@@ -1,0 +1,49 @@
+/* html-native 演示应用样式: 一个完整的应用窗口外壳 */
+html, body { margin: 0; width: 100%; height: 100%; }
+
+#app { display: flex; flex-direction: column; width: 100%; height: 100%;
+       background: #14161c; box-sizing: border-box; }
+
+/* 顶栏 */
+.titlebar { display: flex; align-items: center; gap: 8; padding: 10 14;
+            background: #1b1e26; border-bottom: 1 solid #2a2e3a; }
+.dot { width: 12; height: 12; border-radius: 6; }
+.red { background: #ff5f57; } .yellow { background: #febc2e; } .green { background: #28c840; }
+.title { color: #d7dae2; font-size: 13; font-weight: 600; margin-left: 6; }
+.clock { color: #8b93a7; font-size: 12; font-weight: 600; }
+.spacer { flex-grow: 1; }
+
+/* 主体: 侧栏 + 内容 */
+.body { display: flex; flex-direction: row; flex-grow: 1; }
+.sidebar { display: flex; flex-direction: column; width: 168; padding: 12 8;
+           background: #171a21; border-right: 1 solid #2a2e3a; gap: 4; }
+.nav-item { color: #9aa3b5; padding: 8 12; border-radius: 8; font-size: 13; }
+.nav-item.active { background: #4f7cff; color: #ffffff; font-weight: 600; }
+.ver { color: #5a6273; font-size: 11; padding: 8 12; }
+
+.main { display: flex; flex-direction: column; flex-grow: 1; padding: 16; }
+.loading { color: #6b7386; font-size: 13; padding: 24; }
+
+/* 状态栏 */
+.statusbar { display: flex; padding: 6 14; background: #1b1e26;
+             border-top: 1 solid #2a2e3a; color: #7a8296; font-size: 11; }
+
+/* 面板片段(服务器返回的 HTML 也用这些类) */
+.panel-title { color: #e8eaf0; font-size: 18; font-weight: 700; margin: 0 0 14 0; }
+.cards { display: flex; gap: 12; }
+.card { background: #1b1f27; border: 1 solid #2a3040; border-radius: 12;
+        padding: 14; display: flex; flex-direction: column; gap: 8; flex-grow: 1;
+        box-sizing: border-box; }
+.k { color: #8b93a7; font-size: 12; }
+.v { color: #e8eaf0; font-size: 26; font-weight: 700; }
+.v-sm { color: #e8eaf0; font-size: 15; font-weight: 600; }
+.bar { height: 6; border-radius: 3; background: #232733; }
+.fill { height: 100%; border-radius: 3; background: #4f7cff; }
+
+.sec-title { color: #8b93a7; font-size: 12; font-weight: 600; margin: 18 0 8 0; }
+.row { display: flex; padding: 8 12; background: #191c24; border-radius: 8;
+       margin-bottom: 6; }
+.pname { color: #c3c8d4; font-size: 13; flex-grow: 1; }
+.pmeta { color: #7a8296; font-size: 13; }
+.hi { color: #28c840; }
+.note { color: #6b7386; font-size: 12; margin-top: 4; }

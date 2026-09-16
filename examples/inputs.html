@@ -1,0 +1,41 @@
+<html><head>
+<meta charset="utf-8"><style>
+body { margin: 0; padding: 22; background: #12151c; }
+h2 { color: #e8eaf0; font-size: 17; margin: 0 0 4 0; }
+.sub { color: #6b7386; font-size: 12; margin: 0 0 18 0; }
+label { color: #9aa3b5; font-size: 12; margin: 0 0 5 0; }
+.field { margin-bottom: 14; }
+input { width: 100%; background: #1b212c; border: 1 solid #2b3444; border-radius: 8;
+        color: #e8eaf0; font-size: 13; box-sizing: border-box; }
+input:focus { border: 2 solid #4f7cff; background: #1e2637; }
+input:hover { border-color: #3d4760; }
+.row { display: flex; gap: 10; }
+.row .field { flex: 1; }
+button { background: #4f7cff; color: #ffffff; padding: 10 18; border-radius: 8;
+         text-align: center; font-weight: 600; font-size: 13; margin-top: 4; }
+.note { color: #6b7386; font-size: 11; margin-top: 14; }
+</style></head><body>
+<h2>输入控件</h2>
+<div class="sub">原生键盘编辑 · caret 闪烁 · :focus 状态</div>
+
+<div class="field">
+  <div><label>应用名称</label></div>
+  <input id="f-name" name="name" value="html-native showcase">
+</div>
+<div class="row">
+  <div class="field">
+    <div><label>宽度</label></div>
+    <input id="f-w" name="w" placeholder="例如 920">
+  </div>
+  <div class="field">
+    <div><label>高度</label></div>
+    <input id="f-h" name="h" placeholder="例如 620">
+  </div>
+</div>
+<div class="field">
+  <div><label>备注</label></div>
+  <input id="f-note" name="note" placeholder="留空则使用默认尺寸">
+</div>
+<button id="btn-apply" hx-post="/apply" hx-target="result">应用配置</button>
+<div class="note">表单参数会自动 URL 编码后随 hx-post 发送(见 formEncoded)。</div>
+</body></html>

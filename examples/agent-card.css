@@ -1,0 +1,20 @@
+body { margin: 0; padding: 18; background: #171a21; }
+.card { background: #1e222b; border: 1 solid #2a3040; border-radius: 14;
+        padding: 18; display: flex; flex-direction: column; gap: 12; }
+.head { display: flex; align-items: center; gap: 12; }
+.avatar { width: 40; height: 40; border-radius: 20; background: #4f7cff;
+          color: #ffffff; font-size: 20; font-weight: 700;
+          text-align: center; padding-top: 7; box-sizing: border-box; }
+.name { color: #e8eaf0; font-size: 15; font-weight: 700; }
+.sub { color: #7a8296; font-size: 12; margin-top: 3; }
+.stat-row { display: flex; gap: 10; }
+.stat { background: #232836; border-radius: 10; padding: 10;
+        flex: 1; display: flex; flex-direction: column; gap: 4; }
+.num { color: #e8eaf0; font-size: 18; font-weight: 700; text-align: center; }
+.num.hi { color: #28c840; }
+.lab { color: #7a8296; font-size: 11; text-align: center; }
+.sec { color: #8b93a7; font-size: 12; font-weight: 600; margin-top: 4; }
+.li { color: #c3c8d4; font-size: 13; padding: 4 0 4 0; }
+button { border-radius: 8; padding: 9 14; text-align: center; font-weight: 600; font-size: 13; }
+.ok { background: #4f7cff; color: #ffffff; }
+.cancel { background: #2a3040; color: #c3c8d4; margin-top: 6; }

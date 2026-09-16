@@ -1,0 +1,78 @@
+/* 全部按网页习惯书写: px 后缀 / hex3 / hsl / rgba 前导点 / rem / vw / 子选择器 */
+* { box-sizing: border-box; }
+html, body {
+  margin: 0px;
+  width: 100%;
+  background: #0e1116;
+  color: #e8eaf0;
+  font-size: 14px;
+}
+body > header { display: flex; align-items: center; gap: 12px; padding: 16px 18px 8px; }
+
+.avatar {
+  width: 44px; height: 44px;
+  border-radius: 50%;                      /* 百分比圆角 → 圆 */
+  background: hsl(215, 80%, 55%);
+  border: 2px solid hsla(215, 80%, 75%, .8);
+}
+.who h1 { font-size: 1.25rem; margin: 0px; }
+.who h1 + p { margin: 2px 0px 0px; color: #889; font-size: 0.75rem; }
+
+hr { border-color: #232b38; margin: 6px 0px; }
+
+nav { padding: 8px 18px; }
+nav .chip {
+  display: inline-flex; align-items: center;
+  padding: 4px 12px; margin-right: 6px;
+  border: 1px solid #2a3446; border-radius: 999px;
+  font-size: 0.8rem; color: #9aa3b5;
+}
+nav .chip.hot { color: #0e1116; background: #7ab7ff; border-color: #7ab7ff; }
+nav .chip.hot + .chip { opacity: .5; }     /* 相邻兄弟: hot 之后的 chip 半透明 */
+
+article { padding: 4px 18px 12px; }
+article > h2 { font-size: 1rem; margin: 14px 0px 6px; color: #cdd4e0; }
+article > h2 ~ ol, article > h2 ~ ul { margin: 0px; }
+
+ol, ul { padding-left: 24px; }
+li { margin: 3px 0px; font-size: 0.9rem; line-height: 1.5; color: #b9c1cf; }
+li:first-child { color: #e8eaf0; }         /* 首项强调 */
+ol > li::marker { color: #7ab7ff; }
+
+code {
+  background: rgba(127, 157, 255, .12);
+  padding: 1px 5px; border-radius: 4px;
+  font-size: 0.8rem; color: #9ec1ff;
+}
+.up { color: hsl(145, 60%, 55%); }
+
+blockquote {
+  margin: 12px 0px; padding: 8px 12px;
+  border-left: 3px solid hsl(215, 80%, 55%);
+  background: rgba(127, 157, 255, 0.06);
+  color: #8f99ac; font-size: 0.85rem;
+}
+
+.rows { display: flex; flex-direction: column; }
+.row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 10px; font-size: 0.85rem; color: #aab3c2;
+}
+.row:nth-child(even) { background: rgba(255, 255, 255, 0.03); }
+.row .tag {
+  font-size: 0.7rem; padding: 2px 8px;
+  border-radius: 999px; background: hsl(145, 45%, 45%); color: #08130c;
+}
+.row .tag-b { background: hsl(40, 80%, 55%); color: #241a05; }
+.row .tag-c { background: hsl(215, 60%, 55%); color: #071426; }
+
+footer {
+  padding: 10px 18px 14px; font-size: 0.75rem;
+  border-top: 1px solid #232b38; color: #6b7386;
+}
+footer a { color: #7ab7ff; }
+.dim { color: #4c5468; }
+
+@media (max-width: 460px) {
+  body > header { flex-direction: column; align-items: flex-start; }
+}

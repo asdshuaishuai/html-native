@@ -1,0 +1,47 @@
+/* 布局层样式 — 视觉基底(令牌/卡片/按钮/输入/sys 皮肤)来自 <meta hn-theme="dark"> */
+.wrap { padding: 14 16 16; display: flex; flex-direction: column; gap: 9;
+        height: 100%; box-sizing: border-box; overflow: scroll; }
+
+/* 头部 */
+.head { display: flex; align: center; gap: 10; padding: 2 2 4; }
+.dot { width: 30; height: 30; border-radius: 50%;
+       background: linear-gradient(135deg, #4f7cff, #a86bff); }
+.ht { display: flex; flex-direction: column; gap: 2; }
+.title { font-size: 17; font-weight: 700; }
+.thin { font-weight: 400; color: var(--dim); font-size: 13; }
+.badge { margin-left: auto; color: var(--dim); font-size: 10; font-weight: 700;
+         border: 1 solid var(--line); border-radius: 999; padding: 2 8; }
+
+/* chips */
+.chips { display: flex; gap: 8; }
+.chip { background: var(--card); border: 1 solid var(--line); border-radius: 10;
+        padding: 9 12; overflow: hidden; }
+.chip.host { flex: 2; }
+.chip.up { flex: 1; }
+.chip .syshead { display: none; }
+.chip .sysk { font-size: 10; width: 46; }
+.chip .sysv { font-size: 11; }
+
+/* 资源卡: 双列 */
+.stat { flex: 1; padding: 11; }
+.stat.wide { flex: 2; }
+.stat .syshead { display: none; }
+
+/* 备忘 */
+.grow { flex: 1; }
+.note { margin-top: 8; font-size: 12; display: flex; gap: 8; align: center; }
+.note .k { color: var(--dim); font-size: 11; }
+.note .v { color: var(--ink); font-weight: 600; }
+
+/* 能力清单条纹 */
+.ops { display: flex; flex-direction: column; margin: 0 -8; }
+.op { display: flex; gap: 10; font-size: 11; padding: 6 8; color: var(--dim); line-height: 1.4; }
+.op:nth-child(odd) { background: rgba(255, 255, 255, 0.035); border-radius: 6; }
+.op .t { color: var(--ink); font-weight: 700; width: 30; }
+
+.foot { color: #49516a; font-size: 10; text-align: center; margin-top: 2; }
+.mono { color: #7a86a8; }
+
+@media (max-width: 440px) {
+  .grid { flex-direction: column; }
+}

@@ -1,0 +1,37 @@
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="520x420@140,140">
+<meta name="hn-title" content="webkit 兜底 · grid 布局">
+<meta name="hn-theme" content="dark">
+<!-- 引擎暂无 grid / position:absolute / svg, 显式声明走系统 WebKit 兜底 -->
+<meta name="hn-renderer" content="webkit">
+</head><body>
+<div style="padding: 18">
+  <h1>WebKit 兜底渲染器</h1>
+  <p>本页声明了 <code>hn-renderer=webkit</code>: 由系统 WKWebView 渲染。
+     用于引擎暂不支持的构造 —— grid / absolute / canvas / svg / video。</p>
+
+  <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 10; margin-top: 14">
+    <div class="card" style="background:#171c26;border:1 solid #262e3d;border-radius:10;padding:12">
+      <div style="color:#8a93a8;font-size:11">grid 列 1</div>
+      <div style="font-size:18;font-weight:700">1fr</div></div>
+    <div class="card" style="background:#171c26;border:1 solid #262e3d;border-radius:10;padding:12">
+      <div style="color:#8a93a8;font-size:11">grid 列 2</div>
+      <div style="font-size:18;font-weight:700">1fr</div></div>
+    <div class="card" style="background:#171c26;border:1 solid #262e3d;border-radius:10;padding:12">
+      <div style="color:#8a93a8;font-size:11">grid 列 3</div>
+      <div style="font-size:18;font-weight:700">1fr</div></div>
+  </div>
+
+  <!-- 系统数据在两条路径语义一致(共享 sys:// 桥) -->
+  <div class="card" style="background:#171c26;border:1 solid #262e3d;border-radius:10;padding:12;margin-top:10">
+    <div style="color:#8a93a8;font-size:11;margin-bottom:5">sys:// 在 WebKit 路径同样可用</div>
+    <div id="cpu" hx-get="sys://cpu" hx-trigger="load every 3s" style="font-size:12">…</div>
+  </div>
+
+  <div style="margin-top:12;color:#6b7386;font-size:11">
+    <span id="memo" hx-get="sys://store/get?key=wb-note" hx-trigger="load">…</span>
+  </div>
+</div>
+</body></html>

@@ -1,0 +1,20 @@
+<html><head>
+<meta charset="utf-8"><style>
+body { margin: 0; padding: 20; background: #14171f; }
+h2 { color: #e8eaf0; font-size: 17; margin: 0 0 12 0; }
+p { color: #9aa3b5; font-size: 14; margin: 0 0 16 0; line-height: 1.8; }
+b { color: #ffffff; font-weight: 700; }
+i { color: #ffd479; }
+.hl { background: #2b3a5f; color: #9ecbff; padding: 2 6; border-radius: 4; }
+.warn { color: #ff7a59; font-weight: 700; }
+a { color: #6ee7a8; }
+.box { background: #1b2029; border-radius: 10; padding: 14; margin-bottom: 12; }
+</style></head><body>
+<h2>行内排版验证</h2>
+<div class="box">
+<p>这是一段普通文本, 其中有 <b>加粗的强调内容</b>, 接着 <i>斜体文字</i>, 还有一段 <span class="hl">高亮的行内代码片段</span>, 然后又回到普通文本继续排版下去, 目的是检验跨行时基线是否对齐。</p>
+<p>第二段刻意加长, 让行内元素落在行尾附近并被推到下一行: 前面的普通文字足够多足够长, 于是 <b>这个加粗短语</b> 很可能需要换行, 换行之后它应当仍然保持加粗样式, 且与这一行其它文字共享同一条基线, 不能出现上下错位或者前后间距断裂的情况。</p>
+<p>行首约束检查: <b>行首的加粗</b>不应因为换行而丢失样式, 而 <span class="warn">警告色文字</span> 与普通文本之间应当只有一个空格的距离。</p>
+<p>链接样式: 访问 <a>hn://engine/layout</a> 查看实现, 或阅读 <a>hn://engine/paint</a> 了解绘制管线。</p>
+</div>
+</body></html>

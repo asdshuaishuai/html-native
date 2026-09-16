@@ -1,0 +1,43 @@
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="760x480">
+<meta name="hn-title" content="html-native · 主题与响应式">
+<style>
+:root, body { --accent: #4f7cff; --accent2: #9b5cff; --bg: #12151c;
+              --card: #1b212c; --text: #e8eaf0; --muted: #6b7386; --ok: #3ecf6f; }
+body { margin: 0; padding: 20; background: var(--bg); }
+h2 { color: var(--text); font-size: 17; margin: 0 0 4 0; }
+.sub { color: var(--muted); font-size: 12; margin: 0 0 16 0; }
+.cols { display: flex; gap: 12; }
+.col { background: var(--card); border: 1 solid #2b3444; border-radius: 12;
+       padding: 14; flex: 1; }
+.card-t { color: var(--text); font-size: 13; font-weight: 700; margin-bottom: 8; }
+.btn { background: linear-gradient(135deg, var(--accent), var(--accent2));
+       color: #ffffff; padding: 9 14; border-radius: 9; text-align: center;
+       font-weight: 600; font-size: 12; transition: 200ms; }
+.badge { display: inline; background: #16351f; color: var(--ok); font-size: 10;
+         font-weight: 700; padding: 2 8; border-radius: 5; }
+.note { color: var(--muted); font-size: 11; margin-top: 12; }
+@media (max-width: 600px) {
+  .cols { display: block; }
+  .col { margin-bottom: 10; }
+}
+</style></head><body>
+<h2>主题变量 + 响应式</h2>
+<div class="sub">所有颜色经 var(--…) 注入 · 窄于 600px 时双栏合并为单栏</div>
+<div class="cols">
+  <div class="col">
+    <div class="card-t">变量主题</div>
+    <div class="sub" style="margin:0 0 10 0">accent / card / text 均来自自定义属性, 换主题 = 换一组变量。</div>
+    <div class="btn">主操作</div>
+    <div class="badge">OK</div>
+  </div>
+  <div class="col">
+    <div class="card-t">响应式断点</div>
+    <div class="sub" style="margin:0 0 10 0">@media (max-width: 600px) 切换布局。当前视口小于断点时, 本栏移动到上方栏下方。</div>
+    <div class="btn">次操作</div>
+  </div>
+</div>
+<div class="note">把窗口拉窄到 600px 以下, 布局即刻切换 —— 引擎按视口宽度重新级联。</div>
+</body></html>

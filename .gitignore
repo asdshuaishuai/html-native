@@ -1,0 +1,22 @@
+# 构建产物
+.build/
+*.o
+*.a
+*.dylib
+*.so
+*.dll
+*.exe
+.swiftpm/
+
+# 分发产物
+dist/
+*.hnapp
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# 运行时产物(本地状态)
+*.log

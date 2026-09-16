@@ -1,0 +1,35 @@
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="360x520">
+<meta name="hn-title" content="agent · 仓库分析">
+<style>
+  card { display: block; }
+</style>
+</head>
+<body>
+  <!-- 一个 agent 现场生成的信息卡片示例: agent 输出这份 HTML 给 hn-show 即成窗 -->
+  <div class="card">
+    <div class="head">
+      <div class="avatar">D</div>
+      <div>
+        <div class="name">deepcode 仓库分析</div>
+        <div class="sub">刚刚完成 · 由 agent 生成</div>
+      </div>
+    </div>
+    <div class="stat-row">
+      <div class="stat"><div class="num">24</div><div class="lab">文件</div></div>
+      <div class="stat"><div class="num">6.1k</div><div class="lab">行数</div></div>
+      <div class="stat"><div class="num">3</div><div class="lab">模块</div></div>
+      <div class="stat"><div class="num hi">A</div><div class="lab">健康度</div></div>
+    </div>
+    <div class="sec">要点</div>
+    <div class="li">核心为 C99 无依赖实现, 可被任意语言绑定</div>
+    <div class="li">布局采用 display list 中间层, 平台后端极薄</div>
+    <div class="li">htmx 风格属性提供声明式网络能力</div>
+    <button class="ok" hx-get="/action/open-project">在访达中打开</button>
+    <button class="cancel" hx-get="/action/dismiss">知道了</button>
+  </div>
+</body>
+</html>

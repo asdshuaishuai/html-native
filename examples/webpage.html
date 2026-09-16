@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<!-- 一份"按网页习惯"写的文件: DOCTYPE / link 外链样式 / 语义标签 / hex3 / hsl / rem / vw / 子选择器 / inline-flex / 圆头像 -->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="520x600@160,100">
+<meta name="hn-title" content="webpage · 网页习惯写法">
+<link rel="stylesheet" href="webpage.css">
+</head>
+<body>
+
+<header>
+  <div class="avatar"></div>
+  <div class="who">
+    <h1>产品周报&nbsp;<small>第 36 期</small></h1>
+    <p class="meta">kelthas &middot; <span hx-get="sys://uptime" hx-trigger="load">…</span> 未重启</p>
+  </div>
+</header>
+
+<hr>
+
+<nav>
+  <span class="chip">概览</span>
+  <span class="chip">指标</span>
+  <span class="chip">风险</span>
+  <span class="chip hot">行动</span>
+</nav>
+
+<article>
+  <h2>本周要点</h2>
+  <ol>
+    <li><strong>渲染管线</strong>完成 <code>display list</code> 重构, 指令数下降 <em>37%</em></li>
+    <li>新接入 <code>hsl()</code> 与 <code>vw/vh</code> 单位, 样式书写与网页一致</li>
+    <li>消息卡片 <abbr title="time to live">TTL</abbr> 策略上线, 到期自动销毁</li>
+  </ol>
+
+  <h2>指标</h2>
+  <ul>
+    <li>首帧耗时 <strong>8ms</strong> &mdash; 环比 <span class="up">&#x2191; 12%</span></li>
+    <li>内存占用 <strong>24MB</strong> &mdash; 持平</li>
+    <li>回归断言 <strong>54</strong> 项, 全部通过 &#x2713;</li>
+  </ul>
+
+  <blockquote>把应用开发的技术成本压到最低 —— HTML 描述, 原生渲染, 无浏览器。</blockquote>
+
+  <h2>风险与行动</h2>
+  <table class="rows">
+    <div class="row"><span>Windows/Linux 运行时</span><span class="tag">规划中</span></div>
+    <div class="row"><span>grid 布局</span><span class="tag tag-b">评估中</span></div>
+    <div class="row"><span>组件生态层</span><span class="tag tag-c">引擎之上</span></div>
+  </table>
+</article>
+
+<footer>
+  <a>阅读归档</a> &middot; <a>提工单</a> &middot; <span class="dim">本页即一份 HTML 文件</span>
+</footer>
+
+</body>
+</html>

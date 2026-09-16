@@ -1,0 +1,85 @@
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="480x700@120,100">
+<meta name="hn-title" content="html-native · 桌面演示">
+<meta name="hn-theme" content="dark">
+</head><body>
+<div class="wrap">
+
+  <!-- 头部: 圆点 + 主标题, 右侧一枚短徽标(不换行) -->
+  <div class="head">
+    <div class="dot"></div>
+    <div class="ht">
+      <div class="title">html-native <span class="thin">桌面演示</span></div>
+      <div class="sub">HTML 描述 · 原生渲染 · 无浏览器</div>
+    </div>
+    <span class="badge">v1</span>
+  </div>
+
+  <!-- 概览 chips -->
+  <div class="chips">
+    <div class="chip host" id="chip-host" hx-get="sys://host" hx-trigger="load every 8s">
+      <div class="sk" style="width: 62%"></div><div class="sk" style="width: 40%"></div>
+    </div>
+    <div class="chip up" id="chip-up" hx-get="sys://uptime" hx-trigger="load every 8s">
+      <div class="sk" style="width: 70%"></div>
+    </div>
+  </div>
+
+  <!-- 实时资源 -->
+  <div class="grid">
+    <div class="card stat">
+      <div class="cap">CPU</div>
+      <div id="cpu-out" hx-get="sys://cpu" hx-trigger="load every 3s">
+        <div class="sk" style="width: 60%"></div><div class="sk"></div>
+      </div>
+    </div>
+    <div class="card stat">
+      <div class="cap">内存</div>
+      <div id="mem-out" hx-get="sys://memory" hx-trigger="load every 3s">
+        <div class="sk" style="width: 60%"></div><div class="sk"></div>
+      </div>
+    </div>
+  </div>
+  <div class="grid">
+    <div class="card stat wide">
+      <div class="cap">磁盘</div>
+      <div id="disk-out" hx-get="sys://disk" hx-trigger="load every 20s">
+        <div class="sk" style="width: 55%"></div><div class="sk"></div>
+      </div>
+    </div>
+    <div class="card stat">
+      <div class="cap">电池</div>
+      <div id="bat-out" hx-get="sys://battery" hx-trigger="load every 20s">
+        <div class="sk" style="width: 55%"></div><div class="sk"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 备忘: 输入 + 保存(回车同效), 已存值一行带标签 -->
+  <div class="card">
+    <div class="cap">备忘</div>
+    <div class="row">
+      <input id="note-input" name="value" class="grow" placeholder="写点什么…">
+      <div class="btn" hx-post="sys://store/set?key=dashboard-note" hx-target="note-out">保存</div>
+    </div>
+    <div class="note"><span class="k">已存</span><span id="note-out" class="v"
+      hx-get="sys://store/get?key=dashboard-note" hx-trigger="load">…</span></div>
+  </div>
+
+  <!-- 能力清单 -->
+  <div class="card">
+    <div class="cap">能力清单</div>
+    <div class="ops">
+      <div class="op"><span class="t">引擎</span><span>C99 核心 · 显示列表 · 零平台依赖</span></div>
+      <div class="op"><span class="t">排版</span><span>flexbox · 行内排版 · @media · 令牌主题</span></div>
+      <div class="op"><span class="t">交互</span><span>hx-* 声明式 · 轮询 · 过渡动画 · 回车提交</span></div>
+      <div class="op"><span class="t">数据</span><span>sys:// 系统桥 · 本地 KV · 剪贴板 · 通知</span></div>
+      <div class="op"><span class="t">生命</span><span>秒开 · 热更新 · 持久化 · TTL</span></div>
+    </div>
+  </div>
+
+  <div class="foot">这份界面是一份 HTML 文件 · <span class="mono">hn persist demo</span> 可离线保存</div>
+</div>
+</body></html>

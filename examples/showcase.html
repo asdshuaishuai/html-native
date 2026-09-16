@@ -1,0 +1,102 @@
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x620">
+<meta name="hn-title" content="html-native · Showcase">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <!-- 侧栏 -->
+    <div class="sidebar">
+      <div class="brand">
+        <div class="logo">hn</div>
+        <div>
+          <div class="brand-name">html-native</div>
+          <div class="brand-sub">引擎 v0.2</div>
+        </div>
+      </div>
+      <div class="nav">
+        <div class="nav-item active" id="nav-overview" hx-get="/panel/overview" hx-target="panel">概览</div>
+        <div class="nav-item" id="nav-team">团队</div>
+        <div class="nav-item" id="nav-builds">构建</div>
+        <div class="nav-item" id="nav-assets">资源</div>
+        <div class="nav-item" id="nav-settings">设置</div>
+      </div>
+      <div class="spacer"></div>
+      <div class="sidebar-foot">C99 核心 · 零依赖</div>
+    </div>
+
+    <!-- 主区 -->
+    <div class="main">
+      <div class="topbar">
+        <div>
+          <div class="page-title">概览</div>
+          <div class="page-sub">渲染管线 · 布局引擎 · 系统级表面</div>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn ghost" id="btn-docs">文档</button>
+        <button class="btn primary" id="btn-new">新建应用</button>
+      </div>
+
+      <!-- 渐变 hero -->
+      <div class="hero">
+        <div class="hero-title">HTML 描述, 原生渲染</div>
+        <div class="hero-sub">解析 → 级联 → 布局 → 绘制指令 → CoreGraphics, 全程无浏览器</div>
+        <div class="stats">
+          <div class="stat"><div class="stat-num">2.3k</div><div class="stat-lab">行核心代码</div></div>
+          <div class="stat"><div class="stat-num">0</div><div class="stat-lab">第三方依赖</div></div>
+          <div class="stat"><div class="stat-num">3</div><div class="stat-lab">表面类型</div></div>
+          <div class="stat"><div class="stat-num">16ms</div><div class="stat-lab">整页布局</div></div>
+        </div>
+      </div>
+
+      <!-- 团队卡片(图片 + 阴影) -->
+      <div class="cards">
+        <div class="member">
+          <img class="m-avatar" src="examples/assets/avatar-a.png">
+          <div class="m-name">Ada</div>
+          <div class="m-role">引擎 · 布局</div>
+        </div>
+        <div class="member">
+          <img class="m-avatar" src="examples/assets/avatar-m.png">
+          <div class="m-name">Ming</div>
+          <div class="m-role">渲染 · CoreText</div>
+        </div>
+        <div class="member">
+          <img class="m-avatar" src="examples/assets/avatar-k.png">
+          <div class="m-name">Kai</div>
+          <div class="m-role">宿主 · 生命周期</div>
+        </div>
+        <div class="member">
+          <img class="m-avatar" src="examples/assets/avatar-r.png">
+          <div class="m-name">Rex</div>
+          <div class="m-role">htmx · 传输</div>
+        </div>
+      </div>
+
+      <!-- 可滚动面板 -->
+      <div class="panel-wrap">
+        <div class="sec-title">最近渲染帧</div>
+        <div class="list" id="frames">
+          <div class="frame"><div class="f-id">#0821</div><div class="f-what">showcase.html</div><div class="f-time">12.0ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0820</div><div class="f-what">agent-card.html</div><div class="f-time">8.2ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0819</div><div class="f-what">app-shell.html</div><div class="f-time">11.4ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0818</div><div class="f-what">popup-hud.html</div><div class="f-time">9.1ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0817</div><div class="f-what">panel-cpu.html</div><div class="f-time">7.8ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0816</div><div class="f-what">panel-mem.html</div><div class="f-time">14.2ms</div><div class="tag warn">CLIP</div></div>
+          <div class="frame"><div class="f-id">#0815</div><div class="f-what">dark.css</div><div class="f-time">2.0ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0814</div><div class="f-what">manifest.meta</div><div class="f-time">0.6ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0813</div><div class="f-what">fonts.bin</div><div class="f-time">3.3ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0812</div><div class="f-what">hover-state</div><div class="f-time">5.5ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0811</div><div class="f-what">scroll-list</div><div class="f-time">6.8ms</div><div class="tag ok">PASS</div></div>
+          <div class="frame"><div class="f-id">#0810</div><div class="f-what">daemon.sock</div><div class="f-time">1.2ms</div><div class="tag ok">PASS</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

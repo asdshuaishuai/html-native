@@ -1,0 +1,44 @@
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="330x360">
+<meta name="hn-title" content="agent 消息">
+<style>
+body { margin: 0; padding: 14 16; background: #14171f; border: 1 solid #2a3040;
+       border-radius: 12; display: flex; flex-direction: column; gap: 10;
+       box-sizing: border-box; height: 100%; }
+.head { display: flex; align-items: center; gap: 8; }
+.avatar { width: 30; height: 30; border-radius: 15;
+          background: linear-gradient(135deg, #4f7cff, #9b5cff);
+          color: #fff; font-size: 14; font-weight: 700; text-align: center;
+          padding-top: 7; box-sizing: border-box; }
+.name { color: #eef0f5; font-size: 13; font-weight: 700; }
+.time { color: #5a6273; font-size: 10; margin-left: 4; }
+.body { color: #c3c8d4; font-size: 12; line-height: 1.7; }
+.actions { display: flex; gap: 8; margin-top: auto; }
+.btn { flex: 1; border-radius: 8; padding: 8; text-align: center; font-size: 12;
+       font-weight: 600; transition: 200ms; }
+.ok { background: #4f7cff; color: #fff; }
+.ok:hover { background: #6b8dff; }
+.dismiss { background: #232a38; color: #9aa3b5; }
+.foot { color: #4c5468; font-size: 9; }
+</style></head>
+<body hn-drag hn-dismiss>
+  <div class="head">
+    <div class="avatar">A</div>
+    <div>
+      <div class="name">agent <span class="time">刚刚</span></div>
+    </div>
+  </div>
+  <div class="body">
+    构建完成: <b>html-native</b> 24 个文件全部通过。
+    测试 26/26 绿。这条消息卡片由 <span style="color:#6ee7a8">hn open --ttl 8</span>
+    打开, 8 秒后自动销毁; 也可拖动标题区移动, 点击其它应用即关闭。
+  </div>
+  <div class="actions">
+    <div class="btn ok" hx-get="sys://cpu" hx-target="live">查看 CPU</div>
+    <div class="btn dismiss">知道了</div>
+  </div>
+  <div id="live" class="body"></div>
+  <div class="foot">hx-get="sys://…" 本地系统应答 · 无网络 · 无浏览器</div>
+</body></html>
