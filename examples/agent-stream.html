@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="520x660@160,100">
+<meta name="hn-title" content="agent 轨迹 · 流式输出">
+<meta name="hn-theme" content="dark">
+<link rel="stylesheet" href="agent-stream.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- 头部: 任务标题 + 运行状态 -->
+  <div class="topbar">
+    <div class="pulse"></div>
+    <div class="tb-text">
+      <div class="tb-title">重构渲染管线</div>
+      <div class="tb-sub">agent 正在执行 · <span id="steps" hx-get="sys://agent/count" hx-trigger="every 1s">0</span> 步</div>
+    </div>
+    <div class="tb-badge">运行中</div>
+  </div>
+
+  <!-- 流式轨迹面板: 声明 hn-stream 即自动跟随底部; hn-stream-loop 保留最近 14 条 -->
+  <div class="stream" id="trace" hn-stream hn-stream-loop="14"
+       hx-get="sys://agent/step" hx-trigger="every 1s" hx-swap="beforeend">
+    <div class="ag ag-think">
+      <div class="ag-head"><span class="ag-dot"></span><span class="ag-kind">思考</span>
+        <span class="ag-meta">准备</span></div>
+      <div class="ag-body">接到任务：重构渲染管线的布局阶段。<br>先看当前实现与回归基线。</div>
+    </div>
+  </div>
+
+  <!-- 底部: 输入态 -->
+  <div class="composer">
+    <input id="ask" name="value" placeholder="随时插话或追加要求…">
+    <div class="btn" hx-post="sys://store/set?key=demo-note" hx-target="note">发送</div>
+  </div>
+  <div class="foot"><span id="note" hx-get="sys://store/get?key=demo-note" hx-trigger="load">未设置</span></div>
+
+</div>
+
+</body>
+</html>

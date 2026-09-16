@@ -208,6 +208,17 @@ int hn_node_run_at(hn_node *n, int i, float *x, float *baseline, float *w,
 hn_node *hn_context_scrollable_at(hn_context *c, float x, float y);
 /* 滚动该元素(自动钳制到内容范围); 位置变化返回 1(调用方 repaint) */
 int  hn_node_scroll_by(hn_node *n, float dx, float dy);
+/* 读取当前滚动偏移 */
+void hn_node_scroll_get(hn_node *n, float *x, float *y);
+/* 可滚动上限(content 高 - 盒高); 不可滚动写 0 */
+void hn_node_scroll_range(hn_node *n, float *max_x, float *max_y);
+/* 枚举带指定属性的元素: idx 从 0 起, 命中返回节点 */
+hn_node *hn_doc_find_attr(hn_doc *doc, const char *attr, int idx);
+/* 只保留最后 keep_last 个元素子节点(流式视图的环形缓冲); 返回移除数量 */
+int  hn_node_trim_children(hn_node *n, int keep_last);
+/* 结构自检: 检测链表环、自引用、父子指针不一致。返回问题数量(0=健康)。
+   node_budget 为本次遍历允许访问的最大节点数(防环导致的死循环)。 */
+int  hn_doc_validate(hn_doc *doc, int node_budget);
 
 /* ---- 交互: 命中测试 ---- */
 const char *hn_context_hit_test(hn_context *c, float x, float y); /* 元素 id 或 NULL */

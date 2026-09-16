@@ -70,7 +70,7 @@ static void paint_marker(hn_context *c, hn_node *n, const hn_style *st,
         snprintf(num, 12, "%d.", idx);
         hn_font_desc fd = { st->font_size, st->font_weight, st->font_italic, st->letter_spacing, st->font_family };
         float w = 0;
-        if (c->tb && c->tb->measure) w = c->tb->measure(c->tb->ctx, &fd, num, strlen(num));
+        if (c->tb_valid && c->tb.measure) w = c->tb.measure(c->tb.ctx, &fd, num, strlen(num));
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_TEXT;
@@ -140,9 +140,28 @@ static void push_cmd(hn_context *c, hn_cmd *cmd) {
     c->cmds[c->n_cmds++] = *cmd;
 }
 
+/* 防御性保护: DOM 结构异常(纵向超深嵌套 / 横向兄弟链成环)时只截断绘制,
+   绝不让渲染器崩溃或死循环。正常文档远达不到这些上限。
+   两个维度都要防: 只看深度防不了兄弟链成环(那是同层无限循环)。 */
+#define HN_PAINT_MAX_DEPTH 256
+#define HN_PAINT_MAX_NODES 200000
+
+typedef struct { int depth; int nodes; } paint_guard;
+
+static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
+                         float alpha, float sx, float sy, paint_guard *g);
+
 static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
                        float alpha, float sx, float sy) {
+    paint_guard g = { 0, 0 };
+    paint_walk_g(c, n, pst, alpha, sx, sy, &g);
+}
+
+static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
+                         float alpha, float sx, float sy, paint_guard *g) {
     if (alpha <= 0.001f) return;
+    if (g->depth > HN_PAINT_MAX_DEPTH) return;      /* 纵向异常 */
+    if (++g->nodes > HN_PAINT_MAX_NODES) return;    /* 横向环/规模异常 */
 
     if (n->kind == HN_TEXT) {
         paint_runs(c, n, pst, alpha, sx, sy);
@@ -231,9 +250,9 @@ static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
             cmd.text = val;
             cmd.text_len = vlen;
             float a = st->font_size * 0.8f, d = st->font_size * 0.2f, l = 0;
-            if (c->tb && c->tb->metrics) {
+            if (c->tb_valid && c->tb.metrics) {
                 hn_font_desc fd = { st->font_size, st->font_weight, st->font_italic, st->letter_spacing, st->font_family };
-                c->tb->metrics(c->tb->ctx, &fd, &a, &d, &l);
+                c->tb.metrics(c->tb.ctx, &fd, &a, &d, &l);
             }
             cmd.tx = n->bx + st->padding[3] - sx;
             cmd.baseline = n->by + st->padding[0] + (st->font_size * st->line_height - (a + d)) * 0.5f + a - sy;
@@ -335,8 +354,12 @@ static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
     float csx = sx + n->scroll_x, csy = sy + n->scroll_y;
 
     float child_alpha = alpha * st->opacity;
-    for (hn_node *ch = n->first; ch; ch = ch->next)
-        paint_walk(c, ch, st, child_alpha, csx, csy);
+    for (hn_node *ch = n->first; ch; ch = ch->next) {
+        if (g->nodes > HN_PAINT_MAX_NODES || g->depth > HN_PAINT_MAX_DEPTH) return;
+        g->depth++;
+        paint_walk_g(c, ch, st, child_alpha, csx, csy, g);
+        g->depth--;
+    }
 
     if (clipped) {
         hn_cmd cmd;

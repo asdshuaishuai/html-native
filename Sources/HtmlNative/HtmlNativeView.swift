@@ -1,5 +1,7 @@
 import AppKit
+import CoreVideo
 import Foundation
+import QuartzCore
 import CHtmlNative
 
 /// htmx 风格的声明式交互动作(由元素的 hx-* 属性解析而来)。
@@ -46,7 +48,11 @@ public final class HtmlNativeView: NSView, HNWebHost {
     private var currentHoverNode: OpaquePointer?
     private var caretTimer: Timer?
     private var pollTimers: [Timer] = []
-    private var animTimer: Timer?
+    /// 帧驱动: 优先 CADisplayLink(macOS 14+, 与刷新率对齐), 回退 CVDisplayLink。
+    /// 绝不用 Timer —— 它与 vsync 不同相, 60Hz 定时器配 120Hz 屏只能隔帧更新, 产生抖动。
+    private var frameDriverActive = false
+    private var caLink: AnyObject?   // CADisplayLink(macOS 14+); 用 AnyObject 存储以兼容部署目标
+    private var cvLink: CVDisplayLink?
     private var lastFrameTime: CFTimeInterval = 0
     private var caretOn = true
     private var focusedInput: OpaquePointer?
@@ -114,7 +120,7 @@ public final class HtmlNativeView: NSView, HNWebHost {
     deinit {
         caretTimer?.invalidate()
         pollTimers.forEach { $0.invalidate() }
-        animTimer?.invalidate()
+        stopFrameDriver()
         if let ctx { hn_context_destroy(ctx) }
         if let p = imageBackendPtr {
             p.deinitialize(count: 1)
@@ -138,28 +144,146 @@ public final class HtmlNativeView: NSView, HNWebHost {
         hn_context_layout(ctx, Float(bounds.width), Float(bounds.height), &backend)
         // 首帧初始化动画基准值(不产生动画), 然后按需启动帧循环
         _ = hn_context_anim_tick(ctx, -1)
-        kickAnimationLoop()
+        kickTickLoop()
         needsDisplay = true
     }
 
-    /// 若样式声明了 transition, 启动帧循环驱动插值
-    private func kickAnimationLoop() {
+    // MARK: - 帧驱动(display link)
+
+    /// 按需启动帧循环: 有过渡动画或流式跟随才跑, 静止界面零开销。
+    private func kickTickLoop() {
         guard let ctx else { return }
-        if animTimer != nil { return }
-        guard hn_context_anim_tick(ctx, 0) == 1 else { return }
+        if frameDriverActive { return }
+        let hasStreams = hn_context_doc(ctx).flatMap { hn_doc_find_attr($0, "hn-stream", 0) } != nil
+        guard hasStreams || hn_context_anim_tick(ctx, 0) == 1 else { return }
         lastFrameTime = CACurrentMediaTime()
-        animTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            guard let self, let ctx = self.ctx else { return }
-            let now = CACurrentMediaTime()
-            let dt = (now - self.lastFrameTime) * 1000.0
-            self.lastFrameTime = now
-            let stillActive = hn_context_anim_tick(ctx, Float(dt)) == 1
-            self.needsDisplay = true
-            if !stillActive {
-                self.animTimer?.invalidate()
-                self.animTimer = nil
+        startFrameDriver()
+    }
+
+    private func startFrameDriver() {
+        guard !frameDriverActive else { return }
+        frameDriverActive = true
+        if #available(macOS 14.0, *) {
+            // 每屏刷新回调一次: 120Hz 屏就是 120 次/秒, 相位与 vsync 精确对齐
+            let link = displayLink(target: self, selector: #selector(onDisplayTick(_:)))
+            link.add(to: .main, forMode: .common)
+            caLink = link
+        } else {
+            var link: CVDisplayLink?
+            guard CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess,
+                  let link else { frameDriverActive = false; return }
+            let cb: CVDisplayLinkOutputCallback = { _, _, _, _, _, context in
+                guard let context else { return kCVReturnSuccess }
+                let view = Unmanaged<HtmlNativeView>.fromOpaque(context).takeUnretainedValue()
+                DispatchQueue.main.async { view.frameStep() }   // 视图状态在主线程推进
+                return kCVReturnSuccess
+            }
+            CVDisplayLinkSetOutputCallback(link, cb, Unmanaged.passUnretained(self).toOpaque())
+            CVDisplayLinkStart(link)
+            cvLink = link
+        }
+    }
+
+    private func stopFrameDriver() {
+        frameDriverActive = false
+        if #available(macOS 14.0, *) {
+            (caLink as? CADisplayLink)?.invalidate()
+            caLink = nil
+        } else {
+            if let l = cvLink { CVDisplayLinkStop(l) }
+            cvLink = nil
+        }
+    }
+
+    @available(macOS 14.0, *)
+    @objc private func onDisplayTick(_ link: CADisplayLink) { frameStep() }
+
+    /// 一帧: 推进过渡插值 + 流式跟随 → 请求重绘。两者都空闲则停表。
+    private func frameStep() {
+        guard frameDriverActive, let ctx else { return }
+        let now = CACurrentMediaTime()
+        // dt 上限 50ms: 窗口被遮挡/休眠后恢复时, 避免一次性跳变
+        let dt = Float(min(now - lastFrameTime, 0.05) * 1000.0)
+        lastFrameTime = now
+        guard dt > 0 else { return }
+        let animActive = hn_context_anim_tick(ctx, dt) == 1
+        let streamActive = followStreams(dt: dt)
+        needsDisplay = true
+        if !animActive && !streamActive { stopFrameDriver() }
+    }
+
+    // MARK: - 流式视图(agent 轨迹 / 日志 / 对话)
+
+    /// 声明 `hn-stream` 的容器 = 流式视图: 内容增长时自动平滑跟随底部。
+    /// 这是聊天/日志视图的 "tail -f" 语义, 由运行时提供, 页面只需声明属性。
+    ///
+    /// 跟随条件: 当前视口距底部不超过约 3 屏。用户主动向上翻看历史时,
+    /// 不再强行拉回底部 —— 与真实聊天应用的行为一致。
+    /// 返回 1 表示本帧仍在移动(帧循环需继续)。
+    @discardableResult
+    public func followStreams(dt: Float) -> Bool {
+        guard let ctx, let doc = hn_context_doc(ctx), dt > 0 else { return false }
+        let tau: Float = 0.10        // 时间常数(秒): 约 0.3s 收敛到静止
+        var moving = false
+        var idx: Int32 = 0
+        while let node = hn_doc_find_attr(doc, "hn-stream", idx) {
+            idx += 1
+            var maxY: Float = 0
+            hn_node_scroll_range(node, nil, &maxY)
+            var cur: Float = 0
+            hn_node_scroll_get(node, nil, &cur)
+            var bx: Float = 0, by: Float = 0, bw: Float = 0, bh: Float = 0
+            hn_node_box(node, &bx, &by, &bw, &bh)
+            let gap = maxY - cur
+            if gap < -0.5 {
+                // 内容收缩(环形裁剪): 直接归位, 不缓动 —— 这是布局变化不是运动
+                if hn_node_scroll_by(node, 0, gap) == 1 {
+                    hn_context_repaint(ctx)
+                    moving = true
+                }
+                continue
+            }
+            guard gap > 0.5 else { continue }
+            // 用户主动上翻时不抢滚动条: 距底超过三屏就放手
+            guard gap <= max(bh, 120) * 3 else { continue }
+
+            // 帧率无关的真指数逼近: step = gap·(1 − e^(−dt/τ))
+            // 不用线性近似(gap·dt·c: 帧率一变速度就变), 也不设最小步长
+            // (那会让收尾阶段一直"爬行", 观感发滞)。
+            let k = 1 - exp(-dt / 1000.0 / tau)
+            var step = gap * k
+            // 取整到整数像素: 中途每帧的偏移都是整数, 文字不会在不同亚像素相位
+            // 反复重新栅格化(否则长文本滚动会发虚/抖动)。逼近是反馈回路, 会自纠偏差;
+            // 最后一帧直接落到精确目标(整数中间帧 + 精确落点)。
+            let rounded = step.rounded()
+            step = rounded == 0 ? gap : rounded
+            if hn_node_scroll_by(node, 0, step) == 1 {
+                hn_context_repaint(ctx)
+                moving = true
             }
         }
+        return moving
+    }
+
+    /// 流式视图环形缓冲: `hn-stream-loop="14"` 只保留最近 14 条元素子节点。
+    /// 让内容可以无限追加(agent 持续输出)而内存与视觉都收敛 —— 旧条目滚出视野即回收。
+    public func trimStreams() {
+        guard let ctx, let doc = hn_context_doc(ctx) else { return }
+        var trimmed = false
+        var idx: Int32 = 0
+        // 先收集再摘除: 摘除会改变 DOM, 边遍历边改会漏项/错位
+        var targets: [(OpaquePointer, Int32)] = []
+        while let node = hn_doc_find_attr(doc, "hn-stream-loop", idx) {
+            idx += 1
+            guard let v = hn_node_attr(node, "hn-stream-loop"),
+                  let keep = Int32(String(cString: v)), keep > 0 else { continue }
+            targets.append((node, keep))
+        }
+        for (node, keep) in targets {
+            if hn_node_trim_children(node, keep) > 0 { trimmed = true }
+        }
+        // 摘除改变了内容高度: 必须重排后再让任何代码读盒/滚动范围
+        if trimmed { relayout() }
     }
 
     override public func draw(_ dirtyRect: NSRect) {
@@ -199,8 +323,17 @@ public final class HtmlNativeView: NSView, HNWebHost {
     /// htmx 片段交换后重新布局
     public func applyFragment(_ html: String, targetId: String, swap: hn_swap_mode) {
         guard let ctx, let doc = hn_context_doc(ctx) else { return }
-        hn_doc_swap(doc, targetId, swap, html, html.utf8.count)
+        _ = hn_doc_swap(doc, targetId, swap, html, html.utf8.count)
+        // 换入片段若自带 hx-* 且缺 id, 补一个(不重启轮询 —— 重启会打断正在跑的定时器,
+        // 导致"每轮都重启、swap 永不完成"的死循环)。
+        if let d = hn_context_doc(ctx), let node = hn_doc_find_by_id(d, targetId) {
+            _ = hn_doc_autoid_hx(d)
+            _ = node
+        }
+        // 流式视图: 环形裁剪(内部含重排) → 帧循环接管跟随
+        trimStreams()
         relayout()
+
         if ProcessInfo.processInfo.environment["HN_LOG_SWAP"] != nil {
             let dom = dumpDOM()
             let header = "\n=== swap → \(targetId) (\(html.utf8.count) bytes) ===\n"
@@ -546,6 +679,25 @@ public final class HtmlNativeView: NSView, HNWebHost {
     public func dumpDOM() -> [String] {
         guard let ctx, let doc = hn_context_doc(ctx) else { return [] }
         var out: [String] = []
+        // 诊断头两行: 轮询元素与流式容器(判断"流不流动")。
+        // 注意: 这里的遍历有固定栈上限, 只做有限次抽样, 不遍历整棵树。
+        var polls: [String] = []
+        for i: Int32 in 0..<8 {
+            var idp: UnsafePointer<CChar>?
+            var ms: Int32 = 0
+            guard hn_doc_poll_at(doc, i, &idp, &ms) == 1 else { break }
+            polls.append("\(idp.map { String(cString: $0) } ?? "?")@\(ms)ms")
+        }
+        out.append("· 轮询: \(polls.isEmpty ? "(无)" : polls.joined(separator: ", "))")
+        var streams: [String] = []
+        for i: Int32 in 0..<4 {
+            guard let n = hn_doc_find_attr(doc, "hn-stream", i) else { break }
+            var maxY: Float = 0
+            hn_node_scroll_range(n, nil, &maxY)
+            let loop = hn_node_attr(n, "hn-stream-loop").map { String(cString: $0) } ?? "-"
+            streams.append("loop=\(loop) maxY=\(Int(maxY))")
+        }
+        out.append("· 流式容器: \(streams.isEmpty ? "(无)" : streams.joined(separator: ", "))")
         func walk(_ n: OpaquePointer, _ depth: Int) {
             if depth > 14 { return }
             var line = String(repeating: "  ", count: depth)
@@ -615,16 +767,14 @@ public final class HtmlNativeView: NSView, HNWebHost {
             var id: UnsafePointer<CChar>?
             var ms: Int32 = 0
             guard hn_doc_poll_at(doc, i, &id, &ms) == 1, let idp = id else { break }
-            let target = String(cString: idp)
+            // 定时器锁定 **id**, 不用索引重查 —— 索引会随 DOM 变化(片段换入)而失准,
+            // 表现为"轮询只跑一轮就静默停住"。按 id 查找则始终指向同一逻辑目标。
+            let tid = String(cString: idp)
             let interval = TimeInterval(ms) / 1000.0
             let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
                 guard let self, let ctx = self.ctx else { return }
                 // 重新解析当前 DOM 上的属性(内容可能已被热更新)
                 guard let doc2 = hn_context_doc(ctx) else { return }
-                var id2: UnsafePointer<CChar>?
-                var ms2: Int32 = 0
-                guard hn_doc_poll_at(doc2, i, &id2, &ms2) == 1, let p2 = id2 else { return }
-                let tid = String(cString: p2)
                 guard let node = hn_doc_find_by_id(doc2, tid) else { return }
                 let get = hn_node_attr(node, "hx-get").map { String(cString: $0) }
                 let post = hn_node_attr(node, "hx-post").map { String(cString: $0) }

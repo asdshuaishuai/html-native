@@ -54,12 +54,12 @@ void hn_context_layout(hn_context *c, float width, float height,
     if (!c->doc) return;
     c->vw = width;
     c->vh = height;
-    c->tb = backend;
+    if (backend) { c->tb = *backend; c->tb_valid = 1; } else { c->tb_valid = 0; }
     hn_arena_destroy(c->tmp);
     c->tmp = hn_arena_create();
     c->n_cmds = 0;
     hn_style_compute_all(c);
-    hn_layout_root(c, backend);
+    hn_layout_root(c);
     hn_paint_root(c);
     c->dl.cmds = c->cmds;
     c->dl.count = c->n_cmds;
@@ -443,6 +443,127 @@ int hn_node_scroll_by(hn_node *n, float dx, float dy) {
     return 1;
 }
 
+void hn_node_scroll_get(hn_node *n, float *x, float *y) {
+    if (x) *x = n ? n->scroll_x : 0;
+    if (y) *y = n ? n->scroll_y : 0;
+}
+
+void hn_node_scroll_range(hn_node *n, float *max_x, float *max_y) {
+    float mx = 0, my = 0;
+    if (n && n->kind == HN_ELEM && n->style.overflow) {
+        my = n->content_h - n->bh;
+        if (my < 0) my = 0;
+    }
+    if (max_x) *max_x = mx;
+    if (max_y) *max_y = my;
+}
+
+/* 可增长的遍历栈 —— 固定数组在 DOM 变大后会静默丢节点(遍历不完整),
+   表现为"某些元素查不到/流式容器丢失"。这里按需扩容, 不设上限。 */
+typedef struct { hn_node **v; int n, cap; } nstack;
+
+static void ns_init(nstack *st, int cap) {
+    st->v = malloc(sizeof(hn_node *) * (size_t)cap);
+    st->n = 0; st->cap = st->v ? cap : 0;
+}
+static void ns_push(nstack *st, hn_node *n) {
+    if (st->n == st->cap) {
+        int nc = st->cap ? st->cap * 2 : 512;
+        hn_node **nv = realloc(st->v, sizeof(hn_node *) * (size_t)nc);
+        if (!nv) return;              /* 内存耗尽: 放弃该节点(不崩溃) */
+        st->v = nv; st->cap = nc;
+    }
+    st->v[st->n++] = n;
+}
+static int  ns_pop(nstack *st, hn_node **out) {
+    if (st->n == 0) return 0;
+    *out = st->v[--st->n];
+    return 1;
+}
+static void ns_free(nstack *st) { free(st->v); st->v = NULL; st->n = st->cap = 0; }
+
+hn_node *hn_doc_find_attr(hn_doc *doc, const char *attr, int idx) {
+    if (!doc || !doc->root || !attr) return NULL;
+    nstack st;
+    ns_init(&st, 512);
+    if (!st.v) return NULL;
+    ns_push(&st, doc->root);
+    hn_node *found = NULL;
+    hn_node *n;
+    int seen = 0;
+    while (ns_pop(&st, &n)) {
+        if (n->kind == HN_ELEM && hn_node_attr(n, attr)) {
+            if (seen == idx) { found = n; break; }
+            seen++;
+        }
+        for (hn_node *ch = n->last; ch; ch = ch->prev) ns_push(&st, ch);
+    }
+    ns_free(&st);
+    return found;
+}
+
+/* 环形缓冲: 流式视图(日志/对话/agent 轨迹)只需保留最近 N 条。
+   移除的是最旧的若干个元素子节点, 因此内容可以无限追加而内存与视觉都收敛。 */
+int hn_node_trim_children(hn_node *n, int keep_last) {
+    if (!n || keep_last <= 0) return 0;
+    /* 数元素子节点 */
+    int total = 0;
+    for (hn_node *ch = n->first; ch; ch = ch->next)
+        if (ch->kind == HN_ELEM) total++;
+    int drop = total - keep_last;
+    if (drop <= 0) return 0;
+
+    int removed = 0;
+    hn_node *ch = n->first;
+    while (ch && removed < drop) {
+        hn_node *nx = ch->next;
+        if (ch->kind == HN_ELEM) {
+            /* 摘链: 双向链表两侧都要接好 */
+            if (ch->prev) ch->prev->next = ch->next; else n->first = ch->next;
+            if (ch->next) ch->next->prev = ch->prev; else n->last = ch->prev;
+            /* 关键: 被摘节点自身指针必须清空 —— 否则旧 next/prev 仍指向链上,
+               任何沿旧指针的遍历(如 paint_walk)都可能绕回已摘节点形成环 → 栈溢出。 */
+            ch->next = NULL;
+            ch->prev = NULL;
+            ch->parent = NULL;
+            removed++;
+        }
+        ch = nx;
+    }
+    /* 一致性兜底: 链表首尾若仍指向已摘节点则修正 */
+    if (n->first && n->first->prev) n->first->prev = NULL;
+    if (n->last && n->last->next) n->last->next = NULL;
+    return removed;
+}
+
+/* 结构自检: 显式 visited 表 + 预算上限, 任何环都会被检出而不是死循环 */
+int hn_doc_validate(hn_doc *doc, int node_budget) {
+    if (!doc || !doc->root) return 1;
+    if (node_budget <= 0) node_budget = 100000;
+    int issues = 0, visited = 0;
+    nstack st;
+    ns_init(&st, 512);
+    if (!st.v) return 1;
+    ns_push(&st, doc->root);
+    hn_node *n;
+    while (ns_pop(&st, &n)) {
+        if (++visited > node_budget) { issues++; break; }   /* 超预算: 疑似环 */
+        /* 自引用 */
+        if (n->next == n || n->prev == n || n->first == n || n->last == n) issues++;
+        /* 父子一致性 */
+        for (hn_node *ch = n->first; ch; ch = ch->next) {
+            if (ch->parent != n) issues++;
+            if (ch == n) { issues++; break; }               /* 自己是自己的子节点 */
+            ns_push(&st, ch);
+        }
+        /* 双向链一致性: first->prev 应为 NULL, last->next 应为 NULL */
+        if (n->first && n->first->prev) issues++;
+        if (n->last && n->last->next) issues++;
+    }
+    ns_free(&st);
+    return issues;
+}
+
 const char *hn_context_hit_test(hn_context *c, float x, float y) {
     hn_node *n = hn_context_hit_node(c, x, y);
     /* 无 id 的元素继续向上找最近有 id 的祖先(冒泡语义) */
@@ -512,7 +633,8 @@ static hn_node *find_by_id_rec(hn_node *n, const char *id) {
 
 int hn_doc_autoid_hx(hn_doc *doc) {
     if (!doc || !doc->root) return 0;
-    int assigned = 0, counter = 0;
+    static int counter = 0;   /* 单调递增: 新分配不与既有 id 冲突, 避免重复命名 */
+    int assigned = 0;
     hn_node *stack[256];
     int sp = 0;
     stack[sp++] = doc->root;
@@ -523,6 +645,10 @@ int hn_doc_autoid_hx(hn_doc *doc) {
         if (has_hx && !hn_node_attr(n, "id") && n->arena) {
             char buf[32];
             snprintf(buf, sizeof(buf), "hx-auto-%d", ++counter);
+            /* 若该 id 已被占用(热更新残留), 继续递增 */
+            while (find_by_id_rec(doc->root, buf)) {
+                snprintf(buf, sizeof(buf), "hx-auto-%d", ++counter);
+            }
             size_t vl = strlen(buf) + 1;
             char *v = hn_arena_alloc(n->arena, vl);
             if (v) {
@@ -569,12 +695,14 @@ const char *hn_doc_find_trigger_on_load(hn_doc *doc) {
 /* 枚举 hx-trigger 含 "load" 的元素(页面启动自动请求用; 全量, 非仅首个) */
 int hn_doc_load_at(hn_doc *doc, int idx, const char **out_id) {
     if (out_id) *out_id = NULL;
-    if (!doc) return 0;
-    hn_node *stack[256];
-    int sp = 0, found = 0;
-    stack[sp++] = doc->root;
-    while (sp) {
-        hn_node *n = stack[--sp];
+    if (!doc || !doc->root) return 0;
+    nstack st;
+    ns_init(&st, 256);
+    if (!st.v) return 0;
+    ns_push(&st, doc->root);
+    hn_node *n;
+    int found = 0;
+    while (ns_pop(&st, &n)) {
         if (n->kind != HN_ELEM) continue;
         const char *trig = hn_node_attr(n, "hx-trigger");
         if (trig && strstr(trig, "load")) {
@@ -591,15 +719,16 @@ int hn_doc_load_at(hn_doc *doc, int idx, const char **out_id) {
                 if (found == idx) {
                     const char *id = hn_node_attr(n, "id");
                     if (id && out_id) *out_id = id;
+                    ns_free(&st);
                     return 1;
                 }
                 found++;
             }
         }
         /* 子节点逆序入栈保持文档序 */
-        for (hn_node *ch = n->last; ch; ch = ch->prev)
-            if (sp < 256) stack[sp++] = ch;
+        for (hn_node *ch = n->last; ch; ch = ch->prev) ns_push(&st, ch);
     }
+    ns_free(&st);
     return 0;
 }
 
@@ -682,11 +811,13 @@ static int parse_every(const char *trig) {
 
 int hn_doc_poll_at(hn_doc *doc, int idx, const char **out_id, int *out_ms) {
     if (!doc || !doc->root || idx < 0) return 0;
-    hn_node *stack[512];
-    int sp = 0, seen = 0;
-    stack[sp++] = doc->root;
-    while (sp > 0) {
-        hn_node *n = stack[--sp];
+    nstack st;
+    ns_init(&st, 512);
+    if (!st.v) return 0;
+    ns_push(&st, doc->root);
+    hn_node *n;
+    int seen = 0;
+    while (ns_pop(&st, &n)) {
         if (n->kind == HN_ELEM) {
             const char *trig = hn_node_attr(n, "hx-trigger");
             const char *id = hn_node_attr(n, "id");
@@ -695,16 +826,15 @@ int hn_doc_poll_at(hn_doc *doc, int idx, const char **out_id, int *out_ms) {
                 if (seen == idx) {
                     if (out_id) *out_id = id;
                     if (out_ms) *out_ms = ms;
+                    ns_free(&st);
                     return 1;
                 }
                 seen++;
             }
         }
-        hn_node *kids[512];
-        int kn = 0;
-        for (hn_node *ch = n->first; ch && kn < 512; ch = ch->next) kids[kn++] = ch;
-        for (int i = kn - 1; i >= 0 && sp < 512; i--) stack[sp++] = kids[i];
+        for (hn_node *ch = n->last; ch; ch = ch->prev) ns_push(&st, ch);
     }
+    ns_free(&st);
     return 0;
 }
 
@@ -733,6 +863,10 @@ static void splice_children(hn_doc *doc, hn_node *frag, hn_node *target, hn_swap
         if (mode == HN_SWAP_INNER) target->first = target->last = NULL;
         return;
     }
+    /* 切断片段首尾的外向指针: 片段是被挂接的独立链, 若尾节点的 next 还指着
+       别的节点, 挂到目标链上会形成环 → 遍历(paint_walk)无限递归栈溢出。 */
+    ff->prev = NULL;
+    fl->next = NULL;
     switch (mode) {
     case HN_SWAP_INNER:
         target->first = target->last = NULL;

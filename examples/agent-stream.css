@@ -1,0 +1,37 @@
+/* 布局层 —— 视觉基底(令牌/卡片/按钮/ag-* 轨迹组件)来自 <meta hn-theme="dark"> */
+
+.app { display: flex; flex-direction: column; height: 100%; box-sizing: border-box;
+       padding: 12 14 10; gap: 10; }
+
+/* ---- 顶部状态条 ---- */
+.topbar { display: flex; align-items: center; gap: 10; padding: 0 2; }
+.pulse { width: 9; height: 9; border-radius: 50%; background: #3ecf6f;
+         box-shadow: 0 0 0 3px rgba(62, 207, 111, 0.16); }
+.tb-text { display: flex; flex-direction: column; gap: 1; }
+.tb-title { font-size: 14; font-weight: 700; color: var(--ink); }
+.tb-sub { font-size: 11; color: var(--dim); }
+.tb-badge { margin-left: auto; font-size: 10; font-weight: 700; color: #3ecf6f;
+            border: 1 solid rgba(62, 207, 111, 0.35); border-radius: 999;
+            padding: 2 9; }
+
+/* ---- 流式轨迹面板 ----
+   .stream 由主题提供 overflow:scroll; 这里给出剩余高度与内边距 */
+.stream { flex: 1; background: #12161e; border: 1 solid var(--line);
+          border-radius: 12; padding: 12 12 4; }
+.stream .ag:last-child { margin-bottom: 16; }   /* 末条与输入框留出呼吸 */
+/* 进入视野的条目轻微上浮淡入(过渡由引擎插值, 无脚本) */
+.ag { transition: 260ms; }
+.ag:hover { background: #ffffff06; border-radius: 6; }
+
+/* 图片条目: 缩略图并排信息 */
+.ag-image .ag-thumb img { display: block; }
+
+/* ---- 底部输入 ---- */
+.composer { display: flex; gap: 8; }
+.composer input { flex: 1; }
+.foot { font-size: 10; color: #49516a; text-align: center; }
+.foot span { color: #7a86a8; }
+
+@media (max-width: 420px) {
+  .tb-sub { display: none; }
+}

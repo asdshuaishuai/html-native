@@ -224,6 +224,17 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **行内格式化上下文(IFC)**: 文本与 `display:inline`/`inline-block` 元素共享
   行盒、按词贪心换行 + CJK 码点硬拆、跨节点/跨行基线对齐、
   overflow 裁剪与滚动(带滚动指示条)
+- **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 即获得"自动跟随底部"语义
+  (运行时提供, 页面零脚本): 内容增长时平滑追上, 用户上翻时让出滚动条;
+  `hn-stream-loop="14"` 环形缓冲只保留最近 N 条 —— 内容可无限追加而内存与视觉收敛。
+  `sys://agent/step` 每次调用返回一条轨迹条目(思考/输出/工具调用/图片)演示循环滚动。
+  见 `examples/agent-stream.html`
+- **动画与呈现**: 帧循环用 `CADisplayLink`/`CVDisplayLink` **与 vsync 对齐**
+  (不用 Timer —— 它与刷新率不同相, 60Hz 定时器配 120Hz 屏只会隔帧更新);
+  缓动是**帧率无关的真指数逼近** `step = gap·(1−e^(−dt/τ))`, 无最小步长、
+  中途步长取整像素(文字不因亚像素相位变化而发虚)。回归断言量化了这些性质:
+  步长单调递减、60Hz 与 120Hz 收敛耗时相差 <35%、中途零小数帧、静止后零开销。
+  实测滚动+重绘 0.02ms/帧(预算 16.6ms), 全量重排 2.44ms
 - **设计令牌基底(`hn-theme`)**: `dark`/`light` 一行声明即得完整设计系统——
   色彩令牌(`--accent/--bg/--card/--line/--ink/--dim`)、字阶与行距、卡片/按钮/输入/骨架
   居中、sys:// 片段自动皮肤化、卡片投影与 hover 反馈。作者 css 排在其后, 任意令牌可覆盖。

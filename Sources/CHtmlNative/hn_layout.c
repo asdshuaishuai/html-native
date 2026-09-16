@@ -207,6 +207,9 @@ static void la_grow(line_acc *la, const iitem *it, const hn_text_backend *tb) {
     if (d > la->desc) la->desc = d;
 }
 
+static void translate_subtree(hn_node *n, float dx, float dy);
+static void translate_x(hn_node *n, float dx);
+
 static float align_off(int align, float max_w, float w) {
     if (max_w <= 0) return 0;
     float off = 0;
@@ -239,6 +242,20 @@ static void la_emit(line_acc *la, ivec *iv, float x, float y_top, float max_w, i
                     b->runs[t].x += dx;
                     b->runs[t].baseline += dy;
                     b->runs[t].y_top += dy;
+                }
+                /* 子元素盒也要一起平移! 原子行内盒(inline-block / inline-flex)
+                   内部可能还有自己的块级子节点(如 inline-flex 里的 img/div),
+                   它们是在 (0,0) 相对空间里被布局的; 只平移自身 run 会让这些
+                   子盒停留在 (0,0) —— 表现为图片/子块跑到窗口左上角。 */
+                for (hn_node *sub = b->first; sub; sub = sub->next) {
+                    if (sub->kind == HN_ELEM) translate_subtree(sub, dx, dy);
+                    else if (sub->n_runs > 0) {
+                        for (int t = 0; t < sub->n_runs; t++) {
+                            sub->runs[t].x += dx;
+                            sub->runs[t].baseline += dy;
+                            sub->runs[t].y_top += dy;
+                        }
+                    }
                 }
             }
             continue;
@@ -481,11 +498,19 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
                         const hn_text_backend *tb, int measuring, float forced_h);
 
 /* 整棵子树水平平移(含 runs), 用于 margin:auto 居中 */
-static void translate_subtree(hn_node *n, float dx) {
+/* 整棵子树平移(dx, dy): 盒坐标 + run 的横纵位置都要跟上 */
+static void translate_subtree(hn_node *n, float dx, float dy) {
     n->bx += dx;
-    for (int i = 0; i < n->n_runs; i++) n->runs[i].x += dx;
-    for (hn_node *ch = n->first; ch; ch = ch->next) translate_subtree(ch, dx);
+    n->by += dy;
+    for (int i = 0; i < n->n_runs; i++) {
+        n->runs[i].x += dx;
+        n->runs[i].baseline += dy;
+        n->runs[i].y_top += dy;
+    }
+    for (hn_node *ch = n->first; ch; ch = ch->next) translate_subtree(ch, dx, dy);
 }
+
+static void translate_x(hn_node *n, float dx) { translate_subtree(n, dx, 0); }
 
 static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
                           float cx, float cy, float cw,
@@ -525,7 +550,7 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
             float rem = cw - ch->bw - ml - mr;
             if (rem > 0) {
                 int na = ((ch->style.margin_auto & 8) ? 1 : 0) + ((ch->style.margin_auto & 2) ? 1 : 0);
-                if (ch->style.margin_auto & 8) translate_subtree(ch, rem / (float)na);
+                if (ch->style.margin_auto & 8) translate_x(ch, rem / (float)na);
             }
         }
         cur_y += mt + ch->bh + mb;
@@ -873,11 +898,14 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
         return n->bh;
     }
 
+    /* overflow 容器: 子项按内容自然高布局(不受盒高约束), 溢出的部分由滚动查看。
+       否则内容会被强行压进盒子里, 既显示不全也无法滚动。 */
+    float inner_h_def = st->overflow ? -1 : content_h_def;
     float content_used;
     if (st->display == HN_DISP_FLEX)
-        content_used = layout_flex(c, n, st, x + pl, y + pt, content_w, content_h_def, tb, measuring);
+        content_used = layout_flex(c, n, st, x + pl, y + pt, content_w, inner_h_def, tb, measuring);
     else
-        content_used = layout_block(c, n, st, x + pl, y + pt, content_w, tb, measuring, content_h_def);
+        content_used = layout_block(c, n, st, x + pl, y + pt, content_w, tb, measuring, inner_h_def);
 
     /* 高度: forced_h / border-box 已是边框盒最终值; content-box 显式高度需加 padding */
     if (!h_definite) h = content_used + pt + pb;
@@ -892,9 +920,12 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
         if (mxh > 0 && h > mxh) h = mxh;
     }
     n->bh = h;
+    /* content_h 记录**内容自然总高**, 不受盒高限制 —— 这是滚动上限的依据。
+       定高容器(height:N)装不下的内容仍要计入, 否则 overflow 无法滚动。 */
     n->content_h = content_used + pt + pb;
     if (n->pref_h > 0 && n->pref_h + pt + pb > n->content_h)
         n->content_h = n->pref_h + pt + pb;
+    if (n->content_h < n->bh) n->content_h = n->bh;
 
     if (measuring && st->width_u == HN_U_AUTO) n->bw = n->pref_w + pl + pr;
     else n->bw = content_w + pl + pr;
@@ -902,7 +933,8 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
     return n->bh;
 }
 
-void hn_layout_root(hn_context *c, const hn_text_backend *tb) {
+void hn_layout_root(hn_context *c) {
+    const hn_text_backend *tb = c->tb_valid ? &c->tb : NULL;
     hn_node *root = c->doc->root;
     clear_runs(root);
     float forced = (root->style.height_u == HN_U_AUTO) ? c->vh : -1;

@@ -55,6 +55,8 @@ static const char *LIGHT_CSS =
     "input, textarea { background: #ffffff; }\n"
     ".sysbar { background: #e8eaef; }\n"
     ".sk { background: #00000010; }\n"
+    ".ag-arg { background: #00000008; }\n"
+    ".ag-out { color: #1a7f45; }\n"
     ".card { box-shadow: 0 1 6 rgba(16, 24, 40, 0.08); }\n"
     ".card:hover { border-color: #c9cfd9; }\n";
 
@@ -80,7 +82,35 @@ static const char *BASE_CSS =
     ".sysv { color: var(--ink); font-size: 12; font-weight: 600; }\n"
     ".sysbar { height: 4; border-radius: 2; margin: 6 0 3; }\n"
     ".sysfill { height: 100%; border-radius: 2;\n"
-    "  background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: 400ms; }\n";
+    "  background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: 400ms; }\n"
+    /* ---- agent 轨迹面板(思考/输出/工具/图片 四类条目) ---- */
+    ".ag { border-left: 2 solid var(--line); padding: 0 0 0 10; margin: 0 0 9; }\n"
+    ".ag-head { display: flex; align-items: center; gap: 6; margin: 0 0 3; }\n"
+    ".ag-dot { width: 6; height: 6; border-radius: 3; background: var(--dim); }\n"
+    ".ag-kind { font-size: 10; font-weight: 700; color: var(--dim); letter-spacing: 0.4; }\n"
+    ".ag-name { font-size: 11; font-weight: 700; color: var(--ink); }\n"
+    ".ag-status { font-size: 10; font-weight: 700; }\n"
+    ".ag-status.ok { color: #3ecf6f; }\n"
+    ".ag-status.err { color: #ff5f57; }\n"
+    ".ag-meta { margin-left: auto; font-size: 9; color: var(--dim); }\n"
+    ".ag-body { font-size: 12; color: #b6bfd0; line-height: 1.55; }\n"
+    ".ag-arg { font-size: 11; color: var(--dim); background: #ffffff0a; border-radius: 5;\n"
+    "  padding: 3 7; margin: 0 0 3; }\n"
+    ".ag-out { font-size: 11; color: #8fd4a8; }\n"
+    ".ag-thumb { border: 1 solid var(--line); border-radius: 8; overflow: hidden;\n"
+    "  display: inline-flex; }\n"
+    ".ag-cap { font-size: 10; color: var(--dim); margin: 4 0 0; }\n"
+    /* 类型标识色: 思考=紫, 输出=蓝, 工具=琥珀, 图片=绿 */
+    ".ag-think { border-left-color: #8b6bff; }\n"
+    ".ag-think .ag-dot { background: #8b6bff; }\n"
+    ".ag-text { border-left-color: var(--accent); }\n"
+    ".ag-text .ag-dot { background: var(--accent); }\n"
+    ".ag-tool { border-left-color: #f5b73d; }\n"
+    ".ag-tool .ag-dot { background: #f5b73d; }\n"
+    ".ag-image { border-left-color: #3ecf6f; }\n"
+    ".ag-image .ag-dot { background: #3ecf6f; }\n"
+    /* 流式视图容器: 声明 hn-stream 即获得自动跟随底部 */
+    ".stream { overflow: scroll; padding-right: 2; }\n";
 
 const char *hn_theme_css(const char *name) {
     if (!name) return NULL;

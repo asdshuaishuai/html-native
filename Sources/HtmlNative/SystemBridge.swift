@@ -31,6 +31,8 @@ public enum SystemBridge {
     public static func fragment(for url: String) -> String {
         switch route(of: url) {
         case "cpu": return cpuFragment()
+        case "agent/step": return agentStepFragment()
+        case "agent/count": return agentCountFragment()
         case "memory", "mem": return memFragment()
         case "disk": return diskFragment()
         case "battery", "power": return batteryFragment()
@@ -67,6 +69,127 @@ public enum SystemBridge {
             bar = "<div class=\"sysbar\"><div class=\"sysfill\" style=\"width:\(Int(p))%;background:\(c)\"></div></div>"
         }
         return "<div class=\"sysrow\"><div class=\"sysk\">\(k)</div><div class=\"sysv\">\(v)</div></div>\(bar)"
+    }
+
+    // MARK: - agent 轨迹片段(演示/模拟用)
+
+    /// 模拟 agent 输出流的一步。`sys://agent/step` 每次调用返回**一条**新条目,
+    /// 配合 `hx-trigger="every 1s"` + `hx-swap="append"` + `hn-stream-loop="N"`
+    /// 即构成循环滚动的 agent 轨迹面板 —— 页面侧零脚本。
+    ///
+    /// 四类条目, 按真实 agent 交互节奏轮转:
+    ///   thinking 思考 · text 常规输出 · tool 工具调用(带结果) · image 图片
+    private static var stepSeq: Int = 0
+
+    static func agentStepFragment() -> String {
+        let i = stepSeq
+        stepSeq += 1
+        switch i % 8 {
+        case 0:
+            return thinkEntry("先确认引擎侧的滚动语义：hn-stream 由运行时负责自动跟随,\n页面只声明属性, 不需要写脚本。")
+        case 1:
+            return toolEntry(
+                name: "Bash",
+                arg: "swift build 2>&1 | tail -1",
+                ok: true,
+                output: "Build complete! (0.10s)")
+        case 2:
+            return textEntry("引擎原语已就位 —— 滚动读取、范围查询、环形裁剪各一个 C 接口。")
+        case 3:
+            return toolEntry(
+                name: "Read",
+                arg: "Sources/HtmlNative/HtmlNativeView.swift",
+                ok: true,
+                output: "1448 lines · 命中 followStreams / trimStreams")
+        case 4:
+            imageSeq += 1
+            if imageSeq % 2 == 1 {
+                return imageEntry(asset: "examples/assets/shot.png",
+                                  caption: "验证截图 · 真实视图自绘 @2x (176×264)")
+            }
+            return imageEntry(asset: "examples/assets/chart.png",
+                              caption: "响应式布局对照 · @media 断点前后")
+        case 5:
+            return thinkEntry("跟随条件要避免与用户抢滚动条：距底超过三屏时\n不再拉回, 让用户安静地翻历史。")
+        case 6:
+            return toolEntry(
+                name: "Edit",
+                arg: "hn_stream_loop = 14",
+                ok: true,
+                output: "环形缓冲生效 · 旧条目滚出视野即回收")
+        case 7:
+            return textEntry("循环滚动为**指数逼近 + 速度上限**, 视觉上是追上而不是跳转。")
+
+        default:
+            return textEntry("…")
+        }
+    }
+
+    // ---- 条目模板(类名 .ag-* 由 hn-theme 皮肤化) ----
+
+    static func thinkEntry(_ text: String) -> String {
+        return """
+        <div class="ag ag-think">
+          <div class="ag-head"><span class="ag-dot"></span><span class="ag-kind">思考</span>
+            <span class="ag-meta">\(nowStamp())</span></div>
+          <div class="ag-body">\(escape(text))</div>
+        </div>
+        """
+    }
+
+    static func textEntry(_ text: String) -> String {
+        return """
+        <div class="ag ag-text">
+          <div class="ag-head"><span class="ag-dot"></span><span class="ag-kind">输出</span>
+            <span class="ag-meta">\(nowStamp())</span></div>
+          <div class="ag-body">\(escape(text))</div>
+        </div>
+        """
+    }
+
+    static func toolEntry(name: String, arg: String, ok: Bool, output: String) -> String {
+        return """
+        <div class="ag ag-tool">
+          <div class="ag-head"><span class="ag-dot"></span><span class="ag-kind">工具</span>
+            <span class="ag-name">\(escape(name))</span>
+            <span class="ag-status \(ok ? "ok" : "err")">\(ok ? "✓" : "✗")</span>
+            <span class="ag-meta">\(nowStamp())</span></div>
+          <div class="ag-arg mono">\(escape(arg))</div>
+          <div class="ag-out">\(escape(output))</div>
+        </div>
+        """
+    }
+
+    static func imageEntry(asset: String, caption: String) -> String {
+        return """
+        <div class="ag ag-image">
+          <div class="ag-head"><span class="ag-dot"></span><span class="ag-kind">图片</span>
+            <span class="ag-meta">\(nowStamp())</span></div>
+          <div class="ag-thumb"><img src="\(escape(asset))" width="148" height="92"></div>
+          <div class="ag-cap">\(escape(caption))</div>
+        </div>
+        """
+    }
+
+    /// 图片条目轮换两个素材(模拟 agent 收到/产出不同图片)
+    private static var imageSeq: Int = 0
+
+    static func agentCountFragment() -> String {
+        return "\(stepSeq)"
+    }
+
+    static func nowStamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: Date())
+    }
+
+    /// 转义 HTML 并把换行转为 <br>(条目内多行文本的呈现)
+    static func escape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\n", with: "<br>")
     }
 
     static func infoFragment() -> String {

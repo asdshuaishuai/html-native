@@ -167,7 +167,11 @@ struct hn_context {
     hn_display_list dl;             /* 指向 cmds/n_cmds 的稳定视图 */
     float vw, vh;
     const hn_image_backend *images; /* 运行时持有 */
-    const hn_text_backend  *tb;     /* 本次布局注入的文本后端(绘制阶段复用) */
+    /* 文本后端按**值**持有。绝不能存调用方传入的指针 —— 那通常是栈上局部变量,
+       函数返回后失效; 而绘制阶段(hn_context_repaint)仍需用它测量文本,
+       会读到已失效内存(表现为随机的 SIGBUS/EXC_BAD_ACCESS)。 */
+    hn_text_backend tb;
+    int tb_valid;
     hn_node *hover_node, *active_node, *focus_node; /* 伪类状态 */
     int      caret_on;   /* 是否绘制插入符(窗口聚焦时) */
     int      has_theme;  /* 索引 1 是否为主题槽(热更新时替换) */
@@ -183,7 +187,7 @@ void  hn_style_compute_all(hn_context *c);
 void  hn_parse_inline_decls(hn_arena *ar, const char *src, size_t len,
                             hn_decl **out, int *n_out);
 
-void hn_layout_root(hn_context *c, const hn_text_backend *tb);
+void hn_layout_root(hn_context *c);
 void hn_paint_root(hn_context *c);
 
 #endif
