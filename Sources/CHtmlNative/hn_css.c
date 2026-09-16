@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hn_internal.h"
+#include "hn_port.h"
 
 typedef struct { const char *p, *end; hn_arena *ar; int order; } cps;
 

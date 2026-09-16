@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hn_internal.h"
+#include "hn_port.h"
 
 static const char *UA_CSS =
     "head, title, base, link, meta, style, script, noscript { display: none; }\n"

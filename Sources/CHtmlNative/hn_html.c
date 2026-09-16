@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hn_internal.h"
+#include "hn_port.h"
 
 static int is_ws(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
 
