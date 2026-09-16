@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "html-native": {
+      "command": "/Volumes/data/dev/coding/deepcodeUI/html-native/tools/bin/hn-mcp",
+      "args": []
+    }
+  }
+}
