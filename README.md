@@ -60,6 +60,12 @@ hn dev app.html --css app.css # 开发模式: 保存即热更新
 (`tools/hn-mcp.swift`, 10 个工具: open/update/close/list/persist/restore/sys/shot/dom/dump)
 与 skill (`SKILL.md`)，agent 可直接创建/热更新/内省原生窗口。
 
+**软件光栅化器(hnsoft)**：引擎的绘制后端接缝支持多后端 —— macOS 用 CoreGraphics
+(原生质量)，跨平台/无 GUI 场景用 `hnsoft`(纯 C 软件光栅化器 + FreeType 文本)。
+`hncore render app.html out.png 520 692` 在任何有 C 编译器的平台产出 PNG，
+适合服务器端渲染截图、CI 视觉回归。渲染后端选择与评估见
+[ADR-001](docs/adr-001-renderer.md)。
+
 **三平台引擎二进制**：`ZIG=zig ./tools/build-multiplatform.sh` 一条命令产出
 macOS/Linux/Windows 五个目标产物（`hncore` 引擎 CLI，用于验证与集成测试）。
 详见 [release](https://github.com/asdshuaishuai/html-native/releases)。

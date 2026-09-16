@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hn.h"
+#include "hnsoft.h"
 
 static char *read_all(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -166,7 +167,8 @@ static int verify_boxes(hn_node *n, int *checked) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fputs("用法: hncore <parse|layout|paint|text|boxes|verify> <file.html> [W H]\n"
+        fputs("用法: hncore <render|parse|layout|paint|text|boxes|verify> <file.html> [W H|out.png W H]\n"
+              "  render  渲染为 PNG(软件光栅化, 零 GUI 依赖; 文本需 FreeType)\n"
               "  parse   解析并打印 DOM 树\n"
               "  layout  级联+布局, 打印盒模型树\n"
               "  paint   打印绘制指令(display list)\n"
@@ -261,6 +263,31 @@ int main(int argc, char **argv) {
             }
             for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
                 if (sp < 4096) stack[sp++] = c;
+        }
+    } else if (!strcmp(cmd, "render")) {
+        const char *out = argc > 3 ? argv[3] : "out.png";
+        if (argc > 4) { W = (float)atof(argv[4]); }
+        if (argc > 5) { H = (float)atof(argv[5]); }
+        hn_context_layout(ctx, W, H, NULL);
+        const hn_display_list *dl = hn_context_display_list(ctx);
+        if (!dl) { fprintf(stderr, "hncore: 无绘制指令\n"); rc = 1; }
+        else {
+            unsigned char *px = hnsoft_render(dl, (int)W, (int)H, 0x0B0E13FF);
+            if (!px) { fprintf(stderr, "hncore: 渲染失败\n"); rc = 1; }
+            else {
+                size_t pn = 0;
+                unsigned char *png = hnsoft_encode_png(px, (int)W, (int)H, &pn);
+                if (png) {
+                    FILE *of = fopen(out, "wb");
+                    if (of) { fwrite(png, 1, pn, of); fclose(of);
+                        printf("已渲染 %dx%d → %s (%.1f KB)%s\n", (int)W, (int)H, out,
+                               (double)pn / 1024.0,
+                               hnsoft_font_loaded() ? "" : "  [无字体: 文本未渲染]");
+                    } else { fprintf(stderr, "hncore: 无法写 %s\n", out); rc = 1; }
+                    free(png);
+                } else { fprintf(stderr, "hncore: PNG 编码失败\n"); rc = 1; }
+                free(px);
+            }
         }
     } else if (!strcmp(cmd, "verify")) {
         hn_node *root = hn_doc_root(doc);
