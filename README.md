@@ -1,5 +1,9 @@
 # html-native
 
+[![release](https://img.shields.io/github/v/release/asdshuaishuai/html-native?color=4f7cff)](https://github.com/asdshuaishuai/html-native/releases)
+[![site](https://img.shields.io/badge/site-asdshuaishuai.github.io%2Fhtml--native-4f7cff)](https://asdshuaishuai.github.io/html-native/)
+[![license](https://img.shields.io/badge/license-MIT-3ecf6f)](LICENSE)
+
 > 与 RN / Flutter 同级的原生 UI 框架——UI 描述语言是 HTML。
 > 形态是一个**系统级 PWA / 小程序引擎**：随时生成、销毁、持久化一个应用。
 >
@@ -38,6 +42,27 @@
    人类走 `hn new → hn dev` 热重载循环(保存即生效, 无构建链);
    agent 现场生成 hn 编码推给常驻宿主, 系统里即刻出现信息窗口——
    不拉浏览器, 不装应用。
+
+## 快速开始
+
+```bash
+git clone https://github.com/asdshuaishuai/html-native && cd html-native
+swift build
+alias hn=.build/debug/Hn
+
+hn new myapp && cd myapp      # 生成骨架: app.html / app.css / head.html
+hn dev app.html --css app.css # 开发模式: 保存即热更新
+```
+
+只需要会 HTML 和 CSS。无需 Node、npm、打包器、JavaScript。
+
+**不想用命令行**：把这套能力给 agent 用 —— 项目自带 MCP server
+(`tools/hn-mcp.swift`, 10 个工具: open/update/close/list/persist/restore/sys/shot/dom/dump)
+与 skill (`SKILL.md`)，agent 可直接创建/热更新/内省原生窗口。
+
+**三平台引擎二进制**：`ZIG=zig ./tools/build-multiplatform.sh` 一条命令产出
+macOS/Linux/Windows 五个目标产物（`hncore` 引擎 CLI，用于验证与集成测试）。
+详见 [release](https://github.com/asdshuaishuai/html-native/releases)。
 
 ## 架构与代码地图
 
