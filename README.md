@@ -224,6 +224,20 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **行内格式化上下文(IFC)**: 文本与 `display:inline`/`inline-block` 元素共享
   行盒、按词贪心换行 + CJK 码点硬拆、跨节点/跨行基线对齐、
   overflow 裁剪与滚动(带滚动指示条)
+- **动画系统(引擎级, 不是滚动专属)**: `transition` 过渡 + 
+  **`animation: up|down|left|fade|scale <时长>` 入场预设**(新内容平滑浮现而非硬闪) +
+  **`translate` / `scale` 几何动画**(位移并入滚动偏移、缩放按盒中心换算, 
+  子元素盒与文字一起变换) + **缓动可配**(`linear / ease / ease-in / ease-out / 
+  ease-in-out / cubic-bezier(a,b,c,d)`, 贝塞尔用牛顿迭代反解, 与 CSS 同法)。
+  全部由引擎插值, 页面只声明; 帧循环与 vsync 对齐
+- **原生 JavaScript(JavaScriptCore)**: `<script>` 内的 JS 走**系统自带的 
+  JavaScriptCore**(非 WebKit, 引擎仍是纯 C 与其隔离)。作为 HTML 
+  **交互业务能力的补充**: 计算/状态机/条件逻辑用 JS, 结构与样式仍用 HTML/CSS。
+  提供 `document.getElementById/querySelector/querySelectorAll/createElement`、
+  元素上的 `textContent`/`innerHTML`/`classList`/`style`/`addEventListener`、
+  以及高层 `hn.request`(复用 hx 语义)/`hn.get|set`(本地 KV)/`hn.log`。
+  JS 的 DOM 变更走**同一条布局绘制管线** —— 与 HTML 写的完全等价。
+  `hn-js="off"` 可关闭; 无 `<script>` 时零开销(不创建 JSContext)
 - **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 即获得"自动跟随底部"语义
   (运行时提供, 页面零脚本): 内容增长时平滑追上, 用户上翻时让出滚动条;
   `hn-stream-loop="14"` 环形缓冲只保留最近 N 条 —— 内容可无限追加而内存与视觉收敛。

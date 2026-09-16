@@ -57,6 +57,13 @@ typedef struct hn_style {
     hn_color   sh_color;
     float      sh_ox, sh_oy, sh_blur;
     float      transition_ms; /* 过渡时长(0 = 关闭) */
+    /* ---- 几何与动画声明(可插值) ---- */
+    float      translate_x, translate_y;  /* translate: x y */
+    float      scale;                     /* scale: n (默认 1) */
+    unsigned char anim_ease;              /* 过渡缓动(HN_EASE_*) */
+    float      cb[4];                     /* cubic-bezier 参数 */
+    unsigned char anim_enter;             /* 入场动画预设(HN_ENTER_*), 0=无 */
+    float      enter_ms;                  /* 入场动画时长 */
     int        overflow;     /* 0=visible 1=hidden/scroll(裁剪+可滚) */
     /* 自定义属性表(每次 layout 在 tmp arena 重建; 继承 = 复制父表后叠加) */
     hn_var    *vars; int n_vars;
@@ -83,6 +90,27 @@ typedef struct hn_run {
 } hn_run;
 
 /* 过渡动画状态: 引擎持有"当前值", 运行时按帧 tick 推进 */
+/* 缓动函数(与 CSS 命名对齐) */
+enum {
+    HN_EASE_SMOOTH = 0,   /* 默认: smoothstep(C¹ 连续, 起收都柔和) */
+    HN_EASE_LINEAR = 1,
+    HN_EASE_IN     = 2,
+    HN_EASE_OUT    = 3,
+    HN_EASE_IN_OUT = 4,
+    HN_EASE_CSS    = 5,   /* CSS 的 ease(等价 cubic-bezier(.25,.1,.25,1)) */
+    HN_EASE_CUBIC  = 6    /* 显式 cubic-bezier(a,b,c,d) */
+};
+
+/* 入场动画预设: 元素新出现时的起始状态 */
+enum {
+    HN_ENTER_NONE = 0,
+    HN_ENTER_UP,        /* 下方 8px 淡入上浮(列表/消息条目的默认观感) */
+    HN_ENTER_DOWN,
+    HN_ENTER_FADE,      /* 仅淡入 */
+    HN_ENTER_SCALE,     /* 0.96 放大淡入(卡片/弹窗) */
+    HN_ENTER_LEFT
+};
+
 typedef struct hn_anim {
     int   inited;        /* 是否已初始化(初值直接取样式, 不产生动画) */
     int   dirty_written; /* 上次 tick 是否把插值写回过样式(用于区分样式来源) */
@@ -92,6 +120,14 @@ typedef struct hn_anim {
     float o,  o_from,  o_to;
     float bg[4], bg_from[4], bg_to[4];
     float fg[4], fg_from[4], fg_to[4];
+    /* 几何动画: 位移与缩放(与颜色同样走插值) */
+    float tx, tx_from, tx_to;   /* translate x */
+    float ty, ty_from, ty_to;   /* translate y */
+    float sc, sc_from, sc_to;   /* scale */
+    int   ease;                 /* 本次过渡的缓动 */
+    float cb[4];                /* cubic-bezier 参数 */
+    int   fresh;                /* 刚创建且声明了入场动画: 首次 tick 播放 */
+    int   entering;             /* 正在播放入场动画(独立于样式重算) */
 } hn_anim;
 
 struct hn_node {

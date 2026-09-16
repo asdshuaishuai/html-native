@@ -84,7 +84,9 @@ static const char *BASE_CSS =
     ".sysfill { height: 100%; border-radius: 2;\n"
     "  background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: 400ms; }\n"
     /* ---- agent 轨迹面板(思考/输出/工具/图片 四类条目) ---- */
-    ".ag { border-left: 2 solid var(--line); padding: 0 0 0 10; margin: 0 0 9; }\n"
+    /* 入场动画: 新条目淡入上浮(引擎级 animation 预设, 不需要脚本) */
+    ".ag { border-left: 2 solid var(--line); padding: 0 0 0 10; margin: 0 0 9;\n"
+    "  animation: up 240ms; }\n"
     ".ag-head { display: flex; align-items: center; gap: 6; margin: 0 0 3; }\n"
     ".ag-dot { width: 6; height: 6; border-radius: 3; background: var(--dim); }\n"
     ".ag-kind { font-size: 10; font-weight: 700; color: var(--dim); letter-spacing: 0.4; }\n"

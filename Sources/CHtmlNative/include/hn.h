@@ -196,6 +196,8 @@ int  hn_node_display(hn_node *n);
 /* 计算样式读取(测试/宿主读取动画当前值用) */
 void hn_node_debug_background(hn_node *n, hn_color *out);
 void hn_node_debug_border(hn_node *n, hn_color *out);
+/* 内省: 读取节点当前 opacity(动画插值后的观测值) */
+void hn_node_debug_opacity(hn_node *n, float *out);
 void hn_node_debug_color(hn_node *n, hn_color *out);
 /* 节点自身的行内片段数; 文本节点为其被摆放的段数 */
 int hn_node_run_count(hn_node *n);
@@ -212,6 +214,27 @@ int  hn_node_scroll_by(hn_node *n, float dx, float dy);
 void hn_node_scroll_get(hn_node *n, float *x, float *y);
 /* 可滚动上限(content 高 - 盒高); 不可滚动写 0 */
 void hn_node_scroll_range(hn_node *n, float *max_x, float *max_y);
+typedef enum {
+    HN_SWAP_INNER = 0,  /* 替换目标元素内容(默认, innerHTML) */
+    HN_SWAP_OUTER,      /* 替换目标元素自身(outerHTML) */
+    HN_SWAP_APPEND,     /* 追加到目标末尾 */
+    HN_SWAP_PREPEND     /* 插到目标开头 */
+} hn_swap_mode;
+
+/* ---- DOM 变更(供脚本层与宿主使用; 引擎只做结构操作, 不关心调用者是谁) ---- */
+/* 设置/新建属性(值为空串表示布尔属性); 成功返回 1 */
+int  hn_node_set_attr(hn_node *n, const char *name, const char *value);
+/* 取元素文本内容(深度优先拼接子文本节点, 写入 out, 返回写入长度) */
+size_t hn_node_text_content(hn_node *n, char *out, size_t cap);
+/* 设置元素文本内容(清空子节点后写入一个文本节点); 成功返回 1 */
+int  hn_node_set_text_content(hn_node *n, const char *utf8, size_t len);
+/* 创建元素(挂到 n 下, 返回新节点; 供片段拼装) */
+hn_node *hn_node_append_element(hn_node *parent, const char *tag);
+/* 移除子节点 */
+int  hn_node_remove_child(hn_node *parent, hn_node *child);
+/* 把 HTML 片段解析为若干节点并插入到 parent(append/prepend/inner 语义) */
+int  hn_node_insert_html(hn_node *parent, const char *html, size_t len, hn_swap_mode mode);
+
 /* 枚举带指定属性的元素: idx 从 0 起, 命中返回节点 */
 hn_node *hn_doc_find_attr(hn_doc *doc, const char *attr, int idx);
 /* 只保留最后 keep_last 个元素子节点(流式视图的环形缓冲); 返回移除数量 */
@@ -252,12 +275,7 @@ int hn_doc_poll_at(hn_doc *doc, int idx, const char **out_id, int *out_ms);
 
 /* ---- 交互: 文本更新 / 片段交换(htmx swap) ---- */
 
-typedef enum {
-    HN_SWAP_INNER = 0,  /* 替换目标元素内容(默认, innerHTML) */
-    HN_SWAP_OUTER,      /* 替换目标元素自身(outerHTML) */
-    HN_SWAP_APPEND,     /* 追加到目标末尾 */
-    HN_SWAP_PREPEND     /* 插到目标开头 */
-} hn_swap_mode;
+
 
 /* 更新元素文本(替换其子节点为单个文本节点), 返回 1 表示找到目标 */
 int hn_doc_set_text(hn_doc *doc, const char *element_id, const char *utf8_text);

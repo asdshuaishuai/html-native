@@ -48,6 +48,7 @@ void hn_style_default(hn_style *st) {
     st->flex_basis = -1;
     st->flex_basis_u = HN_U_AUTO;
     st->flex_shrink = 1;
+    st->scale = 1.0f;
 }
 
 void hn_style_inherit(hn_style *dst, const hn_style *p) {
@@ -129,6 +130,27 @@ static int sv_color(sv t, hn_color *out) {
 static int sv_color_full(sv t, hn_color *out) { return sv_color(t, out); }
 
 /* ---------- 声明应用 ---------- */
+
+/* 缓动名/cubic-bezier() → 枚举 + 参数(与 CSS 命名对齐) */
+static unsigned char parse_ease(sv t, float cb[4]) {
+    char buf[64];
+    if (t.n == 0 || t.n >= sizeof(buf)) return HN_EASE_SMOOTH;
+    memcpy(buf, t.s, t.n); buf[t.n] = 0;
+    if (!strcmp(buf, "linear")) return HN_EASE_LINEAR;
+    if (!strcmp(buf, "ease")) return HN_EASE_CSS;
+    if (!strcmp(buf, "ease-in")) return HN_EASE_IN;
+    if (!strcmp(buf, "ease-out")) return HN_EASE_OUT;
+    if (!strcmp(buf, "ease-in-out")) return HN_EASE_IN_OUT;
+    if (!strncmp(buf, "cubic-bezier(", 13)) {
+        const char *p = buf + 13;
+        for (int i = 0; i < 4; i++) {
+            while (*p == ' ' || *p == ',') p++;
+            cb[i] = (float)strtod(p, (char **)&p);
+        }
+        return HN_EASE_CUBIC;
+    }
+    return HN_EASE_SMOOTH;
+}
 
 /* 上一次 apply_len4 的 auto 位图(TRBL), 仅 margin 消费 */
 static unsigned char g_len4_auto;
@@ -389,6 +411,53 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             else if (strchr(buf, 's')) st->transition_ms = (float)(val * 1000.0);
             if (st->transition_ms > 0) break;
         }
+    } else if (!strcmp(name, "translate")) {
+        /* translate: x y  (现代 CSS 独立属性; 也接受 translateY(x) 函数式写法) */
+        int nth = 0;   /* 按出现次序取分量, 不能按"值是否为 0"判断(0 12 会误判) */
+        while (next_tok(&v, &t)) {
+            char buf[48];
+            if (t.n == 0 || t.n >= sizeof(buf)) continue;
+            memcpy(buf, t.s, t.n); buf[t.n] = 0;
+            if (!strncmp(buf, "translateY(", 11) || !strncmp(buf, "translatey(", 11)) {
+                st->translate_y = (float)strtod(buf + 11, NULL);
+            } else if (!strncmp(buf, "translateX(", 11) || !strncmp(buf, "translatex(", 11)) {
+                st->translate_x = (float)strtod(buf + 11, NULL);
+            } else {
+                int u; float fx;
+                if (sv_len(t, st->font_size, &fx, &u)) {
+                    if (nth == 0) st->translate_x = fx; else st->translate_y = fx;
+                    nth++;
+                }
+            }
+        }
+    } else if (!strcmp(name, "scale")) {
+        int u; float fx;
+        if (next_tok(&v, &t) && sv_len(t, st->font_size, &fx, &u)) st->scale = fx;
+    } else if (!strcmp(name, "transition-timing-function")) {
+        if (!next_tok(&v, &t)) return;
+        st->anim_ease = parse_ease(t, st->cb);
+    } else if (!strcmp(name, "animation") || !strcmp(name, "hn-anim")) {
+        /* animation: <预设名> <时长> <缓动>  (预设: up/down/left/fade/scale) */
+        while (next_tok(&v, &t)) {
+            char buf[48];
+            if (t.n == 0 || t.n >= sizeof(buf)) continue;
+            memcpy(buf, t.s, t.n); buf[t.n] = 0;
+            if (!strcmp(buf, "up")) st->anim_enter = HN_ENTER_UP;
+            else if (!strcmp(buf, "down")) st->anim_enter = HN_ENTER_DOWN;
+            else if (!strcmp(buf, "left")) st->anim_enter = HN_ENTER_LEFT;
+            else if (!strcmp(buf, "fade")) st->anim_enter = HN_ENTER_FADE;
+            else if (!strcmp(buf, "scale")) st->anim_enter = HN_ENTER_SCALE;
+            else if (!strcmp(buf, "none")) st->anim_enter = HN_ENTER_NONE;
+            else {
+                double val = strtod(buf, NULL);
+                if (val > 0) {
+                    if (strstr(buf, "ms")) st->enter_ms = (float)val;
+                    else if (strchr(buf, 's')) st->enter_ms = (float)(val * 1000.0);
+                    else st->anim_ease = parse_ease(t, st->cb);
+                }
+            }
+        }
+        if (st->anim_enter != HN_ENTER_NONE && st->enter_ms <= 0) st->enter_ms = 260;
     } else if (!strcmp(name, "cursor")) {
         if (!next_tok(&v, &t)) return;
         st->cursor = sv_eq(t, "pointer") ? 1 : 0;

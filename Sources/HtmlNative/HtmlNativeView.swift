@@ -44,6 +44,10 @@ public final class HtmlNativeView: NSView, HNWebHost {
 
     private var imageBox: ImageStore.CtxBox?
     private var imageBackendPtr: UnsafeMutablePointer<hn_image_backend>?
+    /// 原生 JS 运行时(JavaScriptCore)。仅当页面含 <script> 且未 hn-js="off" 时创建。
+    private var jsRuntime: HNJSRuntime?
+    /// 最近一次脚本错误(便于排查)
+    public var jsError: String?
     private var hoverTracking: NSTrackingArea?
     private var currentHoverNode: OpaquePointer?
     private var caretTimer: Timer?
@@ -112,6 +116,216 @@ public final class HtmlNativeView: NSView, HNWebHost {
         ptr.initialize(to: backend)
         imageBackendPtr = ptr
         hn_context_set_images(ctx, ptr)
+        runPageScripts()
+    }
+
+    // MARK: - 原生 JavaScript(JavaScriptCore)
+
+    /// 从当前文档收集并执行 <script>。JS 只作为交互业务的补充:
+    /// 引擎仍是纯 C, JS 的 DOM 变更也走同一条布局/绘制管线。
+    ///
+    /// 从 DOM 取(而非原始 html 字符串): 这样构造路径(html/doc)与热更新统一,
+    /// 且 <include>/片段换入带来的脚本同样会被执行。
+    func runPageScripts() {
+        guard let ctx, let doc = hn_context_doc(ctx) else { return }
+        let code = Self.collectScripts(doc)
+        let disabled = Self.attrWalk(doc, "hn-js") == "off"
+        guard !code.isEmpty, !disabled else { jsRuntime = nil; return }
+        let rt = HNJSRuntime(bridge: makeJSBridge())
+        jsRuntime = rt
+        rt.run(code)
+        jsError = rt.lastError
+        if let err = rt.lastError {
+            FileHandle.standardError.write("[hn-js] 脚本错误: \(err)\n".data(using: .utf8)!)
+        }
+        relayout()
+    }
+
+    /// 组织 JS → 引擎的桥: 每个 DOM 操作都落到既有的 C API 上
+    func makeJSBridge() -> HNJSRuntime.Bridge {
+        weak var weakSelf = self
+        return HNJSRuntime.Bridge(
+            findById: { id in
+                guard let self = weakSelf, let ctx = self.ctx,
+                      let doc = hn_context_doc(ctx), let n = hn_doc_find_by_id(doc, id) else { return 0 }
+                return UInt(bitPattern: UnsafeRawPointer(n))
+            },
+            findAll: { sel in
+                guard let self = weakSelf, let ctx = self.ctx, let doc = hn_context_doc(ctx) else { return [] }
+                var out: [UInt] = []
+                let s = sel.trimmingCharacters(in: .whitespaces)
+                if s.hasPrefix("#") {
+                    if let n = hn_doc_find_by_id(doc, String(s.dropFirst())) {
+                        out.append(UInt(bitPattern: UnsafeRawPointer(n)))
+                    }
+                } else if s.hasPrefix(".") {
+                    let cls = String(s.dropFirst())
+                    var i: Int32 = 0
+                    while let n = hn_doc_find_attr(doc, "class", i) {
+                        i += 1
+                        if let cv = hn_node_attr(n, "class"), String(cString: cv).contains(cls) {
+                            out.append(UInt(bitPattern: UnsafeRawPointer(n)))
+                        }
+                    }
+                } else {
+                    var i: Int32 = 0
+                    while let n = hn_doc_find_attr(doc, "id", i) {
+                        i += 1
+                        if let tv = hn_node_tag(n), String(cString: tv) == s {
+                            out.append(UInt(bitPattern: UnsafeRawPointer(n)))
+                        }
+                    }
+                }
+                return out
+            },
+            getAttr: { h, name in
+                guard let n = Self.node(from: h) else { return nil }
+                return hn_node_attr(n, name).map { String(cString: $0) }
+            },
+            setAttr: { h, name, val in
+                guard let n = Self.node(from: h) else { return false }
+                return hn_node_set_attr(n, name, val) == 1
+            },
+            getText: { h in
+                guard let n = Self.node(from: h) else { return "" }
+                var buf = [CChar](repeating: 0, count: 4096)
+                _ = hn_node_text_content(n, &buf, 4096)
+                return String(cString: buf)
+            },
+            setText: { h, txt in
+                guard let n = Self.node(from: h) else { return false }
+                return hn_node_set_text_content(n, txt, txt.utf8.count) == 1
+            },
+            insertHTML: { h, html, mode in
+                guard let self = weakSelf else { return 0 }
+                if mode == "create" {
+                    // 游离容器: 挂在一个不可见的根容器下, 插到目标时再搬
+                    guard let ctx = self.ctx, let doc = hn_context_doc(ctx),
+                          let holder = hn_doc_find_by_id(doc, "__hn_detached") else { return 0 }
+                    guard let el = hn_node_append_element(holder, html) else { return 0 }
+                    return UInt(bitPattern: UnsafeRawPointer(el))
+                }
+                guard let self = weakSelf, let ctx = self.ctx, let doc = hn_context_doc(ctx),
+                      let target = hn_doc_find_by_id(doc, Self.idOf(h)) ?? Self.node(from: h).map({ $0 }) else { return 0 }
+                let m: hn_swap_mode = mode == "append" ? HN_SWAP_APPEND
+                    : mode == "prepend" ? HN_SWAP_PREPEND : HN_SWAP_INNER
+                let ok = hn_node_insert_html(target, html, html.utf8.count, m) == 1
+                if ok { self.relayout() }
+                return ok ? UInt(bitPattern: UnsafeRawPointer(target)) : 0
+            },
+            removeChild: { parent, child in
+                guard let p = Self.node(from: parent), let c = Self.node(from: child) else { return false }
+                let ok = hn_node_remove_child(p, c) == 1
+                if ok { weakSelf?.relayout() }
+                return ok
+            },
+            tagOf: { h in
+                guard let n = Self.node(from: h), let t = hn_node_tag(n) else { return "" }
+                return String(cString: t)
+            },
+            getStyle: { _, _ in nil },
+            setStyle: { h, prop, val in
+                guard let n = Self.node(from: h) else { return false }
+                var buf = [CChar](repeating: 0, count: 2048)
+                _ = hn_node_text_content(n, &buf, 0)   // no-op, 仅占位
+                let existing = hn_node_attr(n, "style").map { String(cString: $0) } ?? ""
+                var decls = existing
+                if let r = decls.range(of: "\(prop):") {
+                    let rest = decls[r.upperBound...]
+                    if let semi = rest.firstIndex(of: ";") {
+                        decls.replaceSubrange(r.lowerBound...semi, with: "\(prop): \(val);")
+                    } else {
+                        decls.replaceSubrange(r.lowerBound..., with: "\(prop): \(val)")
+                    }
+                } else {
+                    if !decls.isEmpty && !decls.hasSuffix(";") { decls += ";" }
+                    decls += " \(prop): \(val)"
+                }
+                let ok = hn_node_set_attr(n, "style", decls) == 1
+                if ok { weakSelf?.relayout() }
+                return ok
+            },
+            fetch: { url, method, body, target, swap in
+                guard let self = weakSelf else { return }
+                let m: hn_swap_mode = swap == "append" ? HN_SWAP_APPEND
+                    : swap == "prepend" ? HN_SWAP_PREPEND
+                    : swap == "outer" ? HN_SWAP_OUTER : HN_SWAP_INNER
+                self.performHx(HxAction(method: method, urlString: url,
+                                        targetId: target, swap: m, sourceId: nil))
+            },
+            localStorageGet: { k in weakSelf?.store.get(k) },
+            localStorageSet: { k, v in weakSelf?.store.set(k, v) },
+            log: { msg in FileHandle.standardError.write("[hn-js] \(msg)\n".data(using: .utf8)!) },
+            reload: { weakSelf?.relayout() }
+        )
+    }
+
+    /// handle → 引擎节点指针(句柄就是指针位模式)
+    public static func node(from handle: UInt) -> OpaquePointer? {
+        guard handle != 0 else { return nil }
+        return OpaquePointer(bitPattern: handle)
+    }
+
+    static func idOf(_ handle: UInt) -> String {
+        guard let n = node(from: handle), let idp = hn_node_attr(n, "id") else { return "" }
+        return String(cString: idp)
+    }
+
+    /// 调试: 在当前 JS 上下文里求值(仅测试用)
+    public func jsProbe(_ expr: String) -> String? {
+        jsRuntime?.probe(expr)
+    }
+
+    /// 遍历 DOM 收集 <script> 节点的文本内容
+    public static func collectScriptsPublic(_ doc: OpaquePointer) -> String { collectScripts(doc) }
+
+    static func collectScripts(_ doc: OpaquePointer) -> String {
+        var codes: [String] = []
+        var stack: [OpaquePointer] = []
+        if let root = hn_doc_root(doc) { stack.append(root) }
+        var guardCount = 0
+        while let n = stack.popLast(), guardCount < 20000 {
+            guardCount += 1
+            if let tag = hn_node_tag(n), String(cString: tag) == "script" {
+                var buf = [CChar](repeating: 0, count: 65536)
+                let len = hn_node_text_content(n, &buf, 65536)
+                if len > 0 { codes.append(String(cString: buf)) }
+            }
+            // 逆序入栈: 出栈即文档顺序(脚本按页面出现次序执行)
+            var kids: [OpaquePointer] = []
+            var ch = hn_node_first_child(n)
+            while let c = ch { kids.append(c); ch = hn_node_next_sibling(c) }
+            for c in kids.reversed() { stack.append(c) }
+        }
+        return codes.joined(separator: "\n;\n")
+    }
+
+    /// 从 DOM 读任意元素的属性值(取第一个命中的)
+    static func attrWalk(_ doc: OpaquePointer, _ name: String) -> String? {
+        var idx: Int32 = 0
+        while let n = hn_doc_find_attr(doc, name, idx) {
+            idx += 1
+            if let v = hn_node_attr(n, name) { return String(cString: v) }
+        }
+        return nil
+    }
+
+    /// 抽取页面里所有 <script> 的内容(拼接执行; 保留供测试与工具使用)
+    public static func extractScripts(_ html: String) -> String {
+        var out: [String] = []
+        var rest = Substring(html)
+        while let open = rest.range(of: "<script", options: .caseInsensitive) {
+            guard let gt = rest[open.upperBound...].firstIndex(of: ">") else { break }
+            let afterOpen = rest.index(after: gt)
+            guard let close = rest.range(of: "</script", options: .caseInsensitive, range: afterOpen..<rest.endIndex) else { break }
+            // 跳过带 src 的外链(不支持的用法: 显式忽略而非静默错乱)
+            let attrs = rest[open.upperBound..<gt]
+            if !attrs.lowercased().contains("src=") {
+                out.append(String(rest[afterOpen..<close.lowerBound]))
+            }
+            rest = rest[close.upperBound...]
+        }
+        return out.joined(separator: "\n;\n")
     }
 
     @available(*, unavailable)
@@ -310,6 +524,7 @@ public final class HtmlNativeView: NSView, HNWebHost {
         guard let ctx else { return }
         hn_context_render(ctx, html, html.utf8.count)
         if let doc = hn_context_doc(ctx) { _ = hn_doc_autoid_hx(doc) }
+        runPageScripts()
         relayout()
     }
 
@@ -416,6 +631,10 @@ public final class HtmlNativeView: NSView, HNWebHost {
         if let action = hxAction(at: p) {
             performHx(action)
             return
+        }
+        // 先派发到 JS 处理器(若页面用 addEventListener 注册), 再走 hx 语义
+        if let id = hitTestId(at: p) {
+            jsRuntime?.dispatch(event: "click", elementId: id)
         }
         onClickUnhandled?(hitTestId(at: p))
     }

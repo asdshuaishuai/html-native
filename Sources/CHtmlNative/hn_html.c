@@ -28,6 +28,9 @@ static hn_node *new_node(hn_arena *ar, hn_node_kind k) {
     memset(n, 0, sizeof(hn_node));
     n->kind = k;
     n->arena = ar;
+    /* 标记为"新建": 若该元素声明了入场动画, 首次 tick 时播放
+       (新插入的内容淡入上浮, 而不是硬闪出现)。 */
+    n->anim.fresh = 1;
     return n;
 }
 
@@ -273,7 +276,10 @@ void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len) {
             if (!voidel && !self_close && (!strcmp(tag, "style") || !strcmp(tag, "script"))) {
                 const char *close = find_ci(a, (size_t)(end - a), strcmp(tag, "style") ? "</script" : "</style");
                 const char *gt = close ? memchr(close, '>', (size_t)(end - close)) : NULL;
-                const char *stop = gt ? gt : end;
+                /* 内容止于结束标签的**开头**(close), 不是它的 '>':
+                   否则内容里会带上 "</script", 交给 CSS/JS 解析器就是语法错误。
+                   (<style> 一直带着, CSS 解析器宽容才没暴露; JS 会直接报错。) */
+                const char *stop = close ? close : (gt ? gt : end);
                 if (!strcmp(tag, "style") && stop > a) {
                     hn_sheet *sh = hn_parse_css(a, (size_t)(stop - a));
                     if (sh) {
@@ -286,6 +292,11 @@ void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len) {
                         }
                         doc->inline_sheets[doc->n_inline++] = sh;
                     }
+                } else if (!strcmp(tag, "script") && stop > a) {
+                    /* 脚本内容存为文本子节点: 运行时(JavaScriptCore)据此执行。
+                       引擎自身不解释 JS —— 它只负责把这段文本留在 DOM 里,
+                       保持"引擎平台无关、不依赖脚本引擎"的边界。 */
+                    push_text(ar, el, a, (size_t)(stop - a));
                 }
                 p = gt ? gt + 1 : end;
                 continue;

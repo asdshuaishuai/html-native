@@ -237,6 +237,136 @@ void hn_node_debug_background(hn_node *n, hn_color *out) {
     if (out) *out = n ? n->style.background : 0;
 }
 
+/* ---------------- DOM 变更(push_attr / splice 复用) ---------------- */
+
+int hn_node_set_attr(hn_node *n, const char *name, const char *value) {
+    if (!n || n->kind != HN_ELEM || !name || !n->arena) return 0;
+    /* 已存在则原地改值(值在 arena 上重新分配, 旧值不回收) */
+    for (int i = 0; i < n->n_attrs; i++) {
+        if (!strcmp(n->attrs[i].name, name)) {
+            n->attrs[i].value = hn_arena_strndup(n->arena, value ? value : "",
+                                                 value ? strlen(value) : 0);
+            return 1;
+        }
+    }
+    hn_attr *na = hn_arena_alloc(n->arena, sizeof(hn_attr) * (size_t)(n->n_attrs + 1));
+    if (!na) return 0;
+    for (int i = 0; i < n->n_attrs; i++) na[i] = n->attrs[i];
+    na[n->n_attrs].name = hn_arena_strndup(n->arena, name, strlen(name));
+    na[n->n_attrs].value = hn_arena_strndup(n->arena, value ? value : "",
+                                            value ? strlen(value) : 0);
+    n->attrs = na;
+    n->n_attrs++;
+    return 1;
+}
+
+static size_t text_rec(hn_node *n, char *out, size_t cap, size_t used) {
+    for (hn_node *ch = n->first; ch; ch = ch->next) {
+        if (ch->kind == HN_TEXT && ch->text && ch->text_len) {
+            size_t room = cap > used + 1 ? cap - used - 1 : 0;
+            size_t take = ch->text_len < room ? ch->text_len : room;
+            if (take) memcpy(out + used, ch->text, take);
+            used += take;
+        } else if (ch->kind == HN_ELEM) {
+            used = text_rec(ch, out, cap, used);
+        }
+    }
+    return used;
+}
+
+size_t hn_node_text_content(hn_node *n, char *out, size_t cap) {
+    if (!n || !out || cap == 0) return 0;
+    size_t used = text_rec(n, out, cap, 0);
+    out[used] = 0;
+    return used;
+}
+
+int hn_node_set_text_content(hn_node *n, const char *utf8, size_t len) {
+    if (!n || n->kind != HN_ELEM || !n->arena) return 0;
+    n->first = n->last = NULL;
+    if (!utf8 || !len) return 1;
+    hn_node *t = hn_arena_alloc(n->arena, sizeof(hn_node));
+    if (!t) return 0;
+    memset(t, 0, sizeof(hn_node));
+    t->kind = HN_TEXT;
+    t->arena = n->arena;
+    t->parent = n;
+    t->text = hn_arena_strndup(n->arena, utf8, len);
+    t->text_len = len;
+    n->first = n->last = t;
+    return 1;
+}
+
+hn_node *hn_node_append_element(hn_node *parent, const char *tag) {
+    if (!parent || !tag || !parent->arena) return NULL;
+    hn_node *el = hn_arena_alloc(parent->arena, sizeof(hn_node));
+    if (!el) return NULL;
+    memset(el, 0, sizeof(hn_node));
+    el->kind = HN_ELEM;
+    el->arena = parent->arena;
+    el->tag = hn_arena_strndup(parent->arena, tag, strlen(tag));
+    el->anim.fresh = 1;
+    el->parent = parent;
+    if (parent->last) { parent->last->next = el; el->prev = parent->last; parent->last = el; }
+    else { parent->first = parent->last = el; }
+    return el;
+}
+
+int hn_node_remove_child(hn_node *parent, hn_node *child) {
+    if (!parent || !child) return 0;
+    for (hn_node *ch = parent->first; ch; ch = ch->next) {
+        if (ch != child) continue;
+        if (ch->prev) ch->prev->next = ch->next; else parent->first = ch->next;
+        if (ch->next) ch->next->prev = ch->prev; else parent->last = ch->prev;
+        ch->next = NULL; ch->prev = NULL; ch->parent = NULL;
+        return 1;
+    }
+    return 0;
+}
+
+/* 解析 HTML 片段并插入(供脚本的 innerHTML/append 语义) */
+int hn_node_insert_html(hn_node *parent, const char *html, size_t len, hn_swap_mode mode) {
+    if (!parent || !html || !parent->arena) return 0;
+    hn_node *frag = hn_arena_alloc(parent->arena, sizeof(hn_node));
+    if (!frag) return 0;
+    memset(frag, 0, sizeof(hn_node));
+    frag->kind = HN_ELEM;
+    frag->arena = parent->arena;
+    frag->tag = "fragment";
+    /* 注意: hn_parse_into 会通过 doc 登记内联样式表(<style>), 不能传 NULL。
+       片段里的 <style> 也应生效, 因此借用宿主文档的 arena 建一个临时 doc 视图。 */
+    hn_doc tmpdoc;
+    memset(&tmpdoc, 0, sizeof(tmpdoc));
+    tmpdoc.arena = parent->arena;
+    tmpdoc.root = frag;
+    hn_parse_into(&tmpdoc, frag, html, len);
+    hn_node *ff = frag->first, *fl = frag->last;
+    if (!ff) {
+        if (mode == HN_SWAP_INNER) parent->first = parent->last = NULL;
+        return 1;
+    }
+    ff->prev = NULL;
+    fl->next = NULL;
+    if (mode == HN_SWAP_INNER) {
+        parent->first = parent->last = NULL;
+        for (hn_node *c = ff; c; c = c->next) c->parent = parent;
+        parent->first = ff; parent->last = fl;
+    } else if (mode == HN_SWAP_PREPEND) {
+        for (hn_node *c = ff; c; c = c->next) c->parent = parent;
+        if (parent->first) { parent->first->prev = fl; fl->next = parent->first; parent->first = ff; }
+        else { parent->first = ff; parent->last = fl; }
+    } else { /* APPEND */
+        for (hn_node *c = ff; c; c = c->next) c->parent = parent;
+        if (parent->last) { parent->last->next = ff; ff->prev = parent->last; parent->last = fl; }
+        else { parent->first = ff; parent->last = fl; }
+    }
+    return 1;
+}
+
+void hn_node_debug_opacity(hn_node *n, float *out) {
+    if (out) *out = n ? n->style.opacity : 0;
+}
+
 void hn_node_debug_border(hn_node *n, hn_color *out) {
     if (out) *out = n ? n->style.border_color : 0;
 }
@@ -321,6 +451,56 @@ static void lerp4(float out[4], const float a[4], const float b[4], float t) {
 
 /* 遍历树: 对齐动画目标, 必要时推进进度, 把当前值写回样式。
  * dt_ms < 0 表示"只初始化不推进"(首帧)。返回 1 表示仍有动画在跑。 */
+/* ---------- 缓动 ---------- */
+
+/* 三次贝塞尔求值: 先由 x 反解参数 t(牛顿迭代), 再算 y —— 与 CSS 同法 */
+static float bezier_axis(float t, float a1, float a2) {
+    float c = 3.0f * a1, b = 3.0f * (a2 - a1) - c, a = 1.0f - c - b;
+    return ((a * t + b) * t + c) * t;
+}
+static float bezier_solve(float x, float x1, float x2) {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    float t = x;                       /* 初值 */
+    for (int i = 0; i < 8; i++) {      /* 牛顿迭代: 收敛快且确定性(无随机) */
+        float fx = bezier_axis(t, x1, x2) - x;
+        if (fabsf(fx) < 1e-5f) break;
+        float c = 3.0f * x1, b = 3.0f * (x2 - x1) - c, a = 1.0f - c - b;
+        float d = (3.0f * a * t + 2.0f * b) * t + c;
+        if (fabsf(d) < 1e-6f) break;
+        t -= fx / d;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+    }
+    return t;
+}
+static float ease_apply(int ease, const float cb[4], float t0) {
+    if (t0 <= 0) return 0;
+    if (t0 >= 1) return 1;
+    switch (ease) {
+    case HN_EASE_LINEAR: return t0;
+    case HN_EASE_IN:     return t0 * t0;
+    case HN_EASE_OUT:    return 1.0f - (1.0f - t0) * (1.0f - t0);
+    case HN_EASE_IN_OUT: return t0 < 0.5f ? 2.0f * t0 * t0
+                                           : 1.0f - 2.0f * (1.0f - t0) * (1.0f - t0);
+    case HN_EASE_CSS:    return bezier_axis(bezier_solve(t0, 0.25f, 0.25f), 0.1f, 1.0f);
+    case HN_EASE_CUBIC:  return bezier_axis(bezier_solve(t0, cb[0], cb[2]), cb[1], cb[3]);
+    default:             return t0 * t0 * (3.0f - 2.0f * t0);   /* smoothstep */
+    }
+}
+
+/* 入场动画的起始状态: 返回 from 值(位移/缩放/透明度) */
+static void enter_from(int preset, float *tx, float *ty, float *sc, float *op) {
+    *tx = 0; *ty = 0; *sc = 1.0f; *op = 1.0f;
+    switch (preset) {
+    case HN_ENTER_UP:    *ty = 10.0f; *op = 0.0f; break;
+    case HN_ENTER_DOWN:  *ty = -10.0f; *op = 0.0f; break;
+    case HN_ENTER_LEFT:  *tx = -12.0f; *op = 0.0f; break;
+    case HN_ENTER_FADE:  *op = 0.0f; break;
+    case HN_ENTER_SCALE: *sc = 0.94f; *op = 0.0f; break;
+    default: break;
+    }
+}
+
 static int anim_walk(hn_node *n, float dt_ms) {
     int active = 0;
     if (n->kind == HN_ELEM) {
@@ -334,9 +514,63 @@ static int anim_walk(hn_node *n, float dt_ms) {
         rgba_of(st->background, bg_now);
         rgba_of(st->color, fg_now);
 
+        /* 入场动画: 元素首次出现且声明了 animation 时, 从预设起始态过渡到目标态。
+           用独立标志跟踪, 使其不被随后的样式重算打断(每次 relayout 都会把
+           st->opacity 等重置为级联结果, 若无独立状态入场会瞬间跳到终态)。
+           这让新插入的内容(消息/列表项/卡片)平滑浮现, 而不是硬闪出现。 */
+        if (a->entering) {
+            if (dt_ms > 0) a->t += dt_ms / a->ms;
+            if (a->t >= 1.0f) { a->t = 1.0f; a->entering = 0; a->active = 0; }
+            float e2 = ease_apply(a->ease, a->cb, a->t);
+            a->o  = a->o_from  + (a->o_to  - a->o_from)  * e2;
+            a->tx = a->tx_from + (a->tx_to - a->tx_from) * e2;
+            a->ty = a->ty_from + (a->ty_to - a->ty_from) * e2;
+            a->sc = a->sc_from + (a->sc_to - a->sc_from) * e2;
+            memcpy(a->bg, a->bg_to, sizeof(a->bg));
+            memcpy(a->fg, a->fg_to, sizeof(a->fg));
+            st->background = color_of(a->bg);
+            st->color = color_of(a->fg);
+            st->opacity = a->o;
+            st->translate_x = a->tx;
+            st->translate_y = a->ty;
+            st->scale = a->sc;
+            a->dirty_written = 1;
+            active = 1;
+            goto children;
+        }
+        if (a->fresh && st->anim_enter != HN_ENTER_NONE && st->enter_ms > 0) {
+            a->fresh = 0;
+            a->inited = 1;
+            a->entering = 1;
+            float fx, fy, fsc, fop;
+            enter_from(st->anim_enter, &fx, &fy, &fsc, &fop);
+            a->o = fop;  a->o_from = fop;  a->o_to = st->opacity;
+            a->tx = fx;  a->tx_from = fx;  a->tx_to = st->translate_x;
+            a->ty = fy;  a->ty_from = fy;  a->ty_to = st->translate_y;
+            a->sc = fsc; a->sc_from = fsc; a->sc_to = st->scale;
+            a->ms = st->enter_ms;
+            a->ease = st->anim_ease;
+            memcpy(a->cb, st->cb, sizeof(a->cb));
+            rgba_of(st->background, a->bg);
+            rgba_of(st->color, a->fg);
+            memcpy(a->bg_from, a->bg, sizeof(a->bg));
+            memcpy(a->fg_from, a->fg, sizeof(a->fg));
+            memcpy(a->bg_to, a->bg, sizeof(a->bg));
+            memcpy(a->fg_to, a->fg, sizeof(a->fg));
+            a->t = 0;
+            a->active = 1;
+            a->dirty_written = 0;
+            goto children;
+        }
+        if (a->fresh) a->fresh = 0;   /* 无入场声明: 直接以终态出现 */
+
         if (!a->inited) {
             a->inited = 1;
             a->ms = st->transition_ms;
+            a->tx = a->tx_from = a->tx_to = st->translate_x;
+            a->ty = a->ty_from = a->ty_to = st->translate_y;
+            a->sc = a->sc_from = a->sc_to = st->scale;
+            a->ease = st->anim_ease;
             a->o = a->o_to = st->opacity;
             memcpy(a->bg, bg_now, sizeof(bg_now));
             memcpy(a->fg, fg_now, sizeof(fg_now));
@@ -367,17 +601,36 @@ static int anim_walk(hn_node *n, float dt_ms) {
                 a->dirty_written = 0;   /* 新目标来自样式计算 */
             }
 
+            /* 几何目标: 与颜色同样要区分"样式写入的目标"和"上次写回的插值" */
+            float tx_target, ty_target, sc_target, o_target;
+            if (style_is_ours) {
+                tx_target = a->tx_to; ty_target = a->ty_to;
+                sc_target = a->sc_to; o_target = a->o_to;
+            } else {
+                tx_target = st->translate_x; ty_target = st->translate_y;
+                sc_target = st->scale;       o_target = st->opacity;
+            }
+
             int changed = 0;
             for (int i = 0; i < 4; i++) {
                 if (fabsf(bg_target[i] - a->bg_to[i]) > 0.004f) { a->bg_to[i] = bg_target[i]; changed = 1; }
                 if (fabsf(fg_target[i] - a->fg_to[i]) > 0.004f) { a->fg_to[i] = fg_target[i]; changed = 1; }
             }
+            if (fabsf(tx_target - a->tx_to) > 0.02f) { a->tx_to = tx_target; changed = 1; }
+            if (fabsf(ty_target - a->ty_to) > 0.02f) { a->ty_to = ty_target; changed = 1; }
+            if (fabsf(sc_target - a->sc_to) > 0.0005f) { a->sc_to = sc_target; changed = 1; }
+            if (fabsf(o_target - a->o_to) > 0.004f) { a->o_to = o_target; changed = 1; }
             if (st->transition_ms != a->ms) { a->ms = st->transition_ms; changed = 1; }
+            if (st->anim_ease != a->ease) { a->ease = st->anim_ease; changed = 1; }
+            memcpy(a->cb, st->cb, sizeof(a->cb));
 
             if (changed) {
                 memcpy(a->bg_from, a->bg, sizeof(a->bg));
                 memcpy(a->fg_from, a->fg, sizeof(a->fg));
                 a->o_from = a->o;
+                a->tx_from = a->tx;
+                a->ty_from = a->ty;
+                a->sc_from = a->sc;
                 a->t = 0;
                 a->active = (a->ms > 0);
             }
@@ -385,19 +638,27 @@ static int anim_walk(hn_node *n, float dt_ms) {
             if (a->active && a->ms > 0) {
                 if (dt_ms > 0) a->t += dt_ms / a->ms;
                 if (a->t >= 1.0f) { a->t = 1.0f; a->active = 0; }
-                float e = a->t * a->t * (3.0f - 2.0f * a->t); /* smoothstep */
+                float e = ease_apply(a->ease, a->cb, a->t);
                 lerp4(a->bg, a->bg_from, a->bg_to, e);
                 lerp4(a->fg, a->fg_from, a->fg_to, e);
-                a->o = a->o_from + (a->o_to - a->o_from) * e;
+                a->o  = a->o_from  + (a->o_to  - a->o_from)  * e;
+                a->tx = a->tx_from + (a->tx_to - a->tx_from) * e;
+                a->ty = a->ty_from + (a->ty_to - a->ty_from) * e;
+                a->sc = a->sc_from + (a->sc_to - a->sc_from) * e;
             } else {
                 memcpy(a->bg, a->bg_to, sizeof(a->bg));
                 memcpy(a->fg, a->fg_to, sizeof(a->fg));
                 a->o = a->o_to;
+                a->tx = a->tx_to; a->ty = a->ty_to; a->sc = a->sc_to;
             }
 
             st->background = color_of(a->bg);
             st->color = color_of(a->fg);
             st->opacity = a->o;
+            /* 几何插值写回样式字段: 绘制阶段按此偏移/缩放(read-only 消费) */
+            st->translate_x = a->tx;
+            st->translate_y = a->ty;
+            st->scale = a->sc;
             a->dirty_written = 1;
         }
         if (a->active) active = 1;

@@ -1057,6 +1057,225 @@ do {
     }
 }
 
+print("== 通用动画: 入场 / 位移 / 缩放 / 缓动 ==")
+do {
+    // 1) 入场动画: 新建元素若声明 animation, 首帧应处于起始态(位移+透明), 随后收敛
+    let hA = """
+    <html><head><style>
+    .item { animation: up 200ms; background: #333333; height: 20; }
+    </style></head><body><div id="host" style="padding:10"></div></body></html>
+    """
+    let vA = HtmlNativeView(html: hA)
+    vA.setFrameSize(NSSize(width: 300, height: 300))
+    vA.layout()
+    let dA = hn_context_doc(vA.engineContext)!
+    // 追加一个新条目(新建节点 → fresh → 触发入场)
+    let frag = "<div class=\"item\" id=\"n1\"></div>"
+    _ = hn_doc_swap(dA, "host", HN_SWAP_APPEND, frag, frag.utf8.count)
+    vA.layout()
+    _ = hn_context_anim_tick(vA.engineContext, -1)   // 初始化基准
+    guard let n1 = hn_doc_find_by_id(dA, "n1") else { fatalError("n1 缺失") }
+    // 首帧: 应未达终态(opacity < 1)
+    _ = hn_context_anim_tick(vA.engineContext, 1)
+    vA.relayout()
+    var firstOpacity: Float = 1
+    hn_node_debug_opacity(n1, &firstOpacity)
+    check(firstOpacity < 0.95, String(format: "入场: 首帧未达终态 (opacity=%.2f)", firstOpacity))
+    // 跑完动画
+    for _ in 0..<40 { _ = hn_context_anim_tick(vA.engineContext, 16) }
+    vA.relayout()
+    var endOpacity: Float = 0
+    hn_node_debug_opacity(n1, &endOpacity)
+    check(endOpacity > 0.98, String(format: "入场: 收敛到终态 (opacity=%.2f)", endOpacity))
+    // 动画结束应报告"无活动"(帧循环据此停表)
+    let stillActive = hn_context_anim_tick(vA.engineContext, 16)
+    check(stillActive == 0, "入场: 完成后报告无活动动画(帧循环可停)")
+
+    // 2) 过渡动画: transition + 属性变化 → 逐帧插值(已有能力, 这里验证缓动可配)
+    let hB = """
+    <html><head><style>
+    #t { transition: 200ms; transition-timing-function: linear;
+         background: #000000; width: 50; height: 20; }
+    #t:hover { background: #ffffff; }
+    </style></head><body><div id="t"></div></body></html>
+    """
+    let vB = HtmlNativeView(html: hB)
+    vB.setFrameSize(NSSize(width: 300, height: 200))
+    vB.layout()
+    let dB = hn_context_doc(vB.engineContext)!
+    guard let tb = hn_doc_find_by_id(dB, "t") else { fatalError("t 缺失") }
+    // 顺序要紧: 先在无 hover 状态下初始化基准(取到起点色), 再进入 hover 触发过渡
+    _ = hn_context_anim_tick(vB.engineContext, -1)
+    let c0 = t_pointee_bg(tb)
+    hn_context_set_hover(vB.engineContext, tb)
+    vB.relayout()
+    _ = hn_context_anim_tick(vB.engineContext, -1)    // 让新目标被识别
+    for _ in 0..<12 { _ = hn_context_anim_tick(vB.engineContext, 20) }
+    let cEnd = t_pointee_bg(tb)
+    check(c0 != cEnd, "过渡: 起止色不同 (\(hex(c0)) → \(hex(cEnd)))")
+    // 线性缓动应匀速: 逐段推进的色值应近似等差
+    var samples: [UInt32] = []
+    let vT = HtmlNativeView(html: hB)
+    vT.setFrameSize(NSSize(width: 300, height: 200)); vT.layout()
+    if let dT = hn_context_doc(vT.engineContext), let t2 = hn_doc_find_by_id(dT, "t") {
+        _ = hn_context_anim_tick(vT.engineContext, -1)
+        hn_context_set_hover(vT.engineContext, t2); vT.relayout()
+        _ = hn_context_anim_tick(vT.engineContext, -1)
+        for _ in 1...5 {
+            _ = hn_context_anim_tick(vT.engineContext, 40)
+            samples.append((t_pointee_bg(t2) >> 24) & 0xFF)
+        }
+    }
+    if samples.count == 5 {
+        let d1 = Int(samples[1]) - Int(samples[0])
+        let d2 = Int(samples[2]) - Int(samples[1])
+        check(abs(d1 - d2) <= 2, "缓动: linear 匀速推进(相邻步差 \(d1)/\(d2))")
+    }
+
+    // 3) translate/scale 影响绘制几何: 声明位移的元素, 其绘制指令应整体偏移
+    let hC = """
+    <html><head><style>
+    #m { translate: 0 12; width: 40; height: 10; background: #4f7cff; }
+    </style></head><body><div id="m"></div></body></html>
+    """
+    let vC = HtmlNativeView(html: hC)
+    vC.setFrameSize(NSSize(width: 300, height: 200))
+    vC.layout()
+    let dC = hn_context_doc(vC.engineContext)!
+    guard let mc = hn_doc_find_by_id(dC, "m") else { fatalError("m 缺失") }
+    var mbx: Float = 0, mby: Float = 0, mbw: Float = 0, mbh: Float = 0
+    hn_node_box(mc, &mbx, &mby, &mbw, &mbh)
+    // 找到该矩形的绘制指令, 其 y 应比布局盒 by 大 12(位移生效)
+    var drawn: [String: Any]?
+    for cmd in vC.dumpDisplayList() {
+        if (cmd["k"] as? String) == "r", (cmd["w"] as? Int) == Int(mbw) {
+            drawn = cmd; break
+        }
+    }
+    if let d = drawn, let dy = d["y"] as? Int {
+        check(abs(Double(dy) - (Double(mby) + 12)) < 1.5,
+              "位移: translate 生效 (布局 y=\(Int(mby)) → 绘制 y=\(dy))")
+    } else {
+        check(false, "位移: 未找到矩形指令")
+    }
+}
+
+print("== 原生 JavaScript(JavaScriptCore) ==")
+do {
+    // 1) 脚本提取
+    let src = """
+    <html><body><div id="a">x</div>
+    <script>document.getElementById('a').textContent = 'js 写入';</script>
+    <script>hn.log('second');</script>
+    </body></html>
+    """
+    let code = HtmlNativeView.extractScripts(src)
+    check(code.contains("document.getElementById('a').textContent = 'js 写入'"),
+          "JS: 提取 <script> 内容")
+    check(code.contains("hn.log('second')"), "JS: 多个 script 拼接")
+
+    // 诊断: 逐层验证桥 ----------
+    do {
+        let vD = HtmlNativeView(html: "<html><body><div id=\"zz\">orig</div></body></html>")
+        vD.setFrameSize(NSSize(width: 200, height: 100))
+        vD.layout()
+        let dD = hn_context_doc(vD.engineContext)!
+        if let z = hn_doc_find_by_id(dD, "zz") {
+            let h = UInt(bitPattern: UnsafeRawPointer(z))
+            print(String(format: "     句柄=0x%llx 反解=%d", h, HtmlNativeView.node(from: h) == z ? 1 : 0))
+            let v = hn_node_text_content(z, nil, 0)
+            print("     原始文本长度=\(v)")
+        }
+        // 检查 shim 是否定义了 wrap(脚本能跑且桥可用)
+        // 打印实际收集到的脚本内容(定位语法错误的来源)
+        let collected = HtmlNativeView.collectScriptsPublic(dD)
+        print("     收集到脚本 \(collected.count) 字节:")
+        print("     ---8<---\n\(collected.prefix(300))\n     --->8---")
+        if let rt = vD.jsProbe("typeof document.getElementById") {
+            print("     document.getElementById: \(rt)")
+        }
+        if let rt2 = vD.jsProbe("typeof __hn") {
+            print("     __hn: \(rt2)")
+        }
+        if let rt3 = vD.jsProbe("document.getElementById('zz') ? 'found' : 'null'") {
+            print("     getElementById('zz'): \(rt3)")
+        }
+    }
+
+    // 2) 执行 + DOM 变更经桥回到引擎
+    let vJ = HtmlNativeView(html: src)
+    if let err = vJ.jsError { print("     JS 错误: \(err)") }
+    // 诊断: 打印这条路径上实际收集到的脚本
+    if let dJ0 = hn_context_doc(vJ.engineContext) {
+        let got = HtmlNativeView.collectScriptsPublic(dJ0)
+        print("     vJ 收集脚本: \(got.count) 字节")
+        print("     >>>\n\(got.prefix(400))\n     <<<")
+    }
+    for expr in ["typeof document", "typeof __hnCall", "typeof hn"] {
+        print("     [\(expr)] → \(vJ.jsProbe(expr) ?? "(nil)")")
+    }
+    vJ.setFrameSize(NSSize(width: 300, height: 200))
+    vJ.layout()
+    let dJ = hn_context_doc(vJ.engineContext)!
+    var buf = [CChar](repeating: 0, count: 256)
+    if let a = hn_doc_find_by_id(dJ, "a") {
+        _ = hn_node_text_content(a, &buf, 256)
+        let txt = String(cString: buf)
+        check(txt == "js 写入", "JS: textContent 写入生效(读到 '\(txt)')")
+    } else { check(false, "JS: #a 缺失") }
+
+    // 3) innerHTML 插入 → 引擎解析并挂入 DOM
+    let src2 = """
+    <html><body><div id="host"></div>
+    <script>
+      document.getElementById('host').innerHTML = '<span id="ins">插入的片段</span>';
+      document.getElementById('host').classList.add('marked');
+    </script></body></html>
+    """
+    let vK = HtmlNativeView(html: src2)
+    vK.setFrameSize(NSSize(width: 300, height: 200))
+    vK.layout()
+    let dK = hn_context_doc(vK.engineContext)!
+    check(hn_doc_find_by_id(dK, "ins") != nil, "JS: innerHTML 插入的节点进入 DOM")
+    if let host = hn_doc_find_by_id(dK, "host"), let cls = hn_node_attr(host, "class") {
+        check(String(cString: cls).contains("marked"), "JS: classList.add 生效(class=\(String(cString: cls)))")
+    } else { check(false, "JS: class 未写入") }
+
+    // 4) hn.request 走 hx 语义(此处用本地 KV 路由验证链路)
+    let src3 = """
+    <html><body><div id="kv"></div>
+    <script>hn.request('sys://store/get?key=js-demo', 'GET', '', 'kv', 'inner');</script>
+    </body></html>
+    """
+    let vL = HtmlNativeView(html: src3)
+    vL.setFrameSize(NSSize(width: 300, height: 200))
+    vL.layout()
+    let deadline = Date().addingTimeInterval(1.2)
+    while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    let dL = hn_context_doc(vL.engineContext)!
+    if let kv = hn_doc_find_by_id(dL, "kv") {
+        var b2 = [CChar](repeating: 0, count: 256)
+        _ = hn_node_text_content(kv, &b2, 256)
+        let t = String(cString: b2)
+        check(t.contains("未设置") || !t.isEmpty, "JS: hn.request 触发换入(读到 '\(t)')")
+    }
+
+    // 5) hn-js="off" 时不执行
+    let off = """
+    <html><body hn-js="off"><div id="z">orig</div>
+    <script>document.getElementById('z').textContent = 'should not run';</script></body></html>
+    """
+    let vM = HtmlNativeView(html: off)
+    vM.setFrameSize(NSSize(width: 300, height: 200))
+    vM.layout()
+    let dM = hn_context_doc(vM.engineContext)!
+    if let z = hn_doc_find_by_id(dM, "z") {
+        var b3 = [CChar](repeating: 0, count: 128)
+        _ = hn_node_text_content(z, &b3, 128)
+        check(String(cString: b3) == "orig", "JS: hn-js=\"off\" 时脚本不执行")
+    }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

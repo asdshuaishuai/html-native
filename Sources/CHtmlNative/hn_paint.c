@@ -25,6 +25,23 @@ static hn_color anim_color(const float v[4]) {
     return ((hn_color)r << 24) | ((hn_color)g << 16) | ((hn_color)b << 8) | (hn_color)a;
 }
 
+/* 绘制期变换状态: 位移已并入 sx/sy; scale 需要几何换算。
+   缩放原点取元素盒中心 —— 与 CSS transform-origin: center 一致。 */
+typedef struct {
+    int   depth;
+    int   nodes;
+    float scale;   /* 累积缩放(默认 1) */
+    float ox, oy;  /* 缩放原点(绝对坐标) */
+} paint_guard;
+
+/* 绝对坐标 → 设备坐标(先绕原点缩放, 再减滚动偏移) */
+static inline float tfx(const paint_guard *g, float sx, float x) {
+    return (x - g->ox) * g->scale + g->ox - sx;
+}
+static inline float tfy(const paint_guard *g, float sy, float y) {
+    return (y - g->oy) * g->scale + g->oy - sy;
+}
+
 static void push_cmd(hn_context *c, hn_cmd *cmd);
 
 /* 有效圆角: % 值按盒短边解析(border-radius:50% 即圆) */
@@ -108,7 +125,7 @@ static void paint_marker(hn_context *c, hn_node *n, const hn_style *st,
 
 /* 绘制某节点的全部行内片段(文本节点用父样式, 元素用自身样式) */
 static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
-                       float alpha, float sx, float sy) {
+                       float alpha, float sx, float sy, const paint_guard *g) {
     for (int i = 0; i < n->n_runs; i++) {
         hn_run *r = &n->runs[i];
         if (r->end <= r->begin) continue;
@@ -117,8 +134,9 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
         cmd.kind = HN_CMD_TEXT;
         cmd.text = n->text + r->begin;
         cmd.text_len = r->end - r->begin;
-        cmd.tx = r->x - sx;
-        cmd.baseline = r->baseline - sy;
+        cmd.tx = tfx(g, sx, r->x);
+        cmd.baseline = tfy(g, sy, r->baseline);
+        if (g->scale != 1.0f) cmd.font.size_px = st->font_size * g->scale;
         cmd.font.size_px = st->font_size;
         cmd.font.weight = st->font_weight;
         cmd.font.italic = st->font_italic;
@@ -146,14 +164,12 @@ static void push_cmd(hn_context *c, hn_cmd *cmd) {
 #define HN_PAINT_MAX_DEPTH 256
 #define HN_PAINT_MAX_NODES 200000
 
-typedef struct { int depth; int nodes; } paint_guard;
-
 static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                          float alpha, float sx, float sy, paint_guard *g);
 
 static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
                        float alpha, float sx, float sy) {
-    paint_guard g = { 0, 0 };
+    paint_guard g = { 0, 0, 1.0f, 0, 0 };
     paint_walk_g(c, n, pst, alpha, sx, sy, &g);
 }
 
@@ -164,12 +180,25 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     if (++g->nodes > HN_PAINT_MAX_NODES) return;    /* 横向环/规模异常 */
 
     if (n->kind == HN_TEXT) {
-        paint_runs(c, n, pst, alpha, sx, sy);
+        paint_runs(c, n, pst, alpha, sx, sy, g);
         return;
     }
 
     if (n->style.display == HN_DISP_NONE) return;
     const hn_style *st = &n->style;
+
+    /* 动画变换: 位移平移整棵子树(精确); 缩放换以元素盒中心为原点(几何换算)。
+       两者都由动画插值写入样式字段, 这里只读消费。 */
+    float saved_sx = sx, saved_sy = sy;
+    float saved_scale = g->scale, saved_ox = g->ox, saved_oy = g->oy;
+    if (st->translate_x != 0) sx -= st->translate_x;
+    if (st->translate_y != 0) sy -= st->translate_y;
+    if (st->scale != 1.0f && st->scale > 0.01f) {
+        /* 新原点 = 元素盒中心(绝对坐标) */
+        g->ox = n->bx + n->bw * 0.5f;
+        g->oy = n->by + n->bh * 0.5f;
+        g->scale = saved_scale * st->scale;
+    }
 
     /* 列表标记: li 且父为 ul/ol(背景之上、内容之左) */
     if (n->tag && !strcmp(n->tag, "li") && n->parent && n->parent->tag
@@ -185,8 +214,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_IMAGE;
-            cmd.x = n->bx - sx; cmd.y = n->by - sy;
-            cmd.w = n->bw; cmd.h = n->bh;
+            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by);
+            cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
             cmd.text = src;
             cmd.text_len = strlen(src);
@@ -203,7 +232,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_RECT;
-            cmd.x = n->bx - sx; cmd.y = n->by - sy; cmd.w = n->bw; cmd.h = n->bh;
+            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
             cmd.fill = mul_alpha(st->background, alpha);
             cmd.stroke = mul_alpha(st->border_color, alpha);
@@ -234,8 +263,9 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 cmd.kind = HN_CMD_TEXT;
                 cmd.text = val + r->begin;
                 cmd.text_len = r->end - r->begin;
-                cmd.tx = r->x - sx;
-                cmd.baseline = r->baseline - sy;
+                cmd.tx = tfx(g, sx, r->x);
+                cmd.baseline = tfy(g, sy, r->baseline);
+                if (g->scale != 1.0f) cmd.font.size_px = st->font_size * g->scale;
                 cmd.font.size_px = st->font_size;
                 cmd.font.weight = st->font_weight;
                 cmd.font.italic = st->font_italic;
@@ -302,14 +332,14 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_RECT;
-            cmd.x = n->bx - sx; cmd.y = n->by - sy; cmd.w = n->bw; cmd.h = n->bh;
+            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
             cmd.radius = st->radius;
             cmd.fill = mul_alpha(st->background, alpha);
             cmd.stroke = mul_alpha(st->border_color, alpha);
             cmd.stroke_w = st->border_w;
             push_cmd(c, &cmd);
         }
-        paint_runs(c, n, st, alpha, sx, sy);
+        paint_runs(c, n, st, alpha, sx, sy, g);
         return;
     }
 
@@ -319,7 +349,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_RECT;
-        cmd.x = n->bx - sx; cmd.y = n->by - sy; cmd.w = n->bw; cmd.h = n->bh;
+        cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
         cmd.radius = eff_radius(st, cmd.w, cmd.h);
         cmd.fill = mul_alpha(st->background, alpha);
         cmd.stroke = mul_alpha(st->border_color, alpha);
@@ -355,11 +385,14 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
 
     float child_alpha = alpha * st->opacity;
     for (hn_node *ch = n->first; ch; ch = ch->next) {
-        if (g->nodes > HN_PAINT_MAX_NODES || g->depth > HN_PAINT_MAX_DEPTH) return;
+        if (g->nodes > HN_PAINT_MAX_NODES || g->depth > HN_PAINT_MAX_DEPTH) break;
         g->depth++;
         paint_walk_g(c, ch, st, child_alpha, csx, csy, g);
         g->depth--;
     }
+    /* 恢复本层之前的变换状态(兄弟节点不受影响) */
+    sx = saved_sx; sy = saved_sy;
+    g->scale = saved_scale; g->ox = saved_ox; g->oy = saved_oy;
 
     if (clipped) {
         hn_cmd cmd;
