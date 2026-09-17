@@ -18,8 +18,45 @@ var args = Array(CommandLine.arguments.dropFirst())
 guard let cmd = args.first else { usage(); exit(2) }
 args.removeFirst()
 
+/// 完整用法。这条输出是 **AI agent 的主要说明书** —— 它靠 `hn` 的
+/// 输出来学会怎么驱动界面, 所以必须把命令、参数、与"能拿到什么"列全,
+/// 而不是一句"见源码注释"。
 func usage() {
-    print("用法: hn open|update|close|list|persist|restore|ping ... (见源码注释)")
+    print("""
+    hn — html-native 命令行(agent 的系统入口)
+
+    窗口与表面
+      hn open <id> <file.html> [--css a.css] [--surface window|popup|layer]
+              [--title "T"] [--w W] [--h H] [--x X] [--y Y] [--ttl 秒]
+      hn update <id> <file.html>    用新 HTML 整体替换(样式保留)
+      hn dev <file.html>            开发模式: 保存即热更新
+      hn close <id>                 销毁窗口
+      hn list                       列出所有运行中的应用
+      hn persist <id> <文件.json>   把该应用的本地存储落盘
+      hn restore <id> <文件.json>   从文件恢复
+      hn syscard                    打开系统信息卡
+      hn ping                       探测宿主(并自动拉起)
+
+    读取界面(agent 感知)
+      hn dom <id> [--depth N]       打印 DOM 树(class + 深度)
+      hn text <id> --element <sel>  取某元素的文本内容
+      hn dump <id>                  打印绘制指令列表(display list)
+      hn anim <id>                  列出该应用正在播放的动画
+
+    驱动交互(agent 操作)
+      hn event <id> --text click --target <元素id>
+              --text 可用: click dblclick mousedown mouseup mousemove
+                           mouseenter mouseleave keydown keyup focus blur
+                           input change submit scroll
+              可配: --x --y(坐标) --key "Enter" --key "ArrowLeft" --mods 8
+                   (1=shift 2=ctrl 4=alt 8=cmd) --target 定位元素
+      hn eval <id> --js <表达式>    在该应用的 JS 上下文里求值并打印结果
+                                    (native 与 webkit 渲染器都可用)
+
+    stdin 也可直接喂 HTML:  echo '<h1>hi</h1>' | hn open myapp -
+
+    宿主: ~/.html-native/hn.sock (常驻进程, 不存在时自动拉起)
+    """)
 }
 
 struct Opts {
@@ -38,6 +75,7 @@ struct Opts {
     var key: String?
     var mods: Int?
     var text: String?
+    var kind: String?      /* event 的事件类型 */
 }
 var o = Opts()
 var i = 0
@@ -56,6 +94,14 @@ while i < args.count {
     case "--key": i += 1; o.key = i < args.count ? args[i] : nil
     case "--mods": i += 1; o.mods = i < args.count ? Int(args[i]) : nil
     case "--text": i += 1; o.text = i < args.count ? args[i] : nil
+    /* --id 之前不存在: 所有未识别参数按位置落入 id/file, 于是
+       "hn eval --id evtest --text ..." 里的 "--id" 被当成应用 id,
+       daemon 收到 id="--id" → 报"未找到应用: --id"。这类失败很难自查,
+       因为命令看上去完全正确。 */
+    case "--id": i += 1; o.id = i < args.count ? args[i] : nil
+    case "--element": i += 1; o.target = i < args.count ? args[i] : nil
+    case "--js": i += 1; o.message = i < args.count ? args[i] : nil
+    case "--kind": i += 1; o.kind = i < args.count ? args[i] : nil
     default:
         if o.id == nil { o.id = a } else if o.file == nil { o.file = a }
     }
@@ -259,7 +305,13 @@ case "dump":
     }
 
 case "event":
-    guard let id = o.id, let kind = o.file else { usage(); exit(2) }
+    /* 事件类型两种写法都接受:
+         hn event <id> click            (位置参数)
+         hn event <id> --kind click     (显式)
+       之前只有位置参数一种, 而 --text 又恰好是"输入事件的新值"参数,
+       于是 "hn event <id> --text click" 会被解析成 kind 缺失而打出用法 ——
+       命令看着完全正确却失败, 属于很难自查的那类。 */
+    guard let id = o.id, let kind = o.kind ?? o.file else { usage(); exit(2) }
     var req: [String: Any] = ["op": "event", "id": id, "kind": kind]
     if let t = o.target { req["target"] = t }
     if let k = o.key { req["key"] = k }
@@ -268,11 +320,22 @@ case "event":
     if let x = o.w, let y = o.h { req["x"] = x; req["y"] = y }
     let r = rpc(req) ?? [:]
     if let c = r["consumed"] as? Bool {
-        print(c ? "事件已消费: \(kind)" : "事件未消费: \(kind)")
+        /* 区分"没人监听"和"处理了但没阻止冒泡" —— 两者对判断有没有生效差别很大 */
+        let d = r["detail"] as? [String: Any] ?? [:]
+        let handled = d["handled"] as? Bool ?? false
+        let hx = d["hx"] as? Bool ?? false
+        let noTarget = d["noTarget"] as? Bool ?? false
+        if noTarget { print("目标未找到: --target <元素id> 或给 --x/--y"); exit(1) }
+        if handled || hx || c {
+            let via = hx && !handled ? "(hx 行为)" : "(JS 处理器)"
+            print("事件已处理: \(kind) \(via)")
+        } else {
+            print("事件已派发但无人监听: \(kind)")
+        }
     } else { print("失败: \(r["error"] ?? "?")"); exit(1) }
 
 case "eval":
-    guard let id = o.id, let js = o.message ?? o.file else { usage(); exit(2) }
+    guard let id = o.id, let js = o.message else { usage(); exit(2) }
     let r = rpc(["op": "eval", "id": id, "js": js]) ?? [:]
     if let v = r["value"] { print(v) } else { print("失败: \(r["error"] ?? "?")"); exit(1) }
 

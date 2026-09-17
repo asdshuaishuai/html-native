@@ -191,6 +191,7 @@ enum HNProtocol {
                 return resp(false, ["error": "id/kind required"])
             }
             var out = false
+            var oc: [String: Any] = [:]
             DispatchQueue.main.sync {
                 if let app = HNEngine.shared.app(id: id), let nv = app.view {
                     let kind: hn_event_kind
@@ -223,29 +224,35 @@ enum HNProtocol {
                     }
                     if target == nil && pt == nil {
                         out = false
+                        oc = ["noTarget": true]
                     } else {
                         out = nv.emit(kind, at: pt, node: target,
                                       keyCode: Int32(obj["keyCode"] as? Int ?? 0),
                                       key: obj["key"] as? String,
                                       modifiers: UInt32(obj["modifiers"] as? Int ?? 0),
                                       text: obj["text"] as? String)
+                        /* 回传三态, 让 agent 能区分"没人监听"与"处理了但没阻止冒泡"。
+                           之前只有一个 consumed, 于是"点击确实改了界面"也会报
+                           false, agent 会误判成没生效。 */
+                        let oc2 = nv.lastEventOutcome
+                        oc = ["handled": oc2.handled,
+                              "prevented": oc2.prevented,
+                              "hx": oc2.hx]
                     }
                 }
             }
-            return resp(true, ["consumed": out, "id": id])
+            return resp(true, ["consumed": out, "id": id, "detail": oc])
 
         case "eval":
             guard let id = obj["id"] as? String, let js = obj["js"] as? String else {
                 return resp(false, ["error": "id/js required"])
             }
-            var value: Any = ""
+            var value: Any = "(未找到应用: \(id))"
             DispatchQueue.main.sync {
                 if let app = HNEngine.shared.app(id: id) {
-                    if let wk = app.host as? HNWebKitHost {
-                        value = wk.evalSync(js) ?? "(nil)"
-                    } else {
-                        value = "(该应用使用 native 渲染器, 无 JS 上下文)"
-                    }
+                    // 两个渲染器都实现 evalSync: native 走 JavaScriptCore,
+                    // webkit 走 WKWebView。agent 因此不必关心用了哪个渲染器。
+                    value = app.host.evalSync(js) ?? "(无 JS 环境)"
                 }
             }
             return resp(true, ["value": value])

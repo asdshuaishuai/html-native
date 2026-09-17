@@ -786,19 +786,26 @@ public final class HtmlNativeView: NSView, HNWebHost {
             "text": text ?? "",
         ]
 
-        // 沿冒泡路径由内向外派发
+        /* 沿冒泡路径由内向外派发。
+           返回值区分三态(而不是只有一个 Bool), 因为对 agent 而言
+           "没人监听"和"监听了但没阻止冒泡"是完全不同的信息 —— 之前只返回
+           preventDefault/hx 是否触发, 于是"点击真的改了界面"却报
+           consumed=false, agent 会误判成没生效。 */
         let depth = hn_event_path_len(hit)
-        var consumed = false
+        var handled = false     /* 有 JS 处理器被调用过 */
+        var prevented = false   /* 有处理器调了 preventDefault */
+        var hxFired = false     /* 触发了 hx 行为 */
         for i in 0..<Int(depth) {
             guard let n = hn_event_path_at(hit, Int32(i)),
                   let idp = hn_node_attr(n, "id") else { continue }
             let id = String(cString: idp)
 
-            // 消费者 1: JS 处理器(返回值 = 注册的处理器数; preventDefault 会置标志)
+            // 消费者 1: JS 处理器
             if let rt = jsRuntime {
                 jsPrevented = false
-                rt.dispatch(event: name, elementId: id, detail: detail)
-                if jsPrevented { consumed = true; break }
+                let fired = rt.dispatch(event: name, elementId: id, detail: detail)
+                if fired > 0 { handled = true }
+                if jsPrevented { prevented = true; break }
             }
 
             // 消费者 2: hx-trigger 声明的行为
@@ -806,12 +813,16 @@ public final class HtmlNativeView: NSView, HNWebHost {
             if Self.triggerMatches(trig, event: name) {
                 if let act = hxActionForNode(n) {
                     performHx(act)
-                    consumed = true
+                    hxFired = true
                 }
             }
         }
-        return consumed
+        lastEventOutcome = (handled: handled, prevented: prevented, hx: hxFired)
+        return handled || prevented || hxFired
     }
+    /// 最近一次 emit 的三态结果(供宿主/agent 读取, 见 emit 的注释)
+    public private(set) var lastEventOutcome: (handled: Bool, prevented: Bool, hx: Bool)
+        = (false, false, false)
 
     /// hx-trigger 与事件名的匹配(含 hx 的 hover 语义: 进入也触发)
     public static func triggerMatches(_ trig: String, event: String) -> Bool {
@@ -1216,6 +1227,15 @@ public final class HtmlNativeView: NSView, HNWebHost {
     public var engineContext: OpaquePointer { ctx }
     /// 协议实现: 需要判空的那一份(native 恒有值)
     public var engineContextOrNil: OpaquePointer? { ctx }
+
+    /// 同步执行 JS 并取结果(agent 的 eval 能力)。
+    /// native 路径同样有 JS 环境(系统自带 JavaScriptCore, 与纯 C 引擎隔离),
+    /// 所以 agent 不必区分渲染器 —— 之前这里缺实现导致 eval 对 native
+    /// 应用一律返回"无 JS 上下文", 自动化只能查 DOM 不能跑脚本。
+    public func evalSync(_ js: String) -> Any? {
+        guard let rt = jsRuntime else { return nil }
+        return rt.probe(js)
+    }
 
     /// 内省: 指定 id 的文本内容(排查"内容对不对")
     public func textOf(id: String) -> String? {

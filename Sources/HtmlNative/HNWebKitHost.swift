@@ -30,6 +30,12 @@ public protocol HNWebHost: AnyObject {
     /// 假指针(如 OpaquePointer(bitPattern: 1))去满足非空签名, 调用方任何
     /// "顺手调引擎 API" 都会解引用非法地址而崩溃。
     var engineContextOrNil: OpaquePointer? { get }
+
+    /// 同步执行一段 JS 并返回结果的字符串形式; 该应用无 JS 环境返回 nil。
+    /// **两个渲染器都必须实现**: native 走 JavaScriptCore(引擎仍是纯 C,
+    /// 与 JS 隔离), webkit 走 WKWebView。少一个就会让 agent 的 eval 能力
+    /// 只在某个渲染器上可用 —— 表现为"同一条 daemon 命令时好时坏"。
+    func evalSync(_ js: String) -> Any?
 }
 
 /// sys:// 桥对象 —— 必须在 WKWebView 创建**之前**注册到 config,
@@ -179,6 +185,17 @@ public final class HNWebKitHost: NSObject, HNWebHost, WKNavigationDelegate {
 
     public var engineContextOrNil: OpaquePointer? { nil }
 
+    public func evalSync(_ js: String) -> Any? {
+        var result: Any?
+        var done = false
+        webView.evaluateJavaScript(js) { v, _ in result = v; done = true }
+        let deadline = Date().addingTimeInterval(1.5)
+        while !done && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return result
+    }
+
     public func bodyBackgroundHex() -> UInt32? {
         var hex: UInt32?
         var done = false
@@ -195,17 +212,6 @@ public final class HNWebKitHost: NSObject, HNWebHost, WKNavigationDelegate {
     }
 
     /// 同步执行 JS(内省/验证用): 跑一小段 RunLoop 等回调
-    public func evalSync(_ js: String) -> Any? {
-        var result: Any?
-        var done = false
-        webView.evaluateJavaScript(js) { v, _ in result = v; done = true }
-        let deadline = Date().addingTimeInterval(1.5)
-        while !done && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
-        return result
-    }
-
     /// "rgb(15, 18, 24)" / "rgba(15,18,24,1)" → 0xRRGGBBAA
     static func parseCSSColor(_ s: String) -> UInt32? {
         guard let open = s.firstIndex(of: "("), let close = s.lastIndex(of: ")") else { return nil }

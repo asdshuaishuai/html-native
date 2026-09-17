@@ -471,11 +471,18 @@ public final class HNJSRuntime {
     }
 
     /// 派发事件到 JS 处理器（引擎侧命中测试后调用）
-    public func dispatch(event: String, elementId: String, detail: [String: Any] = [:]) {
+    /// 派发一个事件到指定元素。返回值 = 被调用的处理器个数
+    /// (0 表示"没有处理器监听它" —— agent 需要这个信息来区分
+    ///  "没人理" 和 "处理了但没阻止冒泡")。
+    @discardableResult
+    public func dispatch(event: String, elementId: String, detail: [String: Any] = [:]) -> Int {
+        lastError = nil
         let det = (try? JSONSerialization.data(withJSONObject: detail))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let js = "window.__hnDispatchTo(" + jsString(elementId) + ", " + jsString(event) + ", " + det + ")"
         let r = context.evaluateScript(js)
+        if let e = lastError { return 0 }
+        return Int(r?.toInt32() ?? 0)
     }
 
     /// Swift 字符串 → JS 字符串字面量。

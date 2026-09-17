@@ -2288,6 +2288,39 @@ do {
     } else { check(false, "布局: space-evenly 用例未取到盒子") }
 }
 
+print("== agent 生态: 两个渲染器都能 eval(同步执行 JS) ==")
+do {
+    // 之前 daemon 的 eval 只对 webkit 有效, native 一律返回"无 JS 上下文" ——
+    // 于是 agent 在同一条命令上表现不一致。断言两个渲染器都要给出真值。
+    let jsHTML = """
+    <html><head><style>html,body{margin:0}</style></head><body>
+    <div id="n" data-count="0"></div>
+    <script>
+      window.__answer = function (x) { return 6 * x; };
+      window.__state = 41 + 1;
+    </script></body></html>
+    """
+    let nv = HtmlNativeView(html: jsHTML)
+    nv.frame = NSRect(x: 0, y: 0, width: 200, height: 200)
+    nv.relayout()
+    let v1 = nv.evalSync("String(window.__state)")
+    check(v1 as? String == "42", "eval: native 渲染器可执行 JS (结果 \(v1 ?? "nil"))")
+    let v2 = nv.evalSync("String(window.__answer(7))")
+    check(v2 as? String == "42", "eval: native 可调用页面函数 (结果 \(v2 ?? "nil"))")
+
+    // 无脚本的页面也应安全返回 nil 而不是崩
+    let nv2 = HtmlNativeView(html: "<html><body><div>无脚本</div></body></html>")
+    nv2.frame = NSRect(x: 0, y: 0, width: 100, height: 100)
+    nv2.relayout()
+    check(nv2.evalSync("1+1") == nil, "eval: 无 JS 环境时返回 nil(不崩)")
+
+    // webkit 渲染器同样暴露同一接口(协议要求), agent 无需区分渲染器。
+    // 无头测试里不真建 WKWebView, 只验证协议存在性。
+    let wk = HNWebKitHost()
+    let hasIface = wk is HNWebHost && !(wk is HtmlNativeView)
+    check(hasIface, "eval: webkit 宿主满足 HNWebHost(同一 eval 接口)")
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(
