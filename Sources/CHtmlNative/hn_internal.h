@@ -36,6 +36,10 @@ typedef struct { const char *name, *value; } hn_var;
 typedef struct hn_style {
     hn_display display;
     int        flex_row;      /* 1=row 0=column */
+    /* flex-wrap: 0=nowrap(默认, 溢出收缩) 1=wrap(换行/换列)。
+       缺这个字段时 flex-wrap:wrap 完全无效 —— 子项被压到一行里
+       (实测 3 个 width:60 塞进 width:100 容器, 各缩到 33.3 而不是换行)。 */
+    int        flex_wrap;
     hn_justify justify;
     hn_align   align;      /* align-items: 容器级(作用于所有子项) */
     /* align-self: 子项级, 覆盖父容器的 align-items。

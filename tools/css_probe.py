@@ -256,6 +256,72 @@ r = run(page(".c{width:100;height:100;overflow:hidden}"
              '<div class="c" id="box"><div class="k" id="x"></div></div>'))
 ck("overflow 容器尺寸不受内容影响", r.get("box", [None])[0], (0, 0, 100, 100))
 
+
+# ============ 排版单位语义(来自 css_probe_v3) ============
+def lineh(decl, label):
+    r = run(page(decl + ".k{width:100}",
+                 "<div class='p'><div class='k' id='x'>\u6587</div></div>"))
+    return r.get("x", [None])[0]
+
+# line-height 三种单位: 无单位=倍数 / px=绝对 / %=相对字号 / em=相对字号
+for decl, want, label in [
+    (".p{font-size:20;line-height:1.5}",   30,  "line-height:1.5 → 30px"),
+    (".p{font-size:20;line-height:150%}",  30,  "line-height:150% → 30px"),
+    (".p{font-size:20;line-height:30px}",  30,  "line-height:30px → 30px"),
+    (".p{font-size:20;line-height:2em}",   40,  "line-height:2em → 40px"),
+]:
+    b = lineh(decl, label)
+    if b: ck(label, b[3], want, 5)
+
+# 无单位数字是倍数(CSS 语义) —— 不是"像素"
+b = lineh(".p{font-size:20;line-height:30}", "")
+if b: ck("line-height:30 是倍数(30×20=600)", b[3], 600, 5)
+
+# box-sizing 与 padding+border 叠加
+b = run(page(".a{width:100;height:100;padding:10;border:5 solid #f00;box-sizing:border-box}",
+             "<div class='a' id='x'></div>")).get("x", [None])[0]
+ck("border-box: 宽含 padding+border", b, (0, 0, 100, 100))
+b = run(page(".a{width:100;height:100;padding:10;border:5 solid #f00}",
+             "<div class='a' id='x'></div>")).get("x", [None])[0]
+ck("content-box: 宽加 padding+border", b, (0, 0, 130, 130))
+
+# 逐侧 padding 长写
+b = run(page(".a{width:100;height:100;padding-top:40}",
+             "<div class='a' id='x'></div>")).get("x", [None])[0]
+ck("padding-top 长写", b, (0, 0, 100, 140))
+b = run(page(".a{width:100;height:100;padding-left:40}",
+             "<div class='a' id='x'></div>")).get("x", [None])[0]
+ck("padding-left 长写", b, (0, 0, 140, 100))
+
+# 通配符与选择器组
+b = run(page("*{box-sizing:border-box}.a{width:100;height:100;padding:20}",
+             "<div class='a' id='x'></div>")).get("x", [None])[0]
+ck("通配符 * 应用 box-sizing", b, (0, 0, 100, 100))
+r = run(page(".a, .b{width:200;height:20}",
+             "<div class='a' id='x'></div><div class='b' id='y'></div>"))
+ck("选择器组 命中 a", r.get("x", [None])[0], (0, 0, 200, 20))
+ck("选择器组 命中 b", r.get("y", [None])[0], (0, 20, 200, 20))
+
+# 相邻兄弟 +
+r = run(page(".a + .b{width:200;height:20}.a{width:50;height:20}",
+             "<div class='a' id='a'></div><div class='b' id='b'></div>"))
+ck("相邻兄弟 + 命中紧邻", r.get("b", [None])[0], (0, 20, 200, 20))
+r = run(page(".a + .b{width:200;height:20}",
+             "<div class='a' id='a'></div><div class='c'></div><div class='b' id='b'></div>"))
+bb = r.get("b", [None])[0]
+if bb: ck("相邻兄弟 + 不命中非紧邻(宽度回落到块级默认 400)", bb[2], 400)
+
+# column-gap
+r = run(page(".a{display:flex;width:300;height:50;column-gap:20}.c{width:50;height:20}",
+             "<div class='a'><div class='c' id='x'></div><div class='c' id='y'></div></div>"))
+ck("column-gap 生效", r.get("y", [None])[0], (70, 0, 50, 20))
+
+# flex-wrap
+r = run(page(".f{display:flex;width:100;height:200;flex-wrap:wrap}.c{width:60;height:20}",
+             "<div class='f'><div class='c' id='x'></div><div class='c' id='y'></div></div>"))
+bb = r.get("y", [None])[0]
+if bb: ck("flex-wrap 换到第二行", bb[1] > 10, True)
+
 # ============ 报告 ============
 print("通过 %d / 失败 %d" % (len(passed), len(failed)))
 for name, want, got in failed:

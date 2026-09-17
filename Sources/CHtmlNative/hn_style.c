@@ -299,6 +299,9 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         else if (sv_eq(t, "inline")) st->display = HN_DISP_INLINE;
         else if (sv_eq(t, "inline-block")) st->display = HN_DISP_INLINE_BLOCK;
         else st->display = HN_DISP_BLOCK;
+    } else if (!strcmp(name, "flex-wrap")) {
+        if (!next_tok(&v, &t)) return;
+        st->flex_wrap = sv_eq(t, "wrap") || sv_eq(t, "wrap-reverse") ? 1 : 0;
     } else if (!strcmp(name, "flex-direction")) {
         if (!next_tok(&v, &t)) return;
         st->flex_row = sv_eq(t, "column") || sv_eq(t, "column-reverse") ? 0 : 1;
@@ -677,9 +680,30 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         if (!next_tok(&v, &t)) return;
         if (sv_eq(t, "normal")) st->line_height = 1.45f;
         else if (sv_num(t, &f)) {
-            /* 纯数字 = 倍数; 带 px = 像素值换算 */
-            st->line_height = (t.n > 2 && !strncmp(t.s + t.n - 2, "px", 2))
-                              ? f / (st->font_size > 0 ? st->font_size : 16) : f;
+            /* line-height 的三种单位语义(CSS):
+                 无单位数字  → 倍数(line-height:1.5 = 1.5×字号)
+                 px          → 绝对像素, 换成倍数存放
+                 %           → 相对字号的百分比, 换算成倍数
+               百分比曾漏判: "150%" 被当成倍数 150, 行高变成 150×20=3000px
+               (页面整体被撑爆)。判定用"去掉数值部分后剩下的后缀", 而不是
+               固定偏移 —— em/rem 结尾的也一并按绝对长度处理。 */
+            const char *p = t.s;
+            const char *e = t.s + t.n;
+            while (p < e && ((*p >= '0' && *p <= '9') || *p == '.' ||
+                             *p == '-' || *p == '+')) p++;
+            size_t suffix = (size_t)(e - p);
+            float base = st->font_size > 0 ? st->font_size : 16;
+            if (suffix == 2 && !strncmp(p, "px", 2)) {
+                st->line_height = f / base;
+            } else if (suffix == 1 && *p == '%') {
+                st->line_height = f / 100.0f;
+            } else if (suffix >= 2 && !strncmp(p, "em", 2)) {
+                st->line_height = f;
+            } else if (suffix >= 3 && !strncmp(p, "rem", 3)) {
+                st->line_height = f * g_root_font / base;
+            } else {
+                st->line_height = f;                 /* 无单位: 倍数 */
+            }
             if (st->line_height < 0.5f) st->line_height = 0.5f;
         }
     } else if (!strcmp(name, "letter-spacing")) {

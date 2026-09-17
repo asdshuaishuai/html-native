@@ -2477,6 +2477,82 @@ do {
     } else { check(false, "CSS: rgba() 空格+斜杠写法") }
 }
 
+print("== 排版单位语义与 flex-wrap 回归 ==")
+do {
+    func box2(_ html: String, _ id: String, _ w: Float = 400, _ h: Float = 300)
+        -> (Float, Float, Float, Float)? {
+        guard let d = hn_parse_html(html, html.utf8.count) else { return nil }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, w, h, &backend)
+        var stack: [OpaquePointer] = [hn_doc_root(d)]
+        var out: (Float, Float, Float, Float)?
+        while let n = stack.popLast() {
+            if let i = hn_node_attr(n, "id"), String(cString: i) == id {
+                var x: Float = 0, y: Float = 0, bw: Float = 0, bh: Float = 0
+                hn_node_box(n, &x, &y, &bw, &bh)
+                out = (x, y, bw, bh)
+                break
+            }
+            var kids: [OpaquePointer] = []
+            var c = hn_node_first_child(n)
+            while let k = c { kids.append(k); c = hn_node_next_sibling(k) }
+            stack.append(contentsOf: kids)
+        }
+        hn_context_destroy(cc)
+        return out
+    }
+    func pg2(_ css: String, _ body: String) -> String {
+        "<html><head><style>html,body{margin:0}" + css + "</style></head><body>" + body + "</body></html>"
+    }
+    func eq2(_ a: (Float, Float, Float, Float)?, _ b: (Float, Float, Float, Float),
+             _ tol: Float = 1.5) -> Bool {
+        guard let a else { return false }
+        return abs(a.0 - b.0) <= tol && abs(a.1 - b.1) <= tol
+            && abs(a.2 - b.2) <= tol && abs(a.3 - b.3) <= tol
+    }
+
+    /* line-height 的三种单位语义。百分比曾漏判: "150%" 被当成倍数 150,
+       行高变成 150×字号(页面整体被撑爆)。 */
+    let lhBody = "<div class='p'><div class='k' id='x'>\u{6587}</div></div>"
+    if let b = box2(pg2(".p{font-size:20;line-height:150%}.k{width:100}", lhBody), "x") {
+        check(eq2(b, (0, 0, 100, 30)),
+              String(format: "排版: line-height:150%% → 30px(而非 3000) (高=%.0f)", b.3))
+    } else { check(false, "排版: line-height 百分比用例") }
+    if let b = box2(pg2(".p{font-size:20;line-height:30px}.k{width:100}", lhBody), "x") {
+        check(eq2(b, (0, 0, 100, 30)), String(format: "排版: line-height:30px → 30px (高=%.0f)", b.3))
+    } else { check(false, "排版: line-height px 用例") }
+    if let b = box2(pg2(".p{font-size:20;line-height:2em}.k{width:100}", lhBody), "x") {
+        check(eq2(b, (0, 0, 100, 40)), String(format: "排版: line-height:2em → 40px (高=%.0f)", b.3))
+    } else { check(false, "排版: line-height em 用例") }
+    /* 无单位数字是倍数(CSS 语义), 不是像素 */
+    if let b = box2(pg2(".p{font-size:20;line-height:30}.k{width:100}", lhBody), "x") {
+        check(eq2(b, (0, 0, 100, 600)),
+              String(format: "排版: line-height:30 是倍数(30×20) (高=%.0f)", b.3))
+    } else { check(false, "排版: line-height 倍数用例") }
+
+    /* flex-wrap: 此前字段压根不存在, 子项被压到一行里收缩
+       (3 个 width:60 塞进 width:100 容器, 各缩到 33.3 而不是换行)。 */
+    let wrap4 = "<div class='f'><div class='c' id='a'></div><div class='c' id='b'></div><div class='c' id='c'></div><div class='c' id='d'></div></div>"
+    let wrapCSS = ".f{display:flex;width:200;height:200;flex-wrap:wrap}.c{width:60;height:20}"
+    let ba = box2(pg2(wrapCSS, wrap4), "a")
+    let bd = box2(pg2(wrapCSS, wrap4), "d")
+    if let ba, let bd {
+        check(eq2(ba, (0, 0, 60, 20)), "flex-wrap: 首个在第一行 x=0")
+        check(eq2(bd, (0, 20, 60, 20)),
+              String(format: "flex-wrap: 第 4 个换到第二行 y=%.0f(而非仍在一行)", bd.1))
+        check(ba.2 == 60, String(format: "flex-wrap: 子项不被压缩(宽=%.0f)", ba.2))
+    } else { check(false, "flex-wrap: 用例未取到盒子") }
+
+    /* 换行要考虑 gap */
+    let wrapGapCSS = ".f{display:flex;width:150;height:200;flex-wrap:wrap;gap:10}.c{width:60;height:20}"
+    let wrap3 = "<div class='f'><div class='c' id='a'></div><div class='c' id='b'></div><div class='c' id='c'></div></div>"
+    let bc = box2(pg2(wrapGapCSS, wrap3), "c")
+    if let bc {
+        check(bc.1 > 20, String(format: "flex-wrap: 计 gap 后第 3 个换行 (y=%.0f)", bc.1))
+    } else { check(false, "flex-wrap: gap 用例") }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

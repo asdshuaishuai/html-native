@@ -246,6 +246,12 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **行内格式化上下文(IFC)**: 文本与 `display:inline`/`inline-block` 元素共享
   行盒、按词贪心换行 + CJK 码点硬拆、跨节点/跨行基线对齐、
   overflow 裁剪与滚动(带滚动指示条)
+- **flexbox**: 行/列 · `grow/shrink/basis` · `justify-content`(六种, 含
+  space-around/evenly) · `align-items` / **`align-self`** · **`order`** ·
+  **`flex-wrap`**(换行/换列, 与 gap、align、justify 正确叠加) · `gap`
+- **排版单位**: `line-height` 的三种语义分开处理 —— 无单位是**倍数**、
+  `px` 是绝对像素、`%`/`em` 相对字号; `margin`/`padding` 百分比按
+  **包含块宽度**解析(CSS 规定四个边都一样)
 - **关键帧动画(@keyframes)**: 多段动画定义 + `animation: <名> <时长> <缓动> 
   infinite alternate` 简写; 时间轴逐帧采样, 支持 iteration/方向/fill。
   适合"持续旋转/呼吸/脉冲/颜色循环"等无法用二态 transition 表达的效果

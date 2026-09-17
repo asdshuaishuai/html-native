@@ -902,6 +902,28 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
     float gap_total = st->gap * (float)(cnt - 1);
     float used_cross = 0;
 
+    /* flex-wrap: 先按主轴可用尺寸把子项切成若干行(行方向)或列(列方向)。
+       行号存在 line[i]; 未换行时全为 0(与原单行路径完全一致, 零行为差异)。 */
+    int *line = (int *)calloc((size_t)cnt, sizeof(int));
+    int nlines = 1;
+    if (line) {
+        int cur = 0;
+        float acc = 0;
+        for (int i = 0; i < cnt; i++) {
+            float outer = items[i].ml + items[i].n->bw + items[i].mr;
+            float avail = st->flex_row ? cw : cross_h;
+            /* 第一个子项即使超宽也留在本行(否则会无限换行) */
+            if (st->flex_wrap && avail > 0 && i > 0 &&
+                acc > 0 && acc + st->gap + outer > avail + 0.01f) {
+                cur++;
+                acc = 0;
+            }
+            line[i] = cur;
+            acc += (acc > 0 ? st->gap : 0) + outer;
+        }
+        nlines = cur + 1;
+    }
+
     if (st->flex_row) {
         float sum = 0, grow = 0;
         for (int i = 0; i < cnt; i++) {
@@ -914,100 +936,137 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
             float oh = items[i].mt + items[i].n->bh + items[i].mb;
             if (oh > n->pref_h) n->pref_h = oh;
         }
+        /* 多行时容器自身高度 = 各行高之和(而不是单行的最大高) */
+        if (st->flex_wrap && nlines > 1 && line) {
+            float tot = 0;
+            for (int L = 0; L < nlines; L++) {
+                float lh = 0;
+                for (int i = 0; i < cnt; i++) {
+                    if (line[i] != L) continue;
+                    float oh = items[i].mt + items[i].n->bh + items[i].mb;
+                    if (oh > lh) lh = oh;
+                }
+                tot += lh + (L > 0 ? st->gap : 0);
+            }
+            n->pref_h = tot;
+        }
 
         float free_space = (cw >= 0 && !(measuring && cw < 0)) ? cw - sum - gap_total : 0;
-        float shrink_deficit = 0;
-        if (free_space < 0) {
-            shrink_deficit = -free_space;
-            free_space = 0;
-        }
+        if (free_space < 0) free_space = 0;   /* 收缩按行在下面用 ldef 计算 */
 
         if (measuring) {
             n->pref_w = sum + gap_total;
+            free(line);
             free(items);
             return n->pref_h;
         }
 
-        float lead = 0, extra_gap = 0;
-        if (grow <= 0 && cw >= 0) {
-            float rem = cw - sum - gap_total;
-            if (rem > 0) {
-                /* auto 主轴外边距优先吸收剩余空间(标准: 存在 auto margin 时忽略 justify) */
-                int nauto = 0;
-                for (int i = 0; i < cnt; i++) {
-                    hn_node *a = items[i].n;
-                    if (a->kind != HN_ELEM) continue;
-                    if (a->style.margin_auto & 8) nauto++;
-                    if (a->style.margin_auto & 2) nauto++;
-                }
-                if (nauto > 0) {
-                    float per = rem / (float)nauto;
+        /* 交叉轴: 容器定高用定高; auto 时取内容最大高(单行)或各行之和(换行) */
+        float cross_avail = cross_h >= 0 ? cross_h : n->pref_h;
+        float line_cross_off = 0;      /* 当前行在交叉轴上的起点 */
+
+        float mx = 0;
+        for (int L = 0; L < nlines; L++) {
+            /* ---- 本行的统计: 主轴占用 / grow / shrink / 交叉高 ---- */
+            float lsum = 0, lgrow = 0, lgaps = 0;
+            int lcnt = 0;
+            float lcross = 0;
+            for (int i = 0; i < cnt; i++) {
+                if (line && line[i] != L) continue;
+                hn_node *ch = items[i].n;
+                lsum += items[i].ml + ch->bw + items[i].mr;
+                lgaps += st->gap;
+                if (ch->kind == HN_ELEM && ch->style.flex_grow > 0) lgrow += ch->style.flex_grow;
+                lcnt++;
+                float oh = items[i].mt + ch->bh + items[i].mb;
+                if (oh > lcross) lcross = oh;
+            }
+            if (lgaps > 0) lgaps -= st->gap;        /* n 项之间 n-1 个 gap */
+            if (!st->flex_wrap || nlines <= 1) { lsum = sum; lgrow = grow; lcnt = cnt; }
+
+            float lfree = (cw >= 0) ? cw - lsum - lgaps : 0;
+            if (lfree < 0) lfree = 0;
+            float ldef = 0;
+            if (cw >= 0 && cw - lsum - lgaps < 0) ldef = -(cw - lsum - lgaps);
+
+            float lead = 0, extra_gap = 0;
+            if (lgrow <= 0 && cw >= 0) {
+                float rem = cw - lsum - lgaps;
+                if (rem > 0) {
+                    int nauto = 0;
                     for (int i = 0; i < cnt; i++) {
+                        if (line && line[i] != L) continue;
                         hn_node *a = items[i].n;
                         if (a->kind != HN_ELEM) continue;
-                        if (a->style.margin_auto & 8) items[i].ml += per;
-                        if (a->style.margin_auto & 2) items[i].mr += per;
+                        if (a->style.margin_auto & 8) nauto++;
+                        if (a->style.margin_auto & 2) nauto++;
                     }
-                } else if (st->justify == HN_JUST_CENTER) lead = rem * 0.5f;
-                else if (st->justify == HN_JUST_END) lead = rem;
-                else if (st->justify == HN_JUST_BETWEEN && cnt > 1) extra_gap = rem / (float)(cnt - 1);
-                /* space-around: 首尾各半个间隙, 其余 n-1 个间隙满格。
-                   → lead = 半个间隙, extra_gap = 一个间隙(段内 1 个半)。 */
-                else if (st->justify == HN_JUST_AROUND && cnt > 0) {
-                    float u = rem / (float)cnt;
-                    lead = u * 0.5f;
-                    extra_gap = u;
-                }
-                /* space-evenly: 间隙数 = cnt+1(含首尾各一), 全部等宽 */
-                else if (st->justify == HN_JUST_EVENLY) {
-                    float u = rem / (float)(cnt + 1);
-                    lead = u;
-                    extra_gap = u;
+                    if (nauto > 0) {
+                        float per = rem / (float)nauto;
+                        for (int i = 0; i < cnt; i++) {
+                            if (line && line[i] != L) continue;
+                            hn_node *a = items[i].n;
+                            if (a->kind != HN_ELEM) continue;
+                            if (a->style.margin_auto & 8) items[i].ml += per;
+                            if (a->style.margin_auto & 2) items[i].mr += per;
+                        }
+                    } else if (st->justify == HN_JUST_CENTER) lead = rem * 0.5f;
+                    else if (st->justify == HN_JUST_END) lead = rem;
+                    else if (st->justify == HN_JUST_BETWEEN && lcnt > 1) extra_gap = rem / (float)(lcnt - 1);
+                    else if (st->justify == HN_JUST_AROUND && lcnt > 0) {
+                        float u = rem / (float)lcnt;
+                        lead = u * 0.5f;
+                        extra_gap = u;
+                    } else if (st->justify == HN_JUST_EVENLY) {
+                        float u = rem / (float)(lcnt + 1);
+                        lead = u;
+                        extra_gap = u;
+                    }
                 }
             }
-        }
+            /* 本行的交叉可用高。
+               不换行时保持原语义(定高容器里 align-items:stretch 填满容器高),
+               否则以本行内容高为准 —— 若换行时仍用容器高, 每行都会占满容器,
+               行间距变成容器高(实测 3 行各隔 200px 而不是 20px)。 */
+            float lcross_avail = (!st->flex_wrap || nlines <= 1) && cross_h >= 0
+                                 ? cross_h : lcross;
 
-        /* 交叉轴可用高: 容器定高用定高; auto 才取内容最大高 */
-        float cross_avail = cross_h >= 0 ? cross_h : 0;
-        if (cross_h < 0) {
-            for (int i = 0; i < cnt; i++)
-                if (items[i].mt + items[i].n->bh + items[i].mb > cross_avail)
-                    cross_avail = items[i].mt + items[i].n->bh + items[i].mb;
-        }
-
-        float shrink_wsum = 0;
-        for (int i = 0; i < cnt; i++) {
-            hn_node *ch = items[i].n;
-            float sk = ch->kind == HN_ELEM ? ch->style.flex_shrink : 1;
-            if (sk < 0) sk = 0;
-            shrink_wsum += (items[i].ml + ch->bw + items[i].mr) * sk;
-        }
-
-        float mx = lead;
-        for (int i = 0; i < cnt; i++) {
-            hn_node *ch = items[i].n;
-            float main_outer = items[i].ml + ch->bw + items[i].mr;
-            if (free_space > 0 && grow > 0 && ch->kind == HN_ELEM && ch->style.flex_grow > 0)
-                main_outer += free_space * ch->style.flex_grow / grow;
-            if (shrink_deficit > 0 && shrink_wsum > 0) {
+            float lshrink_sum = 0;
+            for (int i = 0; i < cnt; i++) {
+                if (line && line[i] != L) continue;
+                hn_node *ch = items[i].n;
                 float sk = ch->kind == HN_ELEM ? ch->style.flex_shrink : 1;
                 if (sk < 0) sk = 0;
-                main_outer -= shrink_deficit * (main_outer * sk / shrink_wsum);
-                if (main_outer < 0) main_outer = 0;
+                lshrink_sum += (items[i].ml + ch->bw + items[i].mr) * sk;
             }
+            if (nlines > 1) ldef = 0;                 /* 换行不收缩 */
 
-            float outer_h = items[i].mt + ch->bh + items[i].mb;
+            mx = lead;
+            for (int i = 0; i < cnt; i++) {
+                if (line && line[i] != L) continue;
+                hn_node *ch = items[i].n;
+                float main_outer = items[i].ml + ch->bw + items[i].mr;
+                if (lfree > 0 && lgrow > 0 && ch->kind == HN_ELEM && ch->style.flex_grow > 0)
+                    main_outer += lfree * ch->style.flex_grow / lgrow;
+                if (ldef > 0 && lshrink_sum > 0) {
+                    float sk = ch->kind == HN_ELEM ? ch->style.flex_shrink : 1;
+                    if (sk < 0) sk = 0;
+                    main_outer -= ldef * (main_outer * sk / lshrink_sum);
+                    if (main_outer < 0) main_outer = 0;
+                }
+
+                float outer_h = items[i].mt + ch->bh + items[i].mb;
             float cy_off = items[i].mt, forced = -1;
             if (ch->kind == HN_ELEM) {
                 /* 子项自己的 align-self 覆盖容器的 align-items */
                 hn_align ea = ch->style.has_self_align ? ch->style.self_align : st->align;
                 switch (ea) {
                 case HN_ALIGN_START:  cy_off = items[i].mt; break;
-                case HN_ALIGN_CENTER: cy_off = items[i].mt + (cross_avail - outer_h) * 0.5f; break;
-                case HN_ALIGN_END:    cy_off = cross_avail - outer_h + items[i].mt; break;
-                default: /* stretch: 钉到交叉轴可用高(内容超出由 overflow 裁剪) */
+                case HN_ALIGN_CENTER: cy_off = items[i].mt + (lcross_avail - outer_h) * 0.5f; break;
+                case HN_ALIGN_END:    cy_off = lcross_avail - outer_h + items[i].mt; break;
+                default: /* stretch: 钉到本行交叉可用高(内容超出由 overflow 裁剪) */
                     if (ch->style.height_u == HN_U_AUTO) {
-                        forced = cross_avail - items[i].mt - items[i].mb;
+                        forced = lcross_avail - items[i].mt - items[i].mb;
                         if (forced < 0) forced = 0;
                     }
                     break;
@@ -1015,10 +1074,16 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
             }
             float mainw = main_outer - items[i].ml - items[i].mr;
             if (mainw < 0) mainw = 0;
-            layout_box(c, ch, cx + mx + items[i].ml, cy + cy_off, mainw, cross_avail, tb, 0, forced, mainw);
+            /* 交叉轴定位 = 行起点 + 行内对齐偏移 */
+            layout_box(c, ch, cx + mx + items[i].ml, cy + line_cross_off + cy_off,
+                       mainw, lcross_avail, tb, 0, forced, mainw);
             mx += main_outer + st->gap + extra_gap;
         }
+            line_cross_off += lcross_avail + (L + 1 < nlines ? st->gap : 0);
+        }
         used_cross = cross_avail;
+        free(line);
+        line = NULL;
     } else {
         /* 列方向: 主轴 = 纵向, 受 cross_h(容器定高)约束 */
         float sum = 0, grow = 0;
