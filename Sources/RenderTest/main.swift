@@ -1572,6 +1572,77 @@ do {
     } else { check(false, "事件: inp 缺失") }
 }
 
+print("== 网络层: hn.fetch(Promise) / 白名单 / 错误传播 ==")
+do {
+    // ---- 1) 白名单逻辑(安全边界) ----
+    let saved = HtmlNativeView.allowedHosts
+    HtmlNativeView.allowedHosts = ["example.com", "api.test.io"]
+    check(HtmlNativeView.hostAllowed(URL(string: "https://example.com/x")!), "白名单: 精确主机放行")
+    check(HtmlNativeView.hostAllowed(URL(string: "https://api.example.com/x")!), "白名单: 子域放行")
+    check(!HtmlNativeView.hostAllowed(URL(string: "https://evil.com/x")!), "白名单: 未列出主机拒绝")
+    check(!HtmlNativeView.hostAllowed(URL(string: "https://notexample.com/x")!),
+          "白名单: 后缀相似但不同域拒绝(不误放行)")
+    HtmlNativeView.allowedHosts = []
+    check(HtmlNativeView.hostAllowed(URL(string: "https://anything.com/x")!),
+          "白名单: 空列表 = 放行全部(开发默认)")
+    HtmlNativeView.allowedHosts = saved
+
+    // ---- 2) 真实 HTTP 请求(本地起一个服务端, 验证 Promise 全链路) ----
+    // 用 Python 起一个临时 HTTP 服务? 不可靠。改用 data URL 式的本地回环:
+    // 起一个极简 socket 服务器(纯 Foundation, 无外部依赖)
+    let srv = SimpleHTTPServer()
+    let port = srv.start()
+    check(port > 0, "HTTP: 本地测试服务器已启动(端口 \(port))")
+    if port > 0 {
+        let html = """
+        <html><body><div id="out">-</div>
+        <script>
+          var result = '';
+          hn.fetch('http://127.0.0.1:\(port)/api/hello')
+            .then(function (r) {
+              result = 'status=' + r.status + ' ok=' + r.ok + ' body=' + r.text();
+              hn.fetch('http://127.0.0.1:\(port)/api/json')
+                .then(function (r2) {
+                  var j = r2.json();
+                  result += ' | json.name=' + (j && j.name);
+                  hn.fetch('http://127.0.0.1:\(port)/api/notfound')
+                    .then(function () { result += ' | SHOULD-NOT-HAPPEN'; })
+                    .catch(function (e) {
+                      result += ' | 404-caught=' + (e.status === 404);
+                      hn.fetch('http://127.0.0.1:1/refused')
+                        .then(function () { result += ' | SHOULD-NOT-HAPPEN-2'; })
+                        .catch(function () { result += ' | 连接错误已捕获'; });
+                    });
+                });
+            });
+          window.__result = function () { return result; };
+        </script></body></html>
+        """
+        let vN = HtmlNativeView(html: html)
+        vN.setFrameSize(NSSize(width: 400, height: 300))
+        vN.layout()
+        // 等异步请求完成
+        let dl = Date().addingTimeInterval(4.0)
+        while Date() < dl {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            let r = vN.jsRuntimeForTest?.probe("window.__result()") ?? ""
+            if r.contains("连接错误已捕获") { break }
+        }
+        let got = vN.jsRuntimeForTest?.probe("window.__result()") ?? ""
+        check(got.contains("status=200") && got.contains("ok=true"),
+              "网络: hn.fetch GET 成功 (status/ok) — \(got.prefix(60))")
+        check(got.contains("body=") && got.contains("hello"),
+              "网络: 响应体可读(text())")
+        check(got.contains("json.name=zcode"),
+              "网络: json() 解析响应")
+        check(got.contains("404-caught=true"),
+              "网络: 4xx 走 reject 且带 status")
+        check(got.contains("连接错误已捕获"),
+              "网络: 连接失败被 catch 捕获(不静默)")
+        srv.stop()
+    }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(
@@ -1599,4 +1670,63 @@ if fileMode {
 } else {
     print(failures == 0 ? "== 全部通过 ==" : "== \(failures) 项失败 ==")
     exit(failures == 0 ? 0 : 1)
+}
+
+/// 极简 HTTP 测试服务器(纯 Foundation socket, 零依赖)
+/// 提供 /api/hello (文本) / /api/json (JSON) / 其余 404
+final class SimpleHTTPServer {
+    private var fd: Int32 = -1
+    private var running = false
+
+    func start() -> Int {
+        fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return 0 }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0                       // 系统分配端口
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, listen(fd, 8) == 0 else { close(fd); return 0 }
+        // 取实际端口
+        var actual = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &actual) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+        }
+        let port = Int(UInt16(bigEndian: actual.sin_port))
+        running = true
+        Thread.detachNewThread { [weak self] in self?.serve() }
+        return port
+    }
+
+    private func serve() {
+        while running {
+            var caddr = sockaddr()
+            var clen = socklen_t(MemoryLayout<sockaddr>.size)
+            let c = accept(fd, &caddr, &clen)
+            if c < 0 { if !running { break }; continue }
+            var buf = [UInt8](repeating: 0, count: 4096)
+            let n = read(c, &buf, buf.count)
+            let req = n > 0 ? String(decoding: buf[0..<n], as: UTF8.self) : ""
+            let (code, ctype, body): (String, String, String)
+            if req.contains("GET /api/hello") {
+                (code, ctype, body) = ("200 OK", "text/plain", "hello from test server")
+            } else if req.contains("GET /api/json") {
+                (code, ctype, body) = ("200 OK", "application/json", #"{"name":"zcode","n":42}"#)
+            } else {
+                (code, ctype, body) = ("404 Not Found", "text/plain", "not found")
+            }
+            let resp = "HTTP/1.1 " + code + "\r\nContent-Type: " + ctype + "\r\nContent-Length: " + String(body.utf8.count) + "\r\nConnection: close\r\n\r\n" + body
+            _ = resp.withCString { write(c, $0, strlen($0)) }
+            close(c)
+        }
+    }
+
+    func stop() { running = false; if fd >= 0 { close(fd); fd = -1 } }
 }

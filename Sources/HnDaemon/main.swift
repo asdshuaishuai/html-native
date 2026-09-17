@@ -260,6 +260,18 @@ enum HNProtocol {
             }
             return resp(true, ["id": id, "cmds": items])
 
+        case "text":
+            guard let id = obj["id"] as? String, let eid = obj["element"] as? String else {
+                return resp(false, ["error": "id/element required"])
+            }
+            var txt = ""
+            DispatchQueue.main.sync {
+                if let app = HNEngine.shared.app(id: id), let v = app.view {
+                    txt = v.textOf(id: eid) ?? "(未找到 \(eid))"
+                }
+            }
+            return resp(true, ["text": txt])
+
         case "dom":
             guard let id = obj["id"] as? String else { return resp(false, ["error": "id required"]) }
             var lines: [String] = []

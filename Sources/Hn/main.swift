@@ -272,6 +272,11 @@ case "eval":
     let r = rpc(["op": "eval", "id": id, "js": js]) ?? [:]
     if let v = r["value"] { print(v) } else { print("失败: \(r["error"] ?? "?")"); exit(1) }
 
+case "text":
+    guard let id = o.id, let el = o.target else { usage(); exit(2) }
+    let r = rpc(["op": "text", "id": id, "element": el]) ?? [:]
+    if let t = r["text"] as? String { print(t) } else { print("失败"); exit(1) }
+
 case "dom":
     guard let id = o.id else { usage(); exit(2) }
     guard let r = rpc(["op": "dom", "id": id]), let lines = r["dom"] as? [String] else { print("无响应"); exit(1) }

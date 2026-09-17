@@ -42,6 +42,10 @@ public final class HNJSRuntime {
         public var setStyle: (UInt, String, String) -> Bool
         /// 触发请求（hx 语义复用：url, method, body, targetId, swap）
         public var fetch: (String, String, String, String, String) -> Void
+        /// 真实 HTTP 请求(Promise 风格): 方法/URL/头/体 → (status, headers, bodyText) 或错误
+        public var fetchRequest: (String, String, [String: String], String?,
+                                  @escaping (Int, [String: String], String) -> Void,
+                                  @escaping (Int, [String: String], String) -> Void) -> Void
         /// 元数据
         public var localStorageGet: (String) -> String?
         public var localStorageSet: (String, String) -> Void
@@ -124,6 +128,31 @@ public final class HNJSRuntime {
                 guard let v = b.localStorageGet(a) else { return JSValue(nullIn: ctx) }
                 return JSValue(object: v, in: ctx)
             case "storeSet":  b.localStorageSet(a, a2); return JSValue(undefinedIn: ctx)
+            case "fetch":
+                // 参数: url, method, headersJSON, body, callbackId
+                let url = a
+                let method = a2.isEmpty ? "GET" : a2
+                var hdrs: [String: String] = [:]
+                if let d = a3.data(using: .utf8),
+                   let o = try? JSONSerialization.jsonObject(with: d) as? [String: String] {
+                    hdrs = o
+                }
+                let body: String? = a4.isEmpty ? nil : a4
+                let cbId = arr.count > 5 ? String(describing: arr[5]) : ""
+                b.fetchRequest(method, url, hdrs, body, { status, respHeaders, text in
+                    self.resolveFetch(cbId, ok: true, status: status, headers: respHeaders, body: text)
+                }, { status, respHeaders, err in
+                    // 错误也带状态码/响应头 —— JS 侧需要区分 404 与网络故障
+                    self.resolveFetch(cbId, ok: false, status: status, headers: respHeaders, body: err)
+                })
+                return JSValue(undefinedIn: ctx)
+            case "timerAdd":
+                guard let ms = Double(a) else { return JSValue(object: 0, in: ctx) }
+                let repeat_ = arr.count > 2 ? ((arr[2] as? Bool) ?? (arr[2] as? NSNumber)?.boolValue ?? false) : false
+                return JSValue(object: Int(self.addTimer(ms: ms, repeats: repeat_)), in: ctx)
+            case "timerClear":
+                if let n = Int(a) { self.clearTimer(n) }
+                return JSValue(undefinedIn: ctx)
             case "preventDefault": b.preventDefault(); return JSValue(undefinedIn: ctx)
             case "stopPropagation": b.preventDefault(); return JSValue(undefinedIn: ctx)
             case "log":       b.log(a); return JSValue(undefinedIn: ctx)
@@ -135,6 +164,15 @@ public final class HNJSRuntime {
 
         // JS 侧的薄封装(shim 通过 __hnCall 访问引擎)
         context.evaluateScript(Self.shim)
+        if let e = lastError {
+            FileHandle.standardError.write("[hn-js] shim 加载失败: \(e)\n".data(using: .utf8)!)
+        }
+        #if DEBUG
+        let chk = context.evaluateScript("typeof window")
+        if chk?.toString() != "object" {
+            FileHandle.standardError.write("[hn-js] shim 未生效: typeof window=\(chk?.toString() ?? "nil")\n".data(using: .utf8)!)
+        }
+        #endif
     }
 
     /// JS 侧的薄封装：让 `el.textContent = 'x'` / `el.classList.add('y')` 这类
@@ -148,6 +186,36 @@ public final class HNJSRuntime {
       // 显式取全局对象并挂载 API(不要依赖隐式全局赋值: 读未声明变量会抛错)
       var G = (typeof globalThis !== 'undefined') ? globalThis : this;
       G.document = G.document || {};
+
+      /* setTimeout / setInterval: JavaScriptCore 是裸引擎, 这两个属于宿主能力,
+         不内置。这里桥到原生定时器(runtime 用 Timer 实现), 让 JS 能写常规异步代码。
+         注意: 缺失会在**调用时**抛异常 —— 若 shim 里用到, 会导致后续定义全部不执行
+         (本项目踩过: hn.fetch 里的 setTimeout 让 window 都变得未定义)。 */
+      G.setTimeout = function (fn, ms) {
+        var id = String(call('timerAdd', String(ms || 0), false));
+        __timers[id] = fn;
+        return id;
+      };
+      G.setInterval = function (fn, ms) {
+        var id = String(call('timerAdd', String(ms || 0), true));
+        __timers[id] = fn;
+        return id;
+      };
+      /* 注意: 不能写 `G.a = G.b = function (id) {...}` —— 链式赋值在语句位置
+         会被解析为"匿名函数声明"(SyntaxError), 导致整个 shim 加载失败。
+         必须用圆括号包住函数表达式。 */
+      G.clearTimeout = (G.clearInterval = function (id) {
+        if (id === undefined || id === null) return;
+        delete __timers[String(id)];
+        call('timerClear', String(id));
+      });
+      G.__timers = G.__timers || {};
+      var __timers = G.__timers;
+      /* 原生侧定时器触发时回调此函数 */
+      G.__hnTimerFire = function (id) {
+        var fn = __timers[String(id)];
+        if (fn) { try { fn(); } catch (e) { call('log', 'timer error: ' + e); } }
+      };
       /* 包装对象按 handle 缓存 —— 必须!
          若每次 getElementById 都新建包装, 那么 addEventListener 注册在
          临时对象上, 之后查询拿到的是另一个空对象 → 监听器静默丢失。 */
@@ -232,6 +300,26 @@ public final class HNJSRuntime {
       doc.createHTML = function (html) { return { __html: String(html) }; };
 
       // 高层业务 API: 请求(复用 hx 语义)、本地存储、日志
+      /* hn.fetch(url, options) → Promise<{ok,status,headers,text(),json()}>
+         options: { method, headers, body } —— 语义对齐 Web 的 fetch(子集)
+         iOS/macOS 侧走 URLSession; 回调经 __hnFetchDone 回到 Promise */
+      var __fetchSeq = 0, __fetchPending = {};
+      G.__hnFetchDone = function (id, ok, status, headers, body) {
+        var p = __fetchPending[id];
+        if (!p) return;
+        delete __fetchPending[id];
+        var res = {
+          ok: ok, status: status, headers: headers || {},
+          text: function () { return body; },
+          json: function () { try { return JSON.parse(body); } catch (e) { return null; } }
+        };
+        if (ok) { p.resolve(res); }
+        else {
+          var err = new Error(body || ('HTTP ' + status));
+          err.status = status; err.response = res;
+          p.reject(err);
+        }
+      };
       G.hn = {
         request: function (url, method, body, target, swap) {
           call('request', String(url), method ? String(method) : 'GET',
@@ -241,7 +329,26 @@ public final class HNJSRuntime {
         },
         get: function (k) { var v = call('storeGet', String(k)); return (v === null || v === undefined) ? null : v; },
         set: function (k, v) { call('storeSet', String(k), String(v)); },
-        log: function (m) { call('log', String(m)); }
+        log: function (m) { call('log', String(m)); },
+        fetch: function (url, options) {
+          options = options || {};
+          var method = (options.method || 'GET').toUpperCase();
+          var headers = options.headers || {};
+          var body = options.body === undefined || options.body === null ? '' : String(options.body);
+          var id = 'f' + (++__fetchSeq);
+          return new Promise(function (resolve, reject) {
+            __fetchPending[id] = { resolve: resolve, reject: reject };
+            var hj = '{}';
+            try { hj = JSON.stringify(headers); } catch (e) { hj = '{}'; }
+            call('fetch', String(url), method, hj, body, id);
+            G.setTimeout(function () {
+              if (__fetchPending[id]) {
+                delete __fetchPending[id];
+                reject(new Error('fetch timeout: ' + url));
+              }
+            }, 20000);
+          });
+        }
       };
       G.console = G.console || { log: function () {
         var p = []; for (var i = 0; i < arguments.length; i++) p.push(String(arguments[i]));
@@ -291,6 +398,47 @@ public final class HNJSRuntime {
         return v?.toString()
     }
 
+    // MARK: - 定时器(桥给 JS 的 setTimeout/setInterval)
+
+    private var timers: [Int: Timer] = [:]
+    private var timerSeq = 0
+    private let timerLock = NSLock()
+
+    func addTimer(ms: Double, repeats: Bool) -> Int {
+        timerLock.lock()
+        timerSeq += 1
+        let id = timerSeq
+        timerLock.unlock()
+        let t = Timer.scheduledTimer(withTimeInterval: max(ms, 1) / 1000.0, repeats: repeats) {
+            [weak self] tm in
+            guard let self else { return }
+            if !repeats { self.clearTimer(id) }
+            // 回调 JS(主线程; Timer 已在主 RunLoop)
+            self.context.evaluateScript("window.__hnTimerFire(" + String(id) + ")")
+        }
+        timerLock.lock(); timers[id] = t; timerLock.unlock()
+        return id
+    }
+
+    func clearTimer(_ id: Int) {
+        timerLock.lock()
+        let t = timers.removeValue(forKey: id)
+        timerLock.unlock()
+        t?.invalidate()
+    }
+
+    /// 完成一次 fetch: 回调 JS 侧的 then/catch
+    func resolveFetch(_ cbId: String, ok: Bool, status: Int, headers: [String: String], body: String) {
+        guard !cbId.isEmpty else { return }
+        let hdrJSON = (try? JSONSerialization.data(withJSONObject: headers))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let js = "window.__hnFetchDone(" + jsString(cbId) + ", " + (ok ? "true" : "false")
+            + ", " + String(status) + ", " + hdrJSON + ", " + jsString(body) + ")"
+        DispatchQueue.main.async { [weak self] in
+            self?.context.evaluateScript(js)
+        }
+    }
+
     /// 派发事件到 JS 处理器（引擎侧命中测试后调用）
     public func dispatch(event: String, elementId: String, detail: [String: Any] = [:]) {
         let det = (try? JSONSerialization.data(withJSONObject: detail))
@@ -299,11 +447,34 @@ public final class HNJSRuntime {
         let r = context.evaluateScript(js)
     }
 
+    /// Swift 字符串 → JS 字符串字面量。
+    ///
+    /// 必须转义**所有**行终止符与控制字符: 只处理 \n 是不够的 ——
+    /// 响应体/用户输入里的 \r 会让整个字面量提前终止(SyntaxError: Unexpected EOF),
+    /// 表现为"事件或网络回调偶发失效", 且难以定位。
+    /// U+2028/U+2029 在早期 ES 里也是行终止符, 一并处理。
     private func jsString(_ s: String) -> String {
-        let escaped = s
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
-        return "\"\(escaped)\""
+        var out = "\""
+        out.reserveCapacity(s.utf8.count + 8)
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case "\u{08}": out += "\\b"
+            case "\u{0C}": out += "\\f"
+            case "\u{2028}": out += "\\u2028"
+            case "\u{2029}": out += "\\u2029"
+            default:
+                if scalar.value < 0x20 {
+                    out += String(format: "\\u%04x", scalar.value)
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return out + "\""
     }
 }

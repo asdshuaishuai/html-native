@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="520x420@200,180">
+<meta name="hn-title" content="网络层 · hn.fetch">
+<meta name="hn-theme" content="dark">
+<style>
+.panel { padding: 16; display: flex; flex-direction: column; gap: 10; height: 100%; box-sizing: border-box; }
+.row { display: flex; gap: 8; align-items: center; }
+.status { font-size: 11; color: var(--dim); }
+#out { background: #10151f; border: 1 solid var(--line); border-radius: 10;
+       padding: 12; font-size: 12; color: #9aa3b5; flex: 1; overflow: scroll; }
+.k { color: #7ab7ff; }
+.err { color: #ff7b72; }
+.ok { color: #3ecf6f; }
+</style>
+</head>
+<body>
+<div class="panel">
+  <div>
+    <div style="font-size:15;font-weight:700">网络层演示</div>
+    <div class="status">hn.fetch(url, options) → Promise（走系统 URLSession）</div>
+  </div>
+  <div class="row">
+    <div class="btn" id="get-live">请求公开 API</div>
+    <div class="btn" id="get-json">请求 JSON</div>
+    <div class="btn" id="get-404">触发 404</div>
+    <span class="status" id="lat">—</span>
+  </div>
+  <div id="out">点击上方按钮发起真实 HTTP 请求…</div>
+</div>
+<script>
+  var out = document.getElementById('out');
+  var lat = document.getElementById('lat');
+
+  function show(text) { out.textContent = text; }
+
+  function timedFetch(url, opts, label) {
+    var t0 = Date.now();
+    show('请求中… ' + url);
+    return hn.fetch(url, opts).then(function (r) {
+      lat.textContent = label + ' ' + (Date.now() - t0) + 'ms';
+      return r;
+    }).catch(function (e) {
+      lat.textContent = label + ' 失败 ' + (Date.now() - t0) + 'ms';
+      throw e;
+    });
+  }
+
+  document.getElementById('get-live').addEventListener('click', function () {
+    // 公开测试 API: 回显请求信息
+    timedFetch('https://httpbin.org/get', {}, 'GET').then(function (r) {
+      var j = r.json();
+      show('status=' + r.status + ' ok=' + r.ok + '\n\n' +
+           (j ? '来自 httpbin 的响应:\n  origin = ' + (j.origin || '?') +
+                '\n  url    = ' + (j.url || '?') : r.text().slice(0, 300)));
+    }).catch(function (e) {
+      show('请求失败(可能无网络): ' + e.message + '\n\n' +
+           '说明: 网络层按预期把错误交给了 catch, 未静默失败。');
+    });
+  });
+
+  document.getElementById('get-json').addEventListener('click', function () {
+    timedFetch('https://httpbin.org/json', {}, 'JSON').then(function (r) {
+      var j = r.json();
+      show('status=' + r.status + '\n\n' + (j ? JSON.stringify(j, null, 2).slice(0, 400) : '(解析失败)'));
+    }).catch(function (e) { show('失败: ' + e.message); });
+  });
+
+  document.getElementById('get-404').addEventListener('click', function () {
+    timedFetch('https://httpbin.org/status/404', {}, '404').then(function () {
+      show('不该到这里');
+    }).catch(function (e) {
+      show('已正确捕获 HTTP 错误:\n  status = ' + e.status + '\n  message = ' + e.message +
+           '\n\n(4xx/5xx 走 reject, 与 fetch 语义一致)');
+    });
+  });
+</script>
+</body>
+</html>

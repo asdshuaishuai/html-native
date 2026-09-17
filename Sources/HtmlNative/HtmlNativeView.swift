@@ -37,6 +37,25 @@ public final class HtmlNativeView: NSView, HNWebHost {
     }
     /// 自定义请求通道(默认走 URLSession); 返回 HTML 片段
     public var hxTransport: ((HxAction, @escaping (String?) -> Void) -> Void)?
+
+    /// 允许访问的网络主机(安全边界)。
+    /// 空数组 = 允许全部(开发默认); 非空时只放行列出的主机。
+    /// 建议生产应用显式声明, 避免应用代码随意外发数据。
+    public static var allowedHosts: [String] = []
+
+    /// 请求超时(秒)
+    public static var requestTimeout: TimeInterval = 15
+
+    /// 主机是否被允许(含子域匹配)
+    public static func hostAllowed(_ url: URL) -> Bool {
+        if allowedHosts.isEmpty { return true }
+        guard let host = url.host?.lowercased() else { return false }
+        for a in allowedHosts {
+            let allow = a.lowercased()
+            if host == allow || host.hasSuffix("." + allow) { return true }
+        }
+        return false
+    }
     /// 非 hx 元素被点击时回调(元素 id, 可能向上冒泡)
     public var onClickUnhandled: ((String?) -> Void)?
     /// 输入值变化回调(元素 id, 新值)
@@ -266,6 +285,48 @@ public final class HtmlNativeView: NSView, HNWebHost {
                     : swap == "outer" ? HN_SWAP_OUTER : HN_SWAP_INNER
                 self.performHx(HxAction(method: method, urlString: url,
                                         targetId: target, swap: m, sourceId: nil))
+            },
+            fetchRequest: { method, urlStr, headers, body, done, fail in
+                guard let url = URL(string: urlStr) else {
+                    fail(0, [:], "invalid URL: \(urlStr)"); return
+                }
+                guard let scheme = url.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https" else {
+                    fail(0, [:], "unsupported scheme: \(url.scheme ?? "none")"); return
+                }
+                guard Self.hostAllowed(url) else {
+                    fail(0, [:], "host not allowed: \(url.host ?? "?")")
+                    return
+                }
+                var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                                     timeoutInterval: Self.requestTimeout)
+                req.httpMethod = method
+                for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+                if let body, !body.isEmpty, method != "GET" {
+                    req.httpBody = body.data(using: .utf8)
+                    if headers["Content-Type"] == nil {
+                        req.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
+                    }
+                }
+                URLSession.shared.dataTask(with: req) { data, resp, err in
+                    if let err {
+                        fail(0, [:], err.localizedDescription); return
+                    }
+                    let http = resp as? HTTPURLResponse
+                    let status = http?.statusCode ?? 0
+                    var rh: [String: String] = [:]
+                    for (k, v) in http?.allHeaderFields ?? [:] {
+                        if let ks = k as? String, let vs = v as? String { rh[ks] = vs }
+                    }
+                    let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                    // 2xx/3xx 视为成功; 4xx/5xx 走 reject(与 fetch 语义一致)
+                    if status >= 200 && status < 400 {
+                        done(status, rh, text)
+                    } else {
+                        /* HTTP 错误也带状态码与响应头: JS 侧 e.status 才能判 404/500 */
+                        fail(status, rh, text.isEmpty ? "HTTP \(status)" : text)
+                    }
+                }.resume()
             },
             localStorageGet: { k in weakSelf?.store.get(k) },
             localStorageSet: { k, v in weakSelf?.store.set(k, v) },
@@ -1076,7 +1137,12 @@ public final class HtmlNativeView: NSView, HNWebHost {
         }
         let url = URL(string: action.urlString, relativeTo: baseURL) ?? baseURL
         guard let url else { return }
-        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+        if !Self.hostAllowed(url) {
+            FileHandle.standardError.write("[hn] 主机不在白名单: \(url.host ?? "?") — 请求被拒\n".data(using: .utf8)!)
+            return
+        }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                             timeoutInterval: Self.requestTimeout)
         if action.method == "POST" {
             req.httpMethod = "POST"
             req.setValue("application/x-www-form-urlencoded; charset=utf-8",
@@ -1099,6 +1165,16 @@ public final class HtmlNativeView: NSView, HNWebHost {
 
     /// 供截图/宿主工具: 引擎上下文句柄(hover/scroll/repaint 等只读或状态注入用途)
     public var engineContext: OpaquePointer { ctx }
+
+    /// 内省: 指定 id 的文本内容(排查"内容对不对")
+    public func textOf(id: String) -> String? {
+        guard let ctx, let doc = hn_context_doc(ctx),
+              let n = hn_doc_find_by_id(doc, id) else { return nil }
+        var buf = [CChar](repeating: 0, count: 65536)
+        let len = hn_node_text_content(n, &buf, 65536)
+        _ = len
+        return String(cString: buf)
+    }
 
     /// 内省: DOM 树 + 布局盒 + run 数(排查节点位置错乱)
     public func dumpDOM() -> [String] {
