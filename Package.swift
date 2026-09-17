@@ -36,5 +36,11 @@ let package = Package(
             name: "HnShot",
             dependencies: ["HtmlNative"]
         ),
+        // MCP server(stdio, JSON-RPC 2.0): 把应用能力暴露为 MCP 工具,
+        // 让 agent 不必拼命令行就能创建/驱动/读取原生窗口。
+        .executableTarget(
+            name: "HnMcp",
+            dependencies: ["HtmlNative", "CHtmlNative"]
+        ),
     ]
 )

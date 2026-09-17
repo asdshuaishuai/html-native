@@ -171,6 +171,44 @@ let tools: [Tool] = [
     Tool(name: "hn_dump",
          description: "内省运行中应用的绘制指令列表(实际要画什么)。同一条文字不应出现多次(重影)。",
          schema: ["type": "object", "properties": ["id": ["type": "string"]], "required": ["id"]]),
+
+    /* 下面三个是"驱动"能力。此前 MCP 只能开窗口 + 读界面, 无法点击、
+       无法执行脚本 —— 也就是"看得见但动不了", 自动化只能做展示不能做交互。 */
+    Tool(name: "hn_event",
+         description: """
+向运行中的应用注入一个交互事件(等价于用户操作)。返回三态: 已处理(有处理器)
+/ 已派发但无人监听 / 目标未找到。kind 取值: click dblclick mousedown mouseup
+mousemove mouseenter mouseleave keydown keyup focus blur input change submit scroll。
+target 给元素 id(推荐); 或给 x/y 坐标按命中测试定位。
+""",
+         schema: ["type": "object", "properties": [
+             "id": ["type": "string", "description": "应用标识"],
+             "kind": ["type": "string", "description": "事件类型, 如 click / keydown"],
+             "target": ["type": "string", "description": "目标元素 id"],
+             "x": ["type": "number"], "y": ["type": "number"],
+             "key": ["type": "string", "description": "键名, 如 Enter / ArrowLeft"],
+             "modifiers": ["type": "integer",
+                           "description": "修饰键位掩码: 1=shift 2=ctrl 4=alt 8=cmd"],
+             "text": ["type": "string", "description": "input 事件的新值"],
+         ], "required": ["id", "kind"]]),
+
+    Tool(name: "hn_eval",
+         description: """
+在该应用的 JS 上下文里执行一段脚本并返回结果。
+native 与 webkit 两个渲染器都可用 —— 用来读运行时状态、触发页面逻辑、
+或在断言里取计算值(比解析 DOM 文本可靠)。
+""",
+         schema: ["type": "object", "properties": [
+             "id": ["type": "string", "description": "应用标识"],
+             "js": ["type": "string", "description": "要执行的 JS 表达式"],
+         ], "required": ["id", "js"]]),
+
+    Tool(name: "hn_text",
+         description: "取运行中应用里某个元素的文本内容(比读整棵 DOM 省 token)。",
+         schema: ["type": "object", "properties": [
+             "id": ["type": "string"],
+             "element": ["type": "string", "description": "元素 id"],
+         ], "required": ["id", "element"]]),
 ]
 
 // ---------- 工具实现 ----------
@@ -279,6 +317,49 @@ func callTool(_ name: String, _ args: [String: Any]) -> String {
             }.joined(separator: "\n")
         }
         return "无响应(应用可能未运行)"
+
+    case "hn_event":
+        guard let id = args["id"] as? String, let kind = args["kind"] as? String else {
+            return "错误: 缺少 id 或 kind"
+        }
+        var req: [String: Any] = ["op": "event", "id": id, "kind": kind]
+        if let t = args["target"] as? String { req["target"] = t }
+        if let k = args["key"] as? String { req["key"] = k }
+        if let m = args["modifiers"] as? Int { req["modifiers"] = m }
+        if let t = args["text"] as? String { req["text"] = t }
+        if let x = args["x"] as? Double { req["x"] = x }
+        if let y = args["y"] as? Double { req["y"] = y }
+        let r = rpc(req) ?? [:]
+        guard r["ok"] as? Bool == true else {
+            return "失败: \(r["error"] ?? "?")"
+        }
+        /* 把三态讲清楚: "没人监听"与"处理了但没阻止冒泡"是两件不同的事,
+           前者通常意味着 target 选错了或页面没挂处理器。 */
+        let d = r["detail"] as? [String: Any] ?? [:]
+        if d["noTarget"] as? Bool == true {
+            return "目标未找到: 给 target(元素 id) 或 x/y 坐标"
+        }
+        let handled = d["handled"] as? Bool ?? false
+        let hx = d["hx"] as? Bool ?? false
+        if handled { return "已处理: \(kind) (JS 处理器被调用)" }
+        if hx { return "已处理: \(kind) (触发 hx 行为)" }
+        return "已派发但无人监听: \(kind)"
+
+    case "hn_eval":
+        guard let id = args["id"] as? String, let js = args["js"] as? String else {
+            return "错误: 缺少 id 或 js"
+        }
+        let r = rpc(["op": "eval", "id": id, "js": js]) ?? [:]
+        guard r["ok"] as? Bool == true else { return "失败: \(r["error"] ?? "?")" }
+        return String(describing: r["value"] ?? "(nil)")
+
+    case "hn_text":
+        guard let id = args["id"] as? String, let el = args["element"] as? String else {
+            return "错误: 缺少 id 或 element"
+        }
+        let r = rpc(["op": "text", "id": id, "element": el]) ?? [:]
+        guard r["ok"] as? Bool == true else { return "失败: \(r["error"] ?? "?")" }
+        return r["text"] as? String ?? "(空)"
 
     default:
         return "未知工具: \(name)"

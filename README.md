@@ -57,8 +57,18 @@ hn dev app.html --css app.css # 开发模式: 保存即热更新
 只需要会 HTML 和 CSS。无需 Node、npm、打包器、JavaScript。
 
 **不想用命令行**：把这套能力给 agent 用 —— 项目自带 MCP server
-(`tools/hn-mcp.swift`, 10 个工具: open/update/close/list/persist/restore/sys/shot/dom/dump)
-与 skill (`SKILL.md`)，agent 可直接创建/热更新/内省原生窗口。
+(13 个工具) 与 skill (`SKILL.md`)。除了开窗口与内省，还能**驱动**界面：
+
+| 能力 | 工具 | 说明 |
+|---|---|---|
+| 创建 / 热更新 / 销毁 | `hn_open` `hn_update` `hn_close` | 传 HTML 内容或文件路径 |
+| 感知 | `hn_dom` `hn_text` `hn_dump` `hn_list` | DOM 树 / 某元素文本 / 绘制指令 / 应用列表 |
+| **驱动** | `hn_event` `hn_eval` | 注入点击键盘等事件；在该应用 JS 上下文里求值 |
+| 离线 / 系统 / 截图 | `hn_persist` `hn_restore` `hn_sys` `hn_shot` | `.hnapp` 离线包 / `sys://` 数据 / 渲染 PNG |
+
+`hn_event` 回传三态，agent 能区分"已处理""已派发但无人监听""目标未找到"；
+`hn_eval` 在 native 与 webkit 两个渲染器上都可用（native 走系统自带的
+JavaScriptCore），因此自动化不必关心用了哪个渲染器。
 
 **软件光栅化器(hnsoft)**：引擎的绘制后端接缝支持多后端 —— macOS 用 CoreGraphics
 (原生质量)，跨平台/无 GUI 场景用 `hnsoft`(纯 C 软件光栅化器 + FreeType 文本)。
