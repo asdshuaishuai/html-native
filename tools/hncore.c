@@ -270,15 +270,19 @@ int main(int argc, char **argv) {
                 const hn_cmd *c = &dl->cmds[i];
                 switch (c->kind) {
                 case HN_CMD_RECT:
-                    printf("RECT   %7.1f %7.1f %7.1f %7.1f r=%.1f fill=%08X%s\n",
+                    /* stroke/shadow 一并打印 —— 少了它们就没法验证
+                       border-color / box-shadow 是否生效(只能看到 fill)。 */
+                    printf("RECT   %7.1f %7.1f %7.1f %7.1f r=%.1f fill=%08X%s stroke=%08X w=%.1f%s\n",
                            c->x, c->y, c->w, c->h, c->radius, c->fill,
-                           c->gradient ? " gradient" : "");
+                           c->gradient ? " gradient" : "",
+                           c->stroke, c->stroke_w,
+                           c->shadow ? " shadow" : "");
                     break;
                 case HN_CMD_TEXT:
                     printf("TEXT   x=%7.1f bl=%7.1f ", c->tx, c->baseline);
                     for (size_t k = 0; k < c->text_len && k < 40; k++)
                         fputc(c->text[k], stdout);
-                    printf("  (sz=%.0f)\n", c->font.size_px);
+                    printf("  (sz=%.0f fill=%08X)\n", c->font.size_px, c->fill);
                     break;
                 case HN_CMD_IMAGE:
                     printf("IMAGE  %7.1f %7.1f %7.1f %7.1f %s\n",

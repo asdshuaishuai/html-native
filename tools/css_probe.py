@@ -5,7 +5,7 @@
 (选择器优先级、简写展开、颜色格式、单位换算、继承、文本属性)。
 全部用期望值对照, 找出静默错误。
 """
-import subprocess, os, sys, tempfile
+import subprocess, os, sys, tempfile, re
 
 HN = sys.argv[1] if len(sys.argv) > 1 else "/tmp/hncore"
 if not os.path.exists(HN):
@@ -321,6 +321,66 @@ r = run(page(".f{display:flex;width:100;height:200;flex-wrap:wrap}.c{width:60;he
              "<div class='f'><div class='c' id='x'></div><div class='c' id='y'></div></div>"))
 bb = r.get("y", [None])[0]
 if bb: ck("flex-wrap 换到第二行", bb[1] > 10, True)
+
+
+# ============ 级联与继承(系统性逐属性覆盖检查) ============
+# 逐属性用 .a{prop:v1} .b{prop:v2} 验证后声明者胜出 —— 这是抓"守卫挡住赋值"
+# 这类 bug 最直接的办法(height 就曾因 HN_U_AUTO 守卫而只认第一条规则)。
+def rect_stroke(out):
+    for line in out.splitlines():
+        if line.startswith("RECT"):
+            m = re.search(r"stroke=([0-9A-Fa-f]{8})", line)
+            if m:
+                return m.group(1).upper()
+    return None
+
+def paint_of(html, W=400, H=300):
+    p = os.path.join(D, "pz.html")
+    with open(p, "w") as f:
+        f.write(html)
+    return subprocess.run([HN, "paint", p, str(W), str(H)],
+                          capture_output=True, text=True).stdout
+
+# 颜色类覆盖: 红 → 绿
+for prop in ["background", "background-color"]:
+    o = paint_of(page(".a{%s:#ff0000}.b{%s:#00ff00}.c{width:100;height:50}" % (prop, prop),
+                      "<div class='a b c'></div>"))
+    ck("级联: %s 后声明者胜" % prop, "00FF00" in o, True)
+
+# color 落在 TEXT 指令的 fill 上
+o = paint_of(page(".a{color:#ff0000}.b{color:#00ff00}", "<div class='a b'>文</div>"))
+ck("级联: color 后声明者胜(TEXT fill)", "fill=00FF00FF" in o, True)
+
+# border-color 落在 RECT 的 stroke 上
+o = paint_of(page(".a{border:5 solid #ff0000}.b{border-color:#00ff00}.c{width:100;height:50}",
+                  "<div class='a b c'></div>"))
+ck("级联: border-color 后声明者胜(RECT stroke)", rect_stroke(o), "00FF00FF")
+
+# 渐变覆盖
+o = paint_of(page(".a{background:linear-gradient(0deg,#f00,#00f)}"
+                  ".b{background:linear-gradient(90deg,#0f0,#ff0)}.c{width:100;height:50}",
+                  "<div class='a b c'></div>"))
+ck("级联: 渐变后声明者胜", "gradient" in o, True)
+
+# 继承链(含隔代)与子级覆盖
+b = run(page(".p{font-size:40}.k{width:100}", "<div class='p'><div class='k' id='x'>文</div></div>")
+        ).get("x", [None])[0]
+if b:
+    ck("继承: font-size 传到子元素(行高随之)", b[3], 40 * 1.45, 8)
+b = run(page(".p{font-size:30}.m{}.k{width:100}",
+             "<div class='p'><div class='m'><div class='k' id='x'>文</div></div></div>")
+        ).get("x", [None])[0]
+if b:
+    ck("继承: 隔代传递(孙级)", b[3], 30 * 1.45, 6)
+b = run(page(".p{font-size:40}.k{font-size:10;width:100}",
+             "<div class='p'><div class='k' id='x'>文</div></div>")).get("x", [None])[0]
+if b:
+    ck("继承: 子级显式值覆盖继承值", b[3], 10 * 1.45, 4)
+
+# 特异性: id > 多 class
+b = run(page("#x{height:200}.a{height:50}.b{height:80}",
+             "<div class='a b' id='x'></div>")).get("x", [None])[0]
+ck("特异性: id 高于任意数量 class", b, (0, 0, 400, 200))
 
 # ============ 报告 ============
 print("通过 %d / 失败 %d" % (len(passed), len(failed)))
