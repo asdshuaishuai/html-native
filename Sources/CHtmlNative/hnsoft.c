@@ -9,6 +9,8 @@
  * - PNG: 存储型 deflate(合法 PNG, 无压缩) + CRC32
  */
 #include "hnsoft.h"
+#include "hn_png.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -571,11 +573,28 @@ static void paint_text(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
 /* PNG 解码: 只支持存储型与 zlib 固定哈夫曼以外的常见情形太复杂,
  * 这里用 zlib 的 "stored block" 与常见过滤器逐行反解 —— 完整实现太长,
  * 简化策略: 尝试读取 IHDR 并解析无压缩 IDAT; 失败则跳过图片(不崩溃)。 */
+/* 读文件并解 PNG。返回 malloc 的 RGBA8(调用方 free), 失败返回 NULL。 */
 static unsigned char *load_image_pixels(const char *path, int *w, int *h) {
-    /* 最小实现: 读 PNG 签名/IHDR, 尝试 zlib stored 解码。
-       (服务端渲染场景图片常为 PNG; 复杂编码交由平台后端处理) */
-    (void)path; (void)w; (void)h;
-    return NULL;
+    *w = *h = 0;
+    if (!path || !*path) return NULL;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0) { fclose(f); return NULL; }
+    unsigned char *buf = (unsigned char *)malloc((size_t)n);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) { free(buf); return NULL; }
+    int iw = 0, ih = 0;
+    unsigned char *px = hn_png_decode(buf, (size_t)n, &iw, &ih);
+    free(buf);
+    if (!px) return NULL;
+    *w = iw;
+    *h = ih;
+    return px;
 }
 
 static void paint_image(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {

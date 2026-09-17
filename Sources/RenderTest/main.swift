@@ -8,6 +8,7 @@ import HtmlNative
 // 用法:
 //   RenderTest                # 内置用例 + 断言
 //   RenderTest a.html a.css out.png [W H]  # 渲染任意文件(不断言)
+
 var failures = 0
 
 func t_pointee_bg(_ n: OpaquePointer) -> UInt32 {
@@ -2319,6 +2320,65 @@ do {
     let wk = HNWebKitHost()
     let hasIface = wk is HNWebHost && !(wk is HtmlNativeView)
     check(hasIface, "eval: webkit 宿主满足 HNWebHost(同一 eval 接口)")
+}
+
+print("== 软件光栅后端: PNG 解码(让跨平台有图) ==")
+do {
+    /* 背景: hnsoft 此前完全没有图像解码能力, Linux/Windows/无头环境里
+       所有图片都退化成蓝色网格线占位 —— 跨平台在"有图"场景下其实不完整。
+       这里直接调用解码器, 并断言解出的像素与源图统计一致。 */
+    guard let pngData = FileManager.default.contents(atPath: "examples/assets/avatar-a.png") else {
+        check(false, "PNG 解码: 找不到测试资源"); exit(2)
+    }
+    let n = pngData.count
+    let w = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+    let h = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+    defer { w.deallocate(); h.deallocate() }
+    let px = pngData.withUnsafeBytes { raw -> UnsafeMutablePointer<UInt8>? in
+        guard let base = raw.baseAddress else { return nil }
+        return hn_png_decode(base.assumingMemoryBound(to: UInt8.self), n, w, h)
+    }
+    defer { if let px { px.deallocate() } }
+    if let px {
+        let iw = Int(w.pointee), ih = Int(h.pointee)
+        check(iw == 256 && ih == 256, "PNG 解码: 尺寸正确 (\(iw)x\(ih))")
+        /* 统计非透明像素; 源图是一个有内容的 256x256 头像 */
+        var opaque = 0
+        for i in 0..<(iw * ih) where px[i * 4 + 3] > 10 { opaque += 1 }
+        check(opaque > iw * ih / 4,
+              String(format: "PNG 解码: 解出真实内容 (非透明 %d/%d = %.0f%%)",
+                     opaque, iw * ih, 100.0 * Double(opaque) / Double(iw * ih)))
+        /* 平均色应偏紫(该头像的主色), 证明不是解错成灰/黑 */
+        var sr = 0, sg = 0, sb = 0
+        var cnt = 0
+        for i in 0..<(iw * ih) where px[i * 4 + 3] > 10 {
+            sr += Int(px[i * 4]); sg += Int(px[i * 4 + 1]); sb += Int(px[i * 4 + 2]); cnt += 1
+        }
+        if cnt > 0 {
+            let rr = sr / cnt, gg = sg / cnt, bb = sb / cnt
+            check(bb > rr && bb > gg,
+                  String(format: "PNG 解码: 色彩正确 (平均 rgb=%d,%d,%d, 应偏蓝紫)", rr, gg, bb))
+        }
+    } else {
+        check(false, "PNG 解码: 返回 NULL")
+    }
+
+    /* 非法输入必须安全返回 NULL 而不是崩 */
+    let junk = Data(repeating: 0x89, count: 64)
+    let w2 = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+    let h2 = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+    defer { w2.deallocate(); h2.deallocate() }
+    let bad = junk.withUnsafeBytes { raw -> UnsafeMutablePointer<UInt8>? in
+        guard let base = raw.baseAddress else { return nil }
+        return hn_png_decode(base.assumingMemoryBound(to: UInt8.self), junk.count, w2, h2)
+    }
+    check(bad == nil, "PNG 解码: 非法数据安全返回 NULL")
+    let empty = Data()
+    let bad2 = empty.withUnsafeBytes { raw -> UnsafeMutablePointer<UInt8>? in
+        guard let base = raw.baseAddress else { return nil }
+        return hn_png_decode(base.assumingMemoryBound(to: UInt8.self), 0, w2, h2)
+    }
+    check(bad2 == nil, "PNG 解码: 空输入安全返回 NULL")
 }
 
 print("== 离屏渲染 PNG ==")

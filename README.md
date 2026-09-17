@@ -80,6 +80,7 @@ Sources/CHtmlNative/  引擎核心(C99, ~2200 行, 零依赖)
   hn_layout.c  block 流 + flexbox + 文本换行(CJK 硬拆)
   hn_paint.c   DOM → 绘制指令列表(display list)
   hn_json.c    极简 JSON 解析(零依赖; Lottie 等公开格式需要)
+  hn_png.c     PNG 解码(含自带 inflate; 让软件光栅后端真能显示图片)
   hn_lottie.c  Lottie 求值 → 矢量指令(多边形/图片/矩形)
   hn_mesh.c    网格变形贴图 → MESH 指令(Live2D 类效果的原语)
   hn_context.c 会话: 布局编排/命中/hot-update/清单解析

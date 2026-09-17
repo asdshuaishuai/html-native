@@ -24,7 +24,8 @@ SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
      Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
      Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
-     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hnsoft.c)
+     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c \
+     Sources/CHtmlNative/hnsoft.c)
 
 # -ffp-contract=off: 禁用乘加融合(FMA)。
 # arm64 有 FMA 而 x86_64 基线没有, 默认融合会导致同一文档在不同架构上

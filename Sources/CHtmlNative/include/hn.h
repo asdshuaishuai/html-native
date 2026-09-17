@@ -429,6 +429,15 @@ int hn_doc_swap(hn_doc *doc, const char *target_id, hn_swap_mode mode,
  * 这是 agent 驱动 UI 的核心原语: 现场生成 HTML → 推入常驻窗口。 */
 void hn_context_render(hn_context *c, const char *html_src, size_t len);
 
+/* ---- 软件光栅后端的图像解码 ----
+ * 平台原生后端可以调系统 API(AppKit / GDI+)解图; 软件光栅后端(hnsoft)的
+ * 承诺是"只要有 C 编译器就能构建", 因此自带 PNG 解码, 让 Linux / Windows /
+ * 无头环境也能真正显示图片, 而不是退化成占位图案。
+ * 返回 RGBA8(自上而下, 4 字节/像素), 调用方 free; 不支持该格式返回 NULL。
+ */
+typedef struct hn_png_decoder hn_png_decoder;
+unsigned char *hn_png_decode(const unsigned char *data, size_t n, int *w, int *h);
+
 #ifdef __cplusplus
 }
 #endif
