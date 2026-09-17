@@ -49,6 +49,7 @@ void hn_style_default(hn_style *st) {
     st->height_u = HN_U_AUTO;
     st->flex_basis = -1;
     st->flex_basis_u = HN_U_AUTO;
+    for (int i = 0; i < 4; i++) { st->margin_u[i] = HN_U_PX; st->padding_u[i] = HN_U_PX; }
     st->flex_shrink = 1;
     st->scale = 1.0f;
     st->z_index = 0;
@@ -173,6 +174,8 @@ static unsigned char parse_ease(sv t, float cb[4]) {
 
 /* 上一次 apply_len4 的 auto 位图(TRBL), 仅 margin 消费 */
 static unsigned char g_len4_auto;
+/* 单位也经全局回传(margin 的百分比需要在布局期按容器宽解析) */
+static unsigned char g_len4_unit[4];
 
 static void apply_len4(sv v, float font_px, float out[4]) {
     float vals[4];
@@ -199,9 +202,11 @@ static void apply_len4(sv v, float font_px, float out[4]) {
     }
     /* em 单位按当前字号折算 */
     for (int i = 0; i < 4; i++)
+        /* em 在此展开; 百分比保留原数, 由布局期按容器宽解析 */
         if (units[i] == HN_U_EM) out[i] *= font_px;
     /* 调用方通过全局暂存读取 auto 位(margin 专用) */
     g_len4_auto = (autos[0] ? 1 : 0) | (autos[1] ? 2 : 0) | (autos[2] ? 4 : 0) | (autos[3] ? 8 : 0);
+    for (int i = 0; i < 4; i++) g_len4_unit[i] = (unsigned char)units[i];
 }
 
 /* 大小写不敏感子串查找 */
@@ -307,10 +312,20 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         else st->justify = HN_JUST_START;
     } else if (!strcmp(name, "align-items") || !strcmp(name, "align-self")) {
         if (!next_tok(&v, &t)) return;
-        if (sv_eq(t, "center")) st->align = HN_ALIGN_CENTER;
-        else if (sv_eq(t, "flex-start") || sv_eq(t, "start")) st->align = HN_ALIGN_START;
-        else if (sv_eq(t, "flex-end") || sv_eq(t, "end")) st->align = HN_ALIGN_END;
-        else st->align = HN_ALIGN_STRETCH;
+        hn_align a;
+        if (sv_eq(t, "center")) a = HN_ALIGN_CENTER;
+        else if (sv_eq(t, "flex-start") || sv_eq(t, "start")) a = HN_ALIGN_START;
+        else if (sv_eq(t, "flex-end") || sv_eq(t, "end")) a = HN_ALIGN_END;
+        else a = HN_ALIGN_STRETCH;
+        /* align-self 落在子项自己的样式上, 不能与 align-items 共用一个字段
+           (共用的后果: 父级设了 align-items:center 的子项再写 align-self,
+           级联时两者互踩, 视觉上"align-self 完全无效")。 */
+        if (!strcmp(name, "align-self")) {
+            st->has_self_align = 1;
+            st->self_align = a;
+        } else {
+            st->align = a;
+        }
     } else if (!strcmp(name, "flex-grow")) {
         if (next_tok(&v, &t) && sv_num(t, &f) && f > 0) st->flex_grow = f;
     } else if (!strcmp(name, "flex-shrink")) {
@@ -325,6 +340,8 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
                 st->flex_basis_u = HN_U_PX;
             }
         }
+    } else if (!strcmp(name, "order")) {
+        if (next_tok(&v, &t) && sv_num(t, &f)) st->flex_order = (int)f;
     } else if (!strcmp(name, "flex-basis")) {
         int u;
         if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) {
@@ -347,6 +364,7 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         if (strlen(name) == 6) {
             apply_len4(v, st->font_size, st->margin);
             st->margin_auto = g_len4_auto;
+            for (int i = 0; i < 4; i++) st->margin_u[i] = g_len4_unit[i];
         }
         else {
             int idx = name[7] == 't' ? 0 : name[7] == 'r' ? 1 : name[7] == 'b' ? 2 : 3;
@@ -363,8 +381,10 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
                于是**所有 margin-top/right/bottom/left 长写全部失效**
                (只有 margin 简写能用)。表现为"写了 margin-top:40 毫无反应"
                且不报错, 极难自查。 */
-            if (sv_len(tv, st->font_size, &f, &u))
+            if (sv_len(tv, st->font_size, &f, &u)) {
                 st->margin[idx] = (u == HN_U_EM) ? f * st->font_size : f;
+                st->margin_u[idx] = (unsigned char)u;   /* 百分比留到布局期解析 */
+            }
         }
     } else if (!strcmp(name, "padding") || !strncmp(name, "padding-", 8)) {
         if (strlen(name) == 7) apply_len4(v, st->font_size, st->padding);

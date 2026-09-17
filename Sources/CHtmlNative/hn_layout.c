@@ -13,6 +13,21 @@
 #include <string.h>
 #include "hn_internal.h"
 
+/* 解析 margin 分量: em 已在样式期展开, 这里处理百分比。
+   CSS 规定 margin 的百分比基于**包含块的行内尺寸(水平书写模式下即宽度)**,
+   四个边都一样 —— 包括上下边。所以 margin-top:50% 在 400 宽的容器里
+   是 200px, 不是容器高的一半, 更不是字面的 50px。 */
+static float margin_px(const hn_style *st, int side, float cb_width) {
+    float v = st->margin[side];
+    if (st->margin_u[side] == HN_U_PCT) return v / 100.0f * cb_width;
+    return v;
+}
+
+/* 从样式读四边 margin(已解析百分比) */
+static void margins_of(const hn_style *st, float cb_width, float out[4]) {
+    for (int i = 0; i < 4; i++) out[i] = margin_px(st, i, cb_width);
+}
+
 static float size_of(float v, int u, float base, float font_px) {
     switch (u) {
     case HN_U_PX:  return v;
@@ -752,8 +767,11 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
         }
 
         /* 块级子节点 */
-        float ml = ch->style.margin[3], mr = ch->style.margin[1];
-        float mt = ch->style.margin[0], mb = ch->style.margin[2];
+        float mgn[4];
+        if (ch->kind == HN_ELEM) margins_of(&ch->style, cw, mgn);
+        else mgn[0] = mgn[1] = mgn[2] = mgn[3] = 0;
+        float ml = mgn[3], mr = mgn[1];
+        float mt = mgn[0], mb = mgn[2];
         float avail = (cw < 0) ? -1 : cw - ml - mr;
         if (avail < 0 && cw >= 0) avail = 0;
         /* 相邻块级 margin 折叠: 上一个元素的 margin-bottom 与本次的
@@ -821,8 +839,10 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
         if (is_out_of_flow(ch)) continue;
         items[k].n = ch;
         if (ch->kind == HN_ELEM) {
-            items[k].ml = ch->style.margin[3]; items[k].mr = ch->style.margin[1];
-            items[k].mt = ch->style.margin[0]; items[k].mb = ch->style.margin[2];
+            float mgn[4];
+            margins_of(&ch->style, cw, mgn);
+            items[k].ml = mgn[3]; items[k].mr = mgn[1];
+            items[k].mt = mgn[0]; items[k].mb = mgn[2];
         } else {
             items[k].ml = items[k].mr = items[k].mt = items[k].mb = 0;
         }
@@ -842,6 +862,41 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
         } else {
             layout_box(c, ch, 0, 0, cw, -1, tb, 1, basis >= 0 ? basis : -1, -1);
         }
+        /* flex-basis 是**确定的主轴尺寸**, 不是"可用宽"。
+           只把它当 avail_w 传进去时, 空内容的子项会量出 bw=0(内容宽为 0),
+           于是 basis 完全失效 —— 表现为 "flex-basis:200 的子项宽度是 0,
+           兄弟项把它那份空间也一起吃掉"。这里显式钉住边框盒尺寸。 */
+        if (basis >= 0 && ch->kind == HN_ELEM) {
+            if (st->flex_row) {
+                float want = ch->style.box_border
+                    ? basis
+                    : basis + ch->style.padding[3] + ch->style.padding[1]
+                           + ch->style.border_w * 2;
+                ch->bw = want;
+            } else {
+                float want = ch->style.box_border
+                    ? basis
+                    : basis + ch->style.padding[0] + ch->style.padding[2]
+                           + ch->style.border_w * 2;
+                ch->bh = want;
+            }
+        }
+    }
+
+    /* order: 按视觉顺序排(flex_order 升序, 同序保持文档序 —— 稳定排序)。
+       注意必须在 pass1 **之后**做: 度量顺序与摆放顺序无关, 但 sum 的累加
+       顺序会影响 justify 的分布, 因此统一按 order 重排后再算。 */
+    for (int i = 1; i < cnt; i++) {
+        fitem key = items[i];
+        int kk = key.n->kind == HN_ELEM ? key.n->style.flex_order : 0;
+        int j = i - 1;
+        while (j >= 0) {
+            int kj = items[j].n->kind == HN_ELEM ? items[j].n->style.flex_order : 0;
+            if (kj <= kk) break;
+            items[j + 1] = items[j];
+            j--;
+        }
+        items[j + 1] = key;
     }
 
     float gap_total = st->gap * (float)(cnt - 1);
@@ -944,7 +999,9 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
             float outer_h = items[i].mt + ch->bh + items[i].mb;
             float cy_off = items[i].mt, forced = -1;
             if (ch->kind == HN_ELEM) {
-                switch (st->align) {
+                /* 子项自己的 align-self 覆盖容器的 align-items */
+                hn_align ea = ch->style.has_self_align ? ch->style.self_align : st->align;
+                switch (ea) {
                 case HN_ALIGN_START:  cy_off = items[i].mt; break;
                 case HN_ALIGN_CENTER: cy_off = items[i].mt + (cross_avail - outer_h) * 0.5f; break;
                 case HN_ALIGN_END:    cy_off = cross_avail - outer_h + items[i].mt; break;

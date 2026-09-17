@@ -501,29 +501,76 @@ int hn_color_parse(const char *s, size_t n, hn_color *out) {
             {"darkgray", 0xA9A9A9FF},{"lightgray", 0xD3D3D3FF},
             {"darkblue", 0x00008BFF},{"lightblue", 0xADD8E6FF},
             {"darkred", 0x8B0000FF},{"lightred", 0xFFB3B3FF},
+            /* CSS Color 4 / 现代常用命名色。缺这些会让页面静默丢色
+               (返回 0 → 该条颜色声明被跳过, 元素显示成透明), 而
+               rebeccapurple 这类色在现代配色方案里相当常见。 */
+            {"rebeccapurple", 0x663399FF},
+            {"lightgreen", 0x90EE90FF},{"darkgreen", 0x006400FF},
+            {"lightyellow", 0xFFFFE0FF},{"darkyellow", 0x9B870CFF},
+            {"lightcyan", 0xE0FFFFFF},{"darkcyan", 0x008B8BFF},
+            {"lightpink", 0xFFB6C1FF},{"darkpink", 0xE75480FF},
+            {"hotpink", 0xFF69B4FF},{"deeppink", 0xFF1493FF},
+            {"lightpurple", 0xCBC3E3FF},{"darkpurple", 0x301934FF},
+            {"lightorange", 0xFED8B1FF},{"darkorange", 0xFF8C00FF},
+            {"lightbrown", 0xC4A484FF},{"darkbrown", 0x5C4033FF},
+            {"lightgray", 0xD3D3D3FF},{"darkgray", 0xA9A9A9FF},
+            {"lightgrey", 0xD3D3D3FF},{"darkgrey", 0xA9A9A9FF},
+            {"lightsteelblue", 0xB0C4DEFF},{"steelblue", 0x4682B4FF},
+            {"dodgerblue", 0x1E90FFFF},{"royalblue", 0x4169E1FF},
+            {"midnightblue", 0x191970FF},{"skyblue", 0x87CEEBFF},
+            {"lightseagreen", 0x20B2AAFF},{"seagreen", 0x2E8B57FF},
+            {"springgreen", 0x00FF7FFF},{"forestgreen", 0x228B22FF},
+            {"chartreuse", 0x7FFF00FF},{"khaki", 0xF0E68CFF},
+            {"lavender", 0xE6E6FAFF},{"plum", 0xDDA0DDFF},
+            {"orchid", 0xDA70D6FF},{"tan", 0xD2B48CFF},
+            {"beige", 0xF5F5DCFF},{"ivory", 0xFFFFF0FF},
+            {"snow", 0xFFFAFAFF},{"whitesmoke", 0xF5F5F5FF},
+            {"gainsboro", 0xDCDCDCFF},{"mistyrose", 0xFFE4E1FF},
+            {"peachpuff", 0xFFDAB9FF},{"wheat", 0xF5DEB3FF},
+            {"rosybrown", 0xBC8F8FFF},{"saddlebrown", 0x8B4513FF},
+            {"chocolate", 0xD2691EFF},{"peru", 0xCD853FFF},
+            {"firebrick", 0xB22222FF},{"darkmagenta", 0x8B008BFF},
+            {"darkviolet", 0x9400D3FF},{"blueviolet", 0x8A2BE2FF},
+            {"mediumpurple", 0x9370DBFF},{"slateblue", 0x6A5ACDFF},
+            {"mediumblue", 0x0000CDFF},{"mediumseagreen", 0x3CB371FF},
+            {"mediumspringgreen", 0x00FA9AFF},{"palegreen", 0x98FB98FF},
+            {"palegoldenrod", 0xEEE8AAFF},{"lemonchiffon", 0xFFFACDFF},
+            {"honeydew", 0xF0FFF0FF},{"aliceblue", 0xF0F8FFFF},
+            {"azure", 0xF0FFFFFF},{"mintcream", 0xF5FFFAFF},
+            {"thistle", 0xD8BFD8FF},{"burlywood", 0xDEB887FF},
+            {"navajowhite", 0xFFDEADFF},{"linen", 0xFAF0E6FF},
         };
         for (size_t i = 0; i < sizeof(N) / sizeof(N[0]); i++)
             if (n == strlen(N[i].n) && !strncasecmp(s, N[i].n, n)) { *out = N[i].c; return 1; }
         return 0;
     }
-    /* rgb(a)( r, g, b [, a] ) */
+    /* rgb()/rgba(): 两种写法都要吃下
+         rgb(0,128,255)            逗号分隔(传统)
+         rgb(0 128 255)            空格分隔(CSS Color 4)
+         rgb(0 128 255 / 50%)      空格 + "/" 分隔透明度
+       分隔符集合必须包含 '/' 与 '%': 漏掉的话 "255 / 0.5" 会被读成
+       "255/0.5" 一个 token, strtof 停在 255 处 → 整个颜色解析失败。 */
     float comp[4] = {0, 0, 0, 1};
-    int ci = 0;
+    int ci = 0, alpha_pct = 0;
     size_t i = 0;
     while (i < n && ci < 4) {
-        while (i < n && (s[i] == ' ' || s[i] == ',' || s[i] == '\t')) i++;
+        while (i < n && (s[i] == ' ' || s[i] == ',' || s[i] == '/' || s[i] == '\t')) i++;
         size_t st = i;
-        while (i < n && s[i] != ',' && s[i] != ' ' && s[i] != ')') i++;
+        while (i < n && s[i] != ',' && s[i] != ' ' && s[i] != '/' && s[i] != ')') i++;
         if (i > st) {
             char buf[24];
             size_t l = i - st < sizeof(buf) - 1 ? i - st : sizeof(buf) - 1;
             memcpy(buf, s + st, l);
             buf[l] = 0;
-            comp[ci++] = strtof(buf, NULL);
+            comp[ci] = strtof(buf, NULL);
+            alpha_pct = (buf[l - 1] == '%');
+            ci++;
         } else break;
     }
     if (ci < 3) return 0;
-    int a = comp[3] <= 1.0f ? (int)(comp[3] * 255) : (int)comp[3];
+    /* 百分比透明度: 50% → 127; 数字透明度: 0.5 → 127 */
+    int a = alpha_pct ? (int)(comp[3] / 100.0f * 255.0f)
+                      : (comp[3] <= 1.0f ? (int)(comp[3] * 255) : (int)comp[3]);
     *out = pack_rgba((int)comp[0], (int)comp[1], (int)comp[2], a);
     return 1;
 }

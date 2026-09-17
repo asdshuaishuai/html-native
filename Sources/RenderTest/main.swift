@@ -2381,6 +2381,102 @@ do {
     check(bad2 == nil, "PNG 解码: 空输入安全返回 NULL")
 }
 
+print("== CSS 规范符合性回归(探针发现的静默错误) ==")
+do {
+    /* 这批断言对应"声明被解析了但从未生效"的一类缺陷 —— 它们不报错、
+       不崩溃, 只能靠期望值对照发现。 */
+    func box(_ html: String, _ id: String, _ w: Float = 400, _ h: Float = 300)
+        -> (Float, Float, Float, Float)? {
+        guard let d = hn_parse_html(html, html.utf8.count) else { return nil }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, w, h, &backend)
+        var stack: [OpaquePointer] = [hn_doc_root(d)]
+        var out: (Float, Float, Float, Float)?
+        while let n = stack.popLast() {
+            if let i = hn_node_attr(n, "id"), String(cString: i) == id {
+                var x: Float = 0, y: Float = 0, bw: Float = 0, bh: Float = 0
+                hn_node_box(n, &x, &y, &bw, &bh)
+                out = (x, y, bw, bh)
+                break
+            }
+            var kids: [OpaquePointer] = []
+            var c = hn_node_first_child(n)
+            while let k = c { kids.append(k); c = hn_node_next_sibling(k) }
+            stack.append(contentsOf: kids)
+        }
+        hn_context_destroy(cc)
+        return out
+    }
+    func eq(_ a: (Float, Float, Float, Float)?, _ b: (Float, Float, Float, Float),
+            _ tol: Float = 1.0) -> Bool {
+        guard let a else { return false }
+        return abs(a.0 - b.0) <= tol && abs(a.1 - b.1) <= tol
+            && abs(a.2 - b.2) <= tol && abs(a.3 - b.3) <= tol
+    }
+    func pg(_ css: String, _ body: String) -> String {
+        "<html><head><style>html,body{margin:0}\(css)</style></head><body>\(body)</body></html>"
+    }
+
+    // (1) align-self: 曾与 align-items 共用一个字段, 写了完全无效
+    let asCSS = ".f{display:flex;width:300;height:100;align-items:flex-start}"
+    let asHTML = "<div class='f'><div class='c s' id='x'></div></div>"
+    if let b = box(pg(asCSS + ".c{width:50;height:30}.s{align-self:flex-end}", asHTML), "x") {
+        check(eq(b, (0, 70, 50, 30)),
+              String(format: "CSS: align-self 覆盖 align-items (y=%.0f, 期望 70)", b.1))
+    } else { check(false, "CSS: align-self 用例未取到盒子") }
+
+    // (2) order: 曾不在样式结构里, 视觉顺序无法改变
+    let odHTML = "<div class='f'><div class='c' id='a'></div><div class='c z' id='b'></div></div>"
+    if let b = box(pg(".f{display:flex;width:300;height:50}.c{width:50;height:20}.z{order:-1}", odHTML), "b") {
+        check(eq(b, (0, 0, 50, 20)),
+              String(format: "CSS: order:-1 排到最前 (x=%.0f, 期望 0)", b.0))
+    } else { check(false, "CSS: order 用例未取到盒子") }
+
+    // (3) flex-basis: 曾只当可用宽传入, 空内容子项量出 0 宽
+    let fbHTML = "<div class='f'><div class='a' id='x'></div><div class='b' id='y'></div></div>"
+    let fbCSS = ".f{display:flex;width:300;height:50}.a{flex-basis:200;height:20}.b{flex-grow:1;height:20}"
+    if let b = box(pg(fbCSS, fbHTML), "x") {
+        check(eq(b, (0, 0, 200, 20)),
+              String(format: "CSS: flex-basis 作确定主轴尺寸 (宽=%.0f, 期望 200)", b.2))
+    } else { check(false, "CSS: flex-basis 用例未取到盒子") }
+
+    // (4) margin 百分比: 曾把 50% 当字面 50px; 规范要求基于包含块**宽**
+    let mgHTML = "<div class='p'><div class='a' id='x'></div></div>"
+    let mgCSS = ".p{width:400;height:400}.a{font-size:20;margin-top:50%;width:100;height:10}"
+    if let b = box(pg(mgCSS, mgHTML), "x") {
+        check(eq(b, (0, 200, 100, 10)),
+              String(format: "CSS: margin 百分比基于容器宽 (y=%.0f, 期望 200)", b.1))
+    } else { check(false, "CSS: margin 百分比用例未取到盒子") }
+
+    // (5) 颜色: 命名色与 rgb/rgba 空格分隔 + "/" 百分比(CSS Color 4)
+    func paint_fill(_ decl: String) -> UInt32? {
+        let html = pg(".a{width:100;height:50;" + decl + "}", "<div class='a'></div>")
+        guard let d = hn_parse_html(html, html.utf8.count) else { return nil }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, 400, 300, &backend)
+        defer { hn_context_destroy(cc) }
+        if let dl = hn_context_display_list(cc), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) {
+                let c = cmds[i]
+                if c.kind == HN_CMD_RECT && abs(c.w - 100) < 1 && abs(c.h - 50) < 1 {
+                    return c.fill
+                }
+            }
+        }
+        return nil
+    }
+    check(paint_fill("background:rebeccapurple") == 0x663399FF, "CSS: 命名色 rebeccapurple")
+    check(paint_fill("background:lightseagreen") == 0x20B2AAFF, "CSS: 命名色 lightseagreen")
+    if let a = paint_fill("background:rgba(0 128 255 / 50%)") {
+        let al = a & 0xFF
+        // 打包是 0xRRGGBBAA: R=bits24..31, G=16..23, B=8..15, A=0..7
+        check(al >= 126 && al <= 128 && ((a >> 16) & 0xFF) == 0x80 && ((a >> 24) & 0xFF) == 0x00,
+              String(format: "CSS: rgba() 空格+斜杠百分比 (解出 %08X)", a))
+    } else { check(false, "CSS: rgba() 空格+斜杠写法") }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

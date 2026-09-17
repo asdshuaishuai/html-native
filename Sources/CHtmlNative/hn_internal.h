@@ -37,14 +37,26 @@ typedef struct hn_style {
     hn_display display;
     int        flex_row;      /* 1=row 0=column */
     hn_justify justify;
-    hn_align   align;
+    hn_align   align;      /* align-items: 容器级(作用于所有子项) */
+    /* align-self: 子项级, 覆盖父容器的 align-items。
+       必须与 align 分开存 —— 二者曾共用同一个字段, 于是 align-self 的级联值
+       会与 align-items 互相覆盖, 表现为"align-self 写了没反应"。 */
+    unsigned char has_self_align;
+    hn_align   self_align;
     float      flex_grow;
     float      flex_shrink;   /* 默认 1: 超出时按基数比例收缩 */
     float      flex_basis;    unsigned char flex_basis_u; /* flex:<n> ⇒ basis 0 */
+    int        flex_order;    /* order: 视觉顺序, 默认 0 */
     float      gap;
     float      width;    unsigned char width_u;
     float      height;   unsigned char height_u;
     float      margin[4];    /* top right bottom left */
+    /* margin/padding 的单位(HN_U_*)。百分比必须留到布局期才能解析 ——
+       它基于**包含块的行内尺寸(宽度)**, 而样式计算时还拿不到容器宽。
+       早期实现把百分比当 px 直接用, 于是 margin-top:50% 变成 50px
+       而不是容器宽的 50%(200px), 且不报错。 */
+    unsigned char margin_u[4];
+    unsigned char padding_u[4];
     float      padding[4];
     float      border_w;
     hn_color   border_color;
