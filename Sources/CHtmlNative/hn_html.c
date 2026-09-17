@@ -149,6 +149,36 @@ static void push_text(hn_arena *ar, hn_node *cur, const char *s, size_t n) {
     append_child(cur, t);
 }
 
+/* 原样文本(raw text 元素用: script / style / pre / textarea)。
+ *
+ * 为什么必须原样: 这些元素的内容是**字面量**。空白折叠会把换行变成空格,
+ * 于是 JS 里的 `// 行注释` 会吞掉其后整段代码(SyntaxError), CSS 里的
+ * 规则也会被拼接错乱 —— HTML 规范要求这些元素内容不折叠。
+ * 只做实体解码(&amp; 等), 不做空白处理。 */
+static void push_text_raw(hn_arena *ar, hn_node *cur, const char *s, size_t n) {
+    if (!n) return;
+    char *buf = hn_arena_alloc(ar, n + 8);
+    size_t o = 0;
+    for (size_t i = 0; i < n; ) {
+        if (s[i] == '&') {
+            char rep[4]; size_t rl = 0;
+            size_t used = entity_out(s + i, n - i, rep, &rl);
+            if (used) {
+                for (size_t k = 0; k < rl; k++) buf[o++] = rep[k];
+                i += used;
+                continue;
+            }
+        }
+        buf[o++] = s[i++];
+    }
+    if (!o) return;
+    buf[o] = 0;
+    hn_node *t = new_node(ar, HN_TEXT);
+    t->text = buf;
+    t->text_len = o;
+    append_child(cur, t);
+}
+
 /* 解析后整理: 混排场景下的边界裁剪(前后是元素或端点时裁掉首尾空格) */
 static void normalize_texts(hn_node *n) {
     for (hn_node *c = n->first; c; c = c->next) {
@@ -295,8 +325,9 @@ void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len) {
                 } else if (!strcmp(tag, "script") && stop > a) {
                     /* 脚本内容存为文本子节点: 运行时(JavaScriptCore)据此执行。
                        引擎自身不解释 JS —— 它只负责把这段文本留在 DOM 里,
-                       保持"引擎平台无关、不依赖脚本引擎"的边界。 */
-                    push_text(ar, el, a, (size_t)(stop - a));
+                       保持"引擎平台无关、不依赖脚本引擎"的边界。
+                       必须用 raw 版本: 空白折叠会让 `//` 注释吞掉后续代码。 */
+                    push_text_raw(ar, el, a, (size_t)(stop - a));
                 }
                 p = gt ? gt + 1 : end;
                 continue;

@@ -45,6 +45,11 @@ public final class HtmlNativeView: NSView, HNWebHost {
     private var imageBox: ImageStore.CtxBox?
     private var imageBackendPtr: UnsafeMutablePointer<hn_image_backend>?
     private var jsRuntime: HNJSRuntime?
+    /// 测试用: 暴露 JS 运行时以驱动断言
+    public var jsRuntimeForTest: HNJSRuntime? { jsRuntime }
+
+    /// JS 侧调用 preventDefault 时置位(中止继续派发)
+    fileprivate var jsPrevented = false
     /// 最近一次完整 HTML(供 arena 压缩重建)
     private var fullHTML: String = ""
     /// swap 计数(达到阈值时触发 arena 压缩)
@@ -189,7 +194,11 @@ public final class HtmlNativeView: NSView, HNWebHost {
             },
             setAttr: { h, name, val in
                 guard let n = Self.node(from: h) else { return false }
-                return hn_node_set_attr(n, name, val) == 1
+                let ok = hn_node_set_attr(n, name, val) == 1
+                /* DOM 变更后必须重排 —— 否则 JS 的属性/类名改动不会出现在屏幕上
+                   (表现为"JS 执行成功但界面没反应", 排查成本很高) */
+                if ok { weakSelf?.relayout() }
+                return ok
             },
             getText: { h in
                 guard let n = Self.node(from: h) else { return "" }
@@ -199,7 +208,9 @@ public final class HtmlNativeView: NSView, HNWebHost {
             },
             setText: { h, txt in
                 guard let n = Self.node(from: h) else { return false }
-                return hn_node_set_text_content(n, txt, txt.utf8.count) == 1
+                let ok = hn_node_set_text_content(n, txt, txt.utf8.count) == 1
+                if ok { weakSelf?.relayout() }   /* 同上: 文本变更需重排才可见 */
+                return ok
             },
             insertHTML: { h, html, mode in
                 guard let self = weakSelf else { return 0 }
@@ -231,8 +242,6 @@ public final class HtmlNativeView: NSView, HNWebHost {
             getStyle: { _, _ in nil },
             setStyle: { h, prop, val in
                 guard let n = Self.node(from: h) else { return false }
-                var buf = [CChar](repeating: 0, count: 2048)
-                _ = hn_node_text_content(n, &buf, 0)   // no-op, 仅占位
                 let existing = hn_node_attr(n, "style").map { String(cString: $0) } ?? ""
                 var decls = existing
                 if let r = decls.range(of: "\(prop):") {
@@ -261,6 +270,7 @@ public final class HtmlNativeView: NSView, HNWebHost {
             localStorageGet: { k in weakSelf?.store.get(k) },
             localStorageSet: { k, v in weakSelf?.store.set(k, v) },
             log: { msg in FileHandle.standardError.write("[hn-js] \(msg)\n".data(using: .utf8)!) },
+            preventDefault: { weakSelf?.jsPrevented = true },
             reload: { weakSelf?.relayout() }
         )
     }
@@ -593,6 +603,16 @@ public final class HtmlNativeView: NSView, HNWebHost {
     private func updateHover(at p: NSPoint) {
         guard let ctx else { return }
         let node = hn_context_hit_node(ctx, Float(p.x), Float(p.y))
+        // 统一管道: 移动 / 进入 / 离开
+        if node != currentHoverNode {
+            if let old = currentHoverNode {
+                _ = emit(HN_EV_MOUSELEAVE, at: p, node: old)
+            }
+            if let new = node {
+                _ = emit(HN_EV_MOUSEENTER, at: p, node: new)
+            }
+        }
+        _ = emit(HN_EV_MOUSEMOVE, at: p, node: node)
         if node != currentHoverNode {
             currentHoverNode = node
             hn_context_set_hover(ctx, node)
@@ -622,6 +642,99 @@ public final class HtmlNativeView: NSView, HNWebHost {
         NSCursor.arrow.set()
     }
 
+    // MARK: - 统一事件管道
+
+    /// 事件分发的唯一出口。
+    ///
+    /// 设计: 引擎给出事件数据 + 冒泡路径(hn_event_path_at), 运行时沿路径
+    /// 由内向外派发; 两个消费者共享同一来源:
+    ///   1. JS 的 addEventListener(经 HNJSRuntime.dispatch)
+    ///   2. hx-trigger 声明的行为(hover/focus/keydown 等)
+    /// 任一层调用 preventDefault() 即中止继续派发(与 DOM 语义一致)。
+    ///
+    /// 返回 true 表示事件被消费(调用方不必再做默认处理)。
+    @discardableResult
+    public func emit(_ kind: hn_event_kind, at p: NSPoint?, node target: OpaquePointer?,
+              keyCode: Int32 = 0, key: String? = nil, modifiers: UInt32 = 0,
+              repeat isRepeat: Bool = false, delta: Float = 0, text: String? = nil) -> Bool {
+        guard let ctx else { return false }
+        let hit = target ?? (p.flatMap { hn_context_hit_node(ctx, Float($0.x), Float($0.y)) })
+        guard let hit else { return false }
+
+        let name = String(cString: hn_event_name(kind))
+        let detail: [String: Any] = [
+            "x": p.map { Double($0.x) } ?? 0,
+            "y": p.map { Double($0.y) } ?? 0,
+            "keyCode": Int(keyCode),
+            "key": key ?? "",
+            "shift": (modifiers & UInt32(HN_MOD_SHIFT)) != 0,
+            "ctrl": (modifiers & UInt32(HN_MOD_CTRL)) != 0,
+            "alt": (modifiers & UInt32(HN_MOD_ALT)) != 0,
+            "meta": (modifiers & UInt32(HN_MOD_META)) != 0,
+            "repeat": isRepeat,
+            "delta": Double(delta),
+            "text": text ?? "",
+        ]
+
+        // 沿冒泡路径由内向外派发
+        let depth = hn_event_path_len(hit)
+        var consumed = false
+        for i in 0..<Int(depth) {
+            guard let n = hn_event_path_at(hit, Int32(i)),
+                  let idp = hn_node_attr(n, "id") else { continue }
+            let id = String(cString: idp)
+
+            // 消费者 1: JS 处理器(返回值 = 注册的处理器数; preventDefault 会置标志)
+            if let rt = jsRuntime {
+                jsPrevented = false
+                rt.dispatch(event: name, elementId: id, detail: detail)
+                if jsPrevented { consumed = true; break }
+            }
+
+            // 消费者 2: hx-trigger 声明的行为
+            let trig = hn_node_attr(n, "hx-trigger").map { String(cString: $0).lowercased() } ?? ""
+            if Self.triggerMatches(trig, event: name) {
+                if let act = hxActionForNode(n) {
+                    performHx(act)
+                    consumed = true
+                }
+            }
+        }
+        return consumed
+    }
+
+    /// hx-trigger 与事件名的匹配(含 hx 的 hover 语义: 进入也触发)
+    public static func triggerMatches(_ trig: String, event: String) -> Bool {
+        if trig.isEmpty { return event == "click" }        // 默认 click
+        switch event {
+        case "click":
+            return trig.contains("click") || trig.contains("load") == false && trig.isEmpty
+        case "mouseenter":
+            return trig.contains("hover") || trig.contains("mouseenter")
+        case "mouseleave":
+            return trig.contains("hover-out") || trig.contains("mouseleave")
+        case "keydown":
+            return trig.contains("keydown") || trig.contains("enter")
+        case "focus":
+            return trig.contains("focus")
+        case "blur":
+            return trig.contains("blur")
+        case "scroll":
+            return trig.contains("scroll")
+        case "submit":
+            return trig.contains("submit")
+        case "change":
+            return trig.contains("change")
+        default:
+            return trig.contains(event)
+        }
+    }
+
+    /// 由节点直接构造 hx 动作(事件管道内用; 不经命中测试)
+    func hxActionForNode(_ node: OpaquePointer) -> HxAction? {
+        hxAction(for: node)
+    }
+
     override public func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         // hn-drag: 该元素(或祖先)声明为拖拽手柄 → 交给系统移动窗口
@@ -642,27 +755,45 @@ public final class HtmlNativeView: NSView, HNWebHost {
             hn_context_set_active(ctx, node)
             relayout()
         }
-        if let action = hxAction(at: p) {
-            performHx(action)
+        // 统一事件管道: mousedown → click(冒泡), JS 与 hx-trigger 共享同一来源
+        _ = emit(HN_EV_MOUSEDOWN, at: p, node: nil, modifiers: Self.modMask(event))
+        if emit(HN_EV_CLICK, at: p, node: nil, modifiers: Self.modMask(event)) {
             return
-        }
-        // 先派发到 JS 处理器(若页面用 addEventListener 注册), 再走 hx 语义
-        if let id = hitTestId(at: p) {
-            jsRuntime?.dispatch(event: "click", elementId: id)
         }
         onClickUnhandled?(hitTestId(at: p))
     }
 
     override public func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        _ = emit(HN_EV_MOUSEUP, at: p, node: nil, modifiers: Self.modMask(event))
         if let ctx {
             hn_context_set_active(ctx, nil)
             relayout()
         }
     }
 
+    /// 修饰键 → 引擎掩码
+    static func modMask(_ e: NSEvent) -> UInt32 {
+        var m: UInt32 = 0
+        if e.modifierFlags.contains(.shift) { m |= UInt32(HN_MOD_SHIFT) }
+        if e.modifierFlags.contains(.control) { m |= UInt32(HN_MOD_CTRL) }
+        if e.modifierFlags.contains(.option) { m |= UInt32(HN_MOD_ALT) }
+        if e.modifierFlags.contains(.command) { m |= UInt32(HN_MOD_META) }
+        return m
+    }
+
     // MARK: - 输入(键盘编辑)
 
     private func focusInput(_ node: OpaquePointer?) {
+        // focus/blur 事件(切换时派发到旧/新目标)
+        if focusedInput != node {
+            if let old = focusedInput {
+                _ = emit(HN_EV_BLUR, at: nil, node: old)
+            }
+            if let new = node {
+                _ = emit(HN_EV_FOCUS, at: nil, node: new)
+            }
+        }
         guard let ctx else { return }
         focusedInput = node
         hn_context_set_focus(ctx, node)
@@ -688,7 +819,17 @@ public final class HtmlNativeView: NSView, HNWebHost {
     }
 
     override public func keyDown(with event: NSEvent) {
-        guard let ctx, let node = focusedInput, hn_node_is_input(node) == 1 else {
+        guard let ctx else { super.keyDown(with: event); return }
+        // 统一管道: keydown 先派发(JS/hx 可消费, 如 Escape 关闭弹窗、快捷键)
+        let kc = Self.hnKeyCode(event)
+        let keyName = Self.keyName(event)
+        let mods = Self.modMask(event)
+        let hitForKeys = focusedInput ?? hn_context_hit_node(ctx, -1, -1)
+        if emit(HN_EV_KEYDOWN, at: nil, node: hitForKeys, keyCode: kc,
+                key: keyName, modifiers: mods, repeat: event.isARepeat) {
+            return
+        }
+        guard let node = focusedInput, hn_node_is_input(node) == 1 else {
             // Tab 在控件间移动焦点
             if event.keyCode == 48 { advanceFocus(backward: event.modifierFlags.contains(.shift)); return }
             super.keyDown(with: event)
@@ -748,8 +889,59 @@ public final class HtmlNativeView: NSView, HNWebHost {
             hn_context_set_caret_visible(ctx, 1)
             relayout()
             if let idp = hn_node_attr(node, "id") {
-                onInput?(String(cString: idp), value)
+                let id = String(cString: idp)
+                // input 事件: 值每次变化都派发(元素级冒泡)
+                _ = emit(HN_EV_INPUT, at: nil, node: node, text: value)
+                onInput?(id, value)
             }
+        }
+    }
+
+    override public func keyUp(with event: NSEvent) {
+        _ = emit(HN_EV_KEYUP, at: nil, node: focusedInput,
+                 keyCode: Self.hnKeyCode(event), key: Self.keyName(event),
+                 modifiers: Self.modMask(event))
+    }
+
+    /// 平台键码 → 引擎无关键码
+    static func hnKeyCode(_ e: NSEvent) -> Int32 {
+        switch e.keyCode {
+        case 36, 76: return Int32(HN_KEY_ENTER)
+        case 53:     return Int32(HN_KEY_ESC)
+        case 48:     return Int32(HN_KEY_TAB)
+        case 51:     return Int32(HN_KEY_BACKSPACE)
+        case 117:    return Int32(HN_KEY_DELETE)
+        case 123:    return Int32(HN_KEY_LEFT)
+        case 124:    return Int32(HN_KEY_RIGHT)
+        case 125:    return Int32(HN_KEY_DOWN)
+        case 126:    return Int32(HN_KEY_UP)
+        case 115:    return Int32(HN_KEY_HOME)
+        case 119:    return Int32(HN_KEY_END)
+        case 116:    return Int32(HN_KEY_PAGEUP)
+        case 121:    return Int32(HN_KEY_PAGEDOWN)
+        case 49:     return Int32(HN_KEY_SPACE)
+        default:     return 0
+        }
+    }
+
+    /// 键名(与 DOM KeyboardEvent.key 对齐)
+    static func keyName(_ e: NSEvent) -> String {
+        switch e.keyCode {
+        case 36, 76: return "Enter"
+        case 53:     return "Escape"
+        case 48:     return "Tab"
+        case 51:     return "Backspace"
+        case 117:    return "Delete"
+        case 123:    return "ArrowLeft"
+        case 124:    return "ArrowRight"
+        case 125:    return "ArrowDown"
+        case 126:    return "ArrowUp"
+        case 115:    return "Home"
+        case 119:    return "End"
+        case 116:    return "PageUp"
+        case 121:    return "PageDown"
+        case 49:     return " "
+        default:     return e.charactersIgnoringModifiers ?? ""
         }
     }
 

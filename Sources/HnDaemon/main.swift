@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import CHtmlNative
 import HtmlNative
 
 // HnDaemon — html-native 常驻宿主。
@@ -183,6 +184,64 @@ enum HNProtocol {
             DispatchQueue.main.sync { HNEngine.shared.close(id: id) }
             DevWatcher.stop(id: id)
             return resp(true, ["id": id])
+
+        case "event":
+            guard let id = obj["id"] as? String,
+                  let kindStr = obj["kind"] as? String else {
+                return resp(false, ["error": "id/kind required"])
+            }
+            var out = false
+            DispatchQueue.main.sync {
+                let dbg = ProcessInfo.processInfo.environment["HN_LOG_EV"] != nil
+                if dbg {
+                    let hasApp = HNEngine.shared.app(id: id) != nil
+                    let hasView = HNEngine.shared.app(id: id)?.view != nil
+                    FileHandle.standardError.write("[evd] id=\(id) app=\(hasApp) view=\(hasView)\n".data(using: .utf8)!)
+                }
+                if let app = HNEngine.shared.app(id: id), let nv = app.view {
+                    let kind: hn_event_kind
+                    switch kindStr {
+                    case "click": kind = HN_EV_CLICK
+                    case "mousedown": kind = HN_EV_MOUSEDOWN
+                    case "mouseup": kind = HN_EV_MOUSEUP
+                    case "mousemove": kind = HN_EV_MOUSEMOVE
+                    case "mouseenter": kind = HN_EV_MOUSEENTER
+                    case "mouseleave": kind = HN_EV_MOUSELEAVE
+                    case "keydown": kind = HN_EV_KEYDOWN
+                    case "keyup": kind = HN_EV_KEYUP
+                    case "focus": kind = HN_EV_FOCUS
+                    case "blur": kind = HN_EV_BLUR
+                    case "input": kind = HN_EV_INPUT
+                    case "change": kind = HN_EV_CHANGE
+                    case "submit": kind = HN_EV_SUBMIT
+                    case "scroll": kind = HN_EV_SCROLL
+                    default: kind = HN_EV_NONE
+                    }
+                    // 目标: 指定 id, 或按坐标命中
+                    var target: OpaquePointer?
+                    if let tid = obj["target"] as? String,
+                       let ctx = Optional(nv.engineContext), let doc = hn_context_doc(ctx) {
+                        target = hn_doc_find_by_id(doc, tid)
+                    }
+                    var pt: NSPoint?
+                    if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
+                        pt = NSPoint(x: x, y: y)
+                    }
+                    if dbg {
+                        FileHandle.standardError.write("[evd] kind=\(kindStr) target=\(target != nil) pt=\(pt != nil)\n".data(using: .utf8)!)
+                    }
+                    if target == nil && pt == nil {
+                        out = false
+                    } else {
+                        out = nv.emit(kind, at: pt, node: target,
+                                      keyCode: Int32(obj["keyCode"] as? Int ?? 0),
+                                      key: obj["key"] as? String,
+                                      modifiers: UInt32(obj["modifiers"] as? Int ?? 0),
+                                      text: obj["text"] as? String)
+                    }
+                }
+            }
+            return resp(true, ["consumed": out, "id": id])
 
         case "eval":
             guard let id = obj["id"] as? String, let js = obj["js"] as? String else {

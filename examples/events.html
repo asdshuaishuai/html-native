@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="480x420@180,160">
+<meta name="hn-title" content="事件系统 · 键盘与冒泡">
+<meta name="hn-theme" content="dark">
+<style>
+.panel { padding: 16; display: flex; flex-direction: column; gap: 10; height: 100%;
+         box-sizing: border-box; }
+.hint { color: var(--dim); font-size: 11; }
+.row { display: flex; gap: 8; align-items: center; }
+kbd { background: #ffffff12; border: 1 solid var(--line); border-radius: 5;
+      padding: 1 6; font-size: 11; }
+#keys { background: #10151f; border: 1 solid var(--line); border-radius: 10;
+        padding: 10 12; min-height: 54; font-size: 12; color: #9aa3b5; }
+#stack { color: var(--accent); font-size: 11; }
+.outer { position: relative; background: #171c26; border: 1 solid var(--line);
+         border-radius: 10; padding: 12; }
+.mid { background: #1d2432; border-radius: 8; padding: 10; margin-top: 6; }
+.inner { background: var(--accent); color: #fff; border-radius: 6; padding: 8 12;
+         font-size: 12; font-weight: 600; text-align: center; }
+</style>
+</head>
+<body>
+<div class="panel">
+  <div>
+    <div style="font-size:15;font-weight:700">事件系统</div>
+    <div class="hint">键盘事件冒泡 · JS 监听 · hx 声明的 hover/focus</div>
+  </div>
+
+  <!-- 键盘事件: 按任意键记录 -->
+  <div>
+    <div class="hint" style="margin-bottom:5">按任意键(试试方向键 / Enter / Shift+A)</div>
+    <div id="keys">等待按键…</div>
+  </div>
+
+  <!-- 冒泡演示: 内层点击, 观察事件经过的层级 -->
+  <div>
+    <div class="hint" style="margin-bottom:5">点击内层方块, 观察事件冒泡路径</div>
+    <div class="outer" id="lvl-outer">
+      <div class="hint">outer(收到冒泡)</div>
+      <div class="mid" id="lvl-mid">
+        <div class="hint">mid(收到冒泡)</div>
+        <div class="inner" id="lvl-inner">点击我</div>
+      </div>
+    </div>
+    <div id="stack" style="margin-top:6">命中链: —</div>
+  </div>
+
+  <!-- hx 声明式: hover 与 focus 驱动样式/请求 -->
+  <div class="row">
+    <div class="btn" id="hx-hover" hx-get="sys://host" hx-trigger="hover"
+         hx-target="hover-out">悬停我(hx)</div>
+    <span class="hint" id="hover-out">—</span>
+  </div>
+</div>
+
+<script>
+  // 键盘事件: 展示 key / 修饰键 / 键码
+  document.getElementById('keys').addEventListener('keydown', function (e) {
+    var mods = [];
+    if (e.shift) mods.push('Shift');
+    if (e.ctrl) mods.push('Ctrl');
+    if (e.alt) mods.push('Alt');
+    if (e.meta) mods.push('Cmd');
+    document.getElementById('keys').textContent =
+      'key="' + (e.key || '(无)') + '"' + (mods.length ? '  ' + mods.join('+') : '') +
+      '  keyCode=' + e.keyCode;
+  });
+
+  // 冒泡演示: 三层各自监听, 记录事件经过的层级顺序
+  var path = [];
+  function rec(name) {
+    return function () {
+      path.push(name);
+      document.getElementById('stack').textContent = '命中链: ' + path.join(' → ');
+    };
+  }
+  document.getElementById('lvl-inner').addEventListener('click', rec('inner'));
+  document.getElementById('lvl-mid').addEventListener('click', rec('mid'));
+  document.getElementById('lvl-outer').addEventListener('click', rec('outer'));
+</script>
+</body>
+</html>

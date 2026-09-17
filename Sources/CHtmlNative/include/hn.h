@@ -207,6 +207,58 @@ int hn_node_run_count(hn_node *n);
 int hn_node_run_at(hn_node *n, int i, float *x, float *baseline, float *w,
                    float *y_top, float *h);
 
+/* ---- 事件(引擎只提供事件数据与冒泡路径; 管道由运行时实现, 消费者可是 JS/hx-*) ---- */
+
+typedef enum {
+    HN_EV_NONE = 0,
+    HN_EV_CLICK, HN_EV_DBLCLICK,
+    HN_EV_MOUSEDOWN, HN_EV_MOUSEUP,
+    HN_EV_MOUSEMOVE, HN_EV_MOUSEENTER, HN_EV_MOUSELEAVE,
+    HN_EV_KEYDOWN, HN_EV_KEYUP,
+    HN_EV_FOCUS, HN_EV_BLUR,
+    HN_EV_INPUT, HN_EV_CHANGE,
+    HN_EV_SUBMIT, HN_EV_SCROLL,
+    HN_EV_HOVER                     /* hx 语义: 进入与离开共用 */
+} hn_event_kind;
+
+/* 修饰键位掩码 */
+enum { HN_MOD_SHIFT = 1, HN_MOD_CTRL = 2, HN_MOD_ALT = 4, HN_MOD_META = 8 };
+
+typedef struct hn_event {
+    hn_event_kind kind;
+    hn_node *target;      /* 命中的最深元素(冒泡起点) */
+    float    x, y;        /* 视口坐标(鼠标/滚动类事件) */
+    int      key_code;    /* 平台无关键码(见 hn_key_*) */
+    const char *key;      /* 键名: "a" / "Enter" / "Escape" / "ArrowUp" … */
+    unsigned modifiers;   /* HN_MOD_* 掩码 */
+    int      repeat;      /* 按键重复(长按) */
+    float    delta;       /* 滚轮增量(SCROLL) */
+    const char *text;     /* INPUT 事件的新值(可为 NULL) */
+} hn_event;
+
+/* 常用键码(平台无关; 运行时负责把系统键码映射到这里) */
+enum {
+    HN_KEY_NONE = 0, HN_KEY_ENTER = 1, HN_KEY_ESC = 2, HN_KEY_TAB = 3,
+    HN_KEY_BACKSPACE = 4, HN_KEY_DELETE = 5,
+    HN_KEY_LEFT = 10, HN_KEY_RIGHT = 11, HN_KEY_UP = 12, HN_KEY_DOWN = 13,
+    HN_KEY_HOME = 14, HN_KEY_END = 15, HN_KEY_PAGEUP = 16, HN_KEY_PAGEDOWN = 17,
+    HN_KEY_SPACE = 20
+};
+
+/* 事件名(与 DOM 命名对齐: "click" / "keydown" …); 未知返回 "unknown" */
+const char *hn_event_name(hn_event_kind k);
+
+/* 冒泡路径: 从 target 自身向上直至根; idx 从 0 起。
+ * 只返回**有 id 的元素**(id 是运行时与 JS 的寻址键), 无 id 的祖先被跳过。
+ * 越界返回 NULL。 */
+hn_node *hn_event_path_at(hn_node *target, int idx);
+
+/* 冒泡路径长度(有 id 的元素个数) */
+int hn_event_path_len(hn_node *target);
+
+/* 从 n(含自身)向上找最近的 input/textarea(供事件派发定位编辑目标) */
+hn_node *hn_node_ancestor_input(hn_node *n);
+
 /* ---- 交互: 滚动 ---- */
 /* 点位下最深的 overflow 容器(可滚动元素), 无则 NULL */
 hn_node *hn_context_scrollable_at(hn_context *c, float x, float y);

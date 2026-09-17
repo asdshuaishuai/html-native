@@ -46,6 +46,8 @@ public final class HNJSRuntime {
         public var localStorageGet: (String) -> String?
         public var localStorageSet: (String, String) -> Void
         public var log: (String) -> Void
+        /// JS 调用 preventDefault/stopPropagation → 中止继续冒泡
+        public var preventDefault: () -> Void
         public var reload: () -> Void
     }
 
@@ -122,6 +124,8 @@ public final class HNJSRuntime {
                 guard let v = b.localStorageGet(a) else { return JSValue(nullIn: ctx) }
                 return JSValue(object: v, in: ctx)
             case "storeSet":  b.localStorageSet(a, a2); return JSValue(undefinedIn: ctx)
+            case "preventDefault": b.preventDefault(); return JSValue(undefinedIn: ctx)
+            case "stopPropagation": b.preventDefault(); return JSValue(undefinedIn: ctx)
             case "log":       b.log(a); return JSValue(undefinedIn: ctx)
             case "reload":    b.reload(); return JSValue(undefinedIn: ctx)
             default:          return JSValue(undefinedIn: ctx)
@@ -144,8 +148,14 @@ public final class HNJSRuntime {
       // 显式取全局对象并挂载 API(不要依赖隐式全局赋值: 读未声明变量会抛错)
       var G = (typeof globalThis !== 'undefined') ? globalThis : this;
       G.document = G.document || {};
+      /* 包装对象按 handle 缓存 —— 必须!
+         若每次 getElementById 都新建包装, 那么 addEventListener 注册在
+         临时对象上, 之后查询拿到的是另一个空对象 → 监听器静默丢失。 */
+      var __wrapCache = {};
       function wrap(h) {
         if (h === null || h === undefined) return null;
+        var key = String(h);
+        if (__wrapCache[key]) return __wrapCache[key];
         var o = {
           __h: h,
           get id() { return call('getAttr', h, 'id') || ''; },
@@ -201,6 +211,7 @@ public final class HNJSRuntime {
           get: function (_, k) { return call('getStyle', h, String(k)); },
           set: function (_, k, v) { call('setStyle', h, String(k), String(v)); return true; }
         }) : {};
+        __wrapCache[key] = o;
         return o;
       }
 
@@ -243,7 +254,20 @@ public final class HNJSRuntime {
       function __hnDispatchTo(id, type, detail) {
         var el = document.getElementById(id);
         if (!el) return 0;
-        var ev = detail || {}; ev.type = type; ev.target = el;
+        var ev = detail || {};
+        ev.type = type;
+        ev.target = el;
+        ev.defaultPrevented = false;
+        ev._stopped = false;
+        ev.preventDefault = function () { ev.defaultPrevented = true; call('preventDefault'); };
+        ev.stopPropagation = function () { ev._stopped = true; call('preventDefault'); };
+        /* 常用只读字段(DOM 习惯): 按键、坐标、修饰键 */
+        ev.key = ev.key || '';
+        ev.keyCode = ev.keyCode || 0;
+        ev.clientX = ev.x || 0;
+        ev.clientY = ev.y || 0;
+        ev.shiftKey = !!ev.shift; ev.ctrlKey = !!ev.ctrl;
+        ev.altKey = !!ev.alt; ev.metaKey = !!ev.meta;
         return el.dispatch(type, ev);
       }
       G.__hnDispatchTo = __hnDispatchTo;
@@ -272,7 +296,7 @@ public final class HNJSRuntime {
         let det = (try? JSONSerialization.data(withJSONObject: detail))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let js = "window.__hnDispatchTo(" + jsString(elementId) + ", " + jsString(event) + ", " + det + ")"
-        context.evaluateScript(js)
+        let r = context.evaluateScript(js)
     }
 
     private func jsString(_ s: String) -> String {

@@ -704,6 +704,58 @@ int hn_node_scroll_by(hn_node *n, float dx, float dy) {
     return 1;
 }
 
+/* ---------------- 事件 ---------------- */
+
+const char *hn_event_name(hn_event_kind k) {
+    switch (k) {
+    case HN_EV_CLICK:      return "click";
+    case HN_EV_DBLCLICK:   return "dblclick";
+    case HN_EV_MOUSEDOWN:  return "mousedown";
+    case HN_EV_MOUSEUP:    return "mouseup";
+    case HN_EV_MOUSEMOVE:  return "mousemove";
+    case HN_EV_MOUSEENTER: return "mouseenter";
+    case HN_EV_MOUSELEAVE: return "mouseleave";
+    case HN_EV_KEYDOWN:    return "keydown";
+    case HN_EV_KEYUP:      return "keyup";
+    case HN_EV_FOCUS:      return "focus";
+    case HN_EV_BLUR:       return "blur";
+    case HN_EV_INPUT:      return "input";
+    case HN_EV_CHANGE:     return "change";
+    case HN_EV_SUBMIT:     return "submit";
+    case HN_EV_SCROLL:     return "scroll";
+    case HN_EV_HOVER:      return "hover";
+    default:               return "unknown";
+    }
+}
+
+/* 冒泡路径只含"有 id 的元素": 运行时与 JS 都以 id 寻址。
+   这样路径长度小(通常 2-4 层), 派发成本低。 */
+hn_node *hn_event_path_at(hn_node *target, int idx) {
+    if (!target || idx < 0) return NULL;
+    int seen = 0;
+    for (hn_node *n = target; n; n = n->parent) {
+        if (n->kind != HN_ELEM) continue;
+        if (!hn_node_attr(n, "id")) continue;
+        if (seen == idx) return n;
+        seen++;
+    }
+    return NULL;
+}
+
+int hn_event_path_len(hn_node *target) {
+    if (!target) return 0;
+    int seen = 0;
+    for (hn_node *n = target; n; n = n->parent)
+        if (n->kind == HN_ELEM && hn_node_attr(n, "id")) seen++;
+    return seen;
+}
+
+hn_node *hn_node_ancestor_input(hn_node *n) {
+    for (; n; n = n->parent)
+        if (hn_node_is_input(n)) return n;
+    return NULL;
+}
+
 void hn_node_scroll_get(hn_node *n, float *x, float *y) {
     if (x) *x = n ? n->scroll_x : 0;
     if (y) *y = n ? n->scroll_y : 0;

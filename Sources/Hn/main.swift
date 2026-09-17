@@ -34,6 +34,10 @@ struct Opts {
     var y: Double?
     var ttl: Double?
     var message: String?
+    var target: String?
+    var key: String?
+    var mods: Int?
+    var text: String?
 }
 var o = Opts()
 var i = 0
@@ -48,6 +52,10 @@ while i < args.count {
     case "--x": i += 1; o.x = i < args.count ? Double(args[i]) : nil
     case "--y": i += 1; o.y = i < args.count ? Double(args[i]) : nil
     case "--ttl": i += 1; o.ttl = i < args.count ? Double(args[i]) : nil
+    case "--target": i += 1; o.target = i < args.count ? args[i] : nil
+    case "--key": i += 1; o.key = i < args.count ? args[i] : nil
+    case "--mods": i += 1; o.mods = i < args.count ? Int(args[i]) : nil
+    case "--text": i += 1; o.text = i < args.count ? args[i] : nil
     default:
         if o.id == nil { o.id = a } else if o.file == nil { o.file = a }
     }
@@ -245,6 +253,19 @@ case "dump":
             print(String(format: "%@ x=%4d y=%4d w=%4d h=%4d", k, x, y, w, h))
         }
     }
+
+case "event":
+    guard let id = o.id, let kind = o.file else { usage(); exit(2) }
+    var req: [String: Any] = ["op": "event", "id": id, "kind": kind]
+    if let t = o.target { req["target"] = t }
+    if let k = o.key { req["key"] = k }
+    if let m = o.mods { req["modifiers"] = m }
+    if let tx = o.text { req["text"] = tx }
+    if let x = o.w, let y = o.h { req["x"] = x; req["y"] = y }
+    let r = rpc(req) ?? [:]
+    if let c = r["consumed"] as? Bool {
+        print(c ? "事件已消费: \(kind)" : "事件未消费: \(kind)")
+    } else { print("失败: \(r["error"] ?? "?")"); exit(1) }
 
 case "eval":
     guard let id = o.id, let js = o.message ?? o.file else { usage(); exit(2) }

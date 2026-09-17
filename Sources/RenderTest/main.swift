@@ -1417,6 +1417,161 @@ do {
     }
 }
 
+print("== 统一事件系统: 冒泡 / preventDefault / 事件类型 ==")
+do {
+    // ---- 1) 冒泡路径: 只有带 id 的元素进入路径, 由内向外 ----
+    let hEv = """
+    <html><body>
+    <div id="outer"><div id="mid"><div id="inner">deep</div></div></div>
+    </body></html>
+    """
+    let dEv = hn_parse_html(hEv, hEv.utf8.count)!
+    if let inner = hn_doc_find_by_id(dEv, "inner") {
+        let len = hn_event_path_len(inner)
+        check(len == 3, "事件: 冒泡路径长度 = 3 (outer/mid/inner), 实得 \(len)")
+        var order: [String] = []
+        for i in 0..<Int(len) {
+            if let n = hn_event_path_at(inner, Int32(i)),
+               let idp = hn_node_attr(n, "id") {
+                order.append(String(cString: idp))
+            }
+        }
+        check(order == ["inner", "mid", "outer"],
+              "事件: 路径由内向外 \(order.joined(separator: "→"))")
+        // 越界返回 NULL
+        check(hn_event_path_at(inner, Int32(len)) == nil, "事件: 路径越界返回 NULL")
+    } else { check(false, "事件: inner 缺失") }
+
+    // 无 id 的中间节点被跳过(路径只含可寻址元素)
+    let hEv2 = """
+    <html><body><div id="a"><div><div id="b">x</div></div></div></body></html>
+    """
+    let dEv2 = hn_parse_html(hEv2, hEv2.utf8.count)!
+    if let b = hn_doc_find_by_id(dEv2, "b") {
+        let len2 = hn_event_path_len(b)
+        check(len2 == 2, "事件: 无 id 的祖先被跳过(路径长 \(len2), 应为 2)")
+    }
+
+    // ---- 2) 事件名映射(与 DOM 命名对齐) ----
+    check(String(cString: hn_event_name(HN_EV_CLICK)) == "click", "事件: click 命名")
+    check(String(cString: hn_event_name(HN_EV_KEYDOWN)) == "keydown", "事件: keydown 命名")
+    check(String(cString: hn_event_name(HN_EV_MOUSEENTER)) == "mouseenter", "事件: mouseenter 命名")
+    check(String(cString: hn_event_name(HN_EV_INPUT)) == "input", "事件: input 命名")
+    check(String(cString: hn_event_name(HN_EV_SUBMIT)) == "submit", "事件: submit 命名")
+
+    // ---- 3) hx-trigger 与事件名匹配(hover 语义含进入/离开) ----
+    check(HtmlNativeView.triggerMatches("", event: "click"), "hx: 空 trigger 默认 click")
+    check(HtmlNativeView.triggerMatches("hover", event: "mouseenter"),
+          "hx: hover 响应 mouseenter")
+    check(HtmlNativeView.triggerMatches("focus", event: "focus"), "hx: focus 响应 focus")
+    check(HtmlNativeView.triggerMatches("keydown", event: "keydown"),
+          "hx: keydown 响应 keydown")
+    check(HtmlNativeView.triggerMatches("enter", event: "keydown"),
+          "hx: enter 简写响应 keydown")
+    check(!HtmlNativeView.triggerMatches("hover", event: "click"),
+          "hx: hover 不响应 click(不误触发)")
+
+    // ---- 4) JS 侧: addEventListener 收到事件 + 冒泡 + preventDefault ----
+    let hJs = """
+    <html><body>
+    <div id="box"><div id="btn">点我</div></div>
+    <div id="log">-</div>
+    <script>
+      var hits = [];
+      document.getElementById('btn').addEventListener('click', function (e) {
+        hits.push('btn');
+        e.preventDefault();                  // 应中止继续冒泡
+      });
+      document.getElementById('box').addEventListener('click', function (e) {
+        hits.push('box');                    // 不应被执行(preventDefault 中断)
+      });
+      document.getElementById('btn').addEventListener('keydown', function (e) {
+        document.getElementById('log').textContent = 'key=' + e.key;
+      });
+      window.__getHits = function () { return hits.join(','); };
+    </script>
+    </body></html>
+    """
+    let vJs = HtmlNativeView(html: hJs)
+    vJs.setFrameSize(NSSize(width: 400, height: 300))
+    vJs.layout()
+    let dJs = hn_context_doc(vJs.engineContext)!
+    guard let btn = hn_doc_find_by_id(dJs, "btn") else { fatalError("btn 缺失") }
+    // 直接驱动管道(不经 AppKit 事件)
+    vJs.emit(HN_EV_CLICK, at: nil, node: btn)
+    if let rt = vJs.jsRuntimeForTest {
+        let hits = rt.probe("window.__getHits()") ?? ""
+        check(hits == "btn", "JS: preventDefault 中止冒泡(命中链=\(hits), 只应有 btn)")
+    } else { check(false, "JS: 运行时缺失") }
+
+    // 无 preventDefault 时应冒泡到祖先
+    let hJs2 = """
+    <html><body><div id="p1"><div id="p2">x</div></div>
+    <script>
+      var seq = [];
+      document.getElementById('p2').addEventListener('click', function (e) { seq.push('p2'); });
+      document.getElementById('p1').addEventListener('click', function (e) { seq.push('p1'); });
+      window.__seq = function () { return seq.join(','); };
+    </script></body></html>
+    """
+    let vJs2 = HtmlNativeView(html: hJs2)
+    vJs2.setFrameSize(NSSize(width: 400, height: 300))
+    vJs2.layout()
+    let dJs2 = hn_context_doc(vJs2.engineContext)!
+    if let p2 = hn_doc_find_by_id(dJs2, "p2") {
+        vJs2.emit(HN_EV_CLICK, at: nil, node: p2)
+        let seq = vJs2.jsRuntimeForTest?.probe("window.__seq()") ?? ""
+        check(seq == "p2,p1", "JS: 事件冒泡到祖先(顺序=\(seq))")
+    } else { check(false, "JS: p2 缺失") }
+
+    // ---- 5) 键盘事件: key 名与修饰键传递 ----
+    let hKey = """
+    <html><body><div id="k">x</div>
+    <script>
+      var got = '';
+      document.getElementById('k').addEventListener('keydown', function (e) {
+        got = e.key + (e.shift ? '+shift' : '') + (e.ctrl ? '+ctrl' : '');
+      });
+      window.__got = function () { return got; };
+    </script></body></html>
+    """
+    let vKey = HtmlNativeView(html: hKey)
+    vKey.setFrameSize(NSSize(width: 400, height: 300))
+    vKey.layout()
+    let dKey = hn_context_doc(vKey.engineContext)!
+    if let k = hn_doc_find_by_id(dKey, "k") {
+        vKey.emit(HN_EV_KEYDOWN, at: nil, node: k, keyCode: Int32(HN_KEY_ENTER),
+                  key: "Enter", modifiers: UInt32(HN_MOD_SHIFT))
+        let got = vKey.jsRuntimeForTest?.probe("window.__got()") ?? ""
+        check(got == "Enter+shift", "事件: keydown 传递键名与修饰键 (got='\(got)')")
+    } else { check(false, "事件: k 缺失") }
+
+    // ---- 6) focus/blur 与 input 事件 ----
+    let hFocus = """
+    <html><body><input id="inp" name="v">
+    <script>
+      var evs = [];
+      var el = document.getElementById('inp');
+      el.addEventListener('focus', function () { evs.push('focus'); });
+      el.addEventListener('blur', function () { evs.push('blur'); });
+      el.addEventListener('input', function (e) { evs.push('input:' + e.text); });
+      window.__evs = function () { return evs.join('|'); };
+    </script></body></html>
+    """
+    let vFocus = HtmlNativeView(html: hFocus)
+    vFocus.setFrameSize(NSSize(width: 400, height: 300))
+    vFocus.layout()
+    let dFocus = hn_context_doc(vFocus.engineContext)!
+    if let inp = hn_doc_find_by_id(dFocus, "inp") {
+        vFocus.emit(HN_EV_FOCUS, at: nil, node: inp)
+        vFocus.emit(HN_EV_INPUT, at: nil, node: inp, text: "abc")
+        vFocus.emit(HN_EV_BLUR, at: nil, node: inp)
+        let evs = vFocus.jsRuntimeForTest?.probe("window.__evs()") ?? ""
+        check(evs == "focus|input:abc|blur",
+              "事件: focus/input/blur 顺序与载荷正确 (evs='\(evs)')")
+    } else { check(false, "事件: inp 缺失") }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(
