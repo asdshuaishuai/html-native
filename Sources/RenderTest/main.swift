@@ -1643,6 +1643,184 @@ do {
     }
 }
 
+print("== 动画强化: @keyframes / 3D 变换 / 跨后端 ==")
+do {
+    // ---- 1) @keyframes 解析 ----
+    let hK = """
+    <html><head><style>
+    @keyframes spin { from { rotate: 0; } to { rotate: 360; } }
+    @keyframes pulse { 0% { scale: 1; } 50% { scale: 1.4; } 100% { scale: 1; } }
+    #a { animation: spin 1000ms linear infinite; width: 40; height: 40; background: #4f7cff; }
+    #b { animation: pulse 2000ms ease-in-out infinite; width: 20; height: 20; }
+    </style></head><body><div id="a"></div><div id="b"></div></body></html>
+    """
+    let dK = hn_parse_html(hK, hK.utf8.count)!
+    // 内联 <style> 里的 keyframes 应在文档样式表里
+    var found = 0
+    if let sheetsPtr = Optional(dK) {
+        _ = sheetsPtr
+    }
+    // 通过节点样式检查动画名是否解析
+    let cK = hn_context_create()
+    hn_context_set_doc(cK, dK)
+    // 内联样式表由 set_doc 装载(hn_context_doc 内联表)
+    hn_context_layout(cK, 400, 300, &backend)
+    if let a = hn_doc_find_by_id(dK, "a") {
+        var namePtr: UnsafePointer<CChar>?
+        var kfMs: Float = 0
+        var iter: Int32 = 0
+        hn_node_debug_anim(a, &namePtr, &kfMs, &iter)
+        let name = namePtr.map { String(cString: $0) } ?? "(nil)"
+        check(name == "spin", "keyframes: 动画名解析 (name=\(name))")
+        check(abs(kfMs - 1000) < 1, "keyframes: 时长解析 (\(kfMs)ms)")
+        check(iter == -1, "keyframes: infinite → iter=-1 (\(iter))")
+        found += 1
+    } else { check(false, "keyframes: #a 缺失") }
+    if let b = hn_doc_find_by_id(dK, "b") {
+        var namePtr: UnsafePointer<CChar>?
+        var kfMs: Float = 0
+        var iter: Int32 = 0
+        hn_node_debug_anim(b, &namePtr, &kfMs, &iter)
+        let name = namePtr.map { String(cString: $0) } ?? "(nil)"
+        check(name == "pulse" && abs(kfMs - 2000) < 1,
+              "keyframes: 第二个动画独立 (name=\(name), \(kfMs)ms)")
+    }
+
+    // ---- 2) 时间轴采样: rotate 应随时间推进 ----
+    if let a = hn_doc_find_by_id(dK, "a") {
+        var r0: Float = 0
+        _ = hn_context_anim_tick(cK, -1)              // 初始化
+        _ = hn_context_anim_tick(cK, 250)             // 1/4 周期
+        hn_node_debug_rotate(a, &r0)
+        check(abs(r0 - 90) < 8, String(format: "keyframes: 250ms/1000ms → rotate≈90° (实得 %.0f°)", r0))
+        _ = hn_context_anim_tick(cK, 250)             // 累计半周期
+        var r1: Float = 0
+        hn_node_debug_rotate(a, &r1)
+        check(abs(r1 - 180) < 12, String(format: "keyframes: 累计半周期 → rotate≈180° (实得 %.0f°)", r1))
+        // 无限循环: 超过一个周期后应回卷而不是停止
+        for _ in 0..<4 { _ = hn_context_anim_tick(cK, 250) }
+        var still = hn_context_anim_tick(cK, 16)
+        check(still == 1, "keyframes: infinite 持续运行(不停止)")
+        _ = found
+    }
+
+    // ---- 3) 3D 变换: rotateY 产生倾斜 → 绘制四边形而非矩形 ----
+    let h3 = """
+    <html><head><style>
+    #flat { width: 100; height: 60; background: #ff0000; }
+    #tilt { width: 100; height: 60; background: #00ff00; transform: rotateY(50deg); }
+    #persp { width: 100; height: 60; background: #0000ff; perspective: 200;
+             transform: rotateX(35deg); }
+    </style></head><body>
+    <div id="flat"></div><div id="tilt"></div><div id="persp"></div>
+    </body></html>
+    """
+    let d3 = hn_parse_html(h3, h3.utf8.count)!
+    let c3 = hn_context_create()
+    hn_context_set_doc(c3, d3)
+    hn_context_layout(c3, 400, 400, &backend)
+    if let dl3 = hn_context_display_list(c3) {
+        var quads = 0, redRects = 0
+        for i in 0..<Int(dl3.pointee.count) {
+            let cmd = dl3.pointee.cmds![i]
+            if cmd.kind == HN_CMD_QUAD { quads += 1 }
+            if cmd.kind == HN_CMD_RECT && cmd.fill == 0xff0000ff { redRects += 1 }
+        }
+        check(quads >= 2, "3D: rotateY/rotateX 产生四边形指令 (\(quads) 个)")
+        check(redRects == 1, "3D: 未变换元素仍走矩形路径(不受影响)")
+    }
+    // 投影几何: 三种情况分别验证(正交压缩 / 透视梯形 / 2D 旋转)
+    // 注意: 正交投影下 rotateY 只均匀压缩宽度(仍是矩形) —— 这是正确的 CSS 行为
+    func quadOf(_ css: String, _ w: Float, _ h: Float) -> (Bool, [Float], [Float]) {
+        let html = "<html><head><style>\(css)</style></head><body><div id=\"q\"></div></body></html>"
+        guard let dd = hn_parse_html(html, html.utf8.count) else { return (false, [], []) }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, dd)
+        // 内联样式表由 set_doc 装载
+        hn_context_layout(cc, 400, 400, &backend)
+        guard let dl = hn_context_display_list(cc) else { return (false, [], []) }
+        for i in 0..<Int(dl.pointee.count) {
+            let cmd = dl.pointee.cmds![i]
+            if cmd.kind == HN_CMD_QUAD {
+                var xs = [Float](repeating: 0, count: 4)
+                var ys = [Float](repeating: 0, count: 4)
+                withUnsafePointer(to: cmd.qx) { px in
+                    px.withMemoryRebound(to: Float.self, capacity: 4) { ax in
+                        for k in 0..<4 { xs[k] = ax[k] }
+                    }
+                }
+                withUnsafePointer(to: cmd.qy) { py in
+                    py.withMemoryRebound(to: Float.self, capacity: 4) { ay in
+                        for k in 0..<4 { ys[k] = ay[k] }
+                    }
+                }
+                return (true, xs, ys)
+            }
+        }
+        return (false, [], [])
+    }
+
+    // (a) 正交 rotateY: 仍是矩形, 但宽度被压缩到 ~cos(45°)*120 ≈ 85
+    let (okA, xsA, _) = quadOf("#q { transform: rotateY(45deg); width: 120; height: 80; background: #f00; }", 120, 80)
+    if okA {
+        let topW = abs(xsA[1] - xsA[0])
+        check(topW < 100 && topW > 70,
+              String(format: "3D: 正交 rotateY(45°) 压缩宽度到 %.0f (期望 ≈85)", topW))
+    } else { check(false, "3D: 正交 rotateY 未产生四边形") }
+
+    // (b) 透视 rotateY: 左右边不等(近大远小)
+    let (okB, xsB, _) = quadOf("#q { perspective: 300; transform: rotateY(45deg); width: 120; height: 80; background: #f00; }", 120, 80)
+    if okB {
+        // 绕 Y 轴旋转时上下边仍水平等长, **左右边高度不同**才是透视特征(近大远小)。
+        // 若只看上下边会误判(它们本就相等), 这是我第一版断言写错的地方。
+        var leftH: Float = 0, rightH: Float = 0
+        let okB2 = okB
+        if okB2 {
+            // 需要 y 坐标: 重新取一次(quadOf 的第二个返回值只给了 x)
+            let html = "<html><head><style>#q { perspective: 300; transform: rotateY(45deg); width: 120; height: 80; background: #f00; }</style></head><body><div id=\"q\"></div></body></html>"
+            if let dd = hn_parse_html(html, html.utf8.count) {
+                let cc = hn_context_create()
+                hn_context_set_doc(cc, dd)
+                hn_context_layout(cc, 400, 400, &backend)
+                if let dl = hn_context_display_list(cc) {
+                    for i in 0..<Int(dl.pointee.count) {
+                        let cmd = dl.pointee.cmds![i]
+                        if cmd.kind == HN_CMD_QUAD {
+                            var ys = [Float](repeating: 0, count: 4)
+                            withUnsafePointer(to: cmd.qy) { py in
+                                py.withMemoryRebound(to: Float.self, capacity: 4) { ay in
+                                    for k in 0..<4 { ys[k] = ay[k] }
+                                }
+                            }
+                            leftH = abs(ys[3] - ys[0])     // 左边(顶点 0→3)
+                            rightH = abs(ys[2] - ys[1])    // 右边(顶点 1→2)
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        check(abs(leftH - rightH) > 3,
+              String(format: "3D: 透视 rotateY 左右边高度不同 (左 %.0f / 右 %.0f) — 近大远小", leftH, rightH))
+    } else { check(false, "3D: 透视 rotateY 未产生四边形") }
+
+    // (c) 透视 rotateX: 上边明显短于下边
+    let (okC, xsC, _) = quadOf("#q { perspective: 300; transform: rotateX(40deg); width: 120; height: 80; background: #f00; }", 120, 80)
+    if okC {
+        let topW = abs(xsC[1] - xsC[0]), botW = abs(xsC[2] - xsC[3])
+        check(topW < botW - 5,
+              String(format: "3D: 透视 rotateX(40°) 上窄下宽 (上 %.0f / 下 %.0f)", topW, botW))
+    } else { check(false, "3D: 透视 rotateX 未产生四边形") }
+
+    // (d) 纯 2D rotate: 也应产生四边形(旋转后不再轴对齐)
+    let (okD, xsD, ysD) = quadOf("#q { transform: rotate(20deg); width: 120; height: 80; background: #f00; }", 120, 80)
+    if okD {
+        // 旋转后上边不再水平: 两端 y 不同
+        let dy = abs(ysD[1] - ysD[0])
+        check(dy > 20, String(format: "3D: rotate(20°) 上边倾斜 (两端 dy=%.0f)", dy))
+    } else { check(false, "3D: rotate(20°) 未产生四边形(旋转后应非轴对齐)") }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

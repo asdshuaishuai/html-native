@@ -199,7 +199,96 @@ static void parse_rules(cps *s, hn_sheet *sh, float min_w, float max_w) {
         if (s->p >= s->end) break;
         if (*s->p == '@') {
             /* @media: 解析 min-width/max-width 条件后递归解析内部规则 */
-            if (!strncasecmp(s->p, "@media", 6)) {
+            /* @keyframes: 名字 + { 0% {..} 50% {..} 100% {..} } */
+            if (!strncasecmp(s->p, "@keyframes", 10) ||
+                !strncasecmp(s->p, "@-webkit-keyframes", 18)) {
+                const char *p0 = s->p;
+                s->p += (s->p[1] == '-' ? 18 : 10);
+                skip_ws(s);
+                char *name = read_ident(s);          /* 动画名(不折叠大小写) */
+                skip_ws(s);
+                if (!name || s->p >= s->end || *s->p != '{') {
+                    s->p = p0;
+                    goto not_at_rule;
+                }
+                s->p++;                              /* '{' */
+                /* 分配一个定义槽 */
+                if (sh->n_kfs == sh->cap_kfs) {
+                    int nc = sh->cap_kfs ? sh->cap_kfs * 2 : 8;
+                    hn_keyframes *nk = hn_arena_alloc(sh->arena,
+                                                      sizeof(hn_keyframes) * (size_t)nc);
+                    if (sh->kfs) memcpy(nk, sh->kfs, sizeof(hn_keyframes) * (size_t)sh->n_kfs);
+                    sh->kfs = nk; sh->cap_kfs = nc;
+                }
+                hn_keyframes *kf = &sh->kfs[sh->n_kfs];
+                memset(kf, 0, sizeof(*kf));
+                kf->name = name;
+                /* 解析关键帧块 */
+                while (s->p < s->end && *s->p != '}') {
+                    skip_ws(s);
+                    if (s->p >= s->end || *s->p == '}') break;
+                    /* 位置: from / to / <pct>% , 允许逗号分隔多个 */
+                    float at = 0;
+                    if (!strncasecmp(s->p, "from", 4)) { at = 0; s->p += 4; }
+                    else if (!strncasecmp(s->p, "to", 2)) { at = 1; s->p += 2; }
+                    else {
+                        char *num = s->p;
+                        double v = strtod(num, (char **)&s->p);
+                        at = (float)(v / 100.0);
+                        while (s->p < s->end && (*s->p == ' ' || *s->p == '%')) s->p++;
+                    }
+                    while (s->p < s->end && (*s->p == ' ' || *s->p == ',')) s->p++;
+                    if (s->p >= s->end || *s->p != '{') { /* 跳过畸形帧 */
+                        const char *q = memchr(s->p, '}', (size_t)(s->end - s->p));
+                        if (!q) break;
+                        s->p = q + 1;
+                        continue;
+                    }
+                    s->p++;                          /* '{' */
+                    /* 声明组 */
+                    hn_decl ds[32];
+                    int nd = 0;
+                    while (s->p < s->end && *s->p != '}') {
+                        skip_ws(s);
+                        if (s->p >= s->end || *s->p == '}') break;
+                        char *prop = read_ident(s);
+                        skip_ws(s);
+                        if (!prop || s->p >= s->end || *s->p != ':') {
+                            const char *q = memchr(s->p, ';', (size_t)(s->end - s->p));
+                            const char *qb = memchr(s->p, '}', (size_t)(s->end - s->p));
+                            if (qb && (!q || qb < q)) s->p = qb;
+                            else if (q) s->p = q + 1;
+                            else break;
+                            continue;
+                        }
+                        s->p++;                      /* ':' */
+                        skip_ws(s);
+                        const char *vs = s->p;
+                        while (s->p < s->end && *s->p != ';' && *s->p != '}') s->p++;
+                        const char *ve = s->p;
+                        while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+                        if (nd < 32 && ve > vs) {
+                            ds[nd].name = prop;
+                            ds[nd].value = hn_arena_strndup(sh->arena, vs, (size_t)(ve - vs));
+                            nd++;
+                        }
+                        if (s->p < s->end && *s->p == ';') s->p++;
+                    }
+                    if (s->p < s->end && *s->p == '}') s->p++;
+                    if (kf->n_stops < 16 && nd > 0) {
+                        hn_kf_stop *st = &kf->stops[kf->n_stops++];
+                        st->at = at;
+                        st->decls = hn_arena_alloc(sh->arena, sizeof(hn_decl) * (size_t)nd);
+                        memcpy(st->decls, ds, sizeof(hn_decl) * (size_t)nd);
+                        st->n_decls = nd;
+                    }
+                }
+                if (s->p < s->end && *s->p == '}') s->p++;
+                sh->n_kfs++;
+                continue;
+            }
+not_at_rule:
+                        if (!strncasecmp(s->p, "@media", 6)) {
                 const char *brace = memchr(s->p, '{', (size_t)(s->end - s->p));
                 const char *semi = memchr(s->p, ';', (size_t)(s->end - s->p));
                 if (brace && (!semi || brace < semi)) {

@@ -4,6 +4,7 @@
  * font-size 先于其它属性应用(处理 em 单位依赖)。
  */
 #include <math.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include "hn_internal.h"
@@ -117,6 +118,22 @@ static int sv_len(sv t, float font_px, float *out, int *unit) {
     *out = v;
     *unit = u;
     return 1;
+}
+
+/* 把 sv 复制到静态池。动画名来自样式表(生命周期长于样式计算的临时 arena),
+   这里复制一份独立保存; 池满则环形复用(不崩溃)。 */
+#define SV_POOL_SLOTS 256
+static char *sv_pool[SV_POOL_SLOTS];
+static int sv_pool_n = 0;
+static const char *sv_dup(sv t) {
+    if (t.n == 0 || t.n >= 64) return NULL;
+    if (sv_pool_n >= SV_POOL_SLOTS) sv_pool_n = 0;
+    char *slot = sv_pool[sv_pool_n];
+    if (!slot) { slot = (char *)malloc(64); sv_pool[sv_pool_n] = slot; }
+    memcpy(slot, t.s, t.n);
+    slot[t.n] = 0;
+    sv_pool_n++;
+    return slot;
 }
 
 static int sv_color(sv t, hn_color *out) {
@@ -432,6 +449,42 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             else if (strchr(buf, 's')) st->transition_ms = (float)(val * 1000.0);
             if (st->transition_ms > 0) break;
         }
+    } else if (!strcmp(name, "transform")) {
+        /* transform: rotate(45deg) rotateX(10deg) scale(1.2) translate(4px, 8px)
+           逐函数解析; 未识别的函数忽略(不报错)。角度单位 deg 由 strtod 自然处理。 */
+        while (next_tok(&v, &t)) {
+            char buf[64];
+            if (t.n == 0 || t.n >= sizeof(buf)) continue;
+            memcpy(buf, t.s, t.n); buf[t.n] = 0;
+            char *lp = strchr(buf, '(');
+            if (!lp) continue;
+            *lp = 0;
+            float a1 = (float)strtod(lp + 1, NULL);
+            const char *comma = strchr(lp + 1, ',');
+            float a2v = comma ? (float)strtod(comma + 1, NULL) : 0;
+            if (!strcasecmp(buf, "rotate") || !strcasecmp(buf, "rotatez")) st->rotate = a1;
+            else if (!strcasecmp(buf, "rotatex")) st->rotate_x = a1;
+            else if (!strcasecmp(buf, "rotatey")) st->rotate_y = a1;
+            else if (!strcasecmp(buf, "scale")) st->scale = a1;
+            else if (!strcasecmp(buf, "skewx")) st->skew_x = a1;
+            else if (!strcasecmp(buf, "skewy")) st->skew_y = a1;
+            else if (!strcasecmp(buf, "translatex")) st->translate_x = a1;
+            else if (!strcasecmp(buf, "translatey")) st->translate_y = a1;
+            else if (!strcasecmp(buf, "translate")) { st->translate_x = a1; st->translate_y = a2v; }
+        }
+    } else if (!strcmp(name, "perspective")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_eq(t, "none")) st->perspective = 0;
+        else if (sv_len(t, st->font_size, &f2, &u)) st->perspective = f2;
+    } else if (!strcmp(name, "rotate") || !strcmp(name, "rotate-z")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_len(t, st->font_size, &f2, &u)) st->rotate = f2;
+    } else if (!strcmp(name, "rotate-x")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_len(t, st->font_size, &f2, &u)) st->rotate_x = f2;
+    } else if (!strcmp(name, "rotate-y")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_len(t, st->font_size, &f2, &u)) st->rotate_y = f2;
     } else if (!strcmp(name, "translate")) {
         /* translate: x y  (现代 CSS 独立属性; 也接受 translateY(x) 函数式写法) */
         int nth = 0;   /* 按出现次序取分量, 不能按"值是否为 0"判断(0 12 会误判) */
@@ -468,13 +521,25 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             else if (!strcmp(buf, "left")) st->anim_enter = HN_ENTER_LEFT;
             else if (!strcmp(buf, "fade")) st->anim_enter = HN_ENTER_FADE;
             else if (!strcmp(buf, "scale")) st->anim_enter = HN_ENTER_SCALE;
-            else if (!strcmp(buf, "none")) st->anim_enter = HN_ENTER_NONE;
+            else if (!strcmp(buf, "none")) { st->anim_enter = HN_ENTER_NONE; st->kf_name = NULL; }
+            else if (!strcmp(buf, "infinite")) st->kf_iter = -1;
+            else if (!strcmp(buf, "reverse")) st->kf_dir = 1;
+            else if (!strcmp(buf, "alternate")) st->kf_dir = 2;
+            else if (!strcmp(buf, "alternate-reverse")) st->kf_dir = 3;
+            else if (!strcmp(buf, "forwards") || !strcmp(buf, "both")) st->kf_fill = 1;
             else {
                 double val = strtod(buf, NULL);
                 if (val > 0) {
-                    if (strstr(buf, "ms")) st->enter_ms = (float)val;
-                    else if (strchr(buf, 's')) st->enter_ms = (float)(val * 1000.0);
+                    /* 时间值: 既作为入场时长, 也作为关键帧动画周期 */
+                    float ms = 0;
+                    if (strstr(buf, "ms")) ms = (float)val;
+                    else if (strchr(buf, 's')) ms = (float)(val * 1000.0);
+                    if (ms > 0) { st->enter_ms = ms; st->kf_ms = ms; }
                     else st->anim_ease = parse_ease(t, st->cb);
+                } else if (buf[0] && !isdigit((unsigned char)buf[0]) && !st->kf_name) {
+                    /* 只取**第一个**非数字 token 作为动画名 —— 否则后面的
+                       linear / ease-in-out 会把名字覆盖掉(实测踩过) */
+                    st->kf_name = sv_dup(t);
                 }
             }
         }

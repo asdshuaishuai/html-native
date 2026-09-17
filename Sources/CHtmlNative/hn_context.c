@@ -7,7 +7,7 @@
 #include "hn_internal.h"
 
 const char *hn_ua_css(void); /* hn_style.c */
-static int anim_walk(hn_node *n, float dt_ms);
+static int anim_walk(hn_context *c, hn_node *n, float dt_ms);
 
 hn_context *hn_context_create(void) {
     hn_context *c = calloc(1, sizeof(hn_context));
@@ -79,7 +79,7 @@ void hn_context_set_images(hn_context *c, const hn_image_backend *backend) {
 /* 推进过渡动画并写回样式; 返回 1 表示仍有动画在跑(dt_ms<0 → 仅初始化) */
 int hn_context_anim_tick(hn_context *c, float dt_ms) {
     if (!c->doc || !c->doc->root) return 0;
-    return anim_walk(c->doc->root, dt_ms);
+    return anim_walk(c, c->doc->root, dt_ms);
 }
 
 void hn_context_set_hover(hn_context *c, hn_node *n) { c->hover_node = n; }
@@ -363,6 +363,16 @@ int hn_node_insert_html(hn_node *parent, const char *html, size_t len, hn_swap_m
     return 1;
 }
 
+void hn_node_debug_anim(hn_node *n, const char **name, float *ms, int *iter) {
+    if (name) *name = n ? n->style.kf_name : NULL;
+    if (ms) *ms = n ? n->style.kf_ms : 0;
+    if (iter) *iter = n ? n->style.kf_iter : 0;
+}
+
+void hn_node_debug_rotate(hn_node *n, float *deg) {
+    if (deg) *deg = n ? n->style.rotate : 0;
+}
+
 void hn_node_debug_opacity(hn_node *n, float *out) {
     if (out) *out = n ? n->style.opacity : 0;
 }
@@ -451,6 +461,109 @@ static void lerp4(float out[4], const float a[4], const float b[4], float t) {
 
 /* 遍历树: 对齐动画目标, 必要时推进进度, 把当前值写回样式。
  * dt_ms < 0 表示"只初始化不推进"(首帧)。返回 1 表示仍有动画在跑。 */
+/* ---------- @keyframes ---------- */
+
+hn_keyframes *hn_sheet_find_kf(hn_sheet *sh, const char *name) {
+    if (!sh || !name) return NULL;
+    for (int i = 0; i < sh->n_kfs; i++)
+        if (sh->kfs[i].name && !strcmp(sh->kfs[i].name, name)) return &sh->kfs[i];
+    return NULL;
+}
+
+/* 从所有已加载样式表里按名字找动画定义 */
+static const hn_keyframes *find_kf(hn_context *c, const char *name) {
+    if (!c || !name) return NULL;
+    for (int i = 0; i < c->n_sheets; i++) {
+        hn_keyframes *kf = hn_sheet_find_kf(c->sheets[i], name);
+        if (kf) return kf;
+    }
+    if (c->doc)
+        for (int i = 0; i < c->doc->n_inline; i++) {
+            hn_keyframes *kf = hn_sheet_find_kf(c->doc->inline_sheets[i], name);
+            if (kf) return kf;
+        }
+    return NULL;
+}
+
+/* 在关键帧时间轴 t(0..1) 处取样: 找到相邻两帧并插值, 结果写入 style。
+   只处理可动画的几何与颜色属性(与 transition 支持的范围一致)。 */
+static void kf_sample(const hn_keyframes *kf, float t, hn_style *st) {
+    if (!kf || kf->n_stops == 0) return;
+    /* 找 t 落在的区间 */
+    int a = 0, b = kf->n_stops - 1;
+    for (int i = 0; i < kf->n_stops - 1; i++) {
+        if (t >= kf->stops[i].at && t <= kf->stops[i + 1].at) { a = i; b = i + 1; break; }
+    }
+    const hn_kf_stop *sa = &kf->stops[a], *sb = &kf->stops[b];
+    float span = sb->at - sa->at;
+    float f = span > 0.0001f ? (t - sa->at) / span : 0;
+    if (f < 0) f = 0; else if (f > 1) f = 1;
+    /* 两个端点都要看: 某属性可能只在其中一帧声明(另一帧用元素当前值 = 不插值) */
+    for (int side = 0; side < 2; side++) {
+        const hn_kf_stop *stp = side == 0 ? sa : sb;
+        float k = side == 0 ? (1 - f) : f;
+        if (k <= 0.0001f) continue;
+        for (int d = 0; d < stp->n_decls; d++) {
+            const char *nm = stp->decls[d].name;
+            const char *val = stp->decls[d].value;
+            float num = (float)strtod(val, NULL);
+            if (!strcmp(nm, "opacity")) st->opacity += (num - st->opacity) * k;
+            else if (!strcmp(nm, "translate-x") || !strcmp(nm, "translate")) st->translate_x += (num - st->translate_x) * k;
+            else if (!strcmp(nm, "translate-y")) st->translate_y += (num - st->translate_y) * k;
+            else if (!strcmp(nm, "scale")) st->scale = 1.0f + (num - 1.0f) * k;
+            else if (!strcmp(nm, "rotate") || !strcmp(nm, "rotate-z")) st->rotate = num * k;
+            else if (!strcmp(nm, "rotate-x")) st->rotate_x = num * k;
+            else if (!strcmp(nm, "rotate-y")) st->rotate_y = num * k;
+            else if (!strcmp(nm, "background") || !strcmp(nm, "background-color")) {
+                hn_color col = 0;
+                if (hn_color_parse(val, strlen(val), &col)) {
+                    float c4[4], cur4[4];
+                    rgba_of(col, c4); rgba_of(st->background, cur4);
+                    for (int q = 0; q < 4; q++) cur4[q] += (c4[q] - cur4[q]) * k;
+                    st->background = color_of(cur4);
+                    st->has_gradient = 0;
+                }
+            } else if (!strcmp(nm, "color")) {
+                hn_color col = 0;
+                if (hn_color_parse(val, strlen(val), &col)) {
+                    float c4[4], cur4[4];
+                    rgba_of(col, c4); rgba_of(st->color, cur4);
+                    for (int q = 0; q < 4; q++) cur4[q] += (c4[q] - cur4[q]) * k;
+                    st->color = color_of(cur4);
+                }
+            }
+        }
+    }
+}
+
+/* 推进 @keyframes 动画: 返回 1 表示仍在播放 */
+static int kf_tick(hn_node *n, const hn_keyframes *kf, float ms, int iter, int dir,
+                   int /* fill */, float *clock_io, int *done_io, hn_style *st) {
+    if (!kf || ms <= 0) return 0;
+    float dur = ms;
+    *clock_io += 0;               /* 时钟由调用方按 dt 累加 */
+    float total = *clock_io / dur;          /* 已播放周期数(可为小数) */
+    float t;
+    if (iter < 0) {                          /* 无限循环 */
+        t = total - floorf(total);
+    } else {
+        if (total >= (float)iter) { *done_io = 1; t = 1.0f; }
+        else t = total - floorf(total);
+    }
+    /* 方向: alternate 时偶数轮正向、奇数轮反向 */
+    int cyc = (int)floorf(total);
+    int rev = 0;
+    if (dir == 1) rev = 1;
+    else if (dir == 2) rev = (cyc & 1);
+    else if (dir == 3) rev = !(cyc & 1);
+    if (rev) t = 1.0f - t;
+    kf_sample(kf, t, st);
+    return iter < 0 || !*done_io;
+}
+
+/* 关键帧动画的时钟推进(每帧调用; dt 由 anim_tick 传入) */
+static float g_last_dt = 0;
+
 /* ---------- 缓动 ---------- */
 
 /* 三次贝塞尔求值: 先由 x 反解参数 t(牛顿迭代), 再算 y —— 与 CSS 同法 */
@@ -501,7 +614,7 @@ static void enter_from(int preset, float *tx, float *ty, float *sc, float *op) {
     }
 }
 
-static int anim_walk(hn_node *n, float dt_ms) {
+static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
     int active = 0;
     if (n->kind == HN_ELEM) {
         hn_style *st = &n->style;
@@ -513,6 +626,29 @@ static int anim_walk(hn_node *n, float dt_ms) {
         float bg_now[4], fg_now[4];
         rgba_of(st->background, bg_now);
         rgba_of(st->color, fg_now);
+
+        /* @keyframes 动画: 声明了 animation-name 且能在样式表里找到定义。
+           每帧按时间轴采样, 直接写入样式字段(几何由绘制阶段消费)。
+           与入场预设互斥: 有关键帧动画就不再播入场。 */
+        if (st->kf_name && st->kf_ms > 0) {
+            if (!a->kf) {
+                a->kf = find_kf(c, st->kf_name);
+                a->kf_clock = 0;
+                a->kf_done = 0;
+            }
+            if (a->kf && !a->kf_done) {
+                if (dt_ms > 0) a->kf_clock += dt_ms;
+                int still = kf_tick(n, a->kf, st->kf_ms, st->kf_iter, st->kf_dir,
+                                    st->kf_fill, &a->kf_clock, &a->kf_done, st);
+                st->opacity = st->opacity;   /* kf_sample 已就地写入 */
+                a->o = st->opacity;
+                a->tx = st->translate_x; a->ty = st->translate_y;
+                a->sc = st->scale;       a->rot = st->rotate;
+                a->dirty_written = 1;
+                if (still) active = 1;
+                goto children;
+            }
+        }
 
         /* 入场动画: 元素首次出现且声明了 animation 时, 从预设起始态过渡到目标态。
            用独立标志跟踪, 使其不被随后的样式重算打断(每次 relayout 都会把
@@ -665,7 +801,7 @@ static int anim_walk(hn_node *n, float dt_ms) {
     }
 children:
     for (hn_node *ch = n->first; ch; ch = ch->next)
-        if (anim_walk(ch, dt_ms)) active = 1;
+        if (anim_walk(c, ch, dt_ms)) active = 1;
     return active;
 }
 

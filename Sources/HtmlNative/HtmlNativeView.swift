@@ -82,8 +82,8 @@ public final class HtmlNativeView: NSView, HNWebHost {
     /// 帧驱动: 优先 CADisplayLink(macOS 14+, 与刷新率对齐), 回退 CVDisplayLink。
     /// 绝不用 Timer —— 它与 vsync 不同相, 60Hz 定时器配 120Hz 屏只能隔帧更新, 产生抖动。
     private var frameDriverActive = false
-    private var caLink: AnyObject?   // CADisplayLink(macOS 14+); 用 AnyObject 存储以兼容部署目标
     private var cvLink: CVDisplayLink?
+    private var fallbackTimer: Timer?
     private var lastFrameTime: CFTimeInterval = 0
     private var caretOn = true
     private var focusedInput: OpaquePointer?
@@ -445,7 +445,8 @@ public final class HtmlNativeView: NSView, HNWebHost {
         guard let ctx else { return }
         if frameDriverActive { return }
         let hasStreams = hn_context_doc(ctx).flatMap { hn_doc_find_attr($0, "hn-stream", 0) } != nil
-        guard hasStreams || hn_context_anim_tick(ctx, 0) == 1 else { return }
+        let probe = hn_context_anim_tick(ctx, 0)
+        guard hasStreams || probe == 1 else { return }
         lastFrameTime = CACurrentMediaTime()
         startFrameDriver()
     }
@@ -453,40 +454,40 @@ public final class HtmlNativeView: NSView, HNWebHost {
     private func startFrameDriver() {
         guard !frameDriverActive else { return }
         frameDriverActive = true
-        if #available(macOS 14.0, *) {
-            // 每屏刷新回调一次: 120Hz 屏就是 120 次/秒, 相位与 vsync 精确对齐
-            let link = displayLink(target: self, selector: #selector(onDisplayTick(_:)))
-            link.add(to: .main, forMode: .common)
-            caLink = link
-        } else {
-            var link: CVDisplayLink?
-            guard CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess,
-                  let link else { frameDriverActive = false; return }
+        /* 驱动策略: CVDisplayLink 优先(与刷新率对齐, 无需屏幕关联),
+           失败则退回 Timer(60fps)。
+           注: CADisplayLink 在 accessory 激活策略 + 无屏幕关联时**不触发回调**
+           (实测 caLink 创建成功但 onDisplayTick 零次), 因此不作为首选。 */
+        var link: CVDisplayLink?
+        if CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess, let link {
             let cb: CVDisplayLinkOutputCallback = { _, _, _, _, _, context in
                 guard let context else { return kCVReturnSuccess }
                 let view = Unmanaged<HtmlNativeView>.fromOpaque(context).takeUnretainedValue()
-                DispatchQueue.main.async { view.frameStep() }   // 视图状态在主线程推进
+                DispatchQueue.main.async { view.frameStep() }
                 return kCVReturnSuccess
             }
             CVDisplayLinkSetOutputCallback(link, cb, Unmanaged.passUnretained(self).toOpaque())
-            CVDisplayLinkStart(link)
-            cvLink = link
+            if CVDisplayLinkStart(link) == kCVReturnSuccess {
+                cvLink = link
+                return
+            }
         }
+        /* 兜底: 主 RunLoop 定时器(60fps)。
+           在 CVDisplayLink 不可用的环境(无活动显示器/沙箱)也保证动画能跑。 */
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.frameStep()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        fallbackTimer = t
     }
 
     private func stopFrameDriver() {
         frameDriverActive = false
-        if #available(macOS 14.0, *) {
-            (caLink as? CADisplayLink)?.invalidate()
-            caLink = nil
-        } else {
-            if let l = cvLink { CVDisplayLinkStop(l) }
-            cvLink = nil
-        }
+        if let l = cvLink { CVDisplayLinkStop(l) }
+        cvLink = nil
+        fallbackTimer?.invalidate()
+        fallbackTimer = nil
     }
-
-    @available(macOS 14.0, *)
-    @objc private func onDisplayTick(_ link: CADisplayLink) { frameStep() }
 
     /// 一帧: 推进过渡插值 + 流式跟随 → 请求重绘。两者都空闲则停表。
     private func frameStep() {
@@ -498,6 +499,13 @@ public final class HtmlNativeView: NSView, HNWebHost {
         guard dt > 0 else { return }
         let animActive = hn_context_anim_tick(ctx, dt) == 1
         let streamActive = followStreams(dt: dt)
+        /* 动画推进改的是**样式字段**, 而 display list 是绘制阶段生成的 ——
+           只标 needsDisplay 会重画旧指令(界面看着不动)。
+           必须重新生成绘制指令(repaint 只重跑绘制, 不重算样式/布局,
+           所以不会把动画插值结果覆盖掉)。 */
+        if animActive {
+            hn_context_repaint(ctx)
+        }
         needsDisplay = true
         if !animActive && !streamActive { stopFrameDriver() }
     }
@@ -1246,10 +1254,27 @@ public final class HtmlNativeView: NSView, HNWebHost {
             guard let cmds = dl.cmds else { break }
             let c = cmds[i]
             var d: [String: Any] = [
-                "k": c.kind == HN_CMD_TEXT ? "t" : (c.kind == HN_CMD_RECT ? "r" : "x"),
+                "k": c.kind == HN_CMD_TEXT ? "t"
+                   : (c.kind == HN_CMD_RECT ? "r"
+                   : (c.kind == HN_CMD_QUAD ? "q" : "x")),
             ]
             if c.kind == HN_CMD_TEXT {
                 d["x"] = Int(c.tx); d["y"] = Int(c.baseline)
+            } else if c.kind == HN_CMD_QUAD {
+                /* 四边形: 顶点是关键信息(3D 投影结果) */
+                var pts: [Int] = []
+                withUnsafePointer(to: c.qx) { px in
+                    withUnsafePointer(to: c.qy) { py in
+                        px.withMemoryRebound(to: Float.self, capacity: 4) { ax in
+                            py.withMemoryRebound(to: Float.self, capacity: 4) { ay in
+                                for k in 0..<4 { pts.append(Int(ax[k])); pts.append(Int(ay[k])) }
+                            }
+                        }
+                    }
+                }
+                d["q"] = pts
+                d["fill"] = Int(c.fill)
+                d["x"] = pts[0]; d["y"] = pts[1]
             } else {
                 d["x"] = Int(c.x); d["y"] = Int(c.y)
                 d["w"] = Int(c.w); d["h"] = Int(c.h)

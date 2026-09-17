@@ -249,6 +249,10 @@ case "dump":
         let w = c["w"] as? Int ?? 0, h = c["h"] as? Int ?? 0
         if k == "t" {
             print(String(format: "t x=%4d y=%4d %@", x, y, (c["s"] as? String) ?? ""))
+        } else if k == "q", let pts = c["q"] as? [Int], pts.count >= 8 {
+            print(String(format: "QUAD (%d,%d)(%d,%d)(%d,%d)(%d,%d) fill=%08X",
+                         pts[0], pts[1], pts[2], pts[3], pts[4], pts[5], pts[6], pts[7],
+                         (c["fill"] as? Int) ?? 0))
         } else {
             print(String(format: "%@ x=%4d y=%4d w=%4d h=%4d", k, x, y, w, h))
         }
@@ -271,6 +275,12 @@ case "eval":
     guard let id = o.id, let js = o.message ?? o.file else { usage(); exit(2) }
     let r = rpc(["op": "eval", "id": id, "js": js]) ?? [:]
     if let v = r["value"] { print(v) } else { print("失败: \(r["error"] ?? "?")"); exit(1) }
+
+case "anim":
+    guard let id = o.id else { usage(); exit(2) }
+    let r = rpc(["op": "anim", "id": id]) ?? [:]
+    if let lines = r["anim"] as? [String] { for l in lines { print(l) } }
+    else { print("失败"); exit(1) }
 
 case "text":
     guard let id = o.id, let el = o.target else { usage(); exit(2) }

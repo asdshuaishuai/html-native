@@ -260,6 +260,33 @@ enum HNProtocol {
             }
             return resp(true, ["id": id, "cmds": items])
 
+        case "anim":
+            guard let id = obj["id"] as? String else {
+                return resp(false, ["error": "id required"])
+            }
+            var lines: [String] = []
+            DispatchQueue.main.sync {
+                if let app = HNEngine.shared.app(id: id), let v = app.view,
+                   let ctx = Optional(v.engineContext), let doc = hn_context_doc(ctx) {
+                    // 报告所有声明了动画的元素
+                    var idx: Int32 = 0
+                    while let n = hn_doc_find_attr(doc, "class", idx) {
+                        idx += 1
+                        var name: UnsafePointer<CChar>?
+                        var ms: Float = 0
+                        var iter: Int32 = 0
+                        hn_node_debug_anim(n, &name, &ms, &iter)
+                        guard let np = name else { continue }
+                        var rot: Float = 0
+                        hn_node_debug_rotate(n, &rot)
+                        let id2 = hn_node_attr(n, "id").map { String(cString: $0) } ?? "-"
+                        lines.append("\(String(cString: np)) \(Int(ms))ms iter=\(iter) rotate=\(Int(rot))° (id=\(id2))")
+                    }
+                    if lines.isEmpty { lines.append("(无动画元素)") }
+                }
+            }
+            return resp(true, ["id": id, "anim": lines])
+
         case "text":
             guard let id = obj["id"] as? String, let eid = obj["element"] as? String else {
                 return resp(false, ["error": "id/element required"])

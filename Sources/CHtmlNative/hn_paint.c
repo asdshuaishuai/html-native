@@ -2,6 +2,7 @@
  * 滚动: overflow 容器把子树绘制偏移 (scroll_x, scroll_y) 并用
  * CLIP_PUSH/CLIP_POP 裁剪到自身盒内; 偏移沿树下累积。
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,55 @@ typedef struct {
     float scale;   /* 累积缩放(默认 1) */
     float ox, oy;  /* 缩放原点(绝对坐标) */
 } paint_guard;
+
+/* ---- 3D 变换 ---- */
+
+/* 把盒子四角经 3D 旋转 + 透视投影得到屏幕坐标。
+   旋转原点 = 盒中心(与 CSS transform-origin: 50% 50% 一致)。
+   返回 1 表示存在实际 3D 倾斜(需要按四边形绘制), 0 表示无需变换。 */
+static int project_3d(const hn_style *st, float bx, float by, float bw, float bh,
+                      float persp, float sx, float sy,
+                      float ox[4], float oy[4]) {
+    if (st->rotate_x == 0 && st->rotate_y == 0 && st->rotate == 0) return 0;
+    const float D2R = 3.14159265358979f / 180.0f;
+    float cx = bx + bw * 0.5f, cy = by + bh * 0.5f;
+    float rx = st->rotate_x * D2R, ry = st->rotate_y * D2R, rz = st->rotate * D2R;
+    float cxr = cosf(rx), sxr = sinf(rx);
+    float cyr = cosf(ry), syr = sinf(ry);
+    float czr = cosf(rz), szr = sinf(rz);
+    float dist = persp > 0 ? persp : 0;      /* 0 = 正交投影 */
+    /* 四角(局部坐标, 相对盒中心) */
+    float lx[4] = { -bw * 0.5f,  bw * 0.5f,  bw * 0.5f, -bw * 0.5f };
+    float ly[4] = { -bh * 0.5f, -bh * 0.5f,  bh * 0.5f,  bh * 0.5f };
+    int tilted = 0;
+    for (int i = 0; i < 4; i++) {
+        float x = lx[i], y = ly[i], z = 0;
+        /* 绕 X */
+        float y1 = y * cxr - z * sxr, z1 = y * sxr + z * cxr;
+        /* 绕 Y */
+        float x2 = x * cyr + z1 * syr, z2 = -x * syr + z1 * cyr;
+        /* 绕 Z */
+        float x3 = x2 * czr - y1 * szr, y3 = x2 * szr + y1 * czr;
+        float px = cx + x3, py = cy + y3;
+        if (dist > 0.01f) {
+            /* 透视: 离观察者越远(z2 越小)缩放越小 */
+            float k = dist / (dist - z2);
+            if (k < 0.05f) k = 0.05f;
+            if (k > 20.0f) k = 20.0f;
+            px = cx + (px - cx) * k;
+            py = cy + (py - cy) * k;
+        }
+        if (fabsf(z2) > 0.01f) tilted = 1;
+        ox[i] = px - sx;
+        oy[i] = py - sy;
+    }
+    /* 判定: 绕 X/Y 旋转或绕 Z 旋转(非 0 角度)都会让矩形不再轴对齐,
+       必须按四边形绘制。只有"完全没有旋转变换"时才走矩形快路径
+       (translate/scale 不改变轴对齐性, 仍可用矩形 + 宽高缩放)。 */
+    if (st->rotate_x == 0 && st->rotate_y == 0 && fabsf(st->rotate) < 0.01f) return 0;
+    (void)tilted;
+    return 1;
+}
 
 /* 绝对坐标 → 设备坐标(先绕原点缩放, 再减滚动偏移) */
 static inline float tfx(const paint_guard *g, float sx, float x) {
@@ -229,6 +279,9 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
        两者都由动画插值写入样式字段, 这里只读消费。 */
     float saved_sx = sx, saved_sy = sy;
     float saved_scale = g->scale, saved_ox = g->ox, saved_oy = g->oy;
+    /* 透视视距: 元素自身的 perspective, 否则取父级的(与 CSS 一致) */
+    float persp = st->perspective;
+    if (persp <= 0 && pst) persp = pst->perspective;
     if (st->translate_x != 0) sx -= st->translate_x;
     if (st->translate_y != 0) sy -= st->translate_y;
     if (st->scale != 1.0f && st->scale > 0.01f) {
@@ -430,6 +483,19 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     if (has_fill || has_border) {
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
+        /* 3D 变换: 有倾斜时按投影后的四边形填充(矩形无法表达透视形变) */
+        float qx[4], qy[4];
+        if (project_3d(st, n->bx, n->by, n->bw, n->bh, persp, sx, sy, qx, qy)) {
+            hn_cmd q;
+            memset(&q, 0, sizeof(q));
+            q.kind = HN_CMD_QUAD;
+            for (int k = 0; k < 4; k++) { q.qx[k] = qx[k]; q.qy[k] = qy[k]; }
+            q.fill = mul_alpha(st->background, alpha);
+            push_cmd(c, &q);
+            /* 四边形目前只填充; 子节点(文本)仍按平面绘制(简化),
+               对 UI 场景(卡片翻转/3D 倾斜)足够。 */
+            goto draw_children;
+        }
         cmd.kind = HN_CMD_RECT;
         cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
         cmd.radius = eff_radius(st, cmd.w, cmd.h);
@@ -478,6 +544,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             g->depth--;
         }
     }
+draw_children:
     /* 容器自身的行内片段(目前仅 text-overflow 的省略号):
        在子节点之后绘制, 使其覆盖在被截断的文本之上 */
     if (n->n_runs > 0 && st->display != HN_DISP_INLINE && !hn_node_is_input(n)) {

@@ -18,6 +18,8 @@ public enum HNPainter {
                 drawText(cmd, into: cg)
             } else if cmd.kind == HN_CMD_IMAGE {
                 drawImage(cmd, into: cg)
+            } else if cmd.kind == HN_CMD_QUAD {
+                drawQuad(cmd, into: cg)
             } else if cmd.kind == HN_CMD_CLIP_PUSH {
                 cg.saveGState()
                 let r = CGFloat(max(0, cmd.radius))
@@ -102,6 +104,32 @@ public enum HNPainter {
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attr))
         cg.textPosition = CGPoint(x: CGFloat(cmd.tx), y: CGFloat(cmd.baseline))
         CTLineDraw(line, cg)
+    }
+
+    /// 四边形填充(3D 投影后的面片): 逐顶点建路径后填充。
+    /// 抗锯齿由 CGContext 负责; 顶点顺序为顺时针, 无需额外排序。
+    static func drawQuad(_ cmd: hn_cmd, into cg: CGContext) {
+        /* C 的 float qx[4] 在 Swift 里导入为元组, 用 withUnsafePointer 取连续内存 */
+        var pts: [CGPoint] = []
+        withUnsafePointer(to: cmd.qx) { px in
+            withUnsafePointer(to: cmd.qy) { py in
+                px.withMemoryRebound(to: Float.self, capacity: 4) { ax in
+                    py.withMemoryRebound(to: Float.self, capacity: 4) { ay in
+                        for i in 0..<4 {
+                            pts.append(CGPoint(x: CGFloat(ax[i]), y: CGFloat(ay[i])))
+                        }
+                    }
+                }
+            }
+        }
+        cg.saveGState()
+        cg.beginPath()
+        cg.move(to: pts[0])
+        for i in 1..<4 { cg.addLine(to: pts[i]) }
+        cg.closePath()
+        cg.setFillColor(color(cmd.fill).cgColor)
+        cg.fillPath()
+        cg.restoreGState()
     }
 
     static func drawImage(_ cmd: hn_cmd, into cg: CGContext) {

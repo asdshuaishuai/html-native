@@ -190,6 +190,56 @@ static void paint_shadow(fb *f, const hn_cmd *c, float scale, float ox, float oy
     }
 }
 
+/* ---------------- 四边形(3D 投影面片) ---------------- */
+
+/* 扫描线填充: 对每行求与四边形各边的交点, 取最小/最大 x 之间填充。
+   边缘按 0.5px 覆盖率抗锯齿(与圆角矩形一致的策略)。 */
+static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
+    fcolor col = unpack(c->fill);
+    col.a *= alpha;
+    if (col.a <= 0.01f) return;
+    /* 包围盒 */
+    float minx = c->qx[0], maxx = c->qx[0], miny = c->qy[0], maxy = c->qy[0];
+    for (int i = 1; i < 4; i++) {
+        if (c->qx[i] < minx) minx = c->qx[i];
+        if (c->qx[i] > maxx) maxx = c->qx[i];
+        if (c->qy[i] < miny) miny = c->qy[i];
+        if (c->qy[i] > maxy) maxy = c->qy[i];
+    }
+    int y0 = (int)floorf(miny) - 1, y1 = (int)ceilf(maxy) + 1;
+    for (int py = y0; py <= y1; py++) {
+        float fy = py + 0.5f;
+        float xs[8];
+        int nx = 0;
+        for (int e = 0; e < 4; e++) {
+            float ax = c->qx[e], ay = c->qy[e];
+            float bx = c->qx[(e + 1) & 3], by = c->qy[(e + 1) & 3];
+            if ((ay <= fy && by > fy) || (by <= fy && ay > fy)) {
+                float t = (fy - ay) / (by - ay);
+                if (nx < 8) xs[nx++] = ax + t * (bx - ax);
+            }
+        }
+        if (nx < 2) continue;
+        /* 排序取最小/最大(四边形凸, 最多 2 个交点, 这里通用处理) */
+        for (int a2 = 1; a2 < nx; a2++) {
+            float k = xs[a2]; int b2 = a2 - 1;
+            while (b2 >= 0 && xs[b2] > k) { xs[b2 + 1] = xs[b2]; b2--; }
+            xs[b2 + 1] = k;
+        }
+        float lx = xs[0], rx = xs[nx - 1];
+        int x0 = (int)floorf(lx), x1 = (int)ceilf(rx);
+        for (int px = x0; px <= x1; px++) {
+            float fx = px + 0.5f;
+            float cov = 0;
+            if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
+            else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;   /* 边缘半覆盖 */
+            if (cov <= 0) continue;
+            fcolor cc = col; cc.a *= cov;
+            fb_blend(f, px, py, cc);
+        }
+    }
+}
+
 /* ---------------- 文本(FreeType) ---------------- */
 
 #ifndef HN_NO_TEXT
@@ -365,6 +415,9 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, h
             break;
         case HN_CMD_CLIP_PUSH:
             fb_push_clip(&f, (int)c->x, (int)c->y, (int)(c->x + c->w), (int)(c->y + c->h));
+            break;
+        case HN_CMD_QUAD:
+            paint_quad(&f, c, 1.0f);
             break;
         case HN_CMD_CLIP_POP:
             fb_pop_clip(&f);

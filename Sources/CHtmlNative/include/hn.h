@@ -56,7 +56,9 @@ typedef enum hn_cmd_kind {
     HN_CMD_TEXT = 2,      /* 一行文本, (x, baseline) 定位 */
     HN_CMD_IMAGE = 3,     /* 图片(路径), 覆盖 rect */
     HN_CMD_CLIP_PUSH = 4, /* 圆角矩形裁剪入栈 */
-    HN_CMD_CLIP_POP = 5
+    HN_CMD_CLIP_POP = 5,
+    HN_CMD_QUAD = 6       /* 任意四边形(3D 投影结果); qx/qy 为四个顶点 */
+
 } hn_cmd_kind;
 
 typedef struct hn_cmd {
@@ -80,6 +82,9 @@ typedef struct hn_cmd {
     size_t      text_len;
     float       tx, baseline;
     hn_font_desc font;
+    /* QUAD: 4 个顶点(顺时针, 屏幕坐标). 用于 3D 变换后的面片填充 ——
+       透视投影后矩形不再是矩形, 必须按四边形光栅化。 */
+    float       qx[4], qy[4];
 } hn_cmd;
 
 typedef struct hn_display_list {
@@ -200,6 +205,10 @@ void hn_node_debug_background(hn_node *n, hn_color *out);
 void hn_node_debug_border(hn_node *n, hn_color *out);
 /* 内省: 读取节点当前 opacity(动画插值后的观测值) */
 void hn_node_debug_opacity(hn_node *n, float *out);
+/* 内省: 动画声明(name/时长/循环次数) */
+void hn_node_debug_anim(hn_node *n, const char **name, float *ms, int *iter);
+/* 内省: 当前旋转角度(2D rotate) */
+void hn_node_debug_rotate(hn_node *n, float *deg);
 void hn_node_debug_color(hn_node *n, hn_color *out);
 /* 节点自身的行内片段数; 文本节点为其被摆放的段数 */
 int hn_node_run_count(hn_node *n);

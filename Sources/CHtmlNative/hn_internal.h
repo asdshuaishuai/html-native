@@ -61,6 +61,12 @@ typedef struct hn_style {
     hn_color   sh_color;
     float      sh_ox, sh_oy, sh_blur;
     float      transition_ms; /* 过渡时长(0 = 关闭) */
+    /* ---- 2D/3D 变换(transform) ---- */
+    float      rotate;        /* rotate()/rotateZ(): 绕 Z 轴, 度 */
+    float      rotate_x;      /* rotateX(): 绕 X 轴, 度 */
+    float      rotate_y;      /* rotateY(): 绕 Y 轴, 度 */
+    float      perspective;   /* 父级 perspective(n): 视距 px; >0 启用透视 */
+    float      skew_x, skew_y;/* skew(): 斜切, 度 */
     /* ---- 定位(脱离流的浮层: 弹窗/下拉/遮罩/固定头) ---- */
     unsigned char position;    /* HN_POS_* */
     unsigned char has_top, has_right, has_bottom, has_left;
@@ -79,6 +85,12 @@ typedef struct hn_style {
     float      cb[4];                     /* cubic-bezier 参数 */
     unsigned char anim_enter;             /* 入场动画预设(HN_ENTER_*), 0=无 */
     float      enter_ms;                  /* 入场动画时长 */
+    /* @keyframes 动画: name 指向样式表内的定义(生命周期同表) */
+    const char *kf_name;
+    float      kf_ms;                     /* 单次时长 */
+    int        kf_iter;                   /* 循环次数; -1 = 无限 */
+    int        kf_dir;                    /* 0=normal 1=reverse 2=alternate 3=alternate-reverse */
+    unsigned char kf_fill;                /* 1 = forwards(结束后保持末帧) */
     int        overflow;     /* 0=visible 1=hidden/scroll(裁剪+可滚) */
     /* 自定义属性表(每次 layout 在 tmp arena 重建; 继承 = 复制父表后叠加) */
     hn_var    *vars; int n_vars;
@@ -105,6 +117,22 @@ typedef struct hn_run {
 } hn_run;
 
 /* 过渡动画状态: 引擎持有"当前值", 运行时按帧 tick 推进 */
+/* 一条 CSS 声明(名值对)。定义在此处: @keyframes 与样式规则都要用。 */
+typedef struct { const char *name, *value; } hn_decl;
+
+/* @keyframes 定义: 名字 + 若干关键帧(百分比位置 + 声明组) */
+typedef struct {
+    float      at;            /* 0..1 */
+    hn_decl   *decls;
+    int        n_decls;
+} hn_kf_stop;
+
+typedef struct {
+    const char *name;
+    hn_kf_stop  stops[16];
+    int         n_stops;
+} hn_keyframes;
+
 /* 缓动函数(与 CSS 命名对齐) */
 enum {
     HN_EASE_SMOOTH = 0,   /* 默认: smoothstep(C¹ 连续, 起收都柔和) */
@@ -139,6 +167,11 @@ typedef struct hn_anim {
     float tx, tx_from, tx_to;   /* translate x */
     float ty, ty_from, ty_to;   /* translate y */
     float sc, sc_from, sc_to;   /* scale */
+    float rot, rot_from, rot_to;      /* rotate 角度 */
+    /* @keyframes 运行状态 */
+    const hn_keyframes *kf;     /* 当前动画定义 */
+    float kf_clock;             /* 动画时钟(ms, 累加) */
+    int   kf_done;              /* 已播完(非无限循环且到达终点) */
     int   ease;                 /* 本次过渡的缓动 */
     float cb[4];                /* cubic-bezier 参数 */
     int   fresh;                /* 刚创建且声明了入场动画: 首次 tick 播放 */
@@ -184,7 +217,6 @@ struct hn_doc {
 void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len);
 
 /* ---------- CSS AST ---------- */
-typedef struct { const char *name, *value; } hn_decl;
 
 typedef struct {
     const char *tag;           /* 可为 NULL */
@@ -207,7 +239,14 @@ typedef struct {
     float media_min_w, media_max_w;  /* @media 条件; -1 = 无约束 */
 } hn_rule;
 
-struct hn_sheet { hn_arena *arena; hn_rule *rules; int n_rules; };
+struct hn_sheet {
+    hn_arena *arena;
+    hn_rule *rules; int n_rules;
+    hn_keyframes *kfs; int n_kfs; int cap_kfs;   /* 本表内的 @keyframes */
+};
+
+/* 查找 @keyframes 定义(跨所有已加载样式表) */
+hn_keyframes *hn_sheet_find_kf(hn_sheet *sh, const char *name);
 
 /* ---------- context ---------- */
 struct hn_context {

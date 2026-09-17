@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="520x480@200,150">
+<meta name="hn-title" content="3D 变换 · 动画">
+<meta name="hn-theme" content="dark">
+<style>
+@keyframes spin { from { rotate: 0; } to { rotate: 360; } }
+@keyframes flip { from { rotate-y: 0; } to { rotate-y: 360; } }
+@keyframes breathe { 0% { scale: 1; opacity: 0.55; } 50% { scale: 1.12; opacity: 1; } 100% { scale: 1; opacity: 0.55; } }
+@keyframes slide { from { translate-x: -30; opacity: 0; } to { translate-x: 0; opacity: 1; } }
+@keyframes hue { from { background: #4f7cff; } to { background: #a86bff; } }
+
+.panel { padding: 18; display: flex; flex-direction: column; gap: 14; height: 100%;
+         box-sizing: border-box; }
+.hint { color: var(--dim); font-size: 11; margin-bottom: 6; }
+.grid { display: flex; gap: 14; flex-wrap: nowrap; }
+.cell { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6; }
+.box { width: 84; height: 60; border-radius: 10; background: #4f7cff;
+       display: flex; align-items: center; justify-content: center;
+       color: #fff; font-size: 11; font-weight: 700; }
+.cap { color: var(--dim); font-size: 10; text-align: center; }
+
+/* 无限旋转(纯 2D) */
+.spin { animation: spin 3000ms linear infinite; }
+/* 3D 翻转(绕 Y 轴) */
+.flip { animation: flip 4000ms linear infinite; background: #ff7a45; }
+/* 呼吸(缩放 + 透明度, alternate 方向) */
+.breathe { animation: breathe 2200ms ease-in-out infinite alternate; background: #3ecf6f; }
+/* 入场滑入 */
+.slide { animation: slide 700ms ease-out; background: #f5b73d; color: #241a05; }
+/* 颜色循环 */
+.hue { animation: hue 2500ms linear infinite alternate; }
+
+/* 静态对比: 不同倾斜度(不带动画) */
+.tilt-row { display: flex; gap: 12; margin-top: 4; }
+.tilt { width: 74; height: 56; border-radius: 9; background: #2b3444;
+        border: 1 solid #3a4560; display: flex; align-items: center;
+        justify-content: center; color: #9aa3b5; font-size: 10; }
+.y15 { transform: rotateY(15deg); }
+.y40 { transform: rotateY(40deg); perspective: 400; }
+.x30 { transform: rotateX(30deg); perspective: 400; }
+.both { transform: rotateX(20deg) rotateY(25deg); perspective: 400; }
+</style>
+</head>
+<body>
+<div class="panel">
+  <div>
+    <div style="font-size:15;font-weight:700">3D 变换与关键帧动画</div>
+    <div class="hint">rotate/rotateX/rotateY + perspective · @keyframes 无限循环</div>
+  </div>
+
+  <div>
+    <div class="hint">关键帧动画(持续运行)</div>
+    <div class="grid">
+      <div class="cell"><div class="box spin">spin</div><div class="cap">rotate 3s 无限</div></div>
+      <div class="cell"><div class="box flip">flip</div><div class="cap">rotateY 4s 无限</div></div>
+      <div class="cell"><div class="box breathe">breathe</div><div class="cap">scale+opacity<br>alternate</div></div>
+      <div class="cell"><div class="box hue">hue</div><div class="cap">背景色循环</div></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="hint">透视倾斜(静态, 不同角度对比)</div>
+    <div class="tilt-row">
+      <div class="tilt y15">Y 15°</div>
+      <div class="tilt y40">Y 40°+透视</div>
+      <div class="tilt x30">X 30°+透视</div>
+      <div class="tilt both">X20+Y25</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="hint">入场动画(载入时播放一次)</div>
+    <div class="grid">
+      <div class="cell"><div class="box slide">slide</div><div class="cap">translateX 淡入</div></div>
+      <div class="cell"><div class="box slide" style="animation-delay: 0ms">2</div><div class="cap">同一预设</div></div>
+      <div class="cell"><div class="box slide">3</div><div class="cap">—</div></div>
+      <div class="cell"><div class="box slide" style="background: #a86bff">4</div><div class="cap">—</div></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
