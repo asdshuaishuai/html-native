@@ -230,6 +230,12 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **行内格式化上下文(IFC)**: 文本与 `display:inline`/`inline-block` 元素共享
   行盒、按词贪心换行 + CJK 码点硬拆、跨节点/跨行基线对齐、
   overflow 裁剪与滚动(带滚动指示条)
+- **关键帧动画(@keyframes)**: 多段动画定义 + `animation: <名> <时长> <缓动> 
+  infinite alternate` 简写; 时间轴逐帧采样, 支持 iteration/方向/fill。
+  适合"持续旋转/呼吸/脉冲/颜色循环"等无法用二态 transition 表达的效果
+- **3D 变换**: `transform: rotate/rotateX/rotateY + perspective`;
+  绕三轴旋转矩阵 + 透视投影(近大远小) → 四边形光栅化(新绘制指令 QUAD,
+  CoreGraphics 与软件光栅双后端实现)。可做卡片翻转、3D 倾斜面板
 - **动画系统(引擎级, 不是滚动专属)**: `transition` 过渡 + 
   **`animation: up|down|left|fade|scale <时长>` 入场预设**(新内容平滑浮现而非硬闪) +
   **`translate` / `scale` 几何动画**(位移并入滚动偏移、缩放按盒中心换算, 

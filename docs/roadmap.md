@@ -45,7 +45,7 @@
 | `::before` / `::after` 伪元素 | 装饰性 UI 的标配 |
 | `white-space` / `word-break` / `overflow-wrap` | 文本布局精确控制 |
 | CSS Grid | 现代布局（可延后到 flex 覆盖大部分场景后） |
-| `transform` (rotate/matrix) | 旋转/翻转/复合动画 |
+| ~~`transform` (rotate/matrix)~~ ✅ | 已完成(v0.2): rotate/rotateX/rotateY/perspective + 四边形光栅化 |
 | 路由 / 多视图导航 | 多页面应用 |
 | 状态管理 | 响应式数据绑定 |
 | 背景图片 | 视觉设计 |
@@ -59,6 +59,7 @@
 |---|---|
 | 虚拟滚动 / IntersectionObserver | 长列表性能 |
 | Web Workers 等价 | 后台计算 |
+| ~~启动持续动画~~ ✅ | 已完成(v0.2): @keyframes 多段动画 + 时间轴采样 |
 | CSS `contain` / `will-change` | 性能提示 |
 | 自定义字体 (`@font-face`) | 品牌字体 |
 | 触摸事件 | 移动端 |
