@@ -93,7 +93,8 @@ static void iv_push(ivec *iv, iitem it) {
 /* 行内子树 → item 序列(文档序); 空白折叠为一枚"前置空格"标记 */
 static float layout_box(hn_context *c, hn_node *n, float x, float y,
                         float avail_w, float avail_h,
-                        const hn_text_backend *tb, int measuring, float forced_h);
+                        const hn_text_backend *tb, int measuring, float forced_h,
+                        float forced_w);
 
 static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_backend *tb,
                            float avail_w, int measuring) {
@@ -123,7 +124,7 @@ static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_ba
         || (n->style.display == HN_DISP_FLEX && n->style.disp_inline)) {
         /* 原子片段: 先布局自身盒子(值文本/内边距/边框都在这里算), 再作为整体入流 */
         float avail = avail_w > 0 ? avail_w : -1;
-        layout_box(c, n, 0, 0, avail, -1, tb, measuring, -1);
+        layout_box(c, n, 0, 0, avail, -1, tb, measuring, -1, -1);
         iitem it;
         memset(&it, 0, sizeof(it));
         it.owner = n;               /* 借用 owner: 标记为该节点的占位片段 */
@@ -590,7 +591,7 @@ static void layout_out_of_flow(hn_context *c, hn_node *n, const hn_text_backend 
             ? (bv - cs->top - cs->bottom)
             : (cs->height_u == HN_U_PCT ? bv : -1);
         layout_box(c, ch, 0, 0, avail_w, avail_h, tb, 0,
-                   (cs->has_top && cs->has_bottom) ? avail_h : -1);
+                   (cs->has_top && cs->has_bottom) ? avail_h : -1, -1);
 
         /* 水平: left 优先; 否则 right 对齐; 都无则留在容器内容起点 */
         /* 水平: left / right / 都不设(留在容器内容起点)
@@ -701,7 +702,8 @@ static void layout_input(hn_context *c, hn_node *n, float content_w, const hn_te
 
 static float layout_box(hn_context *c, hn_node *n, float x, float y,
                         float avail_w, float avail_h,
-                        const hn_text_backend *tb, int measuring, float forced_h);
+                        const hn_text_backend *tb, int measuring, float forced_h,
+                        float forced_w);
 
 /* 整棵子树水平平移(含 runs), 用于 margin:auto 居中 */
 /* 整棵子树平移(dx, dy): 盒坐标 + run 的横纵位置都要跟上 */
@@ -723,6 +725,8 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
                           const hn_text_backend *tb, int measuring, float cross_h) {
     (void)st;
     float cur_y = 0, max_w = 0;
+    hn_node *prev_block = NULL;      /* 上一个参与流内定位的块级子节点(用于 margin 折叠) */
+    float pending_mb = 0;            /* 上一位遗留的 margin-bottom, 留待与下一位的 mt 折叠 */
     hn_node *ch = n->first;
     while (ch) {
         if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE) { ch = ch->next; continue; }
@@ -752,7 +756,29 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
         float mt = ch->style.margin[0], mb = ch->style.margin[2];
         float avail = (cw < 0) ? -1 : cw - ml - mr;
         if (avail < 0 && cw >= 0) avail = 0;
-        layout_box(c, ch, cx + ml, cy + cur_y + mt, avail, cross_h, tb, measuring, -1);
+        /* 相邻块级 margin 折叠: 上一个元素的 margin-bottom 与本次的
+           margin-top 取**最大值**(而非相加) —— CSS 标准行为。
+           不折叠会让垂直间距凭空变大一倍(实测: 两段各 margin:20 的
+           文字之间出现 40px 空隙而不是 20px), 破坏排版节奏。
+           注意: 负 margin 也按折叠规则处理(取 max(负,负) 即较小者)。 */
+        /* 相邻块级 margin 折叠(CSS 标准): 前一个的 margin-bottom 与本个的
+           margin-top 取**最大值**, 而不是相加 —— 不折叠会让垂直间距凭空
+           大一倍(实测两段 margin:20 的文字之间空隙是 40px 而非 20px)。
+           实现用"挂起 margin"模型: 前一位的 mb 不立即占位, 而是留到
+           下一位与 mt 一起折叠后一次性占位。这样既不会重复计入,
+           最后一个元素的 mb 也能正确计入总高。负 margin 同样处理:
+           两负取更小者, 一正一负则相加(可相互抵消)。 */
+        float eff_mt;
+        if (prev_block == NULL || is_out_of_flow(prev_block)) {
+            eff_mt = mt;                      /* 首位: 与父内容区顶边折叠 */
+        } else if (pending_mb > 0 && mt > 0) {
+            eff_mt = mt > pending_mb ? mt : pending_mb;
+        } else if (pending_mb < 0 && mt < 0) {
+            eff_mt = mt < pending_mb ? mt : pending_mb;
+        } else {
+            eff_mt = pending_mb + mt;
+        }
+        layout_box(c, ch, cx + ml, cy + cur_y + eff_mt, avail, cross_h, tb, measuring, -1, -1);
         /* margin:0 auto — 左右 auto 吸收剩余空间(双侧=居中, 仅左=推右) */
         if (!measuring && cw >= 0 && ch->kind == HN_ELEM && (ch->style.margin_auto & 10)) {
             float rem = cw - ch->bw - ml - mr;
@@ -761,13 +787,15 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
                 if (ch->style.margin_auto & 8) translate_x(ch, rem / (float)na);
             }
         }
-        cur_y += mt + ch->bh + mb;
+        cur_y += eff_mt + ch->bh;        /* mb 挂起, 交给下一位折叠 */
+        pending_mb = mb;
         float uw = ch->bw + ml + mr;
         if (uw > max_w) max_w = uw;
+        prev_block = ch;
         ch = ch->next;
     }
     n->pref_w = max_w;
-    return cur_y;
+    return cur_y + pending_mb;          /* 末位挂起的 mb 仍要计入总高 */
 }
 
 typedef struct { hn_node *n; float ml, mr, mt, mb; } fitem;
@@ -810,9 +838,9 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
         /* pass1 一律纯度量(measuring=1): 真布局在 pass2 完成。
            此处若真布局会在 (0,0) 生成 run, 与 pass2 的绝对坐标副本并存 → 文本错位/重影。 */
         if (st->flex_row) {
-            layout_box(c, ch, 0, 0, basis >= 0 ? basis : -1, -1, tb, 1, -1);
+            layout_box(c, ch, 0, 0, basis >= 0 ? basis : -1, -1, tb, 1, -1, -1);
         } else {
-            layout_box(c, ch, 0, 0, cw, -1, tb, 1, basis >= 0 ? basis : -1);
+            layout_box(c, ch, 0, 0, cw, -1, tb, 1, basis >= 0 ? basis : -1, -1);
         }
     }
 
@@ -868,6 +896,19 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
                 } else if (st->justify == HN_JUST_CENTER) lead = rem * 0.5f;
                 else if (st->justify == HN_JUST_END) lead = rem;
                 else if (st->justify == HN_JUST_BETWEEN && cnt > 1) extra_gap = rem / (float)(cnt - 1);
+                /* space-around: 首尾各半个间隙, 其余 n-1 个间隙满格。
+                   → lead = 半个间隙, extra_gap = 一个间隙(段内 1 个半)。 */
+                else if (st->justify == HN_JUST_AROUND && cnt > 0) {
+                    float u = rem / (float)cnt;
+                    lead = u * 0.5f;
+                    extra_gap = u;
+                }
+                /* space-evenly: 间隙数 = cnt+1(含首尾各一), 全部等宽 */
+                else if (st->justify == HN_JUST_EVENLY) {
+                    float u = rem / (float)(cnt + 1);
+                    lead = u;
+                    extra_gap = u;
+                }
             }
         }
 
@@ -917,7 +958,7 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
             }
             float mainw = main_outer - items[i].ml - items[i].mr;
             if (mainw < 0) mainw = 0;
-            layout_box(c, ch, cx + mx + items[i].ml, cy + cy_off, mainw, cross_avail, tb, 0, forced);
+            layout_box(c, ch, cx + mx + items[i].ml, cy + cy_off, mainw, cross_avail, tb, 0, forced, mainw);
             mx += main_outer + st->gap + extra_gap;
         }
         used_cross = cross_avail;
@@ -955,6 +996,15 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
                 if (st->justify == HN_JUST_CENTER) lead = rem * 0.5f;
                 else if (st->justify == HN_JUST_END) lead = rem;
                 else if (st->justify == HN_JUST_BETWEEN && cnt > 1) extra_gap = rem / (float)(cnt - 1);
+                else if (st->justify == HN_JUST_AROUND && cnt > 0) {
+                    float u = rem / (float)cnt;
+                    lead = u * 0.5f;
+                    extra_gap = u;
+                } else if (st->justify == HN_JUST_EVENLY) {
+                    float u = rem / (float)(cnt + 1);
+                    lead = u;
+                    extra_gap = u;
+                }
             }
         }
 
@@ -992,7 +1042,7 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
                 }
             }
             if (wavail < 0) wavail = ch->bw;
-            layout_box(c, ch, cx + cx_off, cy + my + items[i].mt, wavail, cross_h, tb, 0, forced);
+            layout_box(c, ch, cx + cx_off, cy + my + items[i].mt, wavail, cross_h, tb, 0, forced, -1);
             my += items[i].mt + ch->bh + items[i].mb + st->gap + extra_gap;
         }
         used_cross = cross_h >= 0 ? cross_h : my - st->gap - extra_gap;
@@ -1009,7 +1059,8 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
 
 static float layout_box(hn_context *c, hn_node *n, float x, float y,
                         float avail_w, float avail_h,
-                        const hn_text_backend *tb, int measuring, float forced_h) {
+                        const hn_text_backend *tb, int measuring, float forced_h,
+                        float forced_w) {
     if (n->kind == HN_TEXT) {
         float pref = 0;
         float h = layout_ifc(c, n->parent, n, n->next, x, y, avail_w, tb, measuring, &pref);
@@ -1077,6 +1128,12 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
         if (mxh > 0 && h > mxh) h = mxh;   /* auto(h<0) 的上限在内容计算后截断 */
     }
     if (forced_h > 0) h = forced_h;
+    /* forced_w: 主轴尺寸由外部(flex 的 grow/shrink 结算结果)强制指定。
+       没有这一条时, 显式 width 会把 flex 算好的 mainw 整个盖掉 ——
+       表现为"flex-shrink 完全不生效, 子项溢出互相重叠"(实测 2 个
+       width:150 的子项塞进 width:200 的容器, 各自仍是 150 且第二项
+       画在第一项身上)。 */
+    if (forced_w > 0) w = forced_w;
     int h_definite = (forced_h > 0) || (st->height_u != HN_U_AUTO && h >= 0);
 
     n->bx = x;
@@ -1152,5 +1209,5 @@ void hn_layout_root(hn_context *c) {
     hn_node *root = c->doc->root;
     clear_runs(root);
     float forced = (root->style.height_u == HN_U_AUTO) ? c->vh : -1;
-    layout_box(c, root, 0, 0, c->vw, c->vh, tb, 0, forced);
+    layout_box(c, root, 0, 0, c->vw, c->vh, tb, 0, forced, -1);
 }

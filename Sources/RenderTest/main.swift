@@ -2180,6 +2180,114 @@ do {
     }
 }
 
+print("== 布局与排版回归(探针发现的真实缺陷) ==")
+do {
+    /* 这批断言对应三个已经修掉的坑。共同点都是"写了样式却毫无反应"——
+       没有断言就会在下次改动时静默回归。 */
+
+    func boxOf(_ html: String, _ id: String, _ w: Float = 400, _ h: Float = 300)
+        -> (Float, Float, Float, Float)? {
+        guard let d = hn_parse_html(html, html.utf8.count) else { return nil }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, w, h, &backend)
+        var stack: [OpaquePointer] = [hn_doc_root(d)]
+        var result: (Float, Float, Float, Float)?
+        while let n = stack.popLast() {
+            if let i = hn_node_attr(n, "id"), String(cString: i) == id {
+                var x: Float = 0, y: Float = 0, bw: Float = 0, bh: Float = 0
+                hn_node_box(n, &x, &y, &bw, &bh)
+                result = (x, y, bw, bh)
+                break
+            }
+            var kids: [OpaquePointer] = []
+            var c = hn_node_first_child(n)
+            while let cc2 = c { kids.append(cc2); c = hn_node_next_sibling(cc2) }
+            stack.append(contentsOf: kids)
+        }
+        hn_context_destroy(cc)
+        return result
+    }
+    func eq(_ a: (Float, Float, Float, Float)?, _ b: (Float, Float, Float, Float),
+            _ tol: Float = 1.0) -> Bool {
+        guard let a else { return false }
+        return abs(a.0 - b.0) <= tol && abs(a.1 - b.1) <= tol
+            && abs(a.2 - b.2) <= tol && abs(a.3 - b.3) <= tol
+    }
+
+    // (1) margin 长写: 曾因 token 被 auto 判定吃掉而全部失效
+    if let b = boxOf("<html><head><style>html,body{margin:0}.a{width:100;height:30;margin-top:40}"
+                     + "</style></head><body><div class=\"a\" id=\"x\"></div></body></html>", "x") {
+        check(eq(b, (0, 40, 100, 30)),
+              String(format: "布局: margin-top 长写生效 (y=%.0f)", b.1))
+    } else { check(false, "布局: margin-top 用例未取到盒子") }
+    if let b = boxOf("<html><head><style>html,body{margin:0}.a{width:100;height:30;margin-left:60}"
+                     + "</style></head><body><div class=\"a\" id=\"x\"></div></body></html>", "x") {
+        check(eq(b, (60, 0, 100, 30)),
+              String(format: "布局: margin-left 长写生效 (x=%.0f)", b.0))
+    } else { check(false, "布局: margin-left 用例未取到盒子") }
+
+    // (2) margin 折叠: 相邻 margin 取最大值而非相加
+    if let b = boxOf("<html><head><style>html,body{margin:0}.a{width:100;height:30;margin:20}"
+                     + "</style></head><body><div class=\"a\" id=\"p\"></div>"
+                     + "<div class=\"a\" id=\"q\"></div></body></html>", "q") {
+        // 20 顶 + 30 高 + 折叠 20 = 70
+        check(eq(b, (20, 70, 100, 30)),
+              String(format: "布局: 相邻 margin 折叠取最大值 (第二个 y=%.0f, 期望 70)", b.1))
+    } else { check(false, "布局: margin 折叠用例未取到盒子") }
+    if let b = boxOf("<html><head><style>html,body{margin:0}"
+                     + ".a{width:100;height:30;margin-bottom:20}"
+                     + ".b{width:100;height:30;margin-top:40}</style></head><body>"
+                     + "<div class=\"a\" id=\"p\"></div><div class=\"b\" id=\"q\"></div></body></html>", "q") {
+        // max(20, 40) = 40 → 第二个在 y=70
+        check(eq(b, (0, 70, 100, 30)),
+              String(format: "布局: 不对称 margin 折叠取较大者 (y=%.0f, 期望 70)", b.1))
+    } else { check(false, "布局: 不对称折叠用例未取到盒子") }
+
+    // (3) flex-shrink: 曾因显式 width 覆盖结算结果而完全失效(子项重叠)
+    if let b = boxOf("<html><head><style>html,body{margin:0}"
+                     + ".f{display:flex;width:200;height:100}"
+                     + ".a{width:150;height:20;flex-shrink:1}</style></head><body>"
+                     + "<div class=\"f\"><div class=\"a\" id=\"p\"></div>"
+                     + "<div class=\"a\" id=\"q\"></div></div></body></html>", "q") {
+        // 溢出 100 均分 → 各 100; 第二个在 x=100 且宽 100(不重叠)
+        check(eq(b, (100, 0, 100, 20)),
+              String(format: "布局: flex-shrink 生效 (第二个 x=%.0f 宽=%.0f, 期望 100/100)",
+                     b.0, b.2))
+    } else { check(false, "布局: flex-shrink 用例未取到盒子") }
+    if let b = boxOf("<html><head><style>html,body{margin:0}"
+                     + ".f{display:flex;width:200;height:100}"
+                     + ".a{width:150;height:20;flex-shrink:1}"
+                     + ".b{width:150;height:20;flex-shrink:3}</style></head><body>"
+                     + "<div class=\"f\"><div class=\"a\" id=\"p\"></div>"
+                     + "<div class=\"b\" id=\"q\"></div></div></body></html>", "q") {
+        // 1:3 分配 → 125 / 75
+        check(eq(b, (125, 0, 75, 20)),
+              String(format: "布局: flex-shrink 按比例 (第二个 x=%.0f 宽=%.0f, 期望 125/75)",
+                     b.0, b.2))
+    } else { check(false, "布局: flex-shrink 比例用例未取到盒子") }
+
+    // (4) space-around / space-evenly: 曾缺失并静默落到 flex-start
+    if let b = boxOf("<html><head><style>html,body{margin:0}"
+                     + ".f{display:flex;width:300;height:100;justify-content:space-around}"
+                     + ".c{width:50;height:30}</style></head><body><div class=\"f\">"
+                     + "<div class=\"c\" id=\"p\"></div><div class=\"c\" id=\"q\"></div>"
+                     + "</div></body></html>", "p") {
+        // 剩余 200, 每项占一段 100, 首尾各半 → 第一个在 x=50
+        check(eq(b, (50, 0, 50, 30)),
+              String(format: "布局: space-around (第一个 x=%.0f, 期望 50)", b.0))
+    } else { check(false, "布局: space-around 用例未取到盒子") }
+    if let b = boxOf("<html><head><style>html,body{margin:0}"
+                     + ".f{display:flex;width:300;height:100;justify-content:space-evenly}"
+                     + ".c{width:50;height:30}</style></head><body><div class=\"f\">"
+                     + "<div class=\"c\" id=\"p\"></div><div class=\"c\" id=\"q\"></div>"
+                     + "</div></body></html>", "p") {
+        // 剩余 200 分 3 段(首/中/尾)各 66.67 → 第一个在 x=66.67
+        check(eq(b, (66.67, 0, 50, 30), 1.5),
+              String(format: "布局: space-evenly (第一个 x=%.1f, 期望 66.67)", b.0))
+    } else { check(false, "布局: space-evenly 用例未取到盒子") }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

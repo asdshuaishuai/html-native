@@ -5,6 +5,7 @@
  */
 #include <math.h>
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "hn_internal.h"
@@ -301,6 +302,8 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         if (sv_eq(t, "center")) st->justify = HN_JUST_CENTER;
         else if (sv_eq(t, "flex-end") || sv_eq(t, "end") || sv_eq(t, "right")) st->justify = HN_JUST_END;
         else if (sv_eq(t, "space-between")) st->justify = HN_JUST_BETWEEN;
+        else if (sv_eq(t, "space-around")) st->justify = HN_JUST_AROUND;
+        else if (sv_eq(t, "space-evenly")) st->justify = HN_JUST_EVENLY;
         else st->justify = HN_JUST_START;
     } else if (!strcmp(name, "align-items") || !strcmp(name, "align-self")) {
         if (!next_tok(&v, &t)) return;
@@ -348,11 +351,19 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         else {
             int idx = name[7] == 't' ? 0 : name[7] == 'r' ? 1 : name[7] == 'b' ? 2 : 3;
             int u;
-            sv tok0;
-            if (next_tok(&v, &tok0) && sv_eq(tok0, "auto")) {
+            sv tv;
+            if (!next_tok(&v, &tv)) return;     /* 取一次, 后面复用同一个 token */
+            if (sv_eq(tv, "auto")) {
                 st->margin[idx] = 0;
                 st->margin_auto |= (unsigned char)(1 << idx);
-            } else if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u))
+                return;
+            }
+            /* 关键: 必须复用上面已取的 token。曾写成"先 next_tok 判 auto,
+               不成立再 next_tok 取值" —— 第一次取已把值吃掉, 第二次取到空串,
+               于是**所有 margin-top/right/bottom/left 长写全部失效**
+               (只有 margin 简写能用)。表现为"写了 margin-top:40 毫无反应"
+               且不报错, 极难自查。 */
+            if (sv_len(tv, st->font_size, &f, &u))
                 st->margin[idx] = (u == HN_U_EM) ? f * st->font_size : f;
         }
     } else if (!strcmp(name, "padding") || !strncmp(name, "padding-", 8)) {

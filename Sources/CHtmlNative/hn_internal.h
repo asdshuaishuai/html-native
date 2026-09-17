@@ -16,7 +16,13 @@ typedef enum { HN_ELEM, HN_TEXT } hn_node_kind;
 typedef struct hn_attr { const char *name, *value; } hn_attr;
 
 typedef enum { HN_U_AUTO = 0, HN_U_PX, HN_U_PCT, HN_U_EM } hn_size_unit;
-typedef enum { HN_JUST_START = 0, HN_JUST_CENTER, HN_JUST_END, HN_JUST_BETWEEN } hn_justify;
+/* justify-content: 全部六种。
+   AROUND/EVENLY 曾缺失, 声明后静默落到 flex-start —— 视觉上是"写了没反应",
+   而且不报错, 属于最难自查的那类缺陷。 */
+typedef enum {
+    HN_JUST_START = 0, HN_JUST_CENTER, HN_JUST_END, HN_JUST_BETWEEN,
+    HN_JUST_AROUND, HN_JUST_EVENLY
+} hn_justify;
 typedef enum { HN_ALIGN_STRETCH = 0, HN_ALIGN_START, HN_ALIGN_CENTER, HN_ALIGN_END } hn_align;
 typedef enum { HN_DISP_BLOCK = 0, HN_DISP_FLEX, HN_DISP_NONE, HN_DISP_INLINE, HN_DISP_INLINE_BLOCK } hn_display;
 
