@@ -6,7 +6,8 @@ let package = Package(
     platforms: [.macOS(.v12)],
     targets: [
         // C99 核心: HTML/CSS 解析 → 级联 → 布局 → 绘制指令
-        .target(name: "CHtmlNative"),
+        .target(name: "CHtmlNative", cSettings: [.unsafeFlags(["-I/opt/homebrew/include/freetype2"])],
+                linkerSettings: [.unsafeFlags(["-L/opt/homebrew/lib", "-lfreetype"])]),
         // macOS 原生运行时: AppKit 窗口 + CoreText 测量 + CoreGraphics 绘制 + htmx
         .target(name: "HtmlNative", dependencies: ["CHtmlNative"]),
         // 演示: 复杂应用窗口 + 本地 HTTP 服务返回 htmx 片段

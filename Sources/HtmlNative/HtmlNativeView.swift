@@ -44,8 +44,11 @@ public final class HtmlNativeView: NSView, HNWebHost {
 
     private var imageBox: ImageStore.CtxBox?
     private var imageBackendPtr: UnsafeMutablePointer<hn_image_backend>?
-    /// 原生 JS 运行时(JavaScriptCore)。仅当页面含 <script> 且未 hn-js="off" 时创建。
     private var jsRuntime: HNJSRuntime?
+    /// 最近一次完整 HTML(供 arena 压缩重建)
+    private var fullHTML: String = ""
+    /// swap 计数(达到阈值时触发 arena 压缩)
+    private var swapCount: Int = 0
     /// 最近一次脚本错误(便于排查)
     public var jsError: String?
     private var hoverTracking: NSTrackingArea?
@@ -96,6 +99,7 @@ public final class HtmlNativeView: NSView, HNWebHost {
 
     public convenience init(html: String, css: String? = nil) {
         self.init(doc: hn_parse_html(html, html.utf8.count), css: css)
+        fullHTML = html
     }
 
     /// 从已解析的 hn 文档构造(引擎/宿主路径: 清单可在构造前先从 doc 读出)
@@ -109,6 +113,7 @@ public final class HtmlNativeView: NSView, HNWebHost {
         if let css, !css.isEmpty {
             hn_context_add_sheet(ctx, hn_parse_css(css, css.utf8.count))
         }
+        fullHTML = ""   // 由 render()/convenience init 设置
         // 图片后端须长期存活: 堆分配结构体 + ctx 盒对象都由视图持有
         let (backend, box) = ImageStore.shared.backend()
         imageBox = box
@@ -522,6 +527,7 @@ public final class HtmlNativeView: NSView, HNWebHost {
 
     public func render(_ html: String) {
         guard let ctx else { return }
+        fullHTML = html
         hn_context_render(ctx, html, html.utf8.count)
         if let doc = hn_context_doc(ctx) { _ = hn_doc_autoid_hx(doc) }
         runPageScripts()
@@ -548,6 +554,14 @@ public final class HtmlNativeView: NSView, HNWebHost {
         // 流式视图: 环形裁剪(内部含重排) → 帧循环接管跟随
         trimStreams()
         relayout()
+        // arena 压缩: 片段追加会在 arena 上累积旧节点(环形裁剪只从链上摘除),
+        // 每 100 次换入做一次全量重解析, 回收已移除节点的内存
+        swapCount += 1
+        if swapCount % 100 == 0, !fullHTML.isEmpty {
+            hn_context_compact(ctx, fullHTML, fullHTML.utf8.count)
+            if let doc = hn_context_doc(ctx) { _ = hn_doc_autoid_hx(doc) }
+            relayout()
+        }
 
         if ProcessInfo.processInfo.environment["HN_LOG_SWAP"] != nil {
             let dom = dumpDOM()

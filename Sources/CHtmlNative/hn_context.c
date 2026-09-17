@@ -1206,3 +1206,16 @@ void hn_context_render(hn_context *c, const char *html_src, size_t len) {
     /* 热更新可能改写了 hn-theme: 重新装载主题基座 */
     hn_context_apply_theme(c);
 }
+
+/* arena 压缩: 全量重渲染时回收旧 DOM 内存。
+ * 调用方须持有完整的 HTML(将重新解析)。用于流式应用的长期内存控制。 */
+void hn_context_compact(hn_context *c, const char *html, size_t len) {
+    if (!c || !c->doc) return;
+    hn_arena_destroy(c->doc->arena);
+    hn_doc_free(c->doc);
+    c->doc = hn_parse_html(html, len);
+    if (c->doc) {
+        hn_context_set_doc(c, c->doc);
+        hn_context_apply_theme(c);
+    }
+}

@@ -128,6 +128,8 @@ const char *hn_theme_base_css(void);
 const char *hn_doc_theme(hn_doc *doc);
 /* 按文档声明装载/替换主题样式表(UA 之后, 作者样式之前) */
 void hn_context_apply_theme(hn_context *c);
+/* arena 压缩: 销毁旧 DOM, 重新解析 HTML, 回收已移除节点的内存 */
+void hn_context_compact(hn_context *c, const char *html, size_t len);
 
 /* ---- 解析 ---- */
 hn_doc   *hn_parse_html(const char *src, size_t len);
