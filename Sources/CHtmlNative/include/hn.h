@@ -57,7 +57,9 @@ typedef enum hn_cmd_kind {
     HN_CMD_IMAGE = 3,     /* 图片(路径), 覆盖 rect */
     HN_CMD_CLIP_PUSH = 4, /* 圆角矩形裁剪入栈 */
     HN_CMD_CLIP_POP = 5,
-    HN_CMD_QUAD = 6       /* 任意四边形(3D 投影结果); qx/qy 为四个顶点 */
+    HN_CMD_QUAD = 6,      /* 任意四边形(3D 投影结果); qx/qy 为四个顶点 */
+    HN_CMD_POLYGON = 7,   /* 任意多边形(矢量路径/Lottie 形状层); 顶点数可变 */
+    HN_CMD_MESH = 8       /* 网格变形贴图(Live2D 类: 顶点网格 + UV 采样源图) */
 
 } hn_cmd_kind;
 
@@ -85,6 +87,20 @@ typedef struct hn_cmd {
     /* QUAD: 4 个顶点(顺时针, 屏幕坐标). 用于 3D 变换后的面片填充 ——
        透视投影后矩形不再是矩形, 必须按四边形光栅化。 */
     float       qx[4], qy[4];
+    /* POLYGON: 任意顶点数的多边形(矢量路径 / Lottie 形状层)。
+       poly 指向顶点数组(引擎临时区分配, 生命周期 = 本次显示列表);
+       poly_n 为顶点数; even_odd=1 使用奇偶填充规则(否则非零环绕)。 */
+    const float *poly;
+    int          poly_n;
+    unsigned char even_odd;
+    /* MESH: 网格变形(Live2D 类效果)。
+       mesh_verts: 屏幕坐标顶点, 2*(cols+1)*(rows+1) 个 float (x,y 交替);
+       mesh_uv:    对应源图归一化 UV, 同长度;
+       mesh_cols/rows: 网格单元数;
+       text: 源图路径(经图片后端加载)。 */
+    const float *mesh_verts;
+    const float *mesh_uv;
+    int          mesh_cols, mesh_rows;
 } hn_cmd;
 
 typedef struct hn_display_list {
@@ -97,6 +113,55 @@ typedef struct hn_image_backend {
     void *ctx;
     int (*size)(void *ctx, const char *path, float *w, float *h); /* 成功返回 1 */
 } hn_image_backend;
+
+/* 资产后端: 读取外部数据文件(Lottie JSON 等)。
+ * 引擎自身不做磁盘/网络 I/O —— 与文本/图片后端同样是依赖倒置:
+ * 运行时决定文件从哪来(磁盘/内存/远端), 引擎只解析拿到的字节。
+ * load 返回的缓冲由运行时持有, 引擎不释放; 失败返回 NULL。 */
+typedef struct hn_asset_backend {
+    void *ctx;
+    const char *(*load)(void *ctx, const char *path, size_t *len);
+} hn_asset_backend;
+
+void hn_context_set_assets(hn_context *c, const hn_asset_backend *backend);
+
+/* ---- Lottie(bodymovin)矢量动画 ----
+ *
+ * <img src="a.json" hn-lottie> 或任意元素 hn-lottie="a.json" 时,
+ * 引擎解析 JSON 并在每帧按时间轴求值, 产出 POLYGON/IMAGE 绘制指令。
+ * 支持子集: 形状层(组/矩形/椭圆/路径/填充/描边)与图片层。
+ * precomp/文本/表达式/特效层不支持(会被跳过, 不报错)。
+ *
+ * 引擎负责"矢量图形 + 时间轴"; 播放控制由声明属性表达:
+ *   hn-lottie-loop="0|1"  是否循环(默认 1)
+ *   hn-lottie-speed="1.5" 播放倍速(默认 1)
+ *   hn-lottie-fit="contain|cover|fill|none"  缩放适配(默认 contain)
+ */
+/* 解析并缓存(同一路径只解析一次); 失败返回 NULL */
+struct hn_lottie;
+struct hn_lottie *hn_lottie_load(hn_context *c, const char *path);
+/* 动画时长(ms); 用于外部做进度条/一次性播放判定 */
+float hn_lottie_duration_ms(struct hn_lottie *l);
+/* 该 Lottie 的原始画布尺寸 */
+void  hn_lottie_size(struct hn_lottie *l, float *w, float *h);
+
+/* ---- 网格变形(Live2D 类效果的原语) ----
+ *
+ * Live2D 的 .moc3 是专有格式(Cubism SDK 商业授权), 无法解码。
+ * 但它公开的核心技术是"把贴图映射到可变形网格上" —— 本引擎提供同一原语:
+ *
+ *   <img src="c.png" hn-mesh="10x8" hn-mesh-sway="6" hn-mesh-speed="1.2"
+ *        hn-mesh-anchor="bottom" hn-mesh-freq="1">
+ *
+ * 顶点位置 = 网格 + 正弦形变(按 anchor 端固定, 向另一端渐强)。
+ * 更复杂的骨骼/物理可由脚本通过 hn_node_set_mesh_verts() 逐帧驱动 ——
+ * 引擎只提供网格与贴图合成, 装配逻辑(即 Live2D 的 rig)属于应用层。
+ */
+/* 脚本驱动网格: verts 为 2*(cols+1)*(rows+1) 个 float(x,y 交替, 元素盒局部坐标)。
+   返回 1 表示节点已接受该网格。坐标原点 = 元素盒左上角。 */
+int hn_node_set_mesh_verts(hn_node *n, const float *verts, int cols, int rows);
+/* 该节点当前是否为网格绘制(声明了 hn-mesh 或被脚本写入顶点) */
+int hn_node_mesh_info(hn_node *n, int *cols, int *rows);
 
 /* ---- 应用清单: hn 编码中的表面声明, 供宿主物化 ----
  *
@@ -119,6 +184,9 @@ typedef struct hn_manifest {
     float x, y;            /* 左上角; 0,0 = 自动(居中) */
     const char *title;     /* 可为 NULL */
     const char *theme;     /* hn-theme: "dark" / "light", 可为 NULL */
+    int transparent;       /* hn-transparent: 1 = 窗口无底色(逐像素 alpha) */
+    int shadow;            /* hn-shadow: 1 = 窗口投影(默认开); 0 = 关闭 */
+    int draggable;         /* hn-draggable: 1 = 空白区域可拖动窗口(默认开) */
 } hn_manifest;
 
 /* 从文档解析清单(meta 缺省时给默认值: window / 自动) */
@@ -135,6 +203,8 @@ const char *hn_doc_theme(hn_doc *doc);
 void hn_context_apply_theme(hn_context *c);
 /* arena 压缩: 销毁旧 DOM, 重新解析 HTML, 回收已移除节点的内存 */
 void hn_context_compact(hn_context *c, const char *html, size_t len);
+/* 透明背板: 把 body 的实色背景改为透明(配合窗口 isOpaque=false) */
+void hn_context_strip_root_background(hn_context *c);
 
 /* ---- 解析 ---- */
 hn_doc   *hn_parse_html(const char *src, size_t len);
@@ -143,9 +213,17 @@ void      hn_doc_free(hn_doc *doc);
 void      hn_sheet_free(hn_sheet *sheet);
 
 /* ---- 上下文 ---- */
+
+/* 所有权约定(重要, 弄错会造成 double-free 或 use-after-free):
+ *   - hn_context_destroy() 会释放通过 hn_context_set_doc / add_sheet 交给它的
+ *     文档与样式表。也就是说: **set 之后不要再自己 free**。
+ *   - 反过来, 未交给 context 的 doc/sheet 必须由调用方自己 free。
+ * 简记: "谁 set 谁放手"。 */
 hn_context *hn_context_create(void);
 void        hn_context_destroy(hn_context *c);
+/* 把文档交给 context(后者负责释放); doc 可为 NULL 表示清空 */
 void        hn_context_set_doc(hn_context *c, hn_doc *doc);
+/* 追加样式表(context 负责释放; 顺序 = 优先级, 后加的覆盖先加的) */
 void        hn_context_add_sheet(hn_context *c, hn_sheet *sheet);
 hn_doc     *hn_context_doc(hn_context *c);
 

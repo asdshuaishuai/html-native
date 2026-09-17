@@ -1,0 +1,52 @@
+<html><head>
+<!-- 透明背板: 窗口无底色, 桌面从透明处透出 -->
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="300x260">
+<meta name="hn-title" content="透明背板 + 网格变形">
+<meta name="hn-transparent" content="1">
+<meta name="hn-shadow" content="1">
+<meta name="hn-draggable" content="1">
+<style>
+/* 注意: html/body 都不设 background —— 声明 hn-transparent 时引擎也会
+   主动剥离根底色。这里不设是为了让"桌面透出"这件事一目了然。 */
+html, body { margin: 0; width: 100%; height: 100%; }
+.wrap { padding: 14; display: flex; flex-direction: column; gap: 10; }
+.title { color: #ffffff; font-size: 13; font-weight: 600; }
+.sub { color: #ffffffaa; font-size: 10; }
+.row { display: flex; gap: 10; align-items: flex-start; }
+
+/* 半透明卡片: 底下是桌面, 卡片的 alpha 让它可见地"叠"在桌面上 */
+.card {
+  background: rgba(28, 34, 46, 0.82);
+  border: 1 solid rgba(120, 150, 220, 0.35);
+  border-radius: 12;
+  padding: 10;
+  display: flex; flex-direction: column; gap: 6; align-items: center;
+}
+.k { color: #cfd6e6; font-size: 10; }
+
+/* 完全不透明的区域: 与透明区形成对照 */
+.solid { background: #4f7cff; border-radius: 10; padding: 10 14; color: #fff;
+         font-size: 11; font-weight: 600; text-align: center; }
+
+.lot { width: 96; height: 96; }
+.mesh { width: 96; height: 96; border-radius: 8; }
+</style>
+</head><body>
+  <div class="wrap">
+    <div class="title">透明背板 + 网格变形</div>
+    <div class="sub">窗口无底色, 卡片是半透明 —— 桌面从卡片下透出</div>
+    <div class="row">
+      <div class="card">
+        <img class="lot" src="assets/loading.json" hn-lottie>
+        <div class="k">Lottie 矢量动画</div>
+      </div>
+      <div class="card">
+        <img class="mesh" src="assets/avatar-k.png"
+             hn-mesh="10x10" hn-mesh-sway="6" hn-mesh-speed="1.1">
+        <div class="k">网格变形(呼吸摆动)</div>
+      </div>
+    </div>
+    <div class="solid">不透明区域(对照)</div>
+  </div>
+</body></html>

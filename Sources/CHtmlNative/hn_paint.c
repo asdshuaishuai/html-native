@@ -94,6 +94,27 @@ static inline float tfy(const paint_guard *g, float sy, float y) {
 
 static void push_cmd(hn_context *c, hn_cmd *cmd);
 
+/* 跨文件入口: Lottie / 网格生成器把自己的指令并入同一条显示列表 */
+void hn_paint_push(hn_context *c, const hn_cmd *cmd) {
+    push_cmd(c, (hn_cmd *)cmd);
+}
+hn_arena *hn_context_tmp(hn_context *c) { return c->tmp; }
+
+/* 该元素要播放的 Lottie 文件:
+     hn-lottie="a.json"            显式路径
+     <img src="a.json" hn-lottie>  布尔属性(值为空串), 路径取 src
+   仅 "false"/"0" 视为显式关闭。 */
+static const char *hn_attr_lottie_src(hn_node *n) {
+    const char *v = hn_node_attr(n, "hn-lottie");
+    if (!v) return NULL;
+    if (!strcmp(v, "false") || !strcmp(v, "0")) return NULL;
+    if (!*v || !strcmp(v, "true") || !strcmp(v, "1")) {
+        const char *src = hn_node_attr(n, "src");
+        return (src && *src) ? src : NULL;
+    }
+    return v;
+}
+
 /* 有效圆角: % 值按盒短边解析(border-radius:50% 即圆) */
 static float eff_radius(const hn_style *st, float w, float h) {
     if (!st->radius_pct || st->radius <= 0) return st->radius;
@@ -296,6 +317,54 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         && st->list_style != 1
         && (!strcmp(n->parent->tag, "ul") || !strcmp(n->parent->tag, "ol"))) {
         paint_marker(c, n, st, alpha, sx, sy);
+    }
+
+    /* Lottie 矢量动画: 声明了 hn-lottie 的元素整体由动画接管(覆盖盒背景与子节点)。
+       解析结果按路径缓存, 时钟取自节点的 ext_clock(由动画 tick 推进)。 */
+    if (n->tag) {
+        const char *lsrc = hn_attr_lottie_src(n);
+        if (lsrc) {
+            struct hn_lottie *l = hn_context_lottie(c, lsrc);
+            if (l) {
+                float bw = n->bw * g->scale, bh = n->bh * g->scale;
+                float bx = tfx(g, sx, n->bx), by = tfy(g, sy, n->by);
+                /* 元素盒背景仍要画(承载底色/圆角), 动画画在其上 */
+                int lf = (st->background & 0xFFu) || st->has_gradient;
+                if (lf) {
+                    hn_cmd bg;
+                    memset(&bg, 0, sizeof(bg));
+                    bg.kind = HN_CMD_RECT;
+                    bg.x = bx; bg.y = by; bg.w = bw; bg.h = bh;
+                    bg.radius = eff_radius(st, bw, bh);
+                    bg.fill = mul_alpha(st->background, alpha);
+                    if (st->has_gradient) {
+                        bg.gradient = 1;
+                        bg.grad_from = mul_alpha(st->grad_from, alpha);
+                        bg.grad_to = mul_alpha(st->grad_to, alpha);
+                        bg.grad_angle = st->grad_angle;
+                    }
+                    push_cmd(c, &bg);
+                }
+                float speed = 1.0f;
+                const char *sp = hn_node_attr(n, "hn-lottie-speed");
+                if (sp && *sp) { speed = (float)atof(sp); if (speed <= 0.01f) speed = 1.0f; }
+                const char *fit = hn_node_attr(n, "hn-lottie-fit");
+                hn_lottie_emit(c, l, n->ext_clock * speed, bw, bh, bx, by,
+                               alpha * st->opacity, fit);
+                return;
+            }
+            /* 解析失败: 落到常规 img 分支(显示占位), 让问题可见而非静默空白 */
+        }
+    }
+
+    /* 网格变形贴图(Live2D 类效果原语): hn-mesh="cols x rows" 或脚本写入顶点 */
+    if (n->tag && (hn_node_attr(n, "hn-mesh") || n->mesh_verts)) {
+        const char *msrc = hn_node_attr(n, "src");
+        if (msrc && *msrc) {
+            hn_mesh_emit(c, n, msrc, n->bw * g->scale, n->bh * g->scale,
+                         tfx(g, sx, n->bx), tfy(g, sy, n->by), alpha);
+            return;
+        }
     }
 
     /* 图片元素 */
@@ -586,4 +655,37 @@ draw_children:
 void hn_paint_root(hn_context *c) {
     c->n_cmds = 0;
     if (c->doc) paint_walk(c, c->doc->root, NULL, 1.0f, 0, 0);
+}
+
+/* 立即清除根链底色(不打开开关)。见 hn_context_strip_root_background。
+   html 与 body 都要清: 只清一个时另一个仍会铺满整屏。
+   文档根是解析器合成的包裹节点, body 往往在更深一层 —— 必须真正遍历。 */
+void hn_strip_root_background_now(hn_context *c) {
+    if (!c || !c->doc || !c->doc->root) return;
+    hn_node *stack[8];
+    int sp = 0;
+    stack[sp++] = c->doc->root;
+    int guard = 0;
+    while (sp > 0 && guard++ < 64) {
+        hn_node *n = stack[--sp];
+        if (n->kind == HN_ELEM && n->tag &&
+            (!strcmp(n->tag, "html") || !strcmp(n->tag, "body"))) {
+            n->style.background = 0;
+            n->style.has_gradient = 0;
+        }
+        for (hn_node *ch = n->first; ch && sp < 8; ch = ch->next)
+            if (ch->kind == HN_ELEM) stack[sp++] = ch;
+    }
+}
+
+/* 透明背板: 把根链(html / body)的实色背景改为透明。
+   声明 hn-transparent 时由运行时调用。
+   注意这是**持续生效的开关**: 真正的清理发生在每次样式计算之后
+   (见 hn_style_compute_all 的调用点), 这里只是打开开关并立刻清一次,
+   让调用方无需额外重布局。只改一次的话, 下一次 layout 从级联重算样式
+   就会把底色装回来 —— 表现为"首次显示透明, 一 resize 就变回不透明"。 */
+void hn_context_strip_root_background(hn_context *c) {
+    if (!c) return;
+    c->transparent = 1;
+    hn_strip_root_background_now(c);
 }

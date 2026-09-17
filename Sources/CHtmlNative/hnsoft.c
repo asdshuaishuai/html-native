@@ -22,6 +22,9 @@
 
 typedef struct { float r, g, b, a; } fcolor;
 
+/* 图像像素解码(定义在文件后部): 返回 malloc 的 RGBA8, 调用方 free */
+static unsigned char *load_image_pixels(const char *path, int *w, int *h);
+
 static fcolor unpack(hn_color c) {
     fcolor r;
     r.r = (float)((c >> 24) & 0xFF) / 255.0f;
@@ -240,6 +243,219 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
     }
 }
 
+/* ---------------- 多边形填充(扫描线 + 覆盖抗锯齿) ---------------- */
+
+typedef struct { float x; int wind; } xhit;
+
+static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
+    if (!c->poly || c->poly_n < 3) return;
+    int n = c->poly_n;
+    fcolor fillc = unpack(c->fill);
+    fillc.a *= alpha;
+    fcolor strokec = unpack(c->stroke);
+    strokec.a *= alpha;
+    int do_fill = fillc.a > 0.004f;
+    int do_stroke = c->stroke_w > 0.05f && strokec.a > 0.004f;
+    if (!do_fill && !do_stroke) return;
+
+    float *px = (float *)malloc(sizeof(float) * (size_t)n);
+    float *py = (float *)malloc(sizeof(float) * (size_t)n);
+    if (!px || !py) { free(px); free(py); return; }
+    float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+    for (int i = 0; i < n; i++) {
+        float x = (c->poly[i * 2]     - ox) * scale + ox;
+        float y = (c->poly[i * 2 + 1] - oy) * scale + oy;
+        px[i] = x; py[i] = y;
+        if (x < minx) minx = x; if (x > maxx) maxx = x;
+        if (y < miny) miny = y; if (y > maxy) maxy = y;
+    }
+    float hw = do_stroke ? c->stroke_w * scale * 0.5f : 0;
+
+    if (do_fill) {
+        int y0 = (int)floorf(miny) - 1, y1 = (int)ceilf(maxy) + 1;
+        xhit *hits = (xhit *)malloc(sizeof(xhit) * (size_t)(n + 2));
+        if (!hits) { free(px); free(py); return; }
+        for (int s = y0; s <= y1; s++) {
+            float fy = (float)s + 0.5f;
+            int nh = 0;
+            for (int e = 0; e < n; e++) {
+                int e2 = (e + 1) % n;
+                float ay = py[e], by = py[e2];
+                if (fabsf(by - ay) < 1e-6f) continue;
+                if ((ay <= fy && by > fy) || (by <= fy && ay > fy)) {
+                    float t = (fy - ay) / (by - ay);
+                    hits[nh].x = px[e] + t * (px[e2] - px[e]);
+                    hits[nh].wind = (by > ay) ? 1 : -1;
+                    nh++;
+                }
+            }
+            if (nh < 2) continue;
+            for (int a2 = 1; a2 < nh; a2++) {
+                xhit k = hits[a2]; int b2 = a2 - 1;
+                while (b2 >= 0 && hits[b2].x > k.x) { hits[b2 + 1] = hits[b2]; b2--; }
+                hits[b2 + 1] = k;
+            }
+            for (int k = 0; k < nh - 1; k++) {
+                int inside;
+                if (c->even_odd) {
+                    inside = (k & 1);
+                } else {
+                    int wsum = 0;
+                    for (int q = 0; q <= k; q++) wsum += hits[q].wind;
+                    inside = (wsum != 0);
+                }
+                if (!inside) continue;
+                float lx = hits[k].x, rx = hits[k + 1].x;
+                if (rx <= lx) continue;
+                for (int xx = (int)floorf(lx); xx <= (int)ceilf(rx); xx++) {
+                    float fx = (float)xx + 0.5f;
+                    float cov = 0;
+                    if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
+                    else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;
+                    if (cov <= 0) continue;
+                    fcolor cc = fillc; cc.a *= cov;
+                    fb_blend(f, xx, s, cc);
+                }
+            }
+        }
+        free(hits);
+    }
+
+    /* 描边: 每条边按宽度展开成四边形带(闭合路径) */
+    if (do_stroke) {
+        int sy0lim = (int)floorf(miny - hw) - 1, sy1lim = (int)ceilf(maxy + hw) + 1;
+        for (int e = 0; e < n; e++) {
+            int e2 = (e + 1) % n;
+            float ax = px[e], ay = py[e], bx = px[e2], by = py[e2];
+            float ex = bx - ax, ey = by - ay;
+            float elen = sqrtf(ex * ex + ey * ey);
+            if (elen < 1e-5f) continue;
+            float nx = -ey / elen * hw, ny = ex / elen * hw;
+            float qx[4] = { ax + nx, bx + nx, bx - nx, ax - nx };
+            float qy[4] = { ay + ny, by + ny, by - ny, ay - ny };
+            float qminy = qy[0], qmaxy = qy[0];
+            for (int i = 1; i < 4; i++) {
+                if (qy[i] < qminy) qminy = qy[i];
+                if (qy[i] > qmaxy) qmaxy = qy[i];
+            }
+            int sy0 = (int)floorf(qminy) - 1, sy1 = (int)ceilf(qmaxy) + 1;
+            if (sy0 < sy0lim) sy0 = sy0lim;
+            if (sy1 > sy1lim) sy1 = sy1lim;
+            for (int s = sy0; s <= sy1; s++) {
+                float fy = (float)s + 0.5f;
+                float xs[8]; int nx2 = 0;
+                for (int i = 0; i < 4; i++) {
+                    float p1y = qy[i], p2y = qy[(i + 1) & 3];
+                    if ((p1y <= fy && p2y > fy) || (p2y <= fy && p1y > fy)) {
+                        float t = (fy - p1y) / (p2y - p1y);
+                        if (nx2 < 8) xs[nx2++] = qx[i] + t * (qx[(i + 1) & 3] - qx[i]);
+                    }
+                }
+                if (nx2 < 2) continue;
+                float lx = xs[0], rx = xs[0];
+                for (int i = 1; i < nx2; i++) {
+                    if (xs[i] < lx) lx = xs[i];
+                    if (xs[i] > rx) rx = xs[i];
+                }
+                for (int xx = (int)floorf(lx); xx <= (int)ceilf(rx); xx++) {
+                    float fx = (float)xx + 0.5f;
+                    float cov = 0;
+                    if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
+                    else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;
+                    if (cov <= 0) continue;
+                    fcolor cc = strokec; cc.a *= cov;
+                    fb_blend(f, xx, s, cc);
+                }
+            }
+        }
+    }
+    free(px); free(py);
+}
+
+/* ---------------- 网格变形贴图(重心坐标反查 UV) ---------------- */
+
+static void paint_mesh(fb *f, const hn_cmd *c, float alpha) {
+    if (!c->mesh_verts || !c->mesh_uv || c->mesh_cols <= 0 || c->mesh_rows <= 0) return;
+    int iw = 0, ih = 0;
+    unsigned char *ipx = load_image_pixels(c->text ? c->text : "", &iw, &ih);
+    float ga = (float)(c->fill & 0xFFu) / 255.0f * alpha;
+    if (ga <= 0.004f) { if (ipx) free(ipx); return; }
+    if (!ipx) {
+        /* 无图像解码器: 画网格线示意, 让"网格变形"这层可见(而非静默空白) */
+        int cols = c->mesh_cols, rows = c->mesh_rows;
+        fcolor col = { 0.35f, 0.55f, 0.95f, 0.55f * ga };
+        for (int r = 0; r <= rows; r++)
+            for (int cc = 0; cc < cols; cc++) {
+                int i0 = r * (cols + 1) + cc, i1 = i0 + 1;
+                float x0 = c->mesh_verts[i0 * 2], y0 = c->mesh_verts[i0 * 2 + 1];
+                float x1 = c->mesh_verts[i1 * 2], y1 = c->mesh_verts[i1 * 2 + 1];
+                int ns = (int)(fabsf(x1 - x0) + fabsf(y1 - y0)) + 1;
+                if (ns > 400) ns = 400;
+                for (int s = 0; s <= ns; s++) {
+                    float t = (float)s / (float)ns;
+                    fb_blend(f, (int)(x0 + (x1 - x0) * t), (int)(y0 + (y1 - y0) * t), col);
+                }
+            }
+        for (int cc = 0; cc <= cols; cc++)
+            for (int r = 0; r < rows; r++) {
+                int i0 = r * (cols + 1) + cc, i1 = i0 + cols + 1;
+                float x0 = c->mesh_verts[i0 * 2], y0 = c->mesh_verts[i0 * 2 + 1];
+                float x1 = c->mesh_verts[i1 * 2], y1 = c->mesh_verts[i1 * 2 + 1];
+                int ns = (int)(fabsf(x1 - x0) + fabsf(y1 - y0)) + 1;
+                if (ns > 400) ns = 400;
+                for (int s = 0; s <= ns; s++) {
+                    float t = (float)s / (float)ns;
+                    fb_blend(f, (int)(x0 + (x1 - x0) * t), (int)(y0 + (y1 - y0) * t), col);
+                }
+            }
+        return;
+    }
+    int cols = c->mesh_cols, rows = c->mesh_rows;
+    for (int r = 0; r < rows; r++) {
+        for (int cc = 0; cc < cols; cc++) {
+            int i00 = r * (cols + 1) + cc;
+            int i10 = i00 + 1, i01 = i00 + cols + 1, i11 = i01 + 1;
+            int tri[2][3] = { { i00, i10, i01 }, { i10, i11, i01 } };
+            for (int t = 0; t < 2; t++) {
+                int a = tri[t][0], b = tri[t][1], d = tri[t][2];
+                float x0 = c->mesh_verts[a * 2], y0 = c->mesh_verts[a * 2 + 1];
+                float x1 = c->mesh_verts[b * 2], y1 = c->mesh_verts[b * 2 + 1];
+                float x2 = c->mesh_verts[d * 2], y2 = c->mesh_verts[d * 2 + 1];
+                float u0 = c->mesh_uv[a * 2], v0 = c->mesh_uv[a * 2 + 1];
+                float u1 = c->mesh_uv[b * 2], v1 = c->mesh_uv[b * 2 + 1];
+                float u2 = c->mesh_uv[d * 2], v2 = c->mesh_uv[d * 2 + 1];
+                float den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+                if (fabsf(den) < 1e-6f) continue;      /* 折叠的退化三角形 */
+                float minx = x0, maxx = x0, miny = y0, maxy = y0;
+                if (x1 < minx) minx = x1; if (x1 > maxx) maxx = x1;
+                if (x2 < minx) minx = x2; if (x2 > maxx) maxx = x2;
+                if (y1 < miny) miny = y1; if (y1 > maxy) maxy = y1;
+                if (y2 < miny) miny = y2; if (y2 > maxy) maxy = y2;
+                for (int yy = (int)floorf(miny); yy <= (int)ceilf(maxy); yy++) {
+                    float fy = (float)yy + 0.5f;
+                    for (int xx = (int)floorf(minx); xx <= (int)ceilf(maxx); xx++) {
+                        float fx = (float)xx + 0.5f;
+                        float w0 = ((y1 - y2) * (fx - x2) + (x2 - x1) * (fy - y2)) / den;
+                        float w1 = ((y2 - y0) * (fx - x2) + (x0 - x2) * (fy - y2)) / den;
+                        float w2 = 1.0f - w0 - w1;
+                        if (w0 < -0.02f || w1 < -0.02f || w2 < -0.02f) continue;
+                        float u = w0 * u0 + w1 * u1 + w2 * u2;
+                        float v = w0 * v0 + w1 * v1 + w2 * v2;
+                        int sx = (int)(u * (float)iw), sy = (int)(v * (float)ih);
+                        if (sx < 0) sx = 0; else if (sx >= iw) sx = iw - 1;
+                        if (sy < 0) sy = 0; else if (sy >= ih) sy = ih - 1;
+                        const unsigned char *p = &ipx[(sy * iw + sx) * 4];
+                        fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f,
+                                       p[3] / 255.0f * ga };
+                        fb_blend(f, xx, yy, col);
+                    }
+                }
+            }
+        }
+    }
+    free(ipx);
+}
+
 /* ---------------- 文本(FreeType) ---------------- */
 
 #ifndef HN_NO_TEXT
@@ -418,6 +634,12 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, h
             break;
         case HN_CMD_QUAD:
             paint_quad(&f, c, 1.0f);
+            break;
+        case HN_CMD_POLYGON:
+            paint_polygon(&f, c, 1.0f, 0, 0, 1.0f);
+            break;
+        case HN_CMD_MESH:
+            paint_mesh(&f, c, 1.0f);
             break;
         case HN_CMD_CLIP_POP:
             fb_pop_clip(&f);

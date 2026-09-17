@@ -20,6 +20,10 @@ public enum HNPainter {
                 drawImage(cmd, into: cg)
             } else if cmd.kind == HN_CMD_QUAD {
                 drawQuad(cmd, into: cg)
+            } else if cmd.kind == HN_CMD_POLYGON {
+                drawPolygon(cmd, into: cg)
+            } else if cmd.kind == HN_CMD_MESH {
+                HNLayerCompositor.drawMesh(cmd, into: cg)
             } else if cmd.kind == HN_CMD_CLIP_PUSH {
                 cg.saveGState()
                 let r = CGFloat(max(0, cmd.radius))
@@ -104,6 +108,36 @@ public enum HNPainter {
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attr))
         cg.textPosition = CGPoint(x: CGFloat(cmd.tx), y: CGFloat(cmd.baseline))
         CTLineDraw(line, cg)
+    }
+
+    /// 多边形填充/描边(矢量路径 / Lottie 形状层)。
+    /// poly 是引擎临时区里的顶点数组, 生命周期覆盖本次绘制。
+    static func drawPolygon(_ cmd: hn_cmd, into cg: CGContext) {
+        guard let poly = cmd.poly, cmd.poly_n >= 3 else { return }
+        let hasFill = (cmd.fill & 0xFF) != 0
+        let hasStroke = cmd.stroke_w > 0 && (cmd.stroke & 0xFF) != 0
+        if !hasFill && !hasStroke { return }
+        cg.saveGState()
+        cg.beginPath()
+        cg.move(to: CGPoint(x: CGFloat(poly[0]), y: CGFloat(poly[1])))
+        for i in 1..<Int(cmd.poly_n) {
+            cg.addLine(to: CGPoint(x: CGFloat(poly[i * 2]), y: CGFloat(poly[i * 2 + 1])))
+        }
+        cg.closePath()
+        if hasFill {
+            cg.setFillColor(color(cmd.fill).cgColor)
+            // 填充规则: 奇偶(evenodd) 用于带洞的路径(Lottie 的 r=2)
+            if cmd.even_odd != 0 { cg.fillPath(using: .evenOdd) }
+            else { cg.fillPath() }
+        }
+        if hasStroke {
+            cg.setStrokeColor(color(cmd.stroke).cgColor)
+            cg.setLineWidth(CGFloat(cmd.stroke_w))
+            cg.setLineJoin(.round)
+            cg.setLineCap(.round)
+            cg.strokePath()
+        }
+        cg.restoreGState()
     }
 
     /// 四边形填充(3D 投影后的面片): 逐顶点建路径后填充。

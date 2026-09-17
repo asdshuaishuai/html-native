@@ -17,6 +17,20 @@ func t_pointee_bg(_ n: OpaquePointer) -> UInt32 {
 }
 func hex(_ v: UInt32) -> String { String(format: "%08x", v) }
 
+/// 文档中第一个 <img> 节点(断言用；无则 nil)
+func firstImg(_ doc: OpaquePointer) -> OpaquePointer? {
+    guard let root = hn_doc_root(doc) else { return nil }
+    var stack: [OpaquePointer] = [root]
+    while let n = stack.popLast() {
+        if let t = hn_node_tag(n), String(cString: t) == "img" { return n }
+        var kids: [OpaquePointer] = []
+        var c = hn_node_first_child(n)
+        while let cc = c { kids.append(cc); c = hn_node_next_sibling(cc) }
+        stack.append(contentsOf: kids)
+    }
+    return nil
+}
+
 func check(_ cond: Bool, _ label: String) {
     print((cond ? "  ✔ " : "  ✘ ") + label)
     if !cond { failures += 1 }
@@ -81,6 +95,16 @@ let ctx = hn_context_create()
 hn_context_set_doc(ctx, doc)
 hn_context_add_sheet(ctx, sheet)
 
+// 资产后端: Lottie JSON 等由运行时读入(引擎自身不做 I/O)
+var assetKeepAlive: AssetStore.CtxBox?
+do {
+    let (ab, box) = AssetStore.shared.backend()
+    assetKeepAlive = box
+    let ap = UnsafeMutablePointer<hn_asset_backend>.allocate(capacity: 1)
+    ap.initialize(to: ab)
+    hn_context_set_assets(ctx, ap)
+}
+
 // 清单解析
 do {
     var m = hn_manifest()
@@ -94,6 +118,20 @@ do {
 print("== layout \(VW)x\(VH) ==")
 var backend = TextShaper.shared.backend()
 hn_context_layout(ctx, Float(VW), Float(VH), &backend)
+
+// HN_CLOCK=<ms>: 把外部资源动画(Lottie / 网格)推进到指定时刻。
+// 没有这步渲染的永远是第 0 帧, 无法断言动画确实在动。
+if let cs = ProcessInfo.processInfo.environment["HN_CLOCK"], let ms = Float(cs), ms > 0 {
+    let step: Float = 16
+    var t: Float = 0
+    while t < ms {
+        let d = min(step, ms - t)
+        _ = hn_context_anim_tick(ctx, d)
+        t += d
+    }
+    hn_context_repaint(ctx)
+    print("  动画时钟: \(ms)ms")
+}
 
 guard let dlp = hn_context_display_list(ctx) else {
     print("✘ 无绘制指令"); exit(1)
@@ -1819,6 +1857,327 @@ do {
         let dy = abs(ysD[1] - ysD[0])
         check(dy > 20, String(format: "3D: rotate(20°) 上边倾斜 (两端 dy=%.0f)", dy))
     } else { check(false, "3D: rotate(20°) 未产生四边形(旋转后应非轴对齐)") }
+}
+
+print("== Lottie 矢量动画 + 网格变形 + 透明背板 ==")
+do {
+    // 内置一个最小 Lottie(不依赖外部文件, 断言可在任何环境跑):
+    // 两层 —— 一个矩形旋转关键帧 + 一个心跳缩放关键帧
+    let lottieJSON = """
+    {"v":"5.7.4","fr":60,"ip":0,"op":60,"w":100,"h":100,"layers":[
+      {"ty":4,"nm":"box","ip":0,"op":60,"ind":1,
+       "ks":{"a":{"a":0,"k":[0,0]},"p":{"a":0,"k":[50,50]},"s":{"a":0,"k":[100,100]},
+             "r":{"a":1,"k":[{"t":0,"s":[0]},{"t":60,"s":[90]}]},"o":{"a":0,"k":100}},
+       "shapes":[{"ty":"gr","it":[
+          {"ty":"rc","p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[40,40]},"r":{"a":0,"k":4}},
+          {"ty":"fl","c":{"a":0,"k":[1,0,0]},"o":{"a":0,"k":100},"r":1},
+          {"ty":"tr","a":{"a":0,"k":[0,0]},"p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[100,100]},
+                     "r":{"a":0,"k":0},"o":{"a":0,"k":100}}]}]},
+      {"ty":4,"nm":"grow","ip":0,"op":60,"ind":2,
+       "ks":{"a":{"a":0,"k":[0,0]},"p":{"a":0,"k":[50,50]},"s":{"a":0,"k":[100,100]},
+             "r":{"a":0,"k":0},"o":{"a":0,"k":100}},
+       "shapes":[{"ty":"gr","it":[
+          {"ty":"el","p":{"a":0,"k":[0,0]},"s":{"a":1,"k":[{"t":0,"s":[10,10]},{"t":60,"s":[80,80]}]}},
+          {"ty":"fl","c":{"a":0,"k":[0,0.5,1]},"o":{"a":0,"k":100},"r":1},
+          {"ty":"tr","a":{"a":0,"k":[0,0]},"p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[100,100]},
+                     "r":{"a":0,"k":0},"o":{"a":0,"k":100}}]}]}]}
+    """
+    AssetStore.shared.put("hn-test-lottie.json", lottieJSON)
+    let ltHTML = """
+    <html><head><style>
+    html,body{margin:0;width:100%;height:100%;background:#000000;}
+    .lot{width:100;height:100;}
+    .mesh{width:80;height:80;}
+    </style></head><body>
+    <img class="lot" src="hn-test-lottie.json" hn-lottie>
+    <img class="mesh" src="assets/avatar-a.png" hn-mesh="6x6" hn-mesh-sway="6">
+    </body></html>
+    """
+    guard let ldoc = hn_parse_html(ltHTML, ltHTML.utf8.count) else { fatalError() }
+    let lctx = hn_context_create()
+    hn_context_set_doc(lctx, ldoc)
+    do {
+        let (ab, box) = AssetStore.shared.backend()
+        assetKeepAlive = box
+        let ap = UnsafeMutablePointer<hn_asset_backend>.allocate(capacity: 1)
+        ap.initialize(to: ab)
+        hn_context_set_assets(lctx, ap)
+    }
+    hn_context_layout(lctx, 200, 240, &backend)
+
+    // 采样某时刻的指令集合(多边形数量 + 首个多边形包围盒 + 网格/图片指令数)
+    func sample(_ ms: Float) -> (poly: Int, mesh: Int, img: Int, box: (Float, Float, Float, Float)) {
+        _ = hn_context_anim_tick(lctx, ms)
+        hn_context_repaint(lctx)
+        var poly = 0, mesh = 0, img = 0
+        var bx: Float = 0, by: Float = 0, bw: Float = 0, bh: Float = 0
+        if let dl = hn_context_display_list(lctx), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) {
+                let c = cmds[i]
+                if c.kind == HN_CMD_POLYGON {
+                    poly += 1
+                    if poly == 1, let p = c.poly {
+                        var mnx = p[0], mxx = p[0], mny = p[1], mxy = p[1]
+                        for q in 0..<Int(c.poly_n) {
+                            let x = p[q * 2], y = p[q * 2 + 1]
+                            mnx = min(mnx, x); mxx = max(mxx, x)
+                            mny = min(mny, y); mxy = max(mxy, y)
+                        }
+                        bx = mnx; by = mny; bw = mxx - mnx; bh = mxy - mny
+                    }
+                }
+                if c.kind == HN_CMD_MESH { mesh += 1 }
+                if c.kind == HN_CMD_IMAGE { img += 1 }
+            }
+        }
+        return (poly, mesh, img, (bx, by, bw, bh))
+    }
+
+    // 动画时长 60 帧 @60fps = 1000ms。sample 的 tick 是**累加**的,
+    // 所以这里依次推进到 100ms / 500ms / 1100ms。
+    let s0 = sample(100)      // → 100ms
+    let s1 = sample(400)      // → 500ms
+    let s2 = sample(600)      // → 1100ms, 取模后等价于 100ms(= s0 的时刻)
+
+    check(s0.poly >= 2, "Lottie: 解析 JSON 并产出多边形指令 (实际 \(s0.poly) 个)")
+    check(s0.mesh == 1, "网格变形: 产出 MESH 指令 (实际 \(s0.mesh) 个)")
+    check(s0.img == 0, "Lottie 元素不再退化为静态 IMAGE (\(s0.img) 个 IMAGE)")
+
+    // 旋转 + 缩放关键帧应改变几何(矩形绕中心转、圆随时间变大)
+    let moved = abs(s1.box.0 - s0.box.0) + abs(s1.box.1 - s0.box.1)
+              + abs(s1.box.2 - s0.box.2) + abs(s1.box.3 - s0.box.3) > 1.0
+    check(moved, String(format: "Lottie: 关键帧在时间轴上推进 (100ms %.1fx%.1f → 500ms %.1fx%.1f)",
+                        s0.box.2, s0.box.3, s1.box.2, s1.box.3))
+
+    // 相隔一个完整周期(1000ms)的两点几何应一致 —— 验证循环取模
+    let back = abs(s2.box.0 - s0.box.0) + abs(s2.box.1 - s0.box.1)
+             + abs(s2.box.2 - s0.box.2) + abs(s2.box.3 - s0.box.3)
+    check(back < 1.5, String(format: "Lottie: 相隔一周期几何一致 (偏差 %.2f px)", back))
+
+    // 透明背板: hn-transparent 应把 body 底色抹掉
+    let trHTML = """
+    <html><head><meta name="hn-transparent" content="1">
+    <style>html,body{margin:0;width:100%;height:100%;background:#1b1f27;}
+    .c{width:40;height:40;background:#ff0000;}</style>
+    </head><body><div class="c"></div></body></html>
+    """
+    var m = hn_manifest()
+    if let tdoc = hn_parse_html(trHTML, trHTML.utf8.count) {
+        hn_doc_manifest(tdoc, &m)
+        check(m.transparent == 1, "透明背板: hn-transparent 清单位被解析")
+        let tctx = hn_context_create()
+        hn_context_set_doc(tctx, tdoc)
+        hn_context_layout(tctx, 200, 200, &backend)
+        // 未剥离前: 根元素应有实色背景指令
+        var rootRects = 0
+        if let dl = hn_context_display_list(tctx), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) {
+                let c = cmds[i]
+                if c.kind == HN_CMD_RECT && c.w >= 199 && c.h >= 199 && (c.fill & 0xFF) != 0 {
+                    rootRects += 1
+                }
+            }
+        }
+        check(rootRects >= 1, "透明背板: 剥离前根底色存在 (\(rootRects) 个全屏实色矩形)")
+        hn_context_strip_root_background(tctx)
+        hn_context_repaint(tctx)
+        var afterRects = 0
+        if let dl = hn_context_display_list(tctx), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) {
+                let c = cmds[i]
+                if c.kind == HN_CMD_RECT && c.w >= 199 && c.h >= 199 && (c.fill & 0xFF) != 0 {
+                    afterRects += 1
+                }
+            }
+        }
+        check(afterRects == 0, "透明背板: 剥离后根底色消失 (\(afterRects) 个全屏实色矩形)")
+        // 关键回归: 再跑一次 layout(等价于窗口 resize / 热更新)。
+        // 样式会从级联重算, 无色板开关若是一次性改写, 这里底色就会被装回来。
+        hn_context_layout(tctx, 240, 240, &backend)
+        var afterRelayout = 0
+        if let dl = hn_context_display_list(tctx), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) {
+                let c = cmds[i]
+                if c.kind == HN_CMD_RECT && c.w >= 199 && c.h >= 199 && (c.fill & 0xFF) != 0 {
+                    afterRelayout += 1
+                }
+            }
+        }
+        check(afterRelayout == 0,
+              "透明背板: 重新布局后仍保持透明(\(afterRelayout) 个全屏实色矩形) — 持久开关")
+        // 内容仍要正常绘制(不能把整页都抹掉)
+        var hasRed = false
+        if let dl = hn_context_display_list(tctx), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) where cmds[i].fill == 0xff0000ff { hasRed = true }
+        }
+        check(hasRed, "透明背板: 内容元素不受影响(红色方块仍在)")
+    } else { check(false, "透明背板: 解析失败") }
+
+    // 透明窗口物化: 走真实 NSWindow 路径验证窗口属性确实被设置
+    // (离屏位图会丢失窗口属性, 必须真建窗口才能断言这一点)
+    do {
+        let winHTML = """
+        <html><head>
+        <meta name="hn-surface" content="popup">
+        <meta name="hn-window" content="200x120">
+        <meta name="hn-transparent" content="1">
+        <meta name="hn-shadow" content="0">
+        <meta name="hn-draggable" content="0">
+        <style>html,body{margin:0;width:100%;height:100%;background:#123456;}
+        .a{position:absolute;left:10;top:10;width:80;height:60;background:#ff0000;}</style>
+        </head><body><div class="a"></div></body></html>
+        """
+        var m2 = hn_manifest()
+        if let d2 = hn_parse_html(winHTML, winHTML.utf8.count) {
+            hn_doc_manifest(d2, &m2)
+            check(m2.transparent == 1, "透明窗口: 清单 transparent=1")
+            check(m2.shadow == 0, "透明窗口: 清单 shadow=0(可关闭投影)")
+            check(m2.draggable == 0, "透明窗口: 清单 draggable=0(可关闭拖动)")
+
+            let app = HNEngine.shared.open(id: "hn-test-transparent", html: winHTML)
+            let w = app.window
+            check(w.isOpaque == false, "透明窗口: NSWindow.isOpaque=false(逐像素 alpha)")
+            check(w.backgroundColor.alphaComponent == 0,
+                  String(format: "透明窗口: 窗口底色为全透明 (alpha=%.2f)", w.backgroundColor.alphaComponent))
+            check(w.hasShadow == false, "透明窗口: hasShadow 跟随清单(=false)")
+            check(w.isMovableByWindowBackground == false, "透明窗口: 空白拖动跟随清单(=false)")
+
+            // 根底色应已被引擎剥离(html/body 的 #123456 不该再出现)
+            let av = app.view
+            check(av != nil, "透明窗口: 取得 native 视图")
+            if let av {
+                var anyDl = false
+                if let dl = hn_context_display_list(av.engineContext), let cmds = dl.pointee.cmds {
+                    anyDl = true
+                    var bgRects = 0
+                    for i in 0..<Int(dl.pointee.count) {
+                        let c = cmds[i]
+                        if c.kind == HN_CMD_RECT && c.w >= 199 && c.h >= 119 { bgRects += 1 }
+                    }
+                    check(bgRects == 0, "透明窗口: 根底色被剥离(\(bgRects) 个全屏矩形)")
+                    var redOk = false
+                    for i in 0..<Int(dl.pointee.count) where cmds[i].fill == 0xff0000ff { redOk = true }
+                    check(redOk, "透明窗口: 内容元素仍在(红块)")
+                }
+                if !anyDl {
+                    // HNEngine.open 尚未触发布局(窗口尺寸由系统决定后才 layout)
+                    av.relayout()
+                    if let dl = hn_context_display_list(av.engineContext), let cmds = dl.pointee.cmds {
+                        var bgRects = 0
+                        for i in 0..<Int(dl.pointee.count) {
+                            let c = cmds[i]
+                            if c.kind == HN_CMD_RECT && c.w >= 199 && c.h >= 119 { bgRects += 1 }
+                        }
+                        check(bgRects == 0, "透明窗口: 根底色被剥离(layout 后 \(bgRects) 个全屏矩形)")
+                        var redOk = false
+                        for i in 0..<Int(dl.pointee.count) where cmds[i].fill == 0xff0000ff { redOk = true }
+                        check(redOk, "透明窗口: 内容元素仍在(layout 后红块)")
+                    } else { check(false, "透明窗口: layout 后仍无绘制指令") }
+                }
+            }
+            HNEngine.shared.close(id: "hn-test-transparent")
+
+            /* 回归: webkit 兜底渲染器没有 C 引擎上下文。此处若把一个假指针
+               (曾用 OpaquePointer(bitPattern: 1))当成真上下文返回, 声明
+               hn-transparent 的 webkit 页面会在建窗时调引擎 API 直接崩溃。
+               断言它必须为 nil, 强制调用方判空。 */
+            let wkHost = HNWebKitHost()
+            check(wkHost.engineContextOrNil == nil,
+                  "透明窗口: webkit 渲染器不返回假引擎上下文(避免崩溃)")
+        } else { check(false, "透明窗口: 解析失败") }
+    }
+
+    // MESH 指令的数据完整性: 顶点/UV 数量与网格一致
+    let mctx = hn_context_create()
+    let mHTML = """
+    <html><head><style>html,body{margin:0} .m{width:60;height:60;}</style></head>
+    <body><img class="m" src="assets/avatar-a.png" hn-mesh="4x3"></body></html>
+    """
+    if let mdoc = hn_parse_html(mHTML, mHTML.utf8.count) {
+        hn_context_set_doc(mctx, mdoc)
+        hn_context_layout(mctx, 120, 120, &backend)
+        var nv = 0, cols = 0, rows = 0, uvok = false
+        if let dl = hn_context_display_list(mctx), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) {
+                let c = cmds[i]
+                if c.kind == HN_CMD_MESH {
+                    cols = Int(c.mesh_cols); rows = Int(c.mesh_rows)
+                    nv = (cols + 1) * (rows + 1)
+                    // UV 应覆盖 0..1 四个角
+                    if let uv = c.mesh_uv {
+                        var mn: Float = 9, mx: Float = -9
+                        for k in 0..<nv { mn = min(mn, uv[k * 2]); mx = max(mx, uv[k * 2]) }
+                        uvok = abs(mn) < 0.001 && abs(mx - 1.0) < 0.001
+                    }
+                }
+            }
+        }
+        check(cols == 4 && rows == 3, "网格: hn-mesh=\"4x3\" 被解析 (实际 \(cols)x\(rows))")
+        check(uvok, "网格: UV 覆盖 0..1 (\(nv) 个顶点)")
+    } else { check(false, "网格: 解析失败") }
+
+    // 脚本驱动网格: hn_node_set_mesh_verts 应让节点进入网格绘制
+    let sctx = hn_context_create()
+    if let sdoc = hn_parse_html(mHTML, mHTML.utf8.count) {
+        hn_context_set_doc(sctx, sdoc)
+        if let img = firstImg(sdoc) {
+            var verts = [Float](repeating: 0, count: (3 + 1) * (3 + 1) * 2)
+            for r in 0...3 { for c in 0...3 {
+                let i = r * 4 + c
+                verts[i * 2] = Float(c) / 3.0 * 60
+                verts[i * 2 + 1] = Float(r) / 3.0 * 60
+            } }
+            let ok = verts.withUnsafeBufferPointer { hn_node_set_mesh_verts(img, $0.baseAddress, 3, 3) }
+            check(ok == 1, "网格: 脚本写入顶点成功(应用层自定义 rig)")
+            var gc: Int32 = 0, gr: Int32 = 0
+            let isMesh = hn_node_mesh_info(img, &gc, &gr) == 1
+            check(isMesh && gc == 3 && gr == 3, "网格: 脚本网格被识别 (\(gc)x\(gr))")
+
+            // 脚本写入的顶点必须真的被绘制使用(而非只改了状态)
+            hn_context_layout(sctx, 120, 120, &backend)
+            var scriptedMesh = false
+            if let dl = hn_context_display_list(sctx), let cmds = dl.pointee.cmds {
+                for i in 0..<Int(dl.pointee.count) {
+                    let c = cmds[i]
+                    if c.kind == HN_CMD_MESH && c.mesh_cols == 3 && c.mesh_rows == 3 {
+                        scriptedMesh = true
+                    }
+                }
+            }
+            check(scriptedMesh, "网格: 脚本网格进入绘制(3x3 MESH 指令)")
+        } else { check(false, "网格: 未找到 img 节点") }
+    }
+
+    // JS → 网格: setMeshVerts 必须可用(这是文档承诺的"应用层 rig"入口)
+    do {
+        let jsHTML = """
+        <html><head><style>html,body{margin:0} .m{width:60;height:60;}</style></head>
+        <body><img id="mm" class="m" src="assets/avatar-a.png">
+        <script>
+          var el = document.getElementById('mm');
+          var v = [];
+          for (var r = 0; r < 4; r++) for (var c = 0; c < 4; c++) {
+            v.push(c / 3 * 60); v.push(r / 3 * 60);
+          }
+          window.__meshOK = el.setMeshVerts(v, 3, 3);
+        </script></body></html>
+        """
+        let jv = HtmlNativeView(html: jsHTML)
+        jv.imageRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        jv.frame = NSRect(x: 0, y: 0, width: 120, height: 120)
+        jv.relayout()
+        let jsErr = jv.jsError ?? ""
+        check(jsErr.isEmpty, "JS 网格: 脚本无错误 (\(jsErr.isEmpty ? "clean" : jsErr))")
+        if let rt = jv.jsRuntimeForTest {
+            let ok = rt.probe("String(window.__meshOK)")
+            check(ok == "true", "JS 网格: setMeshVerts(v, 3, 3) 返回 true (实际 \(ok ?? "nil"))")
+        } else { check(false, "JS 网格: JS 运行时未建立") }
+        var found = false
+        if let dl = hn_context_display_list(jv.engineContext), let cmds = dl.pointee.cmds {
+            for i in 0..<Int(dl.pointee.count) where cmds[i].kind == HN_CMD_MESH { found = true }
+        }
+        check(found, "JS 网格: 经 JS 写入后进入 MESH 绘制")
+    }
 }
 
 print("== 离屏渲染 PNG ==")

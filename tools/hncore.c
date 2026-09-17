@@ -37,6 +37,31 @@ static char *read_all(const char *path, size_t *len) {
     return buf;
 }
 
+/* ---- 资产后端: 引擎不做 I/O, 由这里提供字节(Lottie JSON 等) ----
+   缓冲必须长期存活(引擎就地解析会写入), 故用一张表持有。 */
+typedef struct { char *path; char *data; size_t len; } asset_ent;
+static asset_ent asset_tab[64];
+static int asset_n = 0;
+
+static const char *asset_load(void *ctx, const char *path, size_t *len) {
+    (void)ctx;
+    for (int i = 0; i < asset_n; i++)
+        if (!strcmp(asset_tab[i].path, path)) { if (len) *len = asset_tab[i].len; return asset_tab[i].data; }
+    if (asset_n >= 64) return NULL;
+    size_t n = 0;
+    char *d = read_all(path, &n);
+    if (!d) {
+        /* 相对 HTML 所在目录再试一次(与 <link> 的解析口径一致) */
+        return NULL;
+    }
+    asset_tab[asset_n].path = strdup(path);
+    asset_tab[asset_n].data = d;
+    asset_tab[asset_n].len = n;
+    asset_n++;
+    if (len) *len = n;
+    return d;
+}
+
 /* 常见位置: 同名 .css 与 <link rel=stylesheet href> 抽取 */
 static char *load_css(const char *html_path, const char *html, size_t *out_len) {
     /* 1) 同名 .css 文件 */
@@ -209,8 +234,25 @@ int main(int argc, char **argv) {
     hn_context *ctx = hn_context_create();
     hn_context_set_doc(ctx, doc);
     if (css && clen) hn_context_add_sheet(ctx, hn_parse_css(css, clen));
+    /* 资产后端: Lottie JSON 由这里读入(引擎自身不做 I/O) */
+    hn_asset_backend ab;
+    memset(&ab, 0, sizeof(ab));
+    ab.ctx = NULL;
+    ab.load = asset_load;
+    hn_context_set_assets(ctx, &ab);
     /* 无文本后端: 引擎用等宽估算(纯 C 也能算几何) */
     hn_context_layout(ctx, W, H, NULL);
+    /* HN_CLOCK=<ms>: 把外部资源动画(Lottie/网格)推进到指定时刻。
+       没有这步则渲染的是第 0 帧 —— 断言需要确定性时刻。 */
+    const char *clock_env = getenv("HN_CLOCK");
+    if (clock_env && *clock_env) {
+        float ms = (float)atof(clock_env);
+        /* 分步推进, 让多段关键帧与循环取模都走到(单步也能到, 这里只为稳妥) */
+        float step = 16.0f;
+        for (float t = 0; t < ms; t += step)
+            hn_context_anim_tick(ctx, t + step > ms ? ms - t : step);
+        hn_context_repaint(ctx);
+    }
 
     int rc = 0;
     if (!strcmp(cmd, "layout")) {
@@ -244,6 +286,29 @@ int main(int argc, char **argv) {
                     break;
                 case HN_CMD_CLIP_PUSH: printf("CLIP+  %7.1f %7.1f %7.1f %7.1f\n", c->x, c->y, c->w, c->h); break;
                 case HN_CMD_CLIP_POP:  printf("CLIP-\n"); break;
+                case HN_CMD_QUAD:
+                    printf("QUAD   (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) fill=%08X\n",
+                           c->qx[0], c->qy[0], c->qx[1], c->qy[1],
+                           c->qx[2], c->qy[2], c->qx[3], c->qy[3], c->fill);
+                    break;
+                case HN_CMD_POLYGON: {
+                    float mnx = 1e9f, mny = 1e9f, mxx = -1e9f, mxy = -1e9f;
+                    for (int q = 0; q < c->poly_n; q++) {
+                        float x = c->poly[q * 2], y = c->poly[q * 2 + 1];
+                        if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+                        if (y < mny) mny = y; if (y > mxy) mxy = y;
+                    }
+                    printf("POLY   n=%3d bbox=[%7.1f %7.1f %7.1f %7.1f] fill=%08X stroke=%08X w=%.1f%s\n",
+                           c->poly_n, mnx, mny, mxx - mnx, mxy - mny,
+                           c->fill, c->stroke, c->stroke_w,
+                           c->even_odd ? " evenodd" : "");
+                    break;
+                }
+                case HN_CMD_MESH:
+                    printf("MESH   %dx%d %7.1f %7.1f %7.1f %7.1f %s\n",
+                           c->mesh_cols, c->mesh_rows, c->x, c->y, c->w, c->h,
+                           c->text ? c->text : "");
+                    break;
                 }
             }
         }

@@ -204,6 +204,13 @@ struct hn_node {
     int    caret;                                /* 字节偏移 */
     /* 过渡动画当前值(opacity / 背景 / 前景, 0..1) */
     hn_anim anim;
+    /* 外部资源动画时钟(ms)。Lottie 与网格变形共用 —— 与 CSS 动画同一帧循环,
+       但独立计时: CSS 动画时钟从 0 开始播一遍, Lottie 需要持续累加(循环取模)。 */
+    float ext_clock;
+    /* 脚本写入的网格(hn_node_set_mesh_verts)。非 NULL 时覆盖 hn-mesh 声明的
+       程序化网格 —— 让应用层实现自己的 rig(Live2D 的装配属于应用层)。 */
+    float *mesh_verts;
+    int    mesh_cols, mesh_rows;
 };
 
 struct hn_doc {
@@ -265,6 +272,16 @@ struct hn_context {
     hn_node *hover_node, *active_node, *focus_node; /* 伪类状态 */
     int      caret_on;   /* 是否绘制插入符(窗口聚焦时) */
     int      has_theme;  /* 索引 1 是否为主题槽(热更新时替换) */
+    /* 透明背板: 1 = 每次样式计算后把 html/body 的底色清掉。
+       必须是**持久的上下文状态**而非一次性改写 —— 样式每次 layout 都会
+       从级联重算, 只改一次的话下一次 resize/热更新就把底色又装回来了
+       (表现为"透明在首次显示时正常, 一改尺寸就变回不透明")。 */
+    int      transparent;
+    const hn_asset_backend *assets;  /* 运行时持有; 可为 NULL(则无外部资产) */
+    /* Lottie 缓存: 按路径惰性解析一次(路径字符串在 tmp arena, 故键用副本)。
+       文档重渲染时由 hn_context_compact 清空(旧 arena 已随文档失效)。 */
+    struct { char *path; struct hn_lottie *lottie; } *lot;
+    int n_lot, cap_lot;
 };
 
 /* ---------- 共享工具 ---------- */
@@ -279,5 +296,30 @@ void  hn_parse_inline_decls(hn_arena *ar, const char *src, size_t len,
 
 void hn_layout_root(hn_context *c);
 void hn_paint_root(hn_context *c);
+
+/* ---------- 跨文件内部接口 ---------- */
+/* 向当前显示列表追加指令(hn_paint.c)。供 lottie/网格等"几何生成器"复用,
+   使它们不必知道指令列表的存储细节。 */
+void hn_paint_push(hn_context *c, const hn_cmd *cmd);
+/* 本次 layout 的临时区(生命周期 = 显示列表): 指令引用的顶点数组放这里 */
+hn_arena *hn_context_tmp(hn_context *c);
+/* 资产后端读取(hn_context.c) */
+const hn_asset_backend *hn_context_assets(hn_context *c);
+/* 立即清除根链底色(不打开持续开关); 由 layout 在样式重算后调用 */
+void hn_strip_root_background_now(hn_context *c);
+
+/* Lottie(hn_lottie.c): 解析并缓存; 释放缓存 */
+struct hn_lottie *hn_context_lottie(hn_context *c, const char *path);
+void hn_context_lottie_clear(hn_context *c);
+/* 按时间求值并发射绘制指令 */
+void hn_lottie_emit(hn_context *c, struct hn_lottie *l, float clock_ms,
+                    float bw, float bh, float sx, float sy, float alpha,
+                    const char *fit);
+struct hn_lottie *hn_lottie_load(hn_context *c, const char *path);
+void hn_lottie_free(struct hn_lottie *l);
+
+/* 网格变形(hn_mesh.c): 发射 MESH 指令 */
+void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
+                  float bw, float bh, float sx, float sy, float alpha);
 
 #endif

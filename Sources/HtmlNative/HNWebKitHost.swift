@@ -24,6 +24,12 @@ public protocol HNWebHost: AnyObject {
     var onFirstPaint: (() -> Void)? { get set }
     /// body 背景色(#rrggbb), 取不到返回 nil
     func bodyBackgroundHex() -> UInt32?
+    /// 引擎上下文(仅 native 渲染器存在)。
+    /// 用可选类型 + 独立命名: native 视图已有一个非可选的 engineContext 供
+    /// 宿主/工具直接使用; 这里是"需要判空"的那一份 —— 若让 webkit 用一个
+    /// 假指针(如 OpaquePointer(bitPattern: 1))去满足非空签名, 调用方任何
+    /// "顺手调引擎 API" 都会解引用非法地址而崩溃。
+    var engineContextOrNil: OpaquePointer? { get }
 }
 
 /// sys:// 桥对象 —— 必须在 WKWebView 创建**之前**注册到 config,
@@ -170,6 +176,8 @@ public final class HNWebKitHost: NSObject, HNWebHost, WKNavigationDelegate {
     public func dumpDOM() -> [String] {
         ["webkit 兜底渲染器: DOM 在 WKWebView 内, 请用 Safari 开发者工具检查"]
     }
+
+    public var engineContextOrNil: OpaquePointer? { nil }
 
     public func bodyBackgroundHex() -> UInt32? {
         var hex: UInt32?

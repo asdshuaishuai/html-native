@@ -33,7 +33,13 @@ public final class HtmlNativeView: NSView, HNWebHost {
     var store: HNStore { HNStore(id: storeId) }
     /// 相对图片路径的解析根(默认进程工作目录)
     public var imageRoot: URL? {
-        didSet { ImageStore.shared.root = imageRoot ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath) }
+        didSet {
+            let root = imageRoot ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            ImageStore.shared.root = root
+            // 资产(Lottie JSON)与图片用同一个根: 相对路径的解析口径必须一致,
+            // 否则 <img src="a.png"> 与 hn-lottie="a.json" 会去不同的地方找文件。
+            AssetStore.shared.root = root
+        }
     }
     /// 自定义请求通道(默认走 URLSession); 返回 HTML 片段
     public var hxTransport: ((HxAction, @escaping (String?) -> Void) -> Void)?
@@ -63,6 +69,8 @@ public final class HtmlNativeView: NSView, HNWebHost {
 
     private var imageBox: ImageStore.CtxBox?
     private var imageBackendPtr: UnsafeMutablePointer<hn_image_backend>?
+    private var assetBox: AssetStore.CtxBox?
+    private var assetBackendPtr: UnsafeMutablePointer<hn_asset_backend>?
     private var jsRuntime: HNJSRuntime?
     /// 测试用: 暴露 JS 运行时以驱动断言
     public var jsRuntimeForTest: HNJSRuntime? { jsRuntime }
@@ -145,6 +153,14 @@ public final class HtmlNativeView: NSView, HNWebHost {
         ptr.initialize(to: backend)
         imageBackendPtr = ptr
         hn_context_set_images(ctx, ptr)
+        // 资产后端: Lottie JSON 等外部数据文件。引擎不做磁盘 I/O,
+        // 字节由运行时提供(同一份 Lottie 在三个平台由同一段 C 代码求值)。
+        let (ab, abox) = AssetStore.shared.backend()
+        assetBox = abox
+        let aptr = UnsafeMutablePointer<hn_asset_backend>.allocate(capacity: 1)
+        aptr.initialize(to: ab)
+        assetBackendPtr = aptr
+        hn_context_set_assets(ctx, aptr)
         runPageScripts()
     }
 
@@ -332,7 +348,15 @@ public final class HtmlNativeView: NSView, HNWebHost {
             localStorageSet: { k, v in weakSelf?.store.set(k, v) },
             log: { msg in FileHandle.standardError.write("[hn-js] \(msg)\n".data(using: .utf8)!) },
             preventDefault: { weakSelf?.jsPrevented = true },
-            reload: { weakSelf?.relayout() }
+            reload: { weakSelf?.relayout() },
+            setMeshVerts: { h, verts, cols, rows in
+                guard let self = weakSelf, let n = Self.node(from: h) else { return false }
+                let ok = verts.withUnsafeBufferPointer {
+                    hn_node_set_mesh_verts(n, $0.baseAddress, Int32(cols), Int32(rows))
+                }
+                if ok == 1 { self.relayout() }
+                return ok == 1
+            }
         )
     }
 
@@ -587,7 +611,24 @@ public final class HtmlNativeView: NSView, HNWebHost {
     override public func draw(_ dirtyRect: NSRect) {
         guard let ctx, let dlp = hn_context_display_list(ctx),
               let cg = NSGraphicsContext.current?.cgContext else { return }
+        /* 透明背板: 先清成全透明, 再由绘制指令画出内容。
+           这样 html 里不画背景的地方就真的透出桌面/下层窗口
+           (配合 window.isOpaque=false 与 backgroundColor=.clear)。
+           非透明模式也清一次: 避免重绘时残留上一次的像素(拖影)。 */
+        cg.saveGState()
+        cg.setBlendMode(.copy)
+        cg.setFillColor(NSColor.clear.cgColor)
+        cg.fill(dirtyRect)
+        cg.restoreGState()
         HNPainter.draw(dlp.pointee, into: cg)
+    }
+
+    /// 是否透明背板(由 hn-transparent 声明; 影响窗口配置)
+    public var wantsTransparentBackdrop: Bool {
+        guard let ctx, let doc = hn_context_doc(ctx) else { return false }
+        var m = hn_manifest()
+        hn_doc_manifest(doc, &m)
+        return m.transparent == 1
     }
 
     // MARK: - 热更新通道
@@ -1173,6 +1214,8 @@ public final class HtmlNativeView: NSView, HNWebHost {
 
     /// 供截图/宿主工具: 引擎上下文句柄(hover/scroll/repaint 等只读或状态注入用途)
     public var engineContext: OpaquePointer { ctx }
+    /// 协议实现: 需要判空的那一份(native 恒有值)
+    public var engineContextOrNil: OpaquePointer? { ctx }
 
     /// 内省: 指定 id 的文本内容(排查"内容对不对")
     public func textOf(id: String) -> String? {

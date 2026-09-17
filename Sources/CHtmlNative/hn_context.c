@@ -22,6 +22,8 @@ hn_context *hn_context_create(void) {
 
 void hn_context_destroy(hn_context *c) {
     if (!c) return;
+    hn_context_lottie_clear(c);
+    free(c->lot);
     for (int i = 0; i < c->n_sheets; i++) hn_sheet_free(c->sheets[i]);
     free(c->sheets);
     hn_doc_free(c->doc);
@@ -59,6 +61,9 @@ void hn_context_layout(hn_context *c, float width, float height,
     c->tmp = hn_arena_create();
     c->n_cmds = 0;
     hn_style_compute_all(c);
+    /* 透明背板: 样式重算会把底色从级联装回来, 必须在这之后重新剥离。
+       这是"持久开关"语义的关键一步(见 hn_context_strip_root_background)。 */
+    if (c->transparent) hn_strip_root_background_now(c);
     hn_layout_root(c);
     hn_paint_root(c);
     c->dl.cmds = c->cmds;
@@ -74,6 +79,93 @@ void hn_context_repaint(hn_context *c) {
 
 void hn_context_set_images(hn_context *c, const hn_image_backend *backend) {
     c->images = backend;
+}
+
+void hn_context_set_assets(hn_context *c, const hn_asset_backend *backend) {
+    c->assets = backend;
+    hn_context_lottie_clear(c);     /* 后端换了, 旧解析结果可能不再可得 */
+}
+
+const hn_asset_backend *hn_context_assets(hn_context *c) { return c ? c->assets : NULL; }
+
+/* ---- Lottie 缓存(按路径) ---- */
+
+struct hn_lottie *hn_context_lottie(hn_context *c, const char *path) {
+    if (!c || !path || !*path) return NULL;
+    for (int i = 0; i < c->n_lot; i++)
+        if (c->lot[i].path && !strcmp(c->lot[i].path, path)) return c->lot[i].lottie;
+    struct hn_lottie *l = hn_lottie_load(c, path);
+    if (!l) {
+        /* 缓存失败结果(负缓存), 避免每帧重复尝试读文件 */
+        if (c->n_lot == c->cap_lot) {
+            int nc = c->cap_lot ? c->cap_lot * 2 : 8;
+            void *nv = realloc(c->lot, sizeof(*c->lot) * (size_t)nc);
+            if (!nv) return NULL;
+            c->lot = nv; c->cap_lot = nc;
+        }
+        c->lot[c->n_lot].path = strdup(path);
+        c->lot[c->n_lot].lottie = NULL;
+        c->n_lot++;
+        return NULL;
+    }
+    if (c->n_lot == c->cap_lot) {
+        int nc = c->cap_lot ? c->cap_lot * 2 : 8;
+        void *nv = realloc(c->lot, sizeof(*c->lot) * (size_t)nc);
+        if (!nv) { hn_lottie_free(l); return NULL; }
+        c->lot = nv; c->cap_lot = nc;
+    }
+    c->lot[c->n_lot].path = strdup(path);
+    c->lot[c->n_lot].lottie = l;
+    c->n_lot++;
+    return l;
+}
+
+void hn_context_lottie_clear(hn_context *c) {
+    if (!c || !c->lot) return;
+    for (int i = 0; i < c->n_lot; i++) {
+        free(c->lot[i].path);
+        if (c->lot[i].lottie) hn_lottie_free(c->lot[i].lottie);
+    }
+    c->n_lot = 0;
+}
+
+/* ---- 脚本驱动网格 ---- */
+
+int hn_node_set_mesh_verts(hn_node *n, const float *verts, int cols, int rows) {
+    if (!n || n->kind != HN_ELEM || cols <= 0 || rows <= 0) return 0;
+    if (cols > 128) cols = 128;
+    if (rows > 128) rows = 128;
+    int nv = (cols + 1) * (rows + 1);
+    float *p = (float *)hn_arena_alloc(n->arena, sizeof(float) * (size_t)(nv * 2));
+    if (!p) return 0;
+    if (verts) memcpy(p, verts, sizeof(float) * (size_t)(nv * 2));
+    else {
+        /* 未给顶点则用均匀网格 */
+        for (int r = 0; r <= rows; r++)
+            for (int cc = 0; cc <= cols; cc++) {
+                int i = r * (cols + 1) + cc;
+                p[i * 2]     = (float)cc / (float)cols * n->bw;
+                p[i * 2 + 1] = (float)r / (float)rows * n->bh;
+            }
+    }
+    n->mesh_verts = p;
+    n->mesh_cols = cols;
+    n->mesh_rows = rows;
+    return 1;
+}
+
+int hn_node_mesh_info(hn_node *n, int *cols, int *rows) {
+    if (!n || n->kind != HN_ELEM) return 0;
+    if (n->mesh_verts) {
+        if (cols) *cols = n->mesh_cols;
+        if (rows) *rows = n->mesh_rows;
+        return 1;
+    }
+    const char *g = hn_node_attr(n, "hn-mesh");
+    if (!g || !*g || !strcmp(g, "false") || !strcmp(g, "0")) return 0;
+    if (cols) *cols = 0;
+    if (rows) *rows = 0;
+    return 1;
 }
 
 /* 推进过渡动画并写回样式; 返回 1 表示仍有动画在跑(dt_ms<0 → 仅初始化) */
@@ -626,6 +718,15 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
         float bg_now[4], fg_now[4];
         rgba_of(st->background, bg_now);
         rgba_of(st->color, fg_now);
+
+        /* 外部资源动画时钟(Lottie / 网格变形): 与 CSS 动画共用帧循环, 但独立累加。
+           CSS 动画有"播完"概念, Lottie 需要持续时钟(自身循环取模)。
+           有声明就把节点标记为活跃, 帧驱动才会持续调用 repaint。 */
+        if (dt_ms > 0 &&
+            (hn_node_attr(n, "hn-lottie") || hn_node_attr(n, "hn-mesh") || n->mesh_verts)) {
+            n->ext_clock += dt_ms;
+            active = 1;
+        }
 
         /* @keyframes 动画: 声明了 animation-name 且能在样式表里找到定义。
            每帧按时间轴采样, 直接写入样式字段(几何由绘制阶段消费)。
@@ -1189,6 +1290,9 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
     out->x = out->y = 0;
     out->title = NULL;
     out->theme = NULL;
+    out->transparent = 0;
+    out->shadow = 1;        /* 默认带投影 */
+    out->draggable = 1;     /* 默认可拖动 */
     if (!doc || !doc->root) return;
 
     hn_node *stack[256];
@@ -1202,6 +1306,12 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
             if (name && content) {
                 if (!strcmp(name, "hn-theme")) {
                     out->theme = content;
+                } else if (!strcmp(name, "hn-transparent")) {
+                    out->transparent = strcmp(content, "false") && strcmp(content, "0");
+                } else if (!strcmp(name, "hn-shadow")) {
+                    out->shadow = strcmp(content, "false") && strcmp(content, "0");
+                } else if (!strcmp(name, "hn-draggable")) {
+                    out->draggable = strcmp(content, "false") && strcmp(content, "0");
                 } else if (!strcmp(name, "hn-surface")) {
                     if (!strncmp(content, "popup", 5)) out->surface = HN_SURFACE_POPUP;
                     else if (!strncmp(content, "layer", 5)) out->surface = HN_SURFACE_LAYER;
@@ -1399,6 +1509,7 @@ void hn_context_render(hn_context *c, const char *html_src, size_t len) {
  * 调用方须持有完整的 HTML(将重新解析)。用于流式应用的长期内存控制。 */
 void hn_context_compact(hn_context *c, const char *html, size_t len) {
     if (!c || !c->doc) return;
+    hn_context_lottie_clear(c);          /* 旧文档的路径键已随 arena 释放 */
     hn_arena_destroy(c->doc->arena);
     hn_doc_free(c->doc);
     c->doc = hn_parse_html(html, len);

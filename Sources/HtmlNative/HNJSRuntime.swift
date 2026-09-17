@@ -53,6 +53,9 @@ public final class HNJSRuntime {
         /// JS 调用 preventDefault/stopPropagation → 中止继续冒泡
         public var preventDefault: () -> Void
         public var reload: () -> Void
+        /// 写网格顶点(handle, 扁平 x/y 数组, cols, rows) —— 应用层自定义 rig 用。
+        /// 引擎只做"网格 + 贴图"合成; 骨骼/物理/口型同步由脚本逐帧驱动。
+        public var setMeshVerts: (UInt, [Float], Int, Int) -> Bool
     }
 
     private let context: JSContext
@@ -121,6 +124,28 @@ public final class HNJSRuntime {
                 guard let v = b.getStyle(handle(1), a2) else { return JSValue(nullIn: ctx) }
                 return JSValue(object: v, in: ctx)
             case "setStyle":  return JSValue(bool: b.setStyle(handle(1), a2, a3), in: ctx)
+            case "setMesh":
+                // 参数布局: [op, handle, 顶点串, cols, rows]
+                // (arr[1] 是 handle —— 用 handle(1) 取; 顶点从 arr[2] 起)
+                // 顶点用**字符串**而非嵌套数组传递: JS→Swift 的数组桥接对
+                // 嵌套数组不可靠(toArray() 只做一层平坦化), 用字符串最稳,
+                // 也避免了大网格(128x128 = 3 万个数)的逐元素桥接开销。
+                var verts: [Float] = []
+                if arr.count > 2, let s = arr[2] as? String, !s.isEmpty {
+                    var idx = s.startIndex
+                    while idx < s.endIndex {
+                        guard let comma = s[idx...].firstIndex(of: ",") else {
+                            if let v = Float(s[idx...]) { verts.append(v) }
+                            break
+                        }
+                        if let v = Float(s[idx..<comma]) { verts.append(v) }
+                        if comma == s.index(before: s.endIndex) { break }
+                        idx = s.index(after: comma)
+                    }
+                }
+                let cols = arr.count > 3 ? (Int(String(describing: arr[3])) ?? 0) : 0
+                let rows = arr.count > 4 ? (Int(String(describing: arr[4])) ?? 0) : 0
+                return JSValue(bool: b.setMeshVerts(handle(1), verts, cols, rows), in: ctx)
             case "request":
                 b.fetch(a, a2.isEmpty ? "GET" : a2, a3, a4, arr.count > 5 ? String(describing: arr[5]) : "inner")
                 return JSValue(undefinedIn: ctx)
@@ -233,6 +258,12 @@ public final class HNJSRuntime {
           setAttribute: function (n, v) { call('setAttr', h, String(n), String(v)); },
           hasAttribute: function (n) { var v = call('getAttr', h, String(n)); return v !== null && v !== undefined; },
           removeAttribute: function (n) { call('setAttr', h, String(n), ''); },
+          /* 网格变形: 应用层自定义 rig(骨骼/物理/口型)逐帧写顶点。
+             verts 是 2*(cols+1)*(rows+1) 个数字(x,y 交替), 元素盒局部坐标。
+             写入后该元素改走网格绘制(贴图 = 元素的 src)。 */
+          setMeshVerts: function (verts, cols, rows) {
+            return !!call('setMesh', h, Array.prototype.join.call(verts, ','), cols, rows);
+          },
           get textContent() { return call('getText', h); },
           set textContent(v) { call('setText', h, String(v)); },
           get innerHTML() { return call('getText', h); },

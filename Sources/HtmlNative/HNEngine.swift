@@ -124,8 +124,22 @@ public final class HNEngine {
             }
             // 无缝标题栏: 透明标题条 + 窗口底色/外观跟随页面 body 背景
             window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
-            window.backgroundColor = Self.windowBackdrop(of: host)
+            window.isMovableByWindowBackground = m.draggable == 1
+            if m.transparent == 1 {
+                /* 透明背板: 窗口不画底色, 内容里的透明区域真透出下层 */
+                window.isOpaque = false
+                window.backgroundColor = .clear
+                window.hasShadow = m.shadow == 1
+                /* 剥离根底色只是引擎路径需要做的事(它会重新绘制 html/body 背景)。
+                   webkit 路径没有引擎上下文: 那里靠 WKWebView 的
+                   underPageBackgroundColor = .clear + 页面自身不画根底色实现,
+                   因此这里只需判空跳过, 不能拿假指针去调引擎。 */
+                if let ectx = host.engineContextOrNil {
+                    hn_context_strip_root_background(ectx)
+                }
+            } else {
+                window.backgroundColor = Self.windowBackdrop(of: host)
+            }
         case .popup, .layer:
             let panel = NSPanel(contentRect: frame,
                                 styleMask: [.borderless, .nonactivatingPanel],
@@ -134,9 +148,15 @@ public final class HNEngine {
             panel.isFloatingPanel = true
             panel.isOpaque = false
             panel.backgroundColor = .clear
-            panel.hasShadow = true
+            panel.hasShadow = m.shadow == 1
             panel.hidesOnDeactivate = false
             panel.isReleasedWhenClosed = false
+            /* 弹窗/图层本身就是无边框表面: 声明 hn-transparent 时同样要剥离
+               根底色, 否则 html/body 的实色背景会铺满整个矩形, 圆角与局部
+               透明全部失效(表现为"声明了透明但还是个方块")。 */
+            if m.transparent == 1, let ectx = host.engineContextOrNil {
+                hn_context_strip_root_background(ectx)
+            }
             window = panel
         }
         window.contentView = host.asView

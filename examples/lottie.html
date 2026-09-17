@@ -1,0 +1,47 @@
+<html><head>
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="420x330">
+<meta name="hn-title" content="Lottie + 网格变形">
+<style>
+html, body { margin: 0; width: 100%; height: 100%; background: #0e1117; }
+.wrap { padding: 18; display: flex; flex-direction: column; gap: 14; }
+h1 { color: #e8eaf0; font-size: 16; margin: 0; }
+.sub { color: #6b7386; font-size: 11; }
+.row { display: flex; gap: 14; }
+.card { background: #161b24; border: 1 solid #232b38; border-radius: 12; padding: 10;
+        display: flex; flex-direction: column; gap: 6; align-items: center; }
+.k { color: #9aa3b5; font-size: 11; }
+
+/* Lottie: 声明文件路径, 引擎解析 JSON 并按帧求值 → 矢量指令 */
+.lot { width: 120; height: 120; }
+.lot-sm { width: 78; height: 78; }
+
+/* 网格变形: 贴图按可变形网格绘制(呼吸/摆动) */
+.mesh { width: 120; height: 120; border-radius: 10; }
+</style>
+</head><body>
+  <div class="wrap">
+    <h1>Lottie 矢量动画 + 网格变形贴图</h1>
+    <div class="sub">同一份 JSON, 引擎求值 → 平台无关绘制指令; 无需 WebView</div>
+    <div class="row">
+      <div class="card">
+        <img class="lot" src="assets/loading.json" hn-lottie>
+        <div class="k">Lottie loading(循环)</div>
+      </div>
+      <div class="card">
+        <img class="lot-sm" src="assets/loading.json" hn-lottie hn-lottie-speed="2">
+        <div class="k">2 倍速</div>
+      </div>
+      <div class="card">
+        <img class="mesh" src="assets/avatar-a.png"
+             hn-mesh="12x12" hn-mesh-sway="7" hn-mesh-speed="1.2">
+        <div class="k">网格变形摆动</div>
+      </div>
+      <div class="card">
+        <img class="mesh" src="assets/avatar-k.png"
+             hn-mesh="8x8" hn-mesh-anchor="top" hn-mesh-sway="9">
+        <div class="k">顶部固定</div>
+      </div>
+    </div>
+  </div>
+</body></html>

@@ -79,10 +79,15 @@ Sources/CHtmlNative/  引擎核心(C99, ~2200 行, 零依赖)
   hn_style.c   级联 + 继承 + UA 样式表
   hn_layout.c  block 流 + flexbox + 文本换行(CJK 硬拆)
   hn_paint.c   DOM → 绘制指令列表(display list)
+  hn_json.c    极简 JSON 解析(零依赖; Lottie 等公开格式需要)
+  hn_lottie.c  Lottie 求值 → 矢量指令(多边形/图片/矩形)
+  hn_mesh.c    网格变形贴图 → MESH 指令(Live2D 类效果的原语)
   hn_context.c 会话: 布局编排/命中/hot-update/清单解析
 Sources/HtmlNative/   macOS 运行时 + 应用模型
   TextShaper.swift     CoreText 文本后端(测量回调)
   HNPainter.swift      display list → CoreGraphics
+  HNLayerCompositor.swift 网格变形合成(三角形仿射纹理映射)
+  ImageStore.swift     图片加载/缓存; AssetStore.swift 外部资产(Lottie JSON)
   HtmlNativeView.swift 渲染视图 + htmx(hx-*)执行 + sys:// 应用路由
   HNEngine.swift       应用注册表: open/update/close/persist/restore
                        表面物化: window(NSWindow)/popup(NSPanel 浮层)
@@ -236,6 +241,28 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
 - **3D 变换**: `transform: rotate/rotateX/rotateY + perspective`;
   绕三轴旋转矩阵 + 透视投影(近大远小) → 四边形光栅化(新绘制指令 QUAD,
   CoreGraphics 与软件光栅双后端实现)。可做卡片翻转、3D 倾斜面板
+- **Lottie 矢量动画**: `<img src="a.json" hn-lottie>` 直接播 Lottie/bodymovin
+  文件 —— 引擎解析 JSON、按时间轴求值, 产出**多边形绘制指令(POLYGON)**,
+  所以不必为每个平台写一遍播放器, 也不需要 WebView。支持形状层
+  (组/矩形/椭圆/贝塞尔路径) / 填充 / 描边 / 纯色层 / 图片层, 以及
+  锚点·位置·缩放·旋转·不透明度与**路径变形**关键帧。
+  可选 `hn-lottie-speed`(倍速)、`hn-lottie-fit`(contain/cover/fill/none)。
+  **明确不支持**(跳过而非报错): 预合成层、文本层、表达式、特效、
+  trim path、遮罩与轨道遮罩、repeater
+- **网格变形贴图(Live2D 类效果的原语)**: `<img src="c.png" hn-mesh="12x10"
+  hn-mesh-sway="6" hn-mesh-anchor="bottom">` —— 把贴图映射到可变形网格,
+  顶点按正弦形变(固定端不动, 形成波浪)。这与 Live2D 让立绘"活起来"是
+  **同一套底层原理**, 产物是 MESH 绘制指令(三角形仿射纹理映射,
+  CoreGraphics 与软件光栅双后端实现)。更复杂的装配(骨骼/物理/口型同步)
+  可由脚本逐帧调用 `hn_node_set_mesh_verts()` 写入顶点 —— 引擎只做
+  "网格 + 贴图"的合成, rig 逻辑属于应用层。
+  ⚠️ **Live2D 的 `.moc3` 是专有格式**, 解码需要其 Cubism SDK(商业授权),
+  本项目不自研解码器; 交付的是同技术的开放原语
+- **透明背板**: `<meta name="hn-transparent" content="1">` 让窗口**无底色**
+  (逐像素 alpha, 桌面/下层窗口从透明处透出), 配合 `hn-shadow`(投影开关)、
+  `hn-draggable`(空白区拖动开关)。引擎在每次样式重算后都重新剥离 html/body
+  底色, 所以 resize 与热更新都不会把底色装回来。适合圆形/HUD/悬浮控件窗口。
+  见 `examples/transparent.html`、`examples/lottie.html`
 - **动画系统(引擎级, 不是滚动专属)**: `transition` 过渡 + 
   **`animation: up|down|left|fade|scale <时长>` 入场预设**(新内容平滑浮现而非硬闪) +
   **`translate` / `scale` 几何动画**(位移并入滚动偏移、缩放按盒中心换算, 
