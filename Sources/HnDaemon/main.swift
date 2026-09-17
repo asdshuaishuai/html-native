@@ -192,12 +192,6 @@ enum HNProtocol {
             }
             var out = false
             DispatchQueue.main.sync {
-                let dbg = ProcessInfo.processInfo.environment["HN_LOG_EV"] != nil
-                if dbg {
-                    let hasApp = HNEngine.shared.app(id: id) != nil
-                    let hasView = HNEngine.shared.app(id: id)?.view != nil
-                    FileHandle.standardError.write("[evd] id=\(id) app=\(hasApp) view=\(hasView)\n".data(using: .utf8)!)
-                }
                 if let app = HNEngine.shared.app(id: id), let nv = app.view {
                     let kind: hn_event_kind
                     switch kindStr {
@@ -226,9 +220,6 @@ enum HNProtocol {
                     var pt: NSPoint?
                     if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
                         pt = NSPoint(x: x, y: y)
-                    }
-                    if dbg {
-                        FileHandle.standardError.write("[evd] kind=\(kindStr) target=\(target != nil) pt=\(pt != nil)\n".data(using: .utf8)!)
                     }
                     if target == nil && pt == nil {
                         out = false

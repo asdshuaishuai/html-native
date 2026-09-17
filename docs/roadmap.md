@@ -30,8 +30,9 @@
 | `z-index` | 无法控制层叠顺序 | 引擎(C) |
 | `top/right/bottom/left` | 配合 position 使用 | 引擎(C) |
 | **增量渲染** | 每次变化触发全量重排——大文档不可用 | 引擎(C) |
-| **真实事件系统** | 只有 click；缺 mousemove/focus/blur/keyboard/scroll 事件，无法做拖拽/快捷键/搜索联想 | 运行时(Swift) + JS |
+| ~~**真实事件系统**~~ ✅ | 已完成(v0.2): 统一派发管道 + 冒泡 + preventDefault + 键盘/焦点/输入 | — |
 | **组件模型** | 无可复用/可组合的组件、无生命周期钩子 | 运行时(Swift) + JS |
+| **网络层** | 无 `hn.fetch`，无法调 API | 运行时(Swift) |
 | **网络(HTTP)** | 无法调 API / 加载数据 / WebSocket | 运行时(Swift) |
 | **表单** | 无 form 元素 / submit / validation | 引擎(C) + 运行时 |
 | `text-overflow: ellipsis` | 每个 UI 都需要 | 引擎(C) |
@@ -131,7 +132,12 @@ border-left-color: #333;
 - 引擎: style 拆分 border 为四边独立值；paint 分四条路径绘制
 - 工作量: ~1 周
 
-#### 1d. 事件系统（运行时层）
+#### 1d. 事件系统（运行时层）✅ 已完成
+
+**实施结果**: 引擎提供 `hn_event` 数据与冒泡路径(`hn_event_path_at`),
+运行时 `emit()` 是唯一派发出口, JS 与 hx-trigger 共享同一来源;
+`preventDefault()` 中止冒泡。已修复三个静默失效缺陷(raw text 折叠 /
+包装对象未缓存 / DOM 变更未重排)。154 断言覆盖。
 ```
 -- 事件类型: mousedown/mouseup/click/dblclick
 --            mousemove/mouseenter/mouseleave
