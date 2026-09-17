@@ -358,8 +358,15 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         int u;
         if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) { st->width = f; st->width_u = (unsigned char)u; }
     } else if (!strcmp(name, "height")) {
+        /* 不能带 "height_u == HN_U_AUTO" 这种守卫 —— 那会让**第一条**规则胜出,
+           级联彻底失效。这是 CSS 里极常见的写法:
+               .item { height: 40 }  .item-tall { height: 80 }
+           带守卫时 .item-tall 完全无效, 高度停在 40。
+           (width 从来没带守卫, 所以只有 height 有这个 bug —— 表现为
+            "同样是多 class 覆盖, width 生效而 height 不生效", 很难怀疑到
+             级联本身。) */
         int u;
-        if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u) && st->height_u == HN_U_AUTO) {
+        if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) {
             st->height = f;
             st->height_u = (unsigned char)u;
         }

@@ -2553,6 +2553,61 @@ do {
     } else { check(false, "flex-wrap: gap 用例") }
 }
 
+print("== 级联回归: height 曾被守卫挡住(多 class 覆盖失效) ==")
+do {
+    func box3(_ html: String, _ id: String, _ w: Float = 400, _ h: Float = 300)
+        -> (Float, Float, Float, Float)? {
+        guard let d = hn_parse_html(html, html.utf8.count) else { return nil }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, w, h, &backend)
+        var stack: [OpaquePointer] = [hn_doc_root(d)]
+        var out: (Float, Float, Float, Float)?
+        while let n = stack.popLast() {
+            if let i = hn_node_attr(n, "id"), String(cString: i) == id {
+                var x: Float = 0, y: Float = 0, bw: Float = 0, bh: Float = 0
+                hn_node_box(n, &x, &y, &bw, &bh)
+                out = (x, y, bw, bh)
+                break
+            }
+            var kids: [OpaquePointer] = []
+            var c = hn_node_first_child(n)
+            while let k = c { kids.append(k); c = hn_node_next_sibling(k) }
+            stack.append(contentsOf: kids)
+        }
+        hn_context_destroy(cc)
+        return out
+    }
+    func pg3(_ css: String, _ body: String) -> String {
+        "<html><head><style>html,body{margin:0}" + css + "</style></head><body>" + body + "</body></html>"
+    }
+
+    /* 这是 CSS 里最常见的写法之一:
+         .card { padding: 10; height: 40 }
+         .card-tall { height: 120 }
+       height 的解析曾带 "height_u == HN_U_AUTO" 守卫 —— 那让**第一条**规则
+       胜出, 级联对 height 完全失效。width 从没带守卫, 所以症状是
+       "同样是多 class 覆盖, width 生效而 height 不生效", 很难怀疑到级联。 */
+    let cardCSS = ".card{padding:10;height:40}.card-tall{height:120}.card-wide{width:300}"
+    if let b = box3(pg3(cardCSS, "<div class='card card-tall' id='a'></div>"), "a") {
+        // 120(覆盖后) + 上下各 10 padding = 140
+        check(abs(b.3 - 140) < 2, String(format: "级联: .card-tall 覆盖 height (高=%.0f, 期望 140)", b.3))
+    } else { check(false, "级联: height 覆盖用例") }
+    if let b = box3(pg3(cardCSS, "<div class='card card-wide' id='b'></div>"), "b") {
+        // 300 + 左右各 10 = 320
+        check(abs(b.2 - 320) < 2, String(format: "级联: .card-wide 覆盖 width (宽=%.0f, 期望 320)", b.2))
+    } else { check(false, "级联: width 覆盖用例") }
+    if let b = box3(pg3(cardCSS, "<div class='card card-tall card-wide' id='c'></div>"), "c") {
+        check(abs(b.2 - 320) < 2 && abs(b.3 - 140) < 2,
+              String(format: "级联: 三个 class 同时覆盖 (%.0fx%.0f, 期望 320x140)", b.2, b.3))
+    } else { check(false, "级联: 三 class 用例") }
+
+    // 简写形式: 两个纯 height 规则, 后者胜
+    if let b = box3(pg3(".a{height:50}.b{height:90}", "<div class='a b' id='x'></div>"), "x") {
+        check(abs(b.3 - 90) < 2, String(format: "级联: 后声明 height 胜出 (高=%.0f, 期望 90)", b.3))
+    } else { check(false, "级联: 简写 height 用例") }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(
