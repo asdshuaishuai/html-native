@@ -196,9 +196,21 @@ ck("换行在 normal 下被折叠", run_count(nl), 2)
 tab = "<html><head><style>html,body{margin:0;font-size:14}</style></head><body><div>a\tb</div></body></html>"
 ck("制表符在 normal 下被折叠", run_count(tab), 2)
 
+# pre 下换行必须**强制断行**(不只是保留为有宽度的片段) —— 换行符在字体里
+# 宽度为 0, 若只当片段会全部画在同一行。
 nlp = ("<html><head><style>html,body{margin:0;font-size:20}.p{white-space:pre}</style>"
-       "</head><body><div class='p'>a\n\nb</div></body></html>")
-ck("pre 下换行保留", run_count(nlp) >= 3, True)
+       "</head><body><div class='p'>第一行\n第二行\n第三行</div></body></html>")
+ck("pre 下换行断成 3 行", run_count(nlp), 3)
+_bl = [float(m.group(1)) for m in
+       (re.search(r"baseline=\s*(-?[0-9.]+)", l) for l in runs(nlp)) if m]
+ck("pre 下三行基线递增(真换行)", len(_bl) == 3 and _bl[0] < _bl[1] < _bl[2], True)
+
+# 对照: 折叠模式下换行变成空格(不断行) —— 3 个词, 但都在同一行(基线相同)
+nlc = nlp.replace("white-space:pre", "white-space:normal")
+_nb = [float(m.group(1)) for m in
+       (re.search(r"baseline=\s*(-?[0-9.]+)", l) for l in runs(nlc)) if m]
+ck("normal 下换行折成空格(3 个词)", run_count(nlc), 3)
+ck("normal 下三词同一行(基线相同)", len(_b if (_b := _nb) else []) == 3 and len(set(_nb)) == 1, True)
 
 # 行首/行尾空白在折叠模式下不影响首个片段位置
 r = runs("<html><head><style>html,body{margin:0;font-size:14}</style></head><body>"

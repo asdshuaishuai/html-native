@@ -135,6 +135,24 @@ static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_ba
                 size_t j = i;
                 while (j < len && HN_IS_WS(s[j])) j++;
                 if (j > i) {
+                    /* 空白串里若含换行, 必须**强制断行**(CSS 的 pre 语义) ——
+                       只把它当作有宽度的片段是不够的: 换行符在大多数字体里
+                       宽度为 0 或不固定, 于是 "a\nb" 会画在同一行上。
+                       做法与 <br> 一致: 发一个 forced_break 片段,
+                       行累加器已能处理。 */
+                    int has_nl = 0;
+                    for (size_t k = i; k < j; k++)
+                        if (s[k] == '\n' || s[k] == '\r') { has_nl = 1; break; }
+                    if (has_nl) {
+                        iitem br;
+                        memset(&br, 0, sizeof(br));
+                        br.owner = n;
+                        br.st = st;
+                        br.forced_break = 1;
+                        iv_push(iv, br);
+                        i = j;
+                        continue;
+                    }
                     iitem it;
                     memset(&it, 0, sizeof(it));
                     it.owner = n;

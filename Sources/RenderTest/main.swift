@@ -2667,6 +2667,48 @@ do {
     check(rnl.count == 2, String(format: "空白: 换行在 normal 下被折叠(片段 %d, 期望 2)", rnl.count))
 }
 
+print("== white-space:pre 强制断行 ==")
+do {
+    /* pre 下换行必须断行, 而不只是"保留成有宽度的片段" —— 换行符在字体里
+       宽度为 0 或不固定, 只当片段的话整段会画在同一行。复用 <br> 的
+       forced_break 机制。 */
+    func baselines(_ html: String) -> [Float] {
+        guard let d = hn_parse_html(html, html.utf8.count) else { return [] }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, 600, 300, &backend)
+        var out: [Float] = []
+        var stack: [OpaquePointer] = [hn_doc_root(d)]
+        while let n = stack.popLast() {
+            let nr = hn_node_run_count(n)
+            for i in 0..<nr {
+                var x: Float = 0, bl: Float = 0, w: Float = 0, yt: Float = 0, h: Float = 0
+                if hn_node_run_at(n, Int32(i), &x, &bl, &w, &yt, &h) == 1 { out.append(bl) }
+            }
+            var kids: [OpaquePointer] = []
+            var c = hn_node_first_child(n)
+            while let k = c { kids.append(k); c = hn_node_next_sibling(k) }
+            stack.append(contentsOf: kids)
+        }
+        hn_context_destroy(cc)
+        return out
+    }
+    let pre3 = "<html><head><style>html,body{margin:0;font-size:20}"
+             + ".p{white-space:pre}</style></head><body>"
+             + "<div class='p'>第一行\n第二行\n第三行</div></body></html>"
+    let bp = baselines(pre3)
+    check(bp.count == 3, String(format: "pre: 三行产出 3 个片段(实际 %d)", bp.count))
+    check(bp.count == 3 && bp[0] < bp[1] && bp[1] < bp[2],
+          String(format: "pre: 基线递增=真换行 (%@)",
+                 bp.map { String(format: "%.0f", $0) }.joined(separator: "/")))
+
+    let nrm = pre3.replacingOccurrences(of: "white-space:pre", with: "white-space:normal")
+    let bn = baselines(nrm)
+    check(bn.count == 3 && bn.allSatisfy { abs($0 - bn[0]) < 0.5 },
+          String(format: "normal: 换行折成空格, 三词同一行 (基线 %@)",
+                 bn.map { String(format: "%.0f", $0) }.joined(separator: "/")))
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(
