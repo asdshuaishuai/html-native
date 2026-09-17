@@ -192,10 +192,15 @@ typedef struct {
     int   n;
     float w;              /* 含左右 pad 的行宽 */
     float asc, desc, lh;  /* 行盒度量 */
+    int   has_ellipsis;   /* 本行尾部需绘制 "…"(text-overflow: ellipsis) */
+    float ellipsis_x;     /* 省略号相对行首的 x */
+    float ellipsis_w;     /* 省略号宽度(截断时已测量) */
+    hn_node *ell_owner;   /* 承载省略号文本的节点(临时文本节点) */
 } line_acc;
 
 static void la_reset(line_acc *la) {
     la->n = 0; la->w = 0; la->asc = 0; la->desc = 0; la->lh = 0;
+    la->has_ellipsis = 0; la->ellipsis_x = 0; la->ellipsis_w = 0; la->ell_owner = NULL;
 }
 
 static void la_grow(line_acc *la, const iitem *it, const hn_text_backend *tb) {
@@ -205,6 +210,17 @@ static void la_grow(line_acc *la, const iitem *it, const hn_text_backend *tb) {
     if (lh > la->lh) la->lh = lh;
     if (a > la->asc) la->asc = a;
     if (d > la->desc) la->desc = d;
+}
+
+/* 把第 i 个片段追加进当前行(nowrap 路径用; 逻辑与常规路径一致) */
+static void la_add(line_acc *la, ivec *iv, int i, float space_w, const hn_text_backend *tb) {
+    if (la->n >= 256) return;
+    iitem *it = &iv->v[i];
+    la->idx[la->n] = i;
+    la->x[la->n] = la->w + space_w + it->pad_before;
+    la->n++;
+    la->w = la->x[la->n - 1] + it->w + it->pad_after;
+    la_grow(la, it, tb);
 }
 
 static void translate_subtree(hn_node *n, float dx, float dy);
@@ -219,6 +235,88 @@ static float align_off(int align, float max_w, float w) {
 }
 
 /* 落盘当前行 */
+/* 省略号截断: 在 max_w 内尽量多放片段, 末尾追加 "…"。
+   用于 text-overflow: ellipsis + white-space: nowrap 的组合(单行溢出)。
+   做法: 从行尾回退, 直到剩余空间能容纳省略号, 把最后一个片段的文本区间截短。 */
+/* 省略号截断: 在 max_w 内尽量多放内容, 末尾追加 "…"。
+ *
+ * 关键点: CJK 文本没有空格, 整段是**一个片段**(可能几百 px)。所以不能只
+ * "整片段取舍" —— 必须支持**片段内按码点回退**, 否则第一段就超预算时会
+ * 整行丢空(什么都不画)。 */
+static void la_clip_ellipsis(line_acc *la, ivec *iv, const hn_text_backend *tb, float max_w,
+                             hn_arena *container_arena, hn_node *ell_parent) {
+    if (la->n == 0 || max_w <= 0 || la->w <= max_w) return;
+    const hn_style *st0 = iv->v[la->idx[0]].st;
+    float ell_w = measure_run(tb, st0, "\xE2\x80\xA6", 3);
+    float budget = max_w - ell_w;
+    if (budget < 0) budget = 0;
+
+    /* 逐片段累加, 找出"整段能放下"的最大前缀数(第 1 段放不下也要保留它做段内截断) */
+    float acc = 0;
+    int keep = 0;
+    for (int k = 0; k < la->n; k++) {
+        iitem *it = &iv->v[la->idx[k]];
+        float gap = (k == 0) ? 0
+            : (la->x[k] - (la->x[k - 1] + iv->v[la->idx[k - 1]].w
+                           + iv->v[la->idx[k - 1]].pad_after));
+        float seg = gap + it->pad_before + it->w + it->pad_after;
+        if (acc + seg > budget) break;
+        acc += seg;
+        keep++;
+    }
+    if (keep == 0) keep = 1;              /* 至少保留第一段做段内截断 */
+
+    /* 段内截断: 对最后一个保留片段按码点回退到剩余空间 */
+    if (keep <= la->n) {
+        iitem *last = &iv->v[la->idx[keep - 1]];
+        float before = acc - (last->pad_before + last->w + last->pad_after);
+        if (before < 0) before = 0;
+        float room = budget - before;
+        if (last->end > last->begin) {
+            const char *txt = last->owner ? last->owner->text : NULL;
+            if (txt) {
+                size_t b = last->begin, e = last->end, cut = b;
+                float w = 0;
+                while (b < e) {
+                    size_t cn = utf8_next(txt + b, e - b);
+                    float cw = measure_run(tb, last->st, txt + b, cn);
+                    if (room > 0 && w + cw > room) { break; }   /* 放不下就停 */
+                    w += cw;
+                    b += cn;
+                    cut = b;
+                }
+                last->end = cut;
+                last->w = w;
+            }
+        }
+    }
+    la->n = keep;
+
+    /* 重算行宽 */
+    la->w = 0;
+    for (int k = 0; k < la->n; k++) {
+        iitem *it = &iv->v[la->idx[k]];
+        la->w = la->x[k] + it->w + it->pad_after;
+    }
+
+    /* 追加省略号: 用容器 arena 分配一个临时文本节点承载 "…",
+       使 la_emit 能像普通片段一样为它产出 run(绘制/命中都自然工作)。 */
+    if (container_arena && ell_parent) {
+        /* 承载节点用**容器自身**: 它在 DOM 树里, 绘制阶段会访问到它的 runs。
+           (若用游离的临时节点, paint_walk 遍历不到, 省略号永远不显示。) */
+        static const char ELL[] = "\xE2\x80\xA6";
+        if (!ell_parent->text) {
+            ell_parent->text = hn_arena_strndup(container_arena, ELL, 3);
+            ell_parent->text_len = 3;
+        }
+        la->ell_owner = ell_parent;
+        la->ellipsis_x = la->w;
+        la->ellipsis_w = ell_w;
+        la->has_ellipsis = 1;
+        la->w += ell_w;
+    }
+}
+
 static void la_emit(line_acc *la, ivec *iv, float x, float y_top, float max_w, int align) {
     if (!la->n) return;
     float off = align_off(align, max_w, la->w);
@@ -262,6 +360,18 @@ static void la_emit(line_acc *la, ivec *iv, float x, float y_top, float max_w, i
         }
         run_push(it->owner, it->begin, it->end, x + off + la->x[k], it->w,
                  baseline, y_top, la->lh > 0 ? la->lh : it->st->font_size);
+    }
+    /* 省略号 run: 承载节点由 la_clip_ellipsis 分配(临时文本节点)。
+       begin/end 是它在 "…" 中的字节区间(0..3), 因此绘制阶段能正常取到文本。 */
+    if (la->has_ellipsis && la->ell_owner) {
+        /* 省略号的宽度在 la_clip_ellipsis 里已算过, 存在 ellipsis_w;
+           样式取本行首个片段(没有片段则取承载节点的父级样式) */
+        iitem *first = la->n > 0 ? &iv->v[la->idx[0]] : NULL;
+        const hn_style *st_ell = first ? first->st
+            : (la->ell_owner->parent ? &la->ell_owner->parent->style : NULL);
+        float fs = st_ell ? st_ell->font_size : 14;
+        run_push(la->ell_owner, 0, 3, x + off + la->ellipsis_x, la->ellipsis_w,
+                 baseline, y_top, la->lh > 0 ? la->lh : fs);
     }
 }
 
@@ -332,6 +442,14 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
         float space_w = (it->space_before && la.n > 0) ? measure_run(tb, it->st, " ", 1) : 0;
         float need = it->pad_before + it->w + it->pad_after;
 
+        /* white-space: nowrap — 不因宽度换行(超出部分由 text-overflow 处理) */
+        int nowrap = (container->style.white_space == 1);
+        if (nowrap) {
+            la_add(&la, &iv, i, space_w, tb);
+            i++;
+            continue;
+        }
+
         /* 本行放不下: 已有内容则换行后重试 */
         if (la.n > 0 && max_w > 0 && la.w + space_w + need > max_w) {
             la_emit(&la, &iv, x, y + cur_y, max_w, align);
@@ -386,6 +504,9 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
         i++;
     }
     if (la.n) {
+        /* text-overflow: ellipsis + nowrap: 单行超出时截断并加省略号 */
+        if (container->style.text_overflow == 1 && container->style.white_space == 1)
+            la_clip_ellipsis(&la, &iv, tb, max_w, container->arena, container);
         la_emit(&la, &iv, x, y + cur_y, max_w, align);
         cur_y += la.lh;
     }
@@ -409,6 +530,91 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
 static void clear_runs(hn_node *n) {
     n->n_runs = 0;
     for (hn_node *ch = n->first; ch; ch = ch->next) clear_runs(ch);
+}
+
+/* 是否脱离常规流(position: absolute / fixed) */
+static int is_out_of_flow(const hn_node *ch) {
+    return ch->kind == HN_ELEM &&
+           (ch->style.position == HN_POS_ABSOLUTE || ch->style.position == HN_POS_FIXED);
+}
+
+/* 定位参照块: 最近 positioned 祖先; 无则视口(fixed 直接对视口) */
+static void containing_block(hn_context *c, hn_node *n,
+                             float *x, float *y, float *w, float *h) {
+    hn_node *p = n->parent;
+    while (p && p->kind == HN_ELEM) {
+        if (p->style.position == HN_POS_RELATIVE ||
+            p->style.position == HN_POS_ABSOLUTE ||
+            p->style.position == HN_POS_FIXED) {
+            /* 参照块 = 该祖先的 padding box */
+            *x = p->bx + p->style.padding[3];
+            *y = p->by + p->style.padding[0];
+            *w = p->bw - p->style.padding[1] - p->style.padding[3];
+            *h = p->bh - p->style.padding[0] - p->style.padding[2];
+            return;
+        }
+        p = p->parent;
+    }
+    /* 无 positioned 祖先: 视口 */
+    if (n->style.position == HN_POS_ABSOLUTE || n->style.position == HN_POS_FIXED) {
+        /* absolute 兜底视口, fixed 恒视口 */
+    }
+    *x = 0; *y = 0; *w = c->vw; *h = c->vh;
+}
+
+/* 摆放脱离流的子节点(在容器尺寸确定后调用) */
+static void layout_out_of_flow(hn_context *c, hn_node *n, const hn_text_backend *tb) {
+    for (hn_node *ch = n->first; ch; ch = ch->next) {
+        if (ch->kind != HN_ELEM) continue;
+        if (ch->style.display == HN_DISP_NONE) continue;
+        if (!is_out_of_flow(ch)) continue;
+
+        const hn_style *cs = &ch->style;
+        float bx, by, bw, bv;
+        if (cs->position == HN_POS_FIXED) {
+            /* fixed: 参照视口 */
+            bx = 0; by = 0; bw = c->vw; bv = c->vh;
+        } else {
+            containing_block(c, ch, &bx, &by, &bw, &bv);
+        }
+
+        /* 尺寸解析: 百分比需要参照块尺寸(不能传 -1, 否则 100% 解析失败 →
+           shrink-to-fit 得到内容宽, 表现为 fixed 头部只有几十像素宽)。
+           - 左右都设: 拉伸到剩余空间
+           - 否则: 用参照块宽作为基准, 让 100%/50% 等百分比可解析;
+             宽度未声明时 layout_box 会走 shrink-to-fit(auto 语义) */
+        float avail_w = cs->has_left && cs->has_right
+            ? (bw - cs->left - cs->right)
+            : (cs->width_u == HN_U_PCT ? bw : -1);
+        float avail_h = (cs->has_top && cs->has_bottom)
+            ? (bv - cs->top - cs->bottom)
+            : (cs->height_u == HN_U_PCT ? bv : -1);
+        layout_box(c, ch, 0, 0, avail_w, avail_h, tb, 0,
+                   (cs->has_top && cs->has_bottom) ? avail_h : -1);
+
+        /* 水平: left 优先; 否则 right 对齐; 都无则留在容器内容起点 */
+        /* 水平: left / right / 都不设(留在容器内容起点)
+           注意不能用 left 值是否为 0 判断"是否声明" —— 用 has_* 标志 */
+        float px;
+        if (cs->has_left && !cs->has_right) {
+            px = bx + cs->left;
+        } else if (cs->has_right && !cs->has_left) {
+            px = bx + bw - cs->right - ch->bw;
+        } else if (cs->has_left && cs->has_right) {
+            px = bx + cs->left;          /* 两侧同设: left 优先(并拉伸宽) */
+        } else {
+            px = n->bx + n->style.padding[3];
+        }
+        /* 垂直: top 优先; 否则 bottom 对齐; 都无则留在容器内容起点 */
+        float py;
+        if (cs->has_top) py = by + cs->top;
+        else if (cs->has_bottom) py = by + bv - cs->bottom - ch->bh;
+        else py = n->by + n->style.padding[0];
+
+        translate_subtree(ch, px - ch->bx, py - ch->by);
+        /* absolute 的子树里可能还有 absolute: 递归处理 */
+        layout_out_of_flow(c, ch, tb);
+    }
 }
 
 /* 子节点是否参与行内流 */
@@ -521,6 +727,8 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
     while (ch) {
         if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE) { ch = ch->next; continue; }
         if (ch->kind == HN_TEXT && ch->text_len == 0) { ch = ch->next; continue; }
+        /* 脱离流的子节点不占位(稍后单独摆放) */
+        if (is_out_of_flow(ch)) { ch = ch->next; continue; }
 
         if (is_inline_level(ch)) {
             /* 连续的行内级子节点合成一个行内格式化上下文 */
@@ -571,6 +779,7 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
     for (hn_node *ch = n->first; ch; ch = ch->next) {
         if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE) continue;
         if (ch->kind == HN_TEXT && ch->text_len == 0) continue;
+        if (is_out_of_flow(ch)) continue;      /* 浮层不参与 flex 排版 */
         cnt++;
     }
     if (!cnt) { n->pref_w = 0; return 0; }
@@ -581,6 +790,7 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
     for (hn_node *ch = n->first; ch; ch = ch->next) {
         if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE) continue;
         if (ch->kind == HN_TEXT && ch->text_len == 0) continue;
+        if (is_out_of_flow(ch)) continue;
         items[k].n = ch;
         if (ch->kind == HN_ELEM) {
             items[k].ml = ch->style.margin[3]; items[k].mr = ch->style.margin[1];
@@ -929,6 +1139,10 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
 
     if (measuring && st->width_u == HN_U_AUTO) n->bw = n->pref_w + pl + pr;
     else n->bw = content_w + pl + pr;
+
+    /* 容器尺寸已定 → 摆放脱离流的子节点(position: absolute/fixed)。
+       必须在此处(而非布局中途): 浮层参照的是父容器的最终盒。 */
+    if (!measuring) layout_out_of_flow(c, n, tb);
 
     return n->bh;
 }

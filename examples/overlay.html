@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="460x400@160,140">
+<meta name="hn-title" content="定位系统 · 弹窗与浮层">
+<meta name="hn-theme" content="dark">
+</head>
+<body>
+<div class="app">
+
+  <!-- 固定头部(脱离流, 滚动时不动) -->
+  <div class="topbar">
+    <span class="dot"></span>
+    <span class="tb-title">定位系统演示</span>
+    <span class="tb-badge">position</span>
+  </div>
+
+  <!-- 长内容: 演示固定头部与滚动 -->
+  <div class="content">
+    <div class="cap">能力清单</div>
+    <div class="row-item">position: relative —— 作为定位参照</div>
+    <div class="row-item">position: absolute —— 脱离流, 相对参照定位</div>
+    <div class="row-item">position: fixed —— 相对视口, 滚动不动</div>
+    <div class="row-item">z-index —— 层叠顺序</div>
+    <div class="row-item ellipsis-demo">text-overflow: ellipsis —— 这一行文字非常非常长会被自动截断显示省略号</div>
+    <div class="row-item">逐侧边框: border-top / left / bottom</div>
+
+    <!-- 下拉浮层: absolute + 高 z-index -->
+    <div class="menu-wrap">
+      <div class="btn">打开下拉</div>
+      <div class="menu">
+        <div class="menu-item">重命名</div>
+        <div class="menu-item">复制链接</div>
+        <div class="menu-item">删除</div>
+      </div>
+    </div>
+
+    <div class="filler"></div>
+  </div>
+
+  <!-- 遮罩 + 居中弹窗: 放在滚动容器之外(否则被 overflow 裁剪, 这是正确行为) -->
+  <div class="mask">
+    <div class="modal">
+      <div class="modal-head">确认操作</div>
+      <div class="modal-body">这个弹窗用 absolute 定位, 遮罩覆盖整个内容区。</div>
+      <div class="modal-foot"><div class="btn-sm">取消</div><div class="btn-sm primary">确定</div></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

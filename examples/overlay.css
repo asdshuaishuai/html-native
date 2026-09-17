@@ -1,0 +1,41 @@
+.app { position: relative; display: flex; flex-direction: column;
+       height: 100%; box-sizing: border-box; }
+/* 固定头部: fixed + 高 z-index */
+.topbar { position: fixed; left: 0; top: 0; height: 44; width: 100%;
+          background: #12161e; border-bottom: 1 solid #262e3d; z-index: 100;
+          display: flex; align-items: center; gap: 8; padding: 0 14; }
+.dot { width: 8; height: 8; border-radius: 50%; background: #4f7cff; }
+.tb-title { font-size: 13; font-weight: 700; }
+.tb-badge { margin-left: auto; font-size: 10; color: var(--dim);
+            border: 1 solid var(--line); border-radius: 999; padding: 2 8; }
+/* 内容: 顶部留出固定头高度 */
+.content { position: relative; margin-top: 44; padding: 14; overflow: scroll;
+           height: 100%; box-sizing: border-box; }
+.cap { color: var(--dim); font-size: 11; font-weight: 700; margin-bottom: 8; }
+.row-item { background: var(--card); border-left: 3 solid #4f7cff;
+            padding: 9 12; margin-bottom: 6; font-size: 12; border-radius: 0 8 8 0; }
+.ellipsis-demo { width: 240; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+
+/* 下拉: absolute 相对 .menu-wrap, z-index 高于内容 */
+.menu-wrap { position: relative; margin: 14 0 200; }
+.menu { position: absolute; left: 0; top: 34; width: 150; z-index: 60;
+        background: #1b212c; border: 1 solid #2b3444; border-radius: 10;
+        padding: 5; box-shadow: 0 8 20 rgba(0,0,0,0.45); }
+.menu-item { padding: 7 10; font-size: 12; color: #b6bfd0; border-radius: 6; }
+.menu-item:nth-child(odd) { background: rgba(255,255,255,0.03); }
+.btn { background: var(--accent); color: #fff; padding: 7 14; border-radius: 8;
+       font-size: 12; font-weight: 600; text-align: center; width: 90; }
+
+/* 遮罩 + 居中弹窗: absolute 全尺寸 + 内层绝对居中 */
+.mask { position: absolute; left: 0; top: 44; width: 100%; height: 100%;
+        background: rgba(0, 0, 0, 0.55); z-index: 80; }
+.modal { position: absolute; left: 90; top: 70; width: 260;
+         background: #1b212c; border: 1 solid #313b4d; border-radius: 14;
+         padding: 16; box-shadow: 0 12 30 rgba(0,0,0,0.5); }
+.modal-head { font-size: 14; font-weight: 700; margin-bottom: 8; }
+.modal-body { font-size: 12; color: #9aa3b5; line-height: 1.6; margin-bottom: 14; }
+.modal-foot { display: flex; gap: 8; justify-content: flex-end; }
+.btn-sm { padding: 6 14; border-radius: 7; font-size: 12; background: #2a3342;
+          color: #cdd4e0; }
+.btn-sm.primary { background: var(--accent); color: #fff; font-weight: 600; }
+.filler { height: 240; }

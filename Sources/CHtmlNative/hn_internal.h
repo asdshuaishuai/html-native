@@ -20,6 +20,10 @@ typedef enum { HN_JUST_START = 0, HN_JUST_CENTER, HN_JUST_END, HN_JUST_BETWEEN }
 typedef enum { HN_ALIGN_STRETCH = 0, HN_ALIGN_START, HN_ALIGN_CENTER, HN_ALIGN_END } hn_align;
 typedef enum { HN_DISP_BLOCK = 0, HN_DISP_FLEX, HN_DISP_NONE, HN_DISP_INLINE, HN_DISP_INLINE_BLOCK } hn_display;
 
+/* 定位方式: static 参与常规流; relative 在流中但作为定位参照;
+   absolute 脱离流(参照最近 positioned 祖先); fixed 脱离流(参照视口) */
+typedef enum { HN_POS_STATIC = 0, HN_POS_RELATIVE, HN_POS_ABSOLUTE, HN_POS_FIXED } hn_position;
+
 /* CSS 自定义属性(--name / var(--name)): 级联时收集, 继承自父, 子可覆盖 */
 typedef struct { const char *name, *value; } hn_var;
 
@@ -57,6 +61,17 @@ typedef struct hn_style {
     hn_color   sh_color;
     float      sh_ox, sh_oy, sh_blur;
     float      transition_ms; /* 过渡时长(0 = 关闭) */
+    /* ---- 定位(脱离流的浮层: 弹窗/下拉/遮罩/固定头) ---- */
+    unsigned char position;    /* HN_POS_* */
+    unsigned char has_top, has_right, has_bottom, has_left;
+    float top, right, bottom, left;
+    int   z_index;             /* 层叠顺序(默认 0; 仅 positioned 元素有效) */
+    /* ---- 四边独立边框 ---- */
+    float border_w4[4];        /* top right bottom left; 0 = 用 border_w */
+    hn_color border_c4[4];     /* 同上, 0 = 用 border_color */
+    /* ---- 文本溢出与折行 ---- */
+    unsigned char text_overflow;  /* 1 = ellipsis */
+    unsigned char white_space;    /* 0=normal 1=nowrap 2=pre 3=pre-wrap */
     /* ---- 几何与动画声明(可插值) ---- */
     float      translate_x, translate_y;  /* translate: x y */
     float      scale;                     /* scale: n (默认 1) */

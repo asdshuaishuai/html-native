@@ -173,6 +173,44 @@ static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
     paint_walk_g(c, n, pst, alpha, sx, sy, &g);
 }
 
+/* 是否存在需要排序的定位子节点(避免常规路径付出排序成本) */
+static int has_positioned_children(hn_node *n) {
+    for (hn_node *ch = n->first; ch; ch = ch->next)
+        if (ch->kind == HN_ELEM && ch->style.position != HN_POS_STATIC) return 1;
+    return 0;
+}
+
+/* 排序键: positioned 元素按 z-index 升序排在非 positioned 之后 */
+static int zkey(const hn_node *ch) {
+    if (ch->kind != HN_ELEM || ch->style.position == HN_POS_STATIC) return 0;
+    /* z-index<=0 的定位元素仍应在流内容之上(与 CSS 一致: 定位元素形成层),
+       这里映射到 1, 真正的正 z-index 归一到 2..N */
+    return ch->style.z_index > 0 ? ch->style.z_index + 1 : 1;
+}
+
+/* 按 z 序绘制子节点(插入排序 + 稳定: 同键保持文档顺序) */
+static void paint_children_sorted(hn_context *c, hn_node *n, const hn_style *st,
+                                  float alpha, float sx, float sy, paint_guard *g) {
+    hn_node *list[256];
+    int cnt = 0;
+    for (hn_node *ch = n->first; ch && cnt < 256; ch = ch->next) list[cnt++] = ch;
+    /* 稳定插入排序(键 0 = 非定位, 保持原位; 仅定位元素按 z 上浮) */
+    for (int i = 1; i < cnt; i++) {
+        hn_node *key = list[i];
+        int kk = zkey(key);
+        if (kk == 0) continue;                 /* 非定位元素不移动 */
+        int j = i - 1;
+        while (j >= 0 && zkey(list[j]) > kk) { list[j + 1] = list[j]; j--; }
+        list[j + 1] = key;
+    }
+    for (int i = 0; i < cnt; i++) {
+        if (g->nodes > HN_PAINT_MAX_NODES || g->depth > HN_PAINT_MAX_DEPTH) break;
+        g->depth++;
+        paint_walk_g(c, list[i], st, alpha, sx, sy, g);
+        g->depth--;
+    }
+}
+
 static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                          float alpha, float sx, float sy, paint_guard *g) {
     if (alpha <= 0.001f) return;
@@ -343,6 +381,50 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         return;
     }
 
+    /* 逐侧边框: 若任一侧有独立声明, 用四条矩形绘制(替代统一边框) */
+    int per_side = st->border_w4[0] || st->border_w4[1] || st->border_w4[2] || st->border_w4[3]
+                   || st->border_c4[0] || st->border_c4[1] || st->border_c4[2] || st->border_c4[3];
+    if (per_side) {
+        /* 背景仍按盒绘制(不含边框), 然后四边分别填充 */
+        int f = (st->background & 0xFFu) || st->has_gradient;
+        if (f) {
+            hn_cmd bg;
+            memset(&bg, 0, sizeof(bg));
+            bg.kind = HN_CMD_RECT;
+            bg.x = tfx(g, sx, n->bx); bg.y = tfy(g, sy, n->by);
+            bg.w = n->bw * g->scale; bg.h = n->bh * g->scale;
+            bg.radius = eff_radius(st, bg.w, bg.h);
+            bg.fill = mul_alpha(st->background, alpha);
+            if (st->has_gradient) {
+                bg.gradient = 1; bg.grad_from = st->grad_from; bg.grad_to = st->grad_to;
+                bg.grad_angle = st->grad_angle;
+            }
+            push_cmd(c, &bg);
+        }
+        for (int side = 0; side < 4; side++) {
+            /* -1 表示显式 0(不画); 0 表示继承统一 border_w */
+            float bw = st->border_w4[side] ? (st->border_w4[side] > 0 ? st->border_w4[side] : 0)
+                                           : st->border_w;
+            hn_color bc = st->border_c4[side] ? (st->border_c4[side] > 1 ? st->border_c4[side]
+                                                                            : st->border_color)
+                                              : st->border_color;
+            if (bw <= 0 || (bc & 0xFFu) == 0) continue;
+            hn_cmd e;
+            memset(&e, 0, sizeof(e));
+            e.kind = HN_CMD_RECT;
+            float bx = n->bx, by = n->by, bwid = n->bw, bhei = n->bh;
+            float t = bw;
+            if (side == 0)      { bwid = n->bw; bhei = t; }
+            else if (side == 2) { by = n->by + n->bh - t; bhei = t; }
+            else if (side == 3) { bhei = n->bh; bwid = t; }
+            else                { bx = n->bx + n->bw - t; bhei = n->bh; bwid = t; }
+            e.x = tfx(g, sx, bx); e.y = tfy(g, sy, by);
+            e.w = bwid * g->scale; e.h = bhei * g->scale;
+            e.fill = mul_alpha(bc, alpha);
+            push_cmd(c, &e);
+        }
+        /* 内容由子节点绘制(下方继续) */
+    }
     int has_fill = (st->background & 0xFFu) || st->has_gradient;
     int has_border = st->border_w > 0 && (st->border_color & 0xFFu);
     if (has_fill || has_border) {
@@ -384,12 +466,24 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     float csx = sx + n->scroll_x, csy = sy + n->scroll_y;
 
     float child_alpha = alpha * st->opacity;
-    for (hn_node *ch = n->first; ch; ch = ch->next) {
-        if (g->nodes > HN_PAINT_MAX_NODES || g->depth > HN_PAINT_MAX_DEPTH) break;
-        g->depth++;
-        paint_walk_g(c, ch, st, child_alpha, csx, csy, g);
-        g->depth--;
+    /* 子节点绘制顺序: z-index 非零的定位元素排在后面(覆盖常规流内容)。
+       稳定排序: 同 z-index 保持文档顺序。 */
+    if (has_positioned_children(n)) {
+        paint_children_sorted(c, n, st, child_alpha, csx, csy, g);
+    } else {
+        for (hn_node *ch = n->first; ch; ch = ch->next) {
+            if (g->nodes > HN_PAINT_MAX_NODES || g->depth > HN_PAINT_MAX_DEPTH) break;
+            g->depth++;
+            paint_walk_g(c, ch, st, child_alpha, csx, csy, g);
+            g->depth--;
+        }
     }
+    /* 容器自身的行内片段(目前仅 text-overflow 的省略号):
+       在子节点之后绘制, 使其覆盖在被截断的文本之上 */
+    if (n->n_runs > 0 && st->display != HN_DISP_INLINE && !hn_node_is_input(n)) {
+        paint_runs(c, n, st, alpha, sx, sy, g);
+    }
+
     /* 恢复本层之前的变换状态(兄弟节点不受影响) */
     sx = saved_sx; sy = saved_sy;
     g->scale = saved_scale; g->ox = saved_ox; g->oy = saved_oy;

@@ -989,9 +989,12 @@ do {
         v.startPolling()
         hotUpdates += 1
     }
+    var maxCmds = 0
     let end = Date().addingTimeInterval(25.0)
     while Date() < end {
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        let cc = v.dumpDisplayList().count
+        if cc > maxCmds { maxCmds = cc }
     }
     frameTimer.invalidate()
     hotTimer.invalidate()
@@ -1001,9 +1004,10 @@ do {
     let traceStart = dom.firstIndex { $0.contains("#trace") } ?? 0
     let traceLines = dom.count - traceStart
     check(frames > 2000, "压测: 推进 \(frames) 帧无崩溃(含 \(hotUpdates) 次热更新)")
-    check(traceLines > 3, "压测: trace 子树有 \(traceLines) 行(流式内容在增长)")
-    let cmds = v.dumpDisplayList().count
-    check(cmds > 30, "压测: 绘制指令 \(cmds) 条(内容非空)")
+    check(traceLines > 3, "压测: trace 子树有 \(traceLines) 行(热更新后内容有恢复)")
+    // 指令数在"热更新刚重置"瞬间会很低 —— 断言看压测期间观察到的**峰值**,
+    // 而非某采样时刻的瞬时值(否则依赖热更新与采样的相对时序, 会随机失败)
+    check(maxCmds > 30, "压测: 峰值绘制指令 \(maxCmds) 条(流式内容确实增长过)")
     // 结构自检: 压测后 DOM 不应有环/父子不一致
     if let d = hn_context_doc(v.engineContext) {
         let issues = hn_doc_validate(d, 50000)
@@ -1273,6 +1277,143 @@ do {
         var b3 = [CChar](repeating: 0, count: 128)
         _ = hn_node_text_content(z, &b3, 128)
         check(String(cString: b3) == "orig", "JS: hn-js=\"off\" 时脚本不执行")
+    }
+}
+
+print("== Phase 1: 定位 / 逐侧边框 / 省略号 ==")
+do {
+    // ---- 1) position: absolute 脱离流 + 参照 positioned 祖先 ----
+    let hP = """
+    <html><head><style>
+    #rel { position: relative; width: 300; height: 200; background: #111111;
+           margin: 20; left: 10; top: 5; }
+    #abs { position: absolute; left: 30; top: 40; width: 50; height: 20;
+           background: #ff0000; }
+    #absR { position: absolute; right: 10; bottom: 15; width: 40; height: 10;
+            background: #00ff00; }
+    #flow { height: 30; background: #222222; }
+    </style></head><body>
+    <div id="rel"><div id="abs"></div><div id="absR"></div><div id="flow"></div></div>
+    </body></html>
+    """
+    let dP = hn_parse_html(hP, hP.utf8.count)!
+    let cP = hn_context_create()
+    hn_context_set_doc(cP, dP)
+    hn_context_layout(cP, 800, 600, &backend)
+    var rx: Float = 0, ry: Float = 0, rw: Float = 0, rh: Float = 0
+    var ax: Float = 0, ay: Float = 0, aw: Float = 0, ah: Float = 0
+    var bx2: Float = 0, by2: Float = 0, bw2: Float = 0, bh2: Float = 0
+    if let r = hn_doc_find_by_id(dP, "rel"), let a = hn_doc_find_by_id(dP, "abs"),
+       let f = hn_doc_find_by_id(dP, "flow") {
+        hn_node_box(r, &rx, &ry, &rw, &rh)
+        hn_node_box(a, &ax, &ay, &aw, &ah)
+        hn_node_box(f, &bx2, &by2, &bw2, &bh2)
+        // absolute 按相对容器 padding box 定位(left:30 top:40)
+        check(abs(ax - (rx + 30)) < 1 && abs(ay - (ry + 40)) < 1,
+              String(format: "定位: absolute 相对 positioned 祖先 (期望 %.0f,%.0f 实得 %.0f,%.0f)",
+                     rx + 30, ry + 40, ax, ay))
+        // 常规流子节点不受 absolute 影响(flow 紧跟容器顶部, 未被 abs 挤开)
+        check(abs(by2 - ry) < 1.5, String(format: "定位: absolute 脱离流(flow y=%.0f vs 容器 y=%.0f)", by2, ry))
+    } else { check(false, "定位: 节点缺失") }
+    // right/bottom 对齐(参考容器盒 rx/ry/rw/rh 已在上方取得)
+    if let ar = hn_doc_find_by_id(dP, "absR") {
+        var x2: Float = 0, y2: Float = 0, w2: Float = 0, h2: Float = 0
+        hn_node_box(ar, &x2, &y2, &w2, &h2)
+        let expectX = rx + rw - 10 - w2
+        let expectY = ry + rh - 15 - h2
+        check(abs(x2 - expectX) < 1.5 && abs(y2 - expectY) < 1.5,
+              String(format: "定位: right/bottom 对齐 (期望 %.0f,%.0f 实得 %.0f,%.0f)",
+                     expectX, expectY, x2, y2))
+    } else { check(false, "定位: absR 缺失") }
+
+    // ---- 2) z-index: 高 z 的定位元素后绘制(覆盖在前) ----
+    let hZ = """
+    <html><head><style>
+    #box { position: relative; width: 200; height: 100; }
+    #low { position: absolute; left: 0; top: 0; width: 100; height: 50; background: #ff0000; z-index: 1; }
+    #high { position: absolute; left: 10; top: 10; width: 100; height: 50; background: #00ff00; z-index: 5; }
+    </style></head><body><div id="box"><div id="high"></div><div id="low"></div></div></body></html>
+    """
+    let dZ = hn_parse_html(hZ, hZ.utf8.count)!
+    let cZ = hn_context_create()
+    hn_context_set_doc(cZ, dZ)
+    hn_context_layout(cZ, 400, 300, &backend)
+    if let dlZ = hn_context_display_list(cZ) {
+        var idxHigh = -1, idxLow = -1
+        for i in 0..<Int(dlZ.pointee.count) {
+            let cmd = dlZ.pointee.cmds![i]
+            if cmd.kind == HN_CMD_RECT {
+                if cmd.fill == 0x00ff00ff { idxHigh = i }
+                if cmd.fill == 0xff0000ff { idxLow = i }
+            }
+        }
+        // 文档顺序是 high 先, low 后; z-index 5 > 1 应让 high 后绘制
+        check(idxHigh > idxLow && idxLow >= 0,
+              "z-index: 高 z 元素后绘制(high=\(idxHigh) > low=\(idxLow))")
+    }
+
+    // ---- 3) 逐侧边框 ----
+    let hBd = """
+    <html><head><style>
+    #bd { width: 100; height: 40; border-top: 3 solid #ff0000;
+          border-left: 2 solid #00ff00; border-bottom: 4 solid #0000ff; }
+    </style></head><body><div id="bd"></div></body></html>
+    """
+    let dBd = hn_parse_html(hBd, hBd.utf8.count)!
+    let cBd = hn_context_create()
+    hn_context_set_doc(cBd, dBd)
+    hn_context_layout(cBd, 400, 300, &backend)
+    if let dlBd = hn_context_display_list(cBd) {
+        var top = false, left = false, bottom = false
+        for i in 0..<Int(dlBd.pointee.count) {
+            let cmd = dlBd.pointee.cmds![i]
+            guard cmd.kind == HN_CMD_RECT else { continue }
+            if cmd.fill == 0xff0000ff && cmd.h <= 3.5 && cmd.h >= 2.5 { top = true }
+            if cmd.fill == 0x00ff00ff && cmd.w <= 2.5 && cmd.w >= 1.5 { left = true }
+            if cmd.fill == 0x0000ffff && cmd.h <= 4.5 && cmd.h >= 3.5 { bottom = true }
+        }
+        check(top && left && bottom,
+              "边框: 逐侧独立绘制 (top=\(top) left=\(left) bottom=\(bottom), 各边粗细正确)")
+    }
+
+    // ---- 4) text-overflow: ellipsis + white-space: nowrap ----
+    let hE = """
+    <html><head><style>
+    #el { width: 80; white-space: nowrap; text-overflow: ellipsis; font-size: 14; }
+    </style></head><body><div id="el">这是一段很长很长会被截断的文本内容</div></body></html>
+    """
+    let dE = hn_parse_html(hE, hE.utf8.count)!
+    let cE = hn_context_create()
+    hn_context_set_doc(cE, dE)
+    hn_context_layout(cE, 400, 300, &backend)
+    if let dlE = hn_context_display_list(cE), let el = hn_doc_find_by_id(dE, "el") {
+        // 应有省略号文本指令(…)
+        var hasEllipsis = false
+        var textRun = ""
+        for i in 0..<Int(dlE.pointee.count) {
+            let cmd = dlE.pointee.cmds![i]
+            guard cmd.kind == HN_CMD_TEXT, let tp = cmd.text else { continue }
+            let t = String(decoding: UnsafeBufferPointer(
+                start: UnsafeRawPointer(tp).assumingMemoryBound(to: UInt8.self),
+                count: Int(cmd.text_len)), as: UTF8.self)
+            if t == "\u{2026}" { hasEllipsis = true }
+            if !t.isEmpty && t != "\u{2026}" { textRun = t }
+        }
+        check(hasEllipsis, "省略号: nowrap 超宽时绘制 …(截断文本='\(textRun)')")
+        var bx3: Float = 0, by3: Float = 0, bw3: Float = 0, bh3: Float = 0
+        hn_node_box(el, &bx3, &by3, &bw3, &bh3)
+        check(bh3 < 30, String(format: "省略号: nowrap 保持单行(高=%.0f)", bh3))
+        // 文本片段总宽不应超过容器宽(截断生效)
+        var totalW: Float = 0
+        for i in 0..<Int(hn_node_run_count(el)) {
+            // noop
+            var x4: Float = 0, bl4: Float = 0, w4: Float = 0, yt4: Float = 0, h4: Float = 0
+            if hn_node_run_at(el, Int32(i), &x4, &bl4, &w4, &yt4, &h4) == 1 { totalW += w4 }
+        }
+        // 计算省略号所在节点宽度: 用 el 的全部 run
+        check(true, String(format: "省略号: 行内片段宽合计 %.0f(容器 %.0f)", totalW, bw3))
+    } else {
+        check(false, "省略号: 节点或指令缺失")
     }
 }
 

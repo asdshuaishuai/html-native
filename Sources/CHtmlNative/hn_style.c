@@ -49,6 +49,7 @@ void hn_style_default(hn_style *st) {
     st->flex_basis_u = HN_U_AUTO;
     st->flex_shrink = 1;
     st->scale = 1.0f;
+    st->z_index = 0;
 }
 
 void hn_style_inherit(hn_style *dst, const hn_style *p) {
@@ -356,6 +357,26 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
     } else if (!strcmp(name, "border-width")) {
         int u;
         if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) st->border_w = (u == HN_U_EM) ? f * st->font_size : f;
+    } else if (!strncmp(name, "border-", 7) &&
+               (!strcmp(name + 7, "top") || !strcmp(name + 7, "right") ||
+                !strcmp(name + 7, "bottom") || !strcmp(name + 7, "left"))) {
+        /* 逐侧边框: border-top: 2 solid #4f7cff;  或  border-top-width/-color */
+        int side = name[7] == 't' ? 0 : name[7] == 'r' ? 1 : name[7] == 'b' ? 2 : 3;
+        float bw = -1;
+        hn_color bc = 0;
+        int has_c = 0;
+        sv tt;
+        while (next_tok(&v, &tt)) {
+            int u; float f2;
+            if (sv_eq(tt, "solid") || sv_eq(tt, "dashed") || sv_eq(tt, "dotted") || sv_eq(tt, "none")) {
+                if (sv_eq(tt, "none")) bw = 0;
+                continue;
+            }
+            if (sv_color_full(tt, &bc)) { has_c = 1; continue; }
+            if (sv_len(tt, st->font_size, &f2, &u)) { bw = (u == HN_U_EM) ? f2 * st->font_size : f2; }
+        }
+        if (bw >= 0) st->border_w4[side] = bw > 0 ? bw : -1;   /* -1 标记"显式 0" */
+        if (has_c) st->border_c4[side] = bc ? bc : 1;
     } else if (!strcmp(name, "border-color")) {
         sv whole = { value, strlen(value) };
         if (!sv_color_full(whole, &col)) { if (next_tok(&v, &t)) sv_color(t, &col); }
@@ -458,6 +479,39 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             }
         }
         if (st->anim_enter != HN_ENTER_NONE && st->enter_ms <= 0) st->enter_ms = 260;
+    } else if (!strcmp(name, "position")) {
+        if (!next_tok(&v, &t)) return;
+        if (sv_eq(t, "relative")) st->position = HN_POS_RELATIVE;
+        else if (sv_eq(t, "absolute")) st->position = HN_POS_ABSOLUTE;
+        else if (sv_eq(t, "fixed")) st->position = HN_POS_FIXED;
+        else st->position = HN_POS_STATIC;
+    } else if (!strcmp(name, "top")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_eq(t, "auto")) { st->has_top = 0; }
+        else if (sv_len(t, st->font_size, &f2, &u)) { st->top = f2; st->has_top = 1; }
+    } else if (!strcmp(name, "right")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_eq(t, "auto")) { st->has_right = 0; }
+        else if (sv_len(t, st->font_size, &f2, &u)) { st->right = f2; st->has_right = 1; }
+    } else if (!strcmp(name, "bottom")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_eq(t, "auto")) { st->has_bottom = 0; }
+        else if (sv_len(t, st->font_size, &f2, &u)) { st->bottom = f2; st->has_bottom = 1; }
+    } else if (!strcmp(name, "left")) {
+        int u; float f2;
+        if (next_tok(&v, &t) && sv_eq(t, "auto")) { st->has_left = 0; }
+        else if (sv_len(t, st->font_size, &f2, &u)) { st->left = f2; st->has_left = 1; }
+    } else if (!strcmp(name, "z-index")) {
+        if (next_tok(&v, &t) && sv_eq(t, "auto")) st->z_index = 0;
+        else { char b2[24]; if (t.n < sizeof(b2)) { memcpy(b2, t.s, t.n); b2[t.n] = 0; st->z_index = atoi(b2); } }
+    } else if (!strcmp(name, "text-overflow")) {
+        if (next_tok(&v, &t)) st->text_overflow = sv_eq(t, "ellipsis") ? 1 : 0;
+    } else if (!strcmp(name, "white-space")) {
+        if (!next_tok(&v, &t)) return;
+        if (sv_eq(t, "nowrap")) st->white_space = 1;
+        else if (sv_eq(t, "pre")) st->white_space = 2;
+        else if (sv_eq(t, "pre-wrap")) st->white_space = 3;
+        else st->white_space = 0;
     } else if (!strcmp(name, "cursor")) {
         if (!next_tok(&v, &t)) return;
         st->cursor = sv_eq(t, "pointer") ? 1 : 0;

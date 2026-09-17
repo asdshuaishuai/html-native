@@ -47,7 +47,7 @@ static void skip_ws(cps *s) {    for (;;) {
     }
 }
 
-/* [-a-zA-Z_][-a-zA-Z0-9_], 统一小写(class/id 大小写敏感是已知简化) */
+/* 标签名统一小写(HTML 标签不敏感); class/id 走 read_ident_cased(大小写敏感) */
 static char *read_ident(cps *s) {
     const char *st = s->p;
     if (s->p >= s->end) return NULL;
@@ -64,6 +64,22 @@ static char *read_ident(cps *s) {
     for (const char *i = st; i < s->p; i++) *out++ = (char)tolower((unsigned char)*i);
     *out = 0;
     return ret;
+}
+
+/* 保留大小写的标识符读取: CSS 中 class 与 id 是**大小写敏感**的,
+   不能统一小写(那会让 #absR / .myClass 匹配失败)。 */
+static char *read_ident_cased(cps *s) {
+    const char *st = s->p;
+    if (s->p >= s->end) return NULL;
+    int c = (unsigned char)*s->p;
+    if (!(isalpha(c) || c == '-' || c == '_' || c >= 0x80)) return NULL;
+    s->p++;
+    while (s->p < s->end) {
+        c = (unsigned char)*s->p;
+        if (isalnum(c) || c == '-' || c == '_' || c >= 0x80) s->p++;
+        else break;
+    }
+    return hn_arena_strndup(s->ar, st, (size_t)(s->p - st));
 }
 
 static char *read_value(cps *s) {
@@ -93,14 +109,14 @@ static int read_compound(cps *s, hn_compound *cp) {
         }
         if (s->p < s->end && *s->p == '.') {
             s->p++;
-            char *c = read_ident(s);
+            char *c = read_ident_cased(s);     /* class 大小写敏感 */
             if (c && cp->n_cls < 8) cp->cls[cp->n_cls++] = c;
             any = 1;
             continue;
         }
         if (s->p < s->end && *s->p == '#') {
             s->p++;
-            char *i = read_ident(s);
+            char *i = read_ident_cased(s);     /* id 大小写敏感 */
             if (i && !cp->id) cp->id = i;
             any = 1;
             continue;

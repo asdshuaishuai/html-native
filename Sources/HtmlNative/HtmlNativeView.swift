@@ -932,11 +932,16 @@ public final class HtmlNativeView: NSView, HNWebHost {
         }
         out.append("· 流式容器: \(streams.isEmpty ? "(无)" : streams.joined(separator: ", "))")
         func walk(_ n: OpaquePointer, _ depth: Int) {
-            if depth > 14 { return }
+            if depth > 24 { return }   // 遮罩/弹窗常在深层嵌套
             var line = String(repeating: "  ", count: depth)
             if let tag = hn_node_tag(n) {
                 line += String(cString: tag)
                 if let idp = hn_node_attr(n, "id") { line += "#" + String(cString: idp) }
+                /* class 必须显示: 样式问题排查基本都从类名定位 */
+                if let clsp = hn_node_attr(n, "class") {
+                    let cls = String(cString: clsp)
+                    if !cls.isEmpty { line += "." + cls.replacingOccurrences(of: " ", with: ".") }
+                }
             } else {
                 var vlen = 0
                 if let v = hn_node_value(n, &vlen), vlen > 0 {
