@@ -32,7 +32,7 @@
 | **增量渲染** | 每次变化触发全量重排——大文档不可用 | 引擎(C) |
 | ~~**真实事件系统**~~ ✅ | 已完成(v0.2): 统一派发管道 + 冒泡 + preventDefault + 键盘/焦点/输入 | — |
 | **组件模型** | 无可复用/可组合的组件、无生命周期钩子 | 运行时(Swift) + JS |
-| **网络层** | 无 `hn.fetch`，无法调 API | 运行时(Swift) |
+| ~~**网络层**~~ ✅ | 已完成(v0.2): hn.fetch Promise + 主机白名单 + 错误传播 | — |
 | **网络(HTTP)** | 无法调 API / 加载数据 / WebSocket | 运行时(Swift) |
 | **表单** | 无 form 元素 / submit / validation | 引擎(C) + 运行时 |
 | `text-overflow: ellipsis` | 每个 UI 都需要 | 引擎(C) |
@@ -152,7 +152,12 @@ border-left-color: #333;
 - JS: `el.addEventListener('mousemove', fn)` 已有壳，需接通引擎事件
 - 工作量: ~2 周
 
-#### 1e. 网络层（运行时层）
+#### 1e. 网络层（运行时层）✅ 已完成
+
+**实施结果**: `hn.fetch(url, opts) → Promise<{ok,status,headers,text(),json()}>`,
+走 URLSession; 4xx/5xx reject 且带 status; 主机白名单(子域支持);
+20s 超时。已修复三个静默失效缺陷(JavaScriptCore 无 setTimeout /
+shim 链式赋值语法 / jsString 转义不全)。165 断言覆盖。
 ```
 hn.fetch(url, options) → Promise<response>
   options: { method, headers, body }
