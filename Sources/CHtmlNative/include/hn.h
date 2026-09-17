@@ -293,6 +293,12 @@ int hn_node_run_count(hn_node *n);
 /* 取第 i 个片段: 写出绝对 x/基线/宽 与所属行盒顶/高; 越界返回 0 */
 int hn_node_run_at(hn_node *n, int i, float *x, float *baseline, float *w,
                    float *y_top, float *h);
+/* 取第 i 个片段在该节点文本中的字节区间(排查空白折叠/换行时必须看到内容:
+   只有坐标和宽度时无法判断某个 run 到底是词还是一串空格)。越界返回 0。 */
+int hn_node_run_range(hn_node *n, int i, size_t *begin, size_t *end);
+/* 取节点原始文本(文本节点用); 非文本节点返回 NULL。
+   配合 hn_node_run_range 可打印某个片段的实际内容。 */
+const char *hn_node_text(hn_node *n, size_t *len_out);
 
 /* ---- 事件(引擎只提供事件数据与冒泡路径; 管道由运行时实现, 消费者可是 JS/hx-*) ---- */
 
@@ -393,6 +399,10 @@ hn_node    *hn_context_hit_node(hn_context *c, float x, float y); /* 最深层�
 const char *hn_node_tag(hn_node *n);
 /* 返回元素属性值, 不存在返回 NULL */
 const char *hn_node_attr(hn_node *n, const char *name);
+/* 属性遍历(供宿主/工具内省: 排查"为什么这个 hx-get / hn-mesh 没生效"时,
+   必须能看到元素到底带了哪些声明, 而不是只有 id 和 class)。
+   idx 越界返回 0; 命中时写出属性名与值(值可为空串 = 布尔属性)。 */
+int hn_node_attr_at(hn_node *n, int idx, const char **name, const char **value);
 /* 从 n(含自身)向上找最近一个拥有指定属性的元素 */
 hn_node    *hn_node_ancestor_with_attr(hn_node *n, const char *name);
 /* 表单回车语义: 自身 → 各级祖先 → 最近一级祖先的子树(文档序, 跳过 n 所在分支)

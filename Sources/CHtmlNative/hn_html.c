@@ -119,30 +119,37 @@ static size_t entity_out(const char *s, size_t n, char *out, size_t *out_n) {
 }
 
 /* 文本入树: 实体解码 + 空白折叠(nbsp 不折叠) */
+/* 文本节点保存**原始空白**(只做实体解码, 不折叠)。
+ *
+ * 为什么不能在这里折叠: 空白折叠是 white-space 的计算值决定的, 而样式要在
+ * 解析之后的级联阶段才知道。在 tokenizer 里就把 "a   b" 压成 "a b" 之后,
+ * white-space:pre/pre-wrap 就再也拿不回原始空白了 —— 实测三种取值输出完全
+ * 一致(都塌成单个空格), 代码块 / ASCII 表格 / 对齐文本全部错乱。
+ * 浏览器也是这么分工: DOM 存原始文本, 折叠发生在布局期。
+ * 折叠逻辑现由 flatten_inline 按 white-space 分别处理。 */
 static void push_text(hn_arena *ar, hn_node *cur, const char *s, size_t n) {
     char *buf = hn_arena_alloc(ar, n + 8);
     size_t o = 0;
-    int pend = 0; /* 挂起的空格 */
     for (size_t i = 0; i < n; ) {
         if (s[i] == '&') {
             char rep[4]; size_t rl = 0;
             size_t used = entity_out(s + i, n - i, rep, &rl);
             if (used) {
-                for (size_t k = 0; k < rl; k++) {
-                    unsigned char b = (unsigned char)rep[k];
-                    if (b == ' ') { pend = 1; }
-                    else { if (pend) { buf[o++] = ' '; pend = 0; } buf[o++] = (char)b; }
-                }
+                for (size_t k = 0; k < rl; k++) buf[o++] = rep[k];
                 i += used;
                 continue;
             }
         }
-        int c = (unsigned char)s[i];
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') { pend = 1; i++; continue; }
-        if (pend) { buf[o++] = ' '; pend = 0; }
         buf[o++] = s[i++];
     }
-    if (!o) return;
+    /* 纯空白的文本节点直接丢弃(它在折叠与保留两种模式下都没有可见内容,
+       且留着会让行首判断复杂化)。非纯空白则原样保留首尾空白。 */
+    int only_ws = 1;
+    for (size_t k = 0; k < o; k++) {
+        unsigned char c = (unsigned char)buf[k];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f') { only_ws = 0; break; }
+    }
+    if (!o || only_ws) return;
     hn_node *t = new_node(ar, HN_TEXT);
     t->text = buf;
     t->text_len = o;
@@ -180,21 +187,8 @@ static void push_text_raw(hn_arena *ar, hn_node *cur, const char *s, size_t n) {
 }
 
 /* 解析后整理: 混排场景下的边界裁剪(前后是元素或端点时裁掉首尾空格) */
-static void normalize_texts(hn_node *n) {
-    for (hn_node *c = n->first; c; c = c->next) {
-        if (c->kind == HN_TEXT && c->text_len) {
-            const char *s = c->text; size_t len = c->text_len;
-            if (!c->prev || c->prev->kind == HN_ELEM)
-                while (len && *s == ' ') { s++; len--; }
-            if (!c->next || c->next->kind == HN_ELEM)
-                while (len && s[len - 1] == ' ') len--;
-            c->text = s;
-            c->text_len = len;
-        } else if (c->kind == HN_ELEM) {
-            normalize_texts(c);
-        }
-    }
-}
+/* 首尾空白的裁剪移到了布局期(flatten_inline): 只有非 white-space:pre 的
+   上下文才裁, 否则代码块开头的缩进会被吃掉。这里不再做事。 */
 
 static void push_attr(hn_arena *ar, hn_node *el, const char *name, const char *value) {
     hn_attr *na = hn_arena_alloc(ar, sizeof(hn_attr) * (size_t)(el->n_attrs + 1));
@@ -340,7 +334,6 @@ void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len) {
         push_text(ar, cur, "<", 1);
         p = lt + 1;
     }
-    normalize_texts(root);
 }
 
 hn_doc *hn_parse_html(const char *src, size_t len) {

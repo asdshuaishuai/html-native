@@ -481,6 +481,19 @@ int hn_node_display(hn_node *n) {
     return n ? (int)n->style.display : 2;
 }
 
+int hn_node_run_range(hn_node *n, int i, size_t *begin, size_t *end) {
+    if (!n || !n->runs || i < 0 || i >= n->n_runs) return 0;
+    if (begin) *begin = n->runs[i].begin;
+    if (end) *end = n->runs[i].end;
+    return 1;
+}
+
+const char *hn_node_text(hn_node *n, size_t *len_out) {
+    if (!n || n->kind != HN_TEXT) { if (len_out) *len_out = 0; return NULL; }
+    if (len_out) *len_out = n->text_len;
+    return n->text;
+}
+
 int hn_node_run_count(hn_node *n) {
     return n ? n->n_runs : 0;
 }
@@ -1136,6 +1149,13 @@ const char *hn_node_attr(hn_node *n, const char *name) {
     for (int i = 0; i < n->n_attrs; i++)
         if (!strcmp(n->attrs[i].name, name)) return n->attrs[i].value;
     return NULL;
+}
+
+int hn_node_attr_at(hn_node *n, int idx, const char **name, const char **value) {
+    if (!n || n->kind != HN_ELEM || idx < 0 || idx >= n->n_attrs) return 0;
+    if (name) *name = n->attrs[idx].name;
+    if (value) *value = n->attrs[idx].value;
+    return 1;
 }
 
 hn_node *hn_node_ancestor_with_attr(hn_node *n, const char *name) {

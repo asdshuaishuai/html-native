@@ -125,10 +125,15 @@ static void print_dom(hn_node *n, int depth) {
     const char *tag = hn_node_tag(n);
     if (tag) {
         printf("<%s", tag);
-        const char *id = hn_node_attr(n, "id");
-        if (id) printf(" id=\"%s\"", id);
-        const char *cls = hn_node_attr(n, "class");
-        if (cls) printf(" class=\"%s\"", cls);
+        /* 打出**全部**属性(不只 id/class)。
+           data-* / hx-* / hn-* 这些才是排查"为什么没生效"的关键线索 ——
+           只打 id 和 class 时, 看到 <div id="x"> 完全无法判断它到底带了
+           哪些 hx-get 或 hn-mesh 声明。 */
+        for (int i = 0; ; i++) {
+            const char *an = NULL, *av = NULL;
+            if (!hn_node_attr_at(n, i, &an, &av)) break;
+            printf(" %s=\"%s\"", an, av ? av : "");
+        }
         printf(">\n");
     } else {
         size_t vlen = 0;
@@ -327,8 +332,21 @@ int main(int argc, char **argv) {
             int nr = hn_node_run_count(n);
             for (int i = 0; i < nr; i++) {
                 float x, bl, w, yt, h;
-                if (hn_node_run_at(n, i, &x, &bl, &w, &yt, &h) == 1)
-                    printf("run  x=%7.1f  baseline=%7.1f  w=%6.1f  h=%5.1f\n", x, bl, w, h);
+                if (hn_node_run_at(n, i, &x, &bl, &w, &yt, &h) == 1) {
+                    /* 带上片段文本 —— 只打坐标和宽度时, 无法判断某个 run
+                       到底是词还是空白串(排查 white-space 必须看到内容)。 */
+                    size_t bl2 = 0, be = 0;
+                    printf("run  x=%7.1f  baseline=%7.1f  w=%6.1f  h=%5.1f  \"", x, bl, w, h);
+                    if (hn_node_run_range(n, i, &bl2, &be) == 1) {
+                        size_t tl = 0;
+                        const char *tx = hn_node_text(n, &tl);
+                        if (tx && be <= tl) {
+                            for (size_t k = bl2; k < be && k < bl2 + 24; k++)
+                                fputc(tx[k] == ' ' ? '_' : tx[k], stdout);
+                        }
+                    }
+                    printf("\"\n");
+                }
             }
             for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
                 if (sp < 4096) stack[sp++] = c;

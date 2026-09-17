@@ -2608,6 +2608,65 @@ do {
     } else { check(false, "级联: 简写 height 用例") }
 }
 
+print("== 空白折叠归属: pre 保留 / 折叠模式压掉换行制表符 ==")
+do {
+    /* tokenizer 曾无条件把空白折叠成一个空格, 于是 white-space:pre 与 normal
+       的输出完全一致(代码块 / 对齐文本全错)。改为: DOM 存原始空白,
+       折叠在布局期按 white-space 决定 —— 与浏览器分工一致。
+       这个改动动了 tokenizer, 所以两件事都要盯:
+         (a) pre / pre-wrap 真的保留连续空白与换行
+         (b) 折叠模式仍然把空格、换行、制表符一律压成一个空格 */
+    /// 统计片段数与"整段文本的总推进宽度"(最后一个片段的 x+w)。
+    /// 用总推进而不是某个片段的宽度做断言 —— 空格的字形宽度随字体差别很大
+    /// (纯 C 回退约等于一个汉字宽, CoreText 下窄得多), 但"保留 3 个空格一定
+    /// 比压成 1 个空格更宽"这个关系是稳定的。
+    func runstats(_ html: String) -> (count: Int, advance: Float) {
+        guard let d = hn_parse_html(html, html.utf8.count) else { return (0, 0) }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, 600, 300, &backend)
+        var stack: [OpaquePointer] = [hn_doc_root(d)]
+        var total = 0, advance: Float = 0
+        while let n = stack.popLast() {
+            let nr = hn_node_run_count(n)
+            for i in 0..<nr {
+                var x: Float = 0, bl: Float = 0, w: Float = 0, yt: Float = 0, h: Float = 0
+                if hn_node_run_at(n, Int32(i), &x, &bl, &w, &yt, &h) == 1 {
+                    total += 1
+                    if x + w > advance { advance = x + w }
+                }
+            }
+            var kids: [OpaquePointer] = []
+            var c = hn_node_first_child(n)
+            while let k = c { kids.append(k); c = hn_node_next_sibling(k) }
+            stack.append(contentsOf: kids)
+        }
+        hn_context_destroy(cc)
+        return (total, advance)
+    }
+
+    // (a) pre: "a   b" 应拆成 3 个片段, 中间空白串宽 ≈ 3×单字符
+    let preHTML = "<html><head><style>html,body{margin:0;font-size:20}"
+                + ".p{width:600;white-space:pre}</style></head><body>"
+                + "<div class='p'>a   b</div></body></html>"
+    let rp = runstats(preHTML)
+    check(rp.count >= 3, String(format: "空白: pre 产出 3 个片段(实际 %d)", rp.count))
+
+    // (b) normal: 三个空格压成一个 → 2 个片段
+    let nrmHTML = preHTML.replacingOccurrences(of: "white-space:pre", with: "white-space:normal")
+    let rn = runstats(nrmHTML)
+    check(rn.count == 2, String(format: "空白: normal 折叠成 2 个片段(实际 %d)", rn.count))
+    check(rp.advance > rn.advance + 1.0,
+          String(format: "空白: pre 的总推进更宽(%.1f > normal %.1f) —— 证明空格真被保留",
+                 rp.advance, rn.advance))
+
+    // (c) 折叠模式必须把换行也当空白(否则 "a\n\nb" 会算成一个词)
+    let nlHTML = "<html><head><style>html,body{margin:0;font-size:14}"
+               + "</style></head><body><div>a\n\nb</div></body></html>"
+    let rnl = runstats(nlHTML)
+    check(rnl.count == 2, String(format: "空白: 换行在 normal 下被折叠(片段 %d, 期望 2)", rnl.count))
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

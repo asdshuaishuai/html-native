@@ -78,6 +78,9 @@ typedef struct {
     float           pad_before, pad_after; /* 内联元素的左右内边距/外边距 */
     int             space_before; /* 源码中此前有空白(行首丢弃) */
     int             forced_break;
+    /* white-space:pre 下的空白串(保留原宽度)。标记它是因为行首的空白串
+       按规范要丢弃 —— 没有这个标记就没法区分"pre 的空白串"与普通词。 */
+    int             is_space_run;
 } iitem;
 
 typedef struct { iitem *v; int n, cap; int pending_space; } ivec;
@@ -117,10 +120,67 @@ static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_ba
         const hn_style *st = &n->parent->style;
         const char *s = n->text;
         size_t len = n->text_len, i = 0;
+        /* white-space: pre / pre-wrap —— 保留连续空格与换行, 不做空白折叠。
+           折叠逻辑原本无条件把空格序列压成一个"待放空格", 于是 pre 与 normal
+           的输出完全一样(实测 "a   b" 三种取值结果一致)。
+           pre 与 pre-wrap 的差别只在换行: pre 不因宽度换行, pre-wrap 换行。 */
+        int preserve = (st->white_space == 2 || st->white_space == 3);
+        if (preserve) {
+            /* 空白集合必须与折叠模式一致(含换行), 否则 pre 下 "a\n\nb" 会
+               整个当成一个词 —— 换行既没保留也没断开。 */
+            #define HN_IS_WS(ch) ((ch) == ' ' || (ch) == '\t' || (ch) == '\n' || \
+                                 (ch) == '\r' || (ch) == '\f')
+            while (i < len) {
+                /* 连续的空白本身作为一个 item(保留原宽度), 而不是折叠成 1 个空格 */
+                size_t j = i;
+                while (j < len && HN_IS_WS(s[j])) j++;
+                if (j > i) {
+                    iitem it;
+                    memset(&it, 0, sizeof(it));
+                    it.owner = n;
+                    it.st = st;
+                    it.begin = i;
+                    it.end = j;
+                    it.w = measure_run(tb, st, s + i, j - i);
+                    it.space_before = 0;
+                    it.is_space_run = 1;      /* 标记: 行首的空白串可被丢弃 */
+                    iv_push(iv, it);
+                    i = j;
+                    continue;
+                }
+                /* 非空白: 一直读到下一个空白(空白不再作为词边界) */
+                j = i;
+                while (j < len && !HN_IS_WS(s[j])) j++;
+                iitem it;
+                memset(&it, 0, sizeof(it));
+                it.owner = n;
+                it.st = st;
+                it.begin = i;
+                it.end = j;
+                it.w = measure_run(tb, st, s + i, j - i);
+                it.space_before = 0;
+                iv_push(iv, it);
+                i = j;
+            }
+            return;
+        }
+        /* 折叠模式的空白判定必须覆盖**全部** HTML 空白字符。tokenizer 现在保留
+           原始空白(为了 white-space:pre), 所以这里漏掉 \n/\t 的话,
+           "a\n\n\nb" 会被当成一个词, 宽度把换行符也算进去。 */
         while (i < len) {
-            if (s[i] == ' ') { if (iv->n > 0) iv->pending_space = 1; i++; continue; }
+            unsigned char wc = (unsigned char)s[i];
+            if (wc == ' ' || wc == '\t' || wc == '\n' || wc == '\r' || wc == '\f') {
+                if (iv->n > 0) iv->pending_space = 1;
+                i++;
+                continue;
+            }
             size_t j = i;
-            while (j < len && s[j] != ' ') j++;
+            while (j < len) {
+                unsigned char wc2 = (unsigned char)s[j];
+                if (wc2 == ' ' || wc2 == '\t' || wc2 == '\n' ||
+                    wc2 == '\r' || wc2 == '\f') break;
+                j++;
+            }
             iitem it;
             memset(&it, 0, sizeof(it));
             it.owner = n;
