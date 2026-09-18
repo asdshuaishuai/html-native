@@ -70,11 +70,36 @@ hn dev app.html --css app.css # 开发模式: 保存即热更新
 `hn_eval` 在 native 与 webkit 两个渲染器上都可用（native 走系统自带的
 JavaScriptCore），因此自动化不必关心用了哪个渲染器。
 
-**软件光栅化器(hnsoft)**：引擎的绘制后端接缝支持多后端 —— macOS 用 CoreGraphics
-(原生质量)，跨平台/无 GUI 场景用 `hnsoft`(纯 C 软件光栅化器 + FreeType 文本)。
-`hncore render app.html out.png 520 692` 在任何有 C 编译器的平台产出 PNG，
-适合服务器端渲染截图、CI 视觉回归。渲染后端选择与评估见
-[ADR-001](docs/adr-001-renderer.md)。
+**绘制后端：一个跨平台框架，不是每个平台各写一份**。引擎产出的是纯数据的显示
+列表(8 类指令)，绘制层把它翻译成像素。这个接缝上有两个可互换实现，**签名完全
+相同**(`hnsoft_render` / `hncairo_render`)，换后端只需换链接目标，调用方一行不改：
+
+| 后端 | 用于 | 特点 |
+|---|---|---|
+| `HNPainter.swift` | macOS 运行时 | CoreGraphics, 原生质量 |
+| `hnsoft.c` | 无 GUI / 服务器端 / 无 cairo 的环境 | 纯 C 软件光栅, 零外部依赖 |
+| `hn_cairo.c` | Windows 运行时 / Linux / 无头 | **一份实现喂所有平台** |
+
+`hn_cairo.c` 是"别再为每个平台手写一份绘制"的答案。此前 Windows 与无头场景只能
+靠 `hnsoft` 手写光栅，而它自己承认几处妥协：阴影是"6 层扩边"近似(无高斯模糊)、
+圆角裁剪被简化为轴对齐矩形、PNG 用存储型 deflate(无压缩)。cairo 把这三件事换成
+生产级实现，同时给 macOS/Linux/Windows/iOS/Android 同一份代码。
+
+对照显示列表 8 类指令逐项实测过(`tools/hncairo_probe.c`, 25 条断言全通过)：
+圆角矩形+实色/渐变填充、**任意路径裁剪(含圆角)**、even-odd/非零环绕多边形、
+四边形、UV 贴图、真实覆盖率抗锯齿、**真模糊阴影**、逐像素透明背板。
+
+```
+hncore render  app.html out.png 460 560   # hnsoft 后端
+hncore renderc app.html out.png 460 560   # cairo 后端(同一份显示列表)
+```
+
+构建时带 `-DHN_USE_CAIRO` 即切换(需链接 cairo + FreeType)。文本仍走 FreeType
+光栅化而不用 cairo 的字体后端 —— 因为**测量与绘制必须同源**：布局期用 FreeType
+的字形 advance 排布，绘制若换另一套字体后端，字形就会落出排好的行盒。
+
+一个实测差距：同一份文档 cairo 输出的 PNG 是 31 KB，hnsoft 是 1007 KB ——
+后者用存储型 deflate(不压缩)，前者走真 zlib。
 
 **三平台引擎二进制**：`ZIG=zig ./tools/build-multiplatform.sh` 一条命令产出
 macOS/Linux/Windows 五个目标产物（`hncore` 引擎 CLI，用于验证与集成测试）。
@@ -94,9 +119,10 @@ Sources/CHtmlNative/  引擎核心(C99, ~2200 行, 零依赖)
   hn_lottie.c  Lottie 求值 → 矢量指令(多边形/图片/矩形)
   hn_mesh.c    网格变形贴图 → MESH 指令(Live2D 类效果的原语)
   hn_context.c 会话: 布局编排/命中/hot-update/清单解析
+  hn_cairo.c   **可选**绘制后端: 显示列表 → cairo(一份实现喂所有平台)
 Sources/HtmlNative/   macOS 运行时 + 应用模型
   TextShaper.swift     CoreText 文本后端(测量回调)
-  HNPainter.swift      display list → CoreGraphics
+  HNPainter.swift      display list → CoreGraphics(macOS 运行时; cairo 后端在 C 侧)
   HNLayerCompositor.swift 网格变形合成(三角形仿射纹理映射)
   ImageStore.swift     图片加载/缓存; AssetStore.swift 外部资产(Lottie JSON)
   HtmlNativeView.swift 渲染视图 + htmx(hx-*)执行 + sys:// 应用路由

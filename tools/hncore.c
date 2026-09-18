@@ -20,6 +20,12 @@
 #include <string.h>
 #include "hn.h"
 #include "hnsoft.h"
+/* cairo 绘制后端: 与 hnsoft 同签名, 编译时带 -DHN_USE_CAIRO 即启用。
+   两份实现的差别正是"每个平台手写一份"与"一个跨平台框架"的差别 ——
+   renderc 子命令用来对照同一份显示列表在两者下的输出。 */
+#ifdef HN_USE_CAIRO
+#include "hn_cairo.h"
+#endif
 
 static char *read_all(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -50,6 +56,19 @@ static float hnsoft_measure_cb(void *ctx, const hn_font_desc *font,
     (void)ctx;
     return hnsoft_measure(font, utf8, len);
 }
+#ifdef HN_USE_CAIRO
+static float hncairo_measure_cb(void *ctx, const hn_font_desc *font,
+                                const char *utf8, size_t len) {
+    (void)ctx;
+    return hncairo_measure(font, utf8, len);
+}
+static void hncairo_metrics_cb(void *ctx, const hn_font_desc *font,
+                               float *ascent, float *descent, float *leading) {
+    (void)ctx;
+    hncairo_metrics(font, ascent, descent, leading);
+}
+#endif
+
 static void hnsoft_metrics_cb(void *ctx, const hn_font_desc *font,
                               float *ascent, float *descent, float *leading) {
     (void)ctx;
@@ -229,7 +248,12 @@ static int verify_boxes(hn_node *n, int *checked) {
 int main(int argc, char **argv) {
     if (argc < 3) {
         fputs("用法: hncore <render|parse|layout|paint|text|boxes|verify> <file.html> [W H|out.png W H]\n"
+#ifdef HN_USE_CAIRO
               "  render  渲染为 PNG(软件光栅化, 零 GUI 依赖; 文本需 FreeType)\n"
+              "  renderc 渲染为 PNG(cairo 后端: 一份实现喂所有平台)\n"
+#else
+              "  render  渲染为 PNG(软件光栅化, 零 GUI 依赖; 文本需 FreeType)\n"
+#endif
               "  parse   解析并打印 DOM 树\n"
               "  layout  级联+布局, 打印盒模型树\n"
               "  paint   打印绘制指令(display list)\n"
@@ -424,7 +448,40 @@ int main(int argc, char **argv) {
                 free(px);
             }
         }
+#ifdef HN_USE_CAIRO
+    } else if (!strcmp(cmd, "renderc")) {
+        /* 用 cairo 后端渲染(与 render 同一份显示列表, 不同绘制实现)。
+           文本测量也换成 hncairo_*: 测量与绘制必须同源, 否则字形会落出排好的
+           行盒 —— 这也是保留 FreeType 而不是用 cairo 字体后端的原因。 */
+        const char *out = argc > 3 ? argv[3] : "outc.png";
+        if (argc > 4) { W = (float)atof(argv[4]); }
+        if (argc > 5) { H = (float)atof(argv[5]); }
+        hn_text_backend tb = { NULL, hncairo_measure_cb, hncairo_metrics_cb };
+        hn_context_layout(ctx, W, H, &tb);
+        const hn_display_list *dl = hn_context_display_list(ctx);
+        if (!dl) { fprintf(stderr, "hncore: 无绘制指令\n"); rc = 1; }
+        else {
+            unsigned char *px = hncairo_render(dl, (int)W, (int)H, 0x0B0E13FF);
+            if (!px) { fprintf(stderr, "hncore: cairo 渲染失败\n"); rc = 1; }
+            else {
+                size_t pn = 0;
+                unsigned char *png = hncairo_encode_png(px, (int)W, (int)H, &pn);
+                if (png) {
+                    FILE *of = fopen(out, "wb");
+                    if (of) { fwrite(png, 1, pn, of); fclose(of);
+                        printf("已渲染(cairo) %dx%d → %s (%.1f KB)%s\n",
+                               (int)W, (int)H, out, (double)pn / 1024.0,
+                               hncairo_font_loaded() ? "" : "  [无字体: 文本未渲染]");
+                    } else { fprintf(stderr, "hncore: 无法写 %s\n", out); rc = 1; }
+                    free(png);
+                } else { fprintf(stderr, "hncore: cairo PNG 编码失败\n"); rc = 1; }
+                free(px);
+            }
+        }
     } else if (!strcmp(cmd, "verify")) {
+#else
+    } else if (!strcmp(cmd, "verify")) {
+#endif
         int checked = 0;
         int bad = verify_boxes(hn_doc_root(doc), &checked);
         printf("检查元素: %d, 违反不变量: %d\n", checked, bad);

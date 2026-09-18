@@ -6,7 +6,12 @@ let package = Package(
     platforms: [.macOS(.v12)],
     targets: [
         // C99 核心: HTML/CSS 解析 → 级联 → 布局 → 绘制指令
-        .target(name: "CHtmlNative", cSettings: [.unsafeFlags(["-I/opt/homebrew/include/freetype2"])],
+        // hn_cairo.c 刻意 exclude: 它是**可选**绘制后端(给 C CLI / Windows 运行时 /
+        // Linux 用, 由 -DHN_USE_CAIRO 开启), 而 macOS 运行时走 CoreGraphics,
+        // 根本不需要 cairo。默认源码发现会把目录里所有 .c 都拉进来, 那样 Swift
+        // 包就凭空多出一条 cairo 依赖 —— 而这里一行都用不到它。
+        .target(name: "CHtmlNative", exclude: ["hn_cairo.c", "hn_cairo.h"],
+                cSettings: [.unsafeFlags(["-I/opt/homebrew/include/freetype2"])],
                 linkerSettings: [.unsafeFlags(["-L/opt/homebrew/lib", "-lfreetype"])]),
         // macOS 原生运行时: AppKit 窗口 + CoreText 测量 + CoreGraphics 绘制 + htmx
         .target(name: "HtmlNative", dependencies: ["CHtmlNative"]),

@@ -27,6 +27,11 @@ SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
      Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c \
      Sources/CHtmlNative/hnsoft.c)
 
+# cairo 绘制后端的额外源。与 hnsoft **同签名**(hncairo_render vs hnsoft_render),
+# 所以换后端只需换链接目标, 调用方一行不改 —— 这正是"一个绘制框架喂所有平台"
+# 的接入点。
+CAIRO_SRC=(Sources/CHtmlNative/hn_cairo.c)
+
 # -ffp-contract=off: 禁用乘加融合(FMA)。
 # arm64 有 FMA 而 x86_64 基线没有, 默认融合会导致同一文档在不同架构上
 # 算出不同的 px 值(实测差 0.1px)。布局引擎要求跨平台确定性, 因此关闭。
@@ -75,11 +80,18 @@ build() {  # tag target ext with_text [libs] [srcs...]
     local out="$OUT/$tag$ext"
     printf '  %-22s ' "$tag"
     local extra=""
-    if [ "$with_text" = "text" ]; then
-        extra="-L/opt/homebrew/lib -lfreetype"
-    else
-        extra="-DHN_NO_TEXT"
-    fi
+    case "$with_text" in
+      text)   extra="-L/opt/homebrew/lib -lfreetype" ;;
+      cairo)  # cairo 后端: 链 cairo + FreeType(cairo 文本仍走 FreeType 光栅化,
+              # 与测量同源 —— 换字体后端会让字形落出排好的行盒)。
+              # 头文件路径也要给: cairo.h 在 <prefix>/include/cairo/ 下,
+              # 不加 -I 就是 "cairo.h file not found"。
+              # 库路径一律走 pkg-config: 手写 -lfreetype 时它前面还没有
+              # 任何 -L, zig 会只在 cairo 自己的 lib 目录里找 freetype 然后报
+              # "unable to find dynamic system library"。两个包一起问最稳。
+              extra="-DHN_USE_CAIRO $(pkg-config --cflags --libs cairo freetype2 2>/dev/null)" ;;
+      *)      extra="-DHN_NO_TEXT" ;;
+    esac
     if "$ZIG" cc -target "$target" "${CFLAGS[@]}" $extra $libs "${srcs[@]}" -o "$out" 2>/tmp/hn_build_err.txt; then
         local size
         size=$(wc -c < "$out" | tr -d ' ')
@@ -94,6 +106,16 @@ build() {  # tag target ext with_text [libs] [srcs...]
 # 本机 arm64 带文本; 其余 HN_NO_TEXT(部署平台自行接 FreeType 即可开启)
 build "macos-arm64"    "aarch64-macos" "" "text"
 build "macos-x86_64"   "x86_64-macos"
+
+# cairo 绘制后端: 一份实现喂所有平台。产物用 hncore-cairo-* 命名,
+# 子命令 renderc 走 hncairo_render, render 仍走 hnsoft_render —— 同一份
+# 显示列表两条绘制路径可对照。
+if pkg-config --exists cairo 2>/dev/null; then
+    build "hncore-cairo-macos-arm64" "aarch64-macos" "" "cairo" "" \
+          "${SRC[@]}" "${CAIRO_SRC[@]}"
+else
+    echo "  (跳过 cairo: pkg-config 找不到 cairo)"
+fi
 echo
 echo "Linux (musl 静态, HN_NO_TEXT — 文本需平台 FreeType):"
 build "linux-x86_64"   "x86_64-linux-musl" "" "-DHN_NO_TEXT"
@@ -115,6 +137,7 @@ WIN_RT=(tools/hnwin.c tools/sysbridge.c tools/hnwebview.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
         Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
         Sources/CHtmlNative/hnsoft.c)
+
 WIN_LIBS="-luser32 -lgdi32 -lole32 -loleaut32 -lshell32"
 build "hnwin-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
       "$WIN_LIBS" "${WIN_RT[@]}"
@@ -131,7 +154,32 @@ echo
 HOST_BIN="$OUT/hncore-macos-arm64"
 if [ -x "$HOST_BIN" ]; then
     echo "自检(macOS arm64 实跑):"
-    if "$HOST_BIN" verify "$ROOT/examples/dashboard.html" 480 700 | sed 's/^/  /'; then
+    # cairo 后端实跑: 它必须真的把显示列表画出来(不只是编译通过)。
+# 用 renderc 渲染几个示例并校验 PNG 头 —— 只验"能跑通并产出合法 PNG",
+# 像素级对照留给 tools/hncairo_probe.c。
+CAIRO_BIN="$OUT/hncore-cairo-macos-arm64"
+if [ -x "$CAIRO_BIN" ]; then
+    ok=0; bad=0
+    for f in dashboard showcase transparent lottie webpage; do
+        html="$ROOT/examples/$f.html"
+        [ -f "$html" ] || continue
+        if "$CAIRO_BIN" renderc "$html" "/tmp/hncairo-$f.png" 460 560 >/dev/null 2>&1 \
+           && [ -s "/tmp/hncairo-$f.png" ] \
+           && head -c 8 "/tmp/hncairo-$f.png" | od -An -tx1 | tr -d ' \n' | grep -q '^89504e470d0a1a0a'; then
+            ok=$((ok + 1))
+        else
+            printf '  ✗ cairo 渲染失败: %s\n' "$f"
+            bad=$((bad + 1))
+        fi
+    done
+    if [ "$bad" -gt 0 ]; then
+        echo "  ✘ cairo 后端 $bad 个示例渲染失败"
+        exit 1
+    fi
+    echo "  ✓ cairo 后端: $ok 个示例渲染出合法 PNG"
+fi
+
+if "$HOST_BIN" verify "$ROOT/examples/dashboard.html" 480 700 | sed 's/^/  /'; then
         echo "  ✓ 布局不变量检查通过"
     else
         echo "  ✘ 自检失败"

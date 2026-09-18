@@ -31,7 +31,17 @@
 #include <unistd.h>
 
 #include "hn.h"
+/* 绘制后端可切换: 默认 hnsoft(纯 C 软件光栅), 带 -DHN_USE_CAIRO 时用 cairo。
+   两个入口同签名(hnsoft_render / hncairo_render), 所以这里只换宏。
+   Windows 上真正省下来的就是这件事: 不必再为 GDI/Direct2D 手写一份显示列表
+   翻译, 一份 cairo 后端同时喂 macOS / Linux / Windows。 */
 #include "hnsoft.h"
+#ifdef HN_USE_CAIRO
+#include "hn_cairo.h"
+#define hn_render_px(dl, w, h, bg) hncairo_render((dl), (w), (h), (bg))
+#else
+#define hn_render_px(dl, w, h, bg) hnsoft_render((dl), (w), (h), (bg))
+#endif
 
 /* UTF-8 → UTF-16。Win32 宽字符 API 要求 UTF-16; 走 ANSI 版会把 UTF-8
    字节按本地代码页(中文 Windows = GBK)解读, 中文标题即乱码。 */
@@ -204,7 +214,7 @@ static int app_render(int w, int h) {
     const hn_display_list *dl = hn_context_display_list(g_app.ctx);
     if (!dl) return 0;
     free(g_app.px);
-    g_app.px = hnsoft_render(dl, w, h, 0x00000000);
+    g_app.px = hn_render_px(dl, w, h, 0x00000000);
     return g_app.px != NULL;
 }
 
@@ -499,7 +509,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (hn_node_scroll_by(s, 0, dy)) {
                 hn_context_repaint(g_app.ctx);
                 free(g_app.px);
-                g_app.px = hnsoft_render(hn_context_display_list(g_app.ctx), g_app.w, g_app.h, 0x00000000);
+                g_app.px = hn_render_px(hn_context_display_list(g_app.ctx), g_app.w, g_app.h, 0x00000000);
                 app_present(hwnd);
             }
         }
@@ -520,7 +530,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         /* 过渡动画推进; 返回 1 表示仍在跑 —— 继续帧循环 */
         if (hn_context_anim_tick(g_app.ctx, 16.0f)) {
             free(g_app.px);
-            g_app.px = hnsoft_render(hn_context_display_list(g_app.ctx), g_app.w, g_app.h, 0x00000000);
+            g_app.px = hn_render_px(hn_context_display_list(g_app.ctx), g_app.w, g_app.h, 0x00000000);
             app_present(hwnd);
         }
         return 0;
