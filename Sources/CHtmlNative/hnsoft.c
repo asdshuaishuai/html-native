@@ -529,6 +529,57 @@ static int utf8_next(const unsigned char *s, size_t len, size_t i, int *cp) {
     return n;
 }
 
+/* ---------------- 布局期文本测量(hn_text_backend 实现) ---------------- */
+
+float hnsoft_measure(const hn_font_desc *font, const char *utf8, size_t len) {
+    if (!len) return 0;
+#ifndef HN_NO_TEXT
+    font_init();
+    if (ft_face_ok) {
+        int size_px = (int)(font->size_px + 0.5f);
+        if (size_px < 1) size_px = 1;
+        float total = 0;
+        const unsigned char *s = (const unsigned char *)utf8;
+        size_t i = 0;
+        int nchars = 0;
+        while (i < len) {
+            int cp;
+            int n = utf8_next(s, len, i, &cp);
+            const glyph *g = glyph_get(cp, size_px);
+            /* 缺字形时按字节数回退(与引擎无后端口径一致) */
+            total += g ? (float)g->advance : font->size_px * 0.55f * (float)n;
+            nchars++;
+            i += (size_t)n;
+        }
+        if (font->letter_spacing > 0 && nchars > 0)
+            total += font->letter_spacing * (float)nchars;
+        return total;
+    }
+#endif
+    /* 回退: 与引擎无文本后端口径一致(字节数×字号×0.55) */
+    return (float)len * font->size_px * 0.55f;
+}
+
+void hnsoft_metrics(const hn_font_desc *font, float *ascent, float *descent,
+                    float *leading) {
+#ifndef HN_NO_TEXT
+    font_init();
+    if (ft_face_ok) {
+        int size_px = (int)(font->size_px + 0.5f);
+        if (size_px < 1) size_px = 1;
+        FT_Set_Pixel_Sizes(ft_face, 0, (FT_UInt)size_px);
+        FT_Size_Metrics m = ft_face->size->metrics;
+        *ascent = (float)m.ascender / 64.0f;
+        *descent = -(float)m.descender / 64.0f;
+        *leading = (float)(m.height - m.ascender + m.descender) / 64.0f;
+        return;
+    }
+#endif
+    *ascent = font->size_px * 0.8f;
+    *descent = font->size_px * 0.2f;
+    *leading = font->size_px * 0.45f;
+}
+
 static void paint_text(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
 #ifndef HN_NO_TEXT
     font_init();

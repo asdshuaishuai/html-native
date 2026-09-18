@@ -26,4 +26,13 @@ unsigned char *hnsoft_encode_png(const unsigned char *rgba, int w, int h,
 /* 供测试: FreeType 字体是否加载成功(0=未加载) */
 int hnsoft_font_loaded(void);
 
+/* 布局期文本测量后端(对应 hn.h 的 hn_text_backend 回调):
+   运行时把它注入 hn_context_layout, 引擎即按真实字形宽度排布,
+   而不是等宽估算(CJK 按字节数×字号×0.55 会显著偏宽, 窄容器里
+   文字被错误地逐字换行 —— macOS 上 CoreText 后端不存在此问题)。
+   FreeType 不可用/未加载时按引擎同口径回退。 */
+float hnsoft_measure(const hn_font_desc *font, const char *utf8, size_t len);
+void  hnsoft_metrics(const hn_font_desc *font, float *ascent, float *descent,
+                     float *leading);
+
 #endif

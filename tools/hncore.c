@@ -43,17 +43,42 @@ typedef struct { char *path; char *data; size_t len; } asset_ent;
 static asset_ent asset_tab[64];
 static int asset_n = 0;
 
+/* 文本测量回调: 直接转发到 hnsoft(FreeType 可用时真实测量,
+   否则回退到引擎同口径的等宽估算) */
+static float hnsoft_measure_cb(void *ctx, const hn_font_desc *font,
+                               const char *utf8, size_t len) {
+    (void)ctx;
+    return hnsoft_measure(font, utf8, len);
+}
+static void hnsoft_metrics_cb(void *ctx, const hn_font_desc *font,
+                              float *ascent, float *descent, float *leading) {
+    (void)ctx;
+    hnsoft_metrics(font, ascent, descent, leading);
+}
+
+/* HTML 所在目录(含结尾分隔符)。href/src 相对路径必须相对**文档目录**解析
+   —— 与浏览器口径一致。以 cwd 为基准会在“文档不在 cwd”时静默丢资产
+   (实测: 从项目根 render examples/lottie.html, Lottie 求值直接归零)。 */
+static char g_base_dir[1024];
+
+static char *read_asset(const char *path, size_t *len) {
+    char *d = read_all(path, len);
+    if (!d && g_base_dir[0]) {
+        char joined[1200];
+        snprintf(joined, sizeof(joined), "%s%s", g_base_dir, path);
+        d = read_all(joined, len);
+    }
+    return d;
+}
+
 static const char *asset_load(void *ctx, const char *path, size_t *len) {
     (void)ctx;
     for (int i = 0; i < asset_n; i++)
         if (!strcmp(asset_tab[i].path, path)) { if (len) *len = asset_tab[i].len; return asset_tab[i].data; }
     if (asset_n >= 64) return NULL;
     size_t n = 0;
-    char *d = read_all(path, &n);
-    if (!d) {
-        /* 相对 HTML 所在目录再试一次(与 <link> 的解析口径一致) */
-        return NULL;
-    }
+    char *d = read_asset(path, &n);
+    if (!d) return NULL;
     asset_tab[asset_n].path = strdup(path);
     asset_tab[asset_n].data = d;
     asset_tab[asset_n].len = n;
@@ -103,12 +128,12 @@ static char *load_css(const char *html_path, const char *html, size_t *out_len) 
                 const char *e2 = strchr(q, qc);
                 if (e2 && e2 <= end) {
                     size_t n = (size_t)(e2 - q);
-                    /* href 是路径: 读其内容 */
+                    /* href 是路径: 相对 HTML 目录解析(与资产口径一致) */
                     char *path = (char *)malloc(n + 1);
                     memcpy(path, q, n);
                     path[n] = 0;
                     size_t clen = 0;
-                    char *css = read_all(path, &clen);
+                    char *css = read_asset(path, &clen);
                     free(path);
                     if (css) { *out_len = clen; return css; }
                 }
@@ -212,6 +237,17 @@ int main(int argc, char **argv) {
     float W = argc > 3 ? (float)atof(argv[3]) : 460;
     float H = argc > 4 ? (float)atof(argv[4]) : 560;
 
+    /* HTML 所在目录: 资产/link 的相对路径以此为基准(与浏览器口径一致) */
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            size_t dl = (size_t)(p - path) + 1;
+            if (dl < sizeof(g_base_dir)) {
+                memcpy(g_base_dir, path, dl);
+                g_base_dir[dl] = 0;
+            }
+        }
+    }
+
     size_t hlen = 0;
     char *html = read_all(path, &hlen);
     if (!html) {
@@ -245,8 +281,14 @@ int main(int argc, char **argv) {
     ab.ctx = NULL;
     ab.load = asset_load;
     hn_context_set_assets(ctx, &ab);
-    /* 无文本后端: 引擎用等宽估算(纯 C 也能算几何) */
-    hn_context_layout(ctx, W, H, NULL);
+    /* 文本后端: FreeType 真实测量(不注入则 CJK 按字节×字号×0.55 估算,
+       偏宽 65%, 窄容器内文字被错误逐字换行; 与注入 CoreText 的
+       macOS 运行时行为不一致) */
+    hn_text_backend tb;
+    memset(&tb, 0, sizeof(tb));
+    tb.measure = hnsoft_measure_cb;
+    tb.metrics = hnsoft_metrics_cb;
+    hn_context_layout(ctx, W, H, &tb);
     /* HN_CLOCK=<ms>: 把外部资源动画(Lottie/网格)推进到指定时刻。
        没有这步则渲染的是第 0 帧 —— 断言需要确定性时刻。 */
     const char *clock_env = getenv("HN_CLOCK");
@@ -355,7 +397,7 @@ int main(int argc, char **argv) {
         const char *out = argc > 3 ? argv[3] : "out.png";
         if (argc > 4) { W = (float)atof(argv[4]); }
         if (argc > 5) { H = (float)atof(argv[5]); }
-        hn_context_layout(ctx, W, H, NULL);
+        hn_context_layout(ctx, W, H, &tb);
         const hn_display_list *dl = hn_context_display_list(ctx);
         if (!dl) { fprintf(stderr, "hncore: 无绘制指令\n"); rc = 1; }
         else {
