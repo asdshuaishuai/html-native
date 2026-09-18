@@ -30,10 +30,14 @@ public final class HNApp: NSObject, NSWindowDelegate {
     public private(set) var html: String
     public let css: String?
     public let label: String /* 声明标题(无边框表面无窗口标题, 供管理/列举) */
+    /// 轻应用槽位名(声明了 hn-applet 才有): 几何按这个名字记忆/还原。
+    /// var 是因为 `hn applet remove` 会把活着的实例摘下来 —— 否则运行中
+    /// 的实例一关就把刚删掉的槽位又写回去了, "删除"随即失效。
+    public internal(set) var applet: String?
     var ttlTimer: Timer?
 
     init(id: String, host: any HNWebHost, renderer: HNRenderer, window: NSWindow,
-         surface: HNSurface, html: String, css: String?, label: String) {
+         surface: HNSurface, html: String, css: String?, label: String, applet: String? = nil) {
         self.id = id
         self.host = host
         self.renderer = renderer
@@ -42,15 +46,47 @@ public final class HNApp: NSObject, NSWindowDelegate {
         self.html = html
         self.css = css
         self.label = label
+        self.applet = applet
         super.init()
         window.delegate = self
     }
 
     deinit { ttlTimer?.invalidate() }
 
+    // MARK: - 槽位几何记忆(半固化)
+
+    /// 尺寸只在"用户本来就能改"时才记: 固定尺寸表面的宽高是页面的声明, 不该
+    /// 被一次运行覆盖掉 —— 否则页面作者改了 hn-window 却看不到变化, 而症状
+    /// 是"改了没生效", 极难往槽位上排查。
+    private var remembersSize: Bool { window.styleMask.contains(.resizable) }
+
+    func saveSlot() {
+        guard let name = applet else { return }
+        // 存绝对屏幕坐标: 与窗口停在哪块屏、哪块屏是不是主屏都无关。
+        // 早先这里把 y 换算成"相对所在屏顶边向下", 而 open() 还原时用的是
+        // 主屏顶边 —— 两屏顶边不等高时(副屏下沿对齐很常见), 每次回来都往下
+        // 挪一截, 而且只在该小组件被拖到副屏之后才出现。
+        let f = window.frame
+        HNAppletStore(name: name).save(
+            x: Double(f.minX),
+            y: Double(f.minY),
+            w: remembersSize ? Double(f.width) : Double(host.asView.bounds.width),
+            h: remembersSize ? Double(f.height) : Double(host.asView.bounds.height),
+            appId: id)
+    }
+
     public func windowWillClose(_ n: Notification) {
+        /* 唯一的收口点: 用户点红按钮和程序 close() 都会走到 window.close(),
+           所以槽位落盘放在这里只需一处。 */
+        saveSlot()
         HNEngine.shared.unregister(id: id)
     }
+
+    public func windowDidMove(_ notification: Notification) { saveSlot() }
+
+    /// 拖完边缘才存 —— liveResize 期间会高频触发, 每次都写盘既浪费又会让
+    /// 槽位文件处于半拖拽状态(中途宿主退出就记了个奇怪的尺寸)。
+    public func windowDidEndLiveResize(_ notification: Notification) { saveSlot() }
 }
 
 /// 引擎会话: 应用的创建/热更新/销毁/持久化。
@@ -101,11 +137,37 @@ public final class HNEngine {
             host = wk
             wk.render(html, css: css)
         }
-        let w = size?.width ?? (m.w > 0 ? CGFloat(m.w) : 460)
-        let h = size?.height ?? (m.h > 0 ? CGFloat(m.h) : 560)
+        /* ---- 槽位还原(半固化) ----
+           声明了 hn-applet 的表面是桌面轻应用: 上次停在哪由槽位记住, 下次打开
+           回到原处。优先级刻意排成
+               调用方显式指定 > 槽位记忆 > 页面声明 > 默认
+           调用方排第一是为了让 agent 能临时把它摆到别处而不破坏记忆; 槽位排在
+           页面声明之前, 是因为"记住用户动过的位置"正是这个特性的全部意义 ——
+           反过来页面声明就再也改不动位置了。
+           尺寸则只对**可调整大小**的表面取槽位: 固定尺寸的卡片, 宽高是页面的
+           声明而不是运行期的状态, 一并记住会让作者改 hn-window 看不到变化,
+           而症状是"改了没生效", 极难往槽位上排查。 */
+        let slotName = m.applet.map { String(cString: $0) }
+        let slotGeo = slotName.flatMap { HNAppletStore(name: $0).geometry() }
+        let resizable = (kind == .window)   // 与 window.styleMask 一致, 见 HNApp
+        let w = size?.width
+            ?? (resizable ? slotGeo.map { CGFloat($0.w) } : nil)
+            ?? (m.w > 0 ? CGFloat(m.w) : 460)
+        let h = size?.height
+            ?? (resizable ? slotGeo.map { CGFloat($0.h) } : nil)
+            ?? (m.h > 0 ? CGFloat(m.h) : 560)
         var frame = NSRect(x: 0, y: 0, width: w, height: h)
         var at: NSPoint? = origin
-        if at == nil, m.x > 0 || m.y > 0 { at = NSPoint(x: CGFloat(m.x), y: CGFloat(m.y)) }
+        var restored = false
+        if at == nil, let g = slotGeo {
+            /* 槽位存的是绝对屏幕坐标, 直接可用 —— 与窗口现在在哪块屏无关。 */
+            frame = Self.clampAppletFrame(NSRect(x: g.x, y: g.y, width: w, height: h))
+            restored = true
+        } else if at == nil, m.x > 0 || m.y > 0 {
+            /* 清单的 hn-x/hn-y 是"相对主屏顶边、y 向下"的老约定: 单屏下与
+               绝对坐标等价, 这里保持它以免改动已有页面的观感。 */
+            at = NSPoint(x: CGFloat(m.x), y: CGFloat(m.y))
+        }
         if let at {
             let sf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
             frame = NSRect(x: at.x, y: sf.maxY - at.y - h, width: w, height: h)
@@ -178,7 +240,7 @@ public final class HNEngine {
         }
 
         window.contentView = host.asView
-        if at != nil {
+        if at != nil || restored {
             window.setFrameOrigin(frame.origin)
         } else {
             window.center()
@@ -193,7 +255,15 @@ public final class HNEngine {
             ?? id
         host.storeId = id   // 本地 KV 隔离: 每个应用一个存储文件
         let app = HNApp(id: id, host: host, renderer: renderer, window: window,
-                        surface: kind, html: html, css: css, label: label)
+                        surface: kind, html: html, css: css, label: label,
+                        applet: slotName)
+        /* 打开即落盘 —— 槽位不只记"被移动过", 而是"这个轻应用有个位置"。
+           不在打开时写的话, 一个从没被拖动过的小组件在 `hn applet list` 里
+           完全不存在, agent 会以为它没生效(声明看着是对的, 也不报错)。
+           但**调用方显式给了位置/尺寸时不能写**: 那是 agent 在临时指定摆位,
+           落盘会直接把槽位记忆覆盖成这一次的临时值 —— 于是"摆过一次就再也
+           回不到原处", 而且没有任何迹象。还原自槽位时也不必写(值已在盘上)。 */
+        if origin == nil, size == nil, slotGeo == nil { app.saveSlot() }
         apps[id] = app
         // 页面声明的自动行为: hx-trigger="load" 即时拉取, every Ns 启动轮询
         // (webkit 路径由注入脚本自理 → loadActions 为空)
@@ -350,12 +420,23 @@ public final class HNEngine {
         public let id: String
         public let surface: HNSurface
         public let title: String
+        /// 占了哪个轻应用槽位(未声明 hn-applet 则为 nil)
+        public let applet: String?
     }
 
     public func list() -> [AppInfo] {
         apps.values.map { AppInfo(id: $0.id, surface: $0.surface,
-                                  title: labels[$0.id] ?? $0.label) }
+                                  title: labels[$0.id] ?? $0.label,
+                                  applet: $0.applet) }
             .sorted { $0.id < $1.id }
+    }
+
+    /// 把活着的实例从某个槽位上摘下来(`hn applet remove` 用)。
+    ///
+    /// 不能只删文件: 运行中的实例关闭时还会 saveSlot() 把它写回去, 于是
+    /// "删除"看起来生效了、一关窗口又复活。摘掉实例的 applet 引用才能真的忘掉。
+    public func detachApplet(named name: String) {
+        for app in apps.values where app.applet == name { app.applet = nil }
     }
 
     // MARK: - 持久化(.hnapp = JSON 文档包, 可离线再次唤起)

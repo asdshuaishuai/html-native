@@ -1,0 +1,55 @@
+<html><head>
+<!-- 轻应用(桌面小组件)示例: 四个特征各由一个声明承担
+     hn-applet   → 具名槽位(半固化: 位置按名字记得, 回来回到原处)
+     --ttl(CLI)  → 随用随消(到期自毁, 但槽位仍在)
+     presence/applet → 不占 Dock、不进 Cmd+Tab(系统级但弱存在感)
+     lifecycle   → 关心自己被显示/隐藏/销毁 -->
+<meta name="hn-applet" content="clock">
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="260x120">
+<meta name="hn-presence" content="ghost">
+<meta name="hn-lifecycle" content="launch show hide destroy">
+<style>
+html,body{margin:0;width:100%;height:100%;background:#141821;}
+.card{padding:16;display:flex;flex-direction:column;gap:4;}
+.t{color:#e8eaf0;font-size:26;font-weight:700;}
+.s{color:#6b7386;font-size:11;}
+.hint{color:#7fe0a8;font-size:10;}
+</style>
+</head><body>
+<div class="card" id="root">
+  <div class="t" id="clock">--:--:--</div>
+  <div class="s">槽位: clock · 随用随消, 但位置记得</div>
+  <div class="hint" id="state">拖动我到任意位置, 关掉再开 —— 会回到这里</div>
+</div>
+<script>
+var clock = document.getElementById('clock');
+var state = document.getElementById('state');
+function tick() {
+  var d = new Date();
+  clock.textContent = ('0'+d.getHours()).slice(-2) + ':' +
+                      ('0'+d.getMinutes()).slice(-2) + ':' +
+                      ('0'+d.getSeconds()).slice(-2);
+}
+document.getElementById('root').addEventListener('launch', function () {
+  tick();
+  state.textContent = 'launch: 初始化(读槽位、拉首屏数据都该在这里)';
+});
+document.getElementById('root').addEventListener('show',   function () { state.textContent = 'show'; });
+document.getElementById('root').addEventListener('hide',   function () { state.textContent = 'hide: 挂起动画/停轮询'; });
+document.getElementById('root').addEventListener('destroy',function () { state.textContent = 'destroy: 收尾(几何由运行时落盘)'; });
+setInterval(tick, 1000);
+</script>
+</body></html>
+
+<!--
+  跑法:
+    swift build && D=.build/debug
+    $D/Hn open clock examples/applet.html            # 打开 → 槽位 clock 建立
+    $D/Hn applet list                                # 看到位置/尺寸/开着
+    # 把卡片拖到别处, 然后:
+    $D/Hn close clock
+    $D/Hn open clock examples/applet.html            # 回到你拖到的位置
+    $D/Hn open clock examples/applet.html --ttl 20   # 20 秒后自毁; 槽位仍在
+    $D/Hn applet remove clock                        # 忘记槽位 → 回到屏幕居中
+-->

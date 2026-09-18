@@ -200,6 +200,11 @@ typedef struct hn_manifest {
        声明后运行时按顺序派发同名事件; 缺省不派发。 */
     const char *lifecycle;
     hn_presence presence;  /* hn-presence: 见上 */
+    /* 轻应用(applet)槽位名: 声明后该表面成为"随用随消、半固化"的桌面轻应用
+       (KDE Plasmoid 那类形态)。槽位按名字记住几何与配置 —— 销毁后再打开
+       会还原到原处, 而不是回到屏幕中央或上次的随机位置。
+       NULL = 普通表面(不占槽位)。 */
+    const char *applet;
 } hn_manifest;
 
 /* 从文档解析清单(meta 缺省时给默认值: window / 自动) */

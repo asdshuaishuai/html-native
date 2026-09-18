@@ -2835,6 +2835,187 @@ do {
           String(format: "生命周期: 走统一事件管道到达 JS (实际 %@)", hits))
 }
 
+print("== 轻应用槽位: 半固化(随用随消, 但位置记得) ==")
+do {
+    /* 桌面轻应用(KDE Plasmoid 那类形态)的四个特征里, ttl 管"随用随消"、
+       collectionBehavior 管"系统级"、HNStore 管"自己的数据" —— 缺的是
+       **具名槽位**: 位置按名字记住, 消失后再回来回到原处。这里验这一层。 */
+    let slot = "hn-test-clock"
+    func manifest(_ html: String) -> hn_manifest {
+        var m = hn_manifest()
+        if let d = hn_parse_html(html, html.utf8.count) { hn_doc_manifest(d, &m) }
+        return m
+    }
+
+    /* 1) 清单解析: 未解析的声明等于文档里写什么都没用, 而且不报错 */
+    let mm = manifest("<html><head><meta name=\"hn-applet\" content=\"\(slot)\">"
+                    + "</head><body></body></html>")
+    check(mm.applet != nil && String(cString: mm.applet!) == slot,
+          "槽位: hn-applet 被解析")
+    check(manifest("<html><head></head><body></body></html>").applet == nil,
+          "槽位: 未声明时 applet=nil(普通表面不占槽位)")
+
+    /* 2) 往返: 写盘后**新建实例**再读。只在内存里验会漏掉序列化失败 ——
+          那类 bug 的表现是"位置从来不记得", 而每次运行内又是自洽的。 */
+    HNAppletStore.remove(named: slot)
+    check(HNAppletStore(name: slot).geometry() == nil, "槽位: 初始无几何")
+    HNAppletStore(name: slot).save(x: 120, y: 240, w: 300, h: 180, appId: "a1")
+    if let g = HNAppletStore(name: slot).geometry() {
+        check(g.x == 120 && g.y == 240 && g.w == 300 && g.h == 180,
+              String(format: "槽位: 几何跨实例读回一致 (%.0f,%.0f %.0fx%.0f)", g.x, g.y, g.w, g.h))
+    } else { check(false, "槽位: 几何跨实例读回一致 (读不到)") }
+    check(HNAppletStore(name: slot).lastAppId() == "a1", "槽位: 记住最后一次打开的 app id")
+    check(HNAppletStore.enumerate().contains { $0.name == slot }, "槽位: 枚举能找到")
+
+    /* 3) 坐标: 槽位存**绝对屏幕坐标**(与窗口停在哪块屏无关)。
+          这里用真实窗口验往返: 存进去的必须原样回来。 */
+    let popupHTML = "<html><head><meta name=\"hn-applet\" content=\"\(slot)\">"
+                  + "<meta name=\"hn-surface\" content=\"popup\">"
+                  + "<meta name=\"hn-window\" content=\"300x180\">"
+                  + "<style>html,body{margin:0}</style></head><body>x</body></html>"
+    HNAppletStore.remove(named: slot)
+    let app1 = HNEngine.shared.open(id: "hn-test-applet-1", html: popupHTML)
+    check(app1.applet == slot, "槽位: 实例记住自己的槽位名")
+    /* 摆到指定位置(模拟用户拖动), 再手动触发落盘 —— windowDidMove 由
+       AppKit 发, 离屏验收跑不到那个回调, 所以这里直接调同一个方法。 */
+    let target = NSPoint(x: 620, y: 140)
+    app1.window.setFrameOrigin(target)
+    app1.windowDidMove(Notification(name: NSWindow.didMoveNotification))
+    if let g = HNAppletStore(name: slot).geometry() {
+        check(abs(g.x - target.x) < 0.5 && abs(g.y - target.y) < 0.5,
+              String(format: "槽位: 落盘为绝对屏幕坐标 (%.1f,%.1f), 与窗口原点一致", g.x, g.y))
+        check(abs(g.w - 300) < 0.5 && abs(g.h - 180) < 0.5,
+              "槽位: 固定尺寸表面只记位置, 尺寸仍以页面声明为准")
+    } else { check(false, "槽位: 落盘后应能读回几何") }
+
+    /* 展示坐标换算: 槽位文件是绝对坐标, 但 `hn applet list` 要输出能和
+       hn-x/hn-y 直接对照的"左上原点、y 向下"。 */
+    if let d = HNAppletStore(name: slot).displayTopLeft() {
+        let top = NSScreen.main?.visibleFrame.maxY ?? 1440
+        check(abs(d.x - target.x) < 0.5 && abs(d.y - (top - target.y - 180)) < 0.5,
+              String(format: "槽位: 展示坐标换算为左上原点向下 (%.1f,%.1f)", d.x, d.y))
+    } else { check(false, "槽位: 展示坐标换算") }
+
+    /* 4) 半固化: 关掉再开(换个 app id, 证明绑定的是**槽位**而不是实例),
+          应回到记住的位置, 而不是被重置到屏幕中央。 */
+    HNEngine.shared.close(id: "hn-test-applet-1")
+    check(HNAppletStore(name: slot).geometry() != nil, "槽位: 关闭后几何仍在(半固化)")
+    let app2 = HNEngine.shared.open(id: "hn-test-applet-2", html: popupHTML)
+    check(abs(app2.window.frame.minX - target.x) < 0.5,
+          String(format: "半固化: 重新打开回到原位 (x=%.0f, 期望 %.0f)",
+                 app2.window.frame.minX, target.x))
+    /* 4b) 多屏: 停在副屏的小组件必须**原样**回来。
+           这是绝对坐标存在的原因: 老约定把 y 存成"相对所在屏顶边向下", 而
+           还原时拿主屏顶边换算 —— 两屏顶边不等高时(副屏下沿对齐很常见),
+           每次回来都往下挪一截, 且只在被拖到副屏之后才出现。 */
+    HNEngine.shared.close(id: "hn-test-applet-2")
+    let app2b = HNEngine.shared.open(id: "hn-test-applet-2b", html: popupHTML)
+    check(abs(app2b.window.frame.minX - target.x) < 0.5,
+          "半固化: 换 app id 打开同一槽位仍回到原位(绑定的是槽位不是实例)")
+    if let other = NSScreen.screens.first(where: { $0 != NSScreen.main }) {
+        let pf = other.visibleFrame
+        let spot = NSPoint(x: pf.minX + 200, y: pf.minY + 300)
+        app2b.window.setFrameOrigin(spot)
+        app2b.windowDidMove(Notification(name: NSWindow.didMoveNotification))
+        HNEngine.shared.close(id: "hn-test-applet-2b")
+        let app2c = HNEngine.shared.open(id: "hn-test-applet-2c", html: popupHTML)
+        check(abs(app2c.window.frame.minX - spot.x) < 0.5
+              && abs(app2c.window.frame.minY - spot.y) < 0.5,
+              String(format: "半固化: 副屏位置原样还原 (%.0f,%.0f 期望 %.0f,%.0f)",
+                     app2c.window.frame.minX, app2c.window.frame.minY, spot.x, spot.y))
+        HNEngine.shared.close(id: "hn-test-applet-2c")
+    } else {
+        check(true, "半固化: 副屏往返(本机只有一块屏, 跳过)")
+    }
+
+    /* 5) 调用方显式坐标优先, 而且**不能落盘** —— agent 临时指定摆位不该
+          污染槽位记忆。这里由真实 daemon 跑出来才发现: 早先打开即落盘, 于
+          是"摆过一次就再也回不到原处", 且无任何迹象。
+          注意基准要取"打开前那一刻"的槽位值 —— 前面的多屏用例已经把它改到
+          副屏了, 拿最初的 target 比会假失败。 */
+    let before = HNAppletStore(name: slot).geometry()
+    let app3 = HNEngine.shared.open(id: "hn-test-applet-3", html: popupHTML,
+                                    origin: NSPoint(x: 40, y: 40))
+    check(abs(app3.window.frame.minX - 40) < 0.5, "半固化: 显式 origin 覆盖槽位")
+    let after = HNAppletStore(name: slot).geometry()
+    switch (before, after) {
+    case let (b?, a?):
+        check(abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5,
+              String(format: "半固化: 显式 origin 不写回槽位 (记 %.0f,%.0f 期望 %.0f,%.0f)",
+                     a.x, a.y, b.x, b.y))
+    default:
+        check(false, "半固化: 显式 origin 不写回槽位 (槽位读写不一致)")
+    }
+    /* 未落盘的实例仍要在枚举里如实出现(按运行态补), 否则 agent 会以为
+       这个轻应用不存在。 */
+    check(HNAppletStore.enumerate().contains { $0.name == slot },
+          "枚举: 显式摆位的实例不落盘, 但已存在的槽位仍在清单里")
+    HNEngine.shared.close(id: "hn-test-applet-3")
+
+    /* 5b) 首个打开(无槽位、无显式坐标)必须落盘 —— 否则从没被拖动过的小组件
+           在 `hn applet list` 里完全不存在, 而声明看着是对的、也不报错。 */
+    let slotB = "hn-test-fresh"
+    HNAppletStore.remove(named: slotB)
+    let freshHTML = "<html><head><meta name=\"hn-applet\" content=\"\(slotB)\">"
+                  + "<meta name=\"hn-surface\" content=\"popup\">"
+                  + "<meta name=\"hn-window\" content=\"200x100\">"
+                  + "<style>html,body{margin:0}</style></head><body>x</body></html>"
+    check(HNAppletStore.enumerate().contains { $0.name == slotB } == false,
+          "枚举: 首次打开前无槽位")
+    let fresh = HNEngine.shared.open(id: "hn-test-applet-fresh", html: freshHTML)
+    check(HNAppletStore(name: slotB).geometry() != nil,
+          "枚举: 首次打开即建立槽位(未被拖动过的小组件也可被枚举)")
+    let freshG = HNAppletStore(name: slotB).geometry()!
+    check(abs(freshG.x - fresh.window.frame.minX) < 0.5
+          && abs(freshG.y - fresh.window.frame.minY) < 0.5,
+          "枚举: 首次打开记下的是实际落点")
+    HNEngine.shared.close(id: "hn-test-applet-fresh")
+    HNAppletStore.remove(named: slotB)
+
+    /* 6) remove 必须连活着的实例一起摘掉。只删文件的话, 运行中的实例关闭时
+          saveSlot() 会把它写回去 —— 于是"删除"看起来生效、一关窗口又复活。
+          注意这里必须先有一个**还开着**的实例, 否则 detach 无事可做。 */
+    HNAppletStore.remove(named: slot)
+    let app4 = HNEngine.shared.open(id: "hn-test-applet-4", html: popupHTML)
+    check(app4.applet == slot, "remove: 准备一个占着该槽位的活实例")
+    HNAppletStore.remove(named: slot)
+    HNEngine.shared.detachApplet(named: slot)
+    check(app4.applet == nil, "remove: 活着的实例被摘离槽位")
+    app4.window.setFrameOrigin(NSPoint(x: 300, y: 200))
+    app4.windowDidMove(Notification(name: NSWindow.didMoveNotification))
+    HNEngine.shared.close(id: "hn-test-applet-4")
+    check(HNAppletStore(name: slot).geometry() == nil,
+          "remove: 摘离后关闭不再写回(删除真的生效)")
+
+    /* 7) 可调整大小的表面(window)才记尺寸 —— 用户的 resize 要能被记住 */
+    let slotW = "hn-test-window"
+    HNAppletStore.remove(named: slotW)
+    let winHTML = "<html><head><meta name=\"hn-applet\" content=\"\(slotW)\">"
+                + "<meta name=\"hn-surface\" content=\"window\">"
+                + "<meta name=\"hn-window\" content=\"320x220\">"
+                + "<style>html,body{margin:0}</style></head><body>x</body></html>"
+    let w1 = HNEngine.shared.open(id: "hn-test-applet-w1", html: winHTML)
+    w1.window.setFrame(NSRect(x: 200, y: 200, width: 520, height: 360), display: true)
+    w1.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification))
+    let gw = HNAppletStore(name: slotW).geometry()
+    check(gw != nil && abs(gw!.w - 520) < 1 && abs(gw!.h - 360) < 1,
+          String(format: "槽位: 可调整大小表面记住 resize 后的尺寸 (%.0fx%.0f)",
+                 gw?.w ?? -1, gw?.h ?? -1))
+    HNEngine.shared.close(id: "hn-test-applet-w1")
+    let w2 = HNEngine.shared.open(id: "hn-test-applet-w2", html: winHTML)
+    check(abs(w2.window.frame.width - 520) < 1,
+          String(format: "半固化: resize 后的尺寸被还原 (宽=%.0f, 期望 520)",
+                 w2.window.frame.width))
+    /* 原点也要原样回来。titled 表面有个坑: NSWindow(contentRect:) 把传入矩形
+       当**内容**矩形, 而 setFrameOrigin 设的是**窗口**矩形 —— 两者相差一个
+       标题栏。若还原用了内容语义, 位置会系统性上移一截。 */
+    check(abs(w2.window.frame.minX - 200) < 1 && abs(w2.window.frame.minY - 200) < 1,
+          String(format: "半固化: titled 表面的原点也原样还原 (%.0f,%.0f 期望 200,200)",
+                 w2.window.frame.minX, w2.window.frame.minY))
+    HNEngine.shared.close(id: "hn-test-applet-w2")
+    HNAppletStore.remove(named: slotW)
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

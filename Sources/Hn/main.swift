@@ -31,11 +31,17 @@ func usage() {
       hn update <id> <file.html>    用新 HTML 整体替换(样式保留)
       hn dev <file.html>            开发模式: 保存即热更新
       hn close <id>                 销毁窗口
-      hn list                       列出所有运行中的应用
+      hn list                       列出所有运行中的应用(含所占轻应用槽位)
+      hn applet list                列出所有轻应用槽位(位置/尺寸/是否开着)
+      hn applet remove <名字>       忘记某槽位: 下次打开回到页面声明的位置
       hn persist <id> <文件.json>   把该应用的本地存储落盘
       hn restore <id> <文件.json>   从文件恢复
       hn syscard                    打开系统信息卡
       hn ping                       探测宿主(并自动拉起)
+
+    轻应用(桌面小组件)
+      页面加 <meta name="hn-applet" content="名字"> 即成为半固化的轻应用:
+      随用随消(--ttl 到期自毁), 但位置与尺寸按槽位名记住, 回来时回到原处。
 
     读取界面(agent 感知)
       hn dom <id> [--depth N]       打印 DOM 树(class + 深度)
@@ -278,10 +284,54 @@ case "list":
     if let apps = r["apps"] as? [[String: Any]] {
         if apps.isEmpty { print("(无运行中的应用)") }
         for a in apps {
-            print("\(a["id"] ?? "?")\t\(a["surface"] ?? "?")\t\(a["title"] ?? "")")
+            // 占槽位的轻应用把槽位名列出来: 名字才是它"回来时回到哪"的凭据
+            let slot = a["applet"] as? String
+            let mark = slot.map { " [slot: \($0)]" } ?? ""
+            print("\(a["id"] ?? "?")\t\(a["surface"] ?? "?")\t\(a["title"] ?? "")\(mark)")
         }
     } else {
         print("无响应"); exit(1)
+    }
+
+case "applet":
+    /* 轻应用槽位(KDE Plasmoid 那类桌面小组件): 随用随消, 但位置/尺寸按名字
+       记住, 消失后再回来回到原处。
+
+       子命令与名字都走位置参数: hn applet remove clock。而解析器把未识别的
+       参数依次落入 o.id / o.file —— 所以 "applet" 是 cmd、"remove" 是
+       o.id、"clock" 是 o.file。早先这里去读 o.file 当子命令, 于是子命令变成
+       "clock"、名字变成 "remove": 命令看上去完全正确, 打出来的却是用法。
+       这与之前 lifecycle 读不存在的 --message 是同一类坑。 */
+    let sub = o.kind ?? o.id
+    switch sub {
+    case "list", nil:
+        let r = rpc(["op": "applets"]) ?? [:]
+        guard let slots = r["applets"] as? [[String: Any]] else { print("无响应"); exit(1) }
+        if slots.isEmpty {
+            print("(无轻应用槽位 —— 页面加 <meta name=\"hn-applet\" content=\"名字\"> 即可占用)")
+            break
+        }
+        for s in slots {
+            let open = (s["open"] as? Bool) == true ? "开着" : "已收起"
+            let x = s["x"] as? Double ?? 0, y = s["y"] as? Double ?? 0
+            let w = s["w"] as? Double ?? 0, h = s["h"] as? Double ?? 0
+            print("\(s["name"] ?? "?")\t\(open)\t\(Int(x)),\(Int(y)) \(Int(w))x\(Int(h))\t\(s["appId"] ?? "")")
+        }
+    case "remove", "rm":
+        /* 名字取自子命令之后那个位置参数。不能写 `o.file ?? o.id` —— 那样
+           "hn applet remove" 漏名字时会退回去删一个叫 "remove" 的槽位。 */
+        let name = (sub == o.id) ? o.file : o.id
+        guard let name else { print("用法: hn applet remove <槽位名>"); exit(2) }
+        let r = rpc(["op": "applet-remove", "name": name]) ?? [:]
+        guard (r["ok"] as? Bool) == true else { print("失败: \(r["error"] ?? "?")"); exit(1) }
+        if (r["removed"] as? Bool) == true {
+            print("已忘记槽位: \(name) —— 下次打开回到页面声明的位置")
+            print("(若该槽位当前开着, 关闭后也不会再写回)")
+        } else {
+            print("没有这个槽位: \(name)")
+        }
+    default:
+        print("用法: hn applet list | hn applet remove <槽位名>"); exit(2)
     }
 
 case "dump":

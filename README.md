@@ -127,11 +127,16 @@ D=.build/debug
 # 生成: 秒开一个弹窗(表面类型由 hn 编码里的 meta 声明)
 $D/Hn open agent-card examples/agent-card.html --css examples/agent-card.css
 
-$D/Hn list                 # 运行中的应用
+$D/Hn list                 # 运行中的应用(含所占轻应用槽位)
+$D/Hn applet list          # 轻应用槽位: 位置 / 尺寸 / 此刻是否开着
 $D/Hn update agent-card examples/agent-card.html   # 热更新(窗口保持)
 $D/Hn persist agent-card   # 持久化 → ~/.html-native/apps/agent-card.hnapp
 $D/Hn close agent-card     # 销毁
 $D/Hn restore agent-card   # 从包恢复
+
+# 轻应用: 页面带 <meta name="hn-applet" content="clock"> 即半固化
+$D/Hn open clock examples/applet.html --ttl 30   # 30 秒后自毁, 位置仍记得
+$D/Hn applet remove clock    # 忘记槽位 → 下次打开回到声明位置
 
 cat foo.html | $D/Hn open - --surface popup    # 管道: agent 生成 → 成窗
 ```
@@ -180,6 +185,7 @@ $D/Hn dev app.html --css app.css
 <meta name="hn-window"  content="360x520">        <!-- 或 360x520@100,80 -->
 <meta name="hn-title"   content="agent · 仓库分析">
 <meta name="hn-theme"   content="dark">            <!-- 或 light: 内置设计令牌基底 -->
+<meta name="hn-applet"  content="clock">          <!-- 轻应用槽位名, 见下 -->
 ```
 
 引擎只解析声明(C: `hn_doc_manifest`), 由宿主物化成对应表面。
@@ -190,6 +196,8 @@ $D/Hn dev app.html --css app.css
 {"op":"open","id":"card","html":"<h1>hi</h1>","surface":"popup","w":360,"h":520}
 {"op":"update","id":"card","html":"..."}
 {"op":"close","id":"card"} / {"op":"list"} / {"op":"persist","id":"card"} / {"op":"restore","id":"card"}
+{"op":"applets"}                        → 轻应用槽位清单
+{"op":"applet-remove","name":"clock"}   → 忘记某槽位
 ```
 
 ### 截图(真实视图自绘, 无需屏幕权限)
@@ -247,6 +255,18 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   `hn-lifecycle="launch show hide destroy"` 声明关心哪些生命周期事件,
   未声明的页面一次都不打扰; 事件走**同一条统一事件管道**(JS 处理器与 hx 共用)。
   agent 可用 `hn lifecycle <id> --kind hide` 手动触发, 模拟应用被切到后台
+- **轻应用槽位(半固化)**: 声明 `hn-applet="clock"` 的表面成为**具名桌面轻应用**
+  (KDE Plasmoid 那类形态, 不是 PWA 也不是页面栈): 位置按槽位名记在
+  `~/.html-native/applets/<名>.json`, 销毁后再打开回到原处。四个特征由此齐备 ——
+  `--ttl` 管**随用随消**、槽位管**半固化**、`.canJoinAllSpaces` 等管**系统级**、
+  槽位名本身管**具名**。要点:
+  - 槽位绑定的是**名字不是 app id**: 换个 id 打开同一份页面, 仍回到原处
+  - 优先级: 调用方显式 `--x/--y` > 槽位记忆 > 页面声明 > 屏幕居中。
+    显式坐标**不落盘**, agent 临时摆位不会污染记忆
+  - 固定尺寸表面(popup/layer)只记位置, 宽高仍以页面声明为准 —— 否则作者改了
+    `hn-window` 看不到变化; `window` 表面则连 resize 后的尺寸一起记
+  - 存**绝对屏幕坐标**, 与窗口停在哪块屏无关; 副屏位置原样还原
+  - agent: `hn applet list` / `hn applet remove <名>`(`{"op":"applets"}`)
 - **跨平台确定性**: 引擎是纯 C99, `-ffp-contract=off` 关掉 FMA 融合(arm64 有
   而 x86_64 基线没有, 默认融合会让同一文档算出不同 px 值)。构建脚本带**跨架构
   确定性门禁**: 同 HN_NO_TEXT 口径下比对各架构产物的布局输出, 不一致即构建失败。

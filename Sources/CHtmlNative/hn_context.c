@@ -1390,6 +1390,7 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
     out->draggable = 1;     /* 默认可拖动 */
     out->lifecycle = NULL;
     out->presence = HN_PRESENCE_AUTO;
+    out->applet = NULL;
     if (!doc || !doc->root) return;
 
     hn_node *stack[256];
@@ -1427,6 +1428,9 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
                     }
                 } else if (!strcmp(name, "hn-title")) {
                     out->title = content;
+                } else if (!strcmp(name, "hn-applet")) {
+                    /* 槽位名: 声明后成为随用随消、半固化的桌面轻应用 */
+                    if (content[0]) out->applet = content;
                 } else if (!strcmp(name, "hn-presence")) {
                     /* ghost = 完全不占系统身份; app = 明确要 Dock 身份 */
                     if (!strcmp(content, "ghost") || !strcmp(content, "none"))

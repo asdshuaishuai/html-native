@@ -341,10 +341,65 @@ enum HNProtocol {
             var items: [[String: Any]] = []
             DispatchQueue.main.sync {
                 items = HNEngine.shared.list().map {
-                    ["id": $0.id, "surface": $0.surface.rawValue, "title": $0.title]
+                    var d: [String: Any] = ["id": $0.id, "surface": $0.surface.rawValue,
+                                            "title": $0.title]
+                    if let a = $0.applet { d["applet"] = a }
+                    return d
                 }
             }
             return resp(true, ["apps": items])
+
+        case "applets":
+            /* 轻应用槽位清单(agent 用): 槽位是持久的, 应用是瞬时的 —— 所以这里
+               把"盘上记着的"和"此刻开着的"合成一份, 让 agent 一眼看出哪些槽位
+               还活着、哪些只是留了个位置。 */
+            var items: [[String: Any]] = []
+            DispatchQueue.main.sync {
+                var live: [String: HNApp] = [:]
+                for info in HNEngine.shared.list() {
+                    if let a = info.applet, let app = HNEngine.shared.app(id: info.id) {
+                        live[a] = app
+                    }
+                }
+                var slots = HNAppletStore.enumerate()
+                /* 调用方显式指定了位置的实例不落盘(见 HNEngine.open), 于是它
+                   在盘上没有槽位文件 —— 但它是开着的, 枚举就得如实报出来,
+                   否则 agent 看到的是"这个轻应用不存在"。这里按运行态补上,
+                   位置取窗口当前位置。补进来的条目不带 appId/lastSeen。 */
+                for (name, app) in live where !slots.contains(where: { $0.name == name }) {
+                    let f = app.window.frame
+                    slots.append(HNAppletStore.SlotInfo(
+                        name: name, x: Double(f.minX), y: Double(f.minY),
+                        w: Double(f.width), h: Double(f.height),
+                        appId: nil, lastSeen: nil, open: true))
+                }
+                items = slots.sorted { $0.name < $1.name }.map { s in
+                    /* 对外一律给展示坐标(左上原点、y 向下、相对主屏顶边),
+                       与 hn-x/hn-y 同一套读法; 槽位文件里的绝对坐标是实现细节。 */
+                    let d0 = s.displayTopLeft
+                    var d: [String: Any] = ["name": s.name,
+                                            "x": d0.x, "y": d0.y, "w": d0.w, "h": d0.h,
+                                            "open": live[s.name] != nil]
+                    if let a = s.appId { d["appId"] = a }
+                    if let t = s.lastSeen { d["lastSeen"] = t }
+                    if let app = live[s.name] { d["id"] = app.id }
+                    return d
+                }
+            }
+            return resp(true, ["applets": items])
+
+        case "applet-remove":
+            /* 忘记槽位: 下次打开回到页面声明的位置。
+               注意要连活着的实例一起摘掉 —— 否则运行中的实例关闭时会把几何
+               又写回去, 删除随即失效(见 HNEngine.detachApplet)。 */
+            guard let name = obj["name"] as? String else { return resp(false, ["error": "name required"]) }
+            var existed = false
+            DispatchQueue.main.sync {
+                existed = HNAppletStore(name: name).geometry() != nil
+                HNAppletStore.remove(named: name)
+                HNEngine.shared.detachApplet(named: name)
+            }
+            return resp(true, ["name": name, "removed": existed])
 
         case "persist":
             guard let id = obj["id"] as? String else { return resp(false, ["error": "id required"]) }
