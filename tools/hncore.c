@@ -359,7 +359,8 @@ int main(int argc, char **argv) {
                     printf("TEXT   x=%7.1f bl=%7.1f ", c->tx, c->baseline);
                     for (size_t k = 0; k < c->text_len && k < 40; k++)
                         fputc(c->text[k], stdout);
-                    printf("  (sz=%.0f fill=%08X)\n", c->font.size_px, c->fill);
+                    printf("  (sz=%.0f fill=%08X%s)\n", c->font.size_px, c->fill,
+                           c->shadow ? " text-shadow" : "");
                     break;
                 case HN_CMD_IMAGE:
                     printf("IMAGE  %7.1f %7.1f %7.1f %7.1f %s\n",

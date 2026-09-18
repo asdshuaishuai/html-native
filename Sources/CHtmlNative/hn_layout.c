@@ -1312,8 +1312,14 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
         pb = st->padding[2] + bb; pl = st->padding[3] + bl;
     }
 
+    /* calc(<pct>% ± <len>): PCT 通道解出后再加减绝对偏移。clamp 到 0 ——
+       calc(100% - 500px) 在窄容器里会得到负宽, 负宽在布局里语义不明。 */
     float w = size_of(st->width, st->width_u, avail_w, st->font_size);
     float h = size_of(st->height, st->height_u, avail_h, st->font_size);
+    if (st->width_u == HN_U_PCT && st->width_calc_px) w += st->width_calc_px;
+    if (st->height_u == HN_U_PCT && st->height_calc_px) h += st->height_calc_px;
+    if (w < 0 && st->width_u == HN_U_PCT) w = 0;
+    if (h < 0 && st->height_u == HN_U_PCT) h = 0;
     /* min/max 约束(auto 尺寸同样受钳: 上限截断/下限托底) */
     if (st->min_w_u != HN_U_AUTO || st->max_w_u != HN_U_AUTO) {
         float mnw = st->min_w_u == HN_U_AUTO ? -1 : size_of(st->min_w, st->min_w_u, avail_w, st->font_size);

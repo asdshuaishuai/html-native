@@ -101,10 +101,58 @@ static int sv_num(sv t, float *out) {
 /* 视口/根字号(每次 compute 全量刷新; vw/vh/rem 即时解析为 px) */
 static float g_vw = 0, g_vh = 0, g_root_font = 16;
 
+/* calc() 求值: 项(+/-)项…。
+   绝对单位(px/pt/em/rem/vw/vh)就地算; 恰好一个 % 项时百分比走 PCT 通道,
+   绝对项的合计写进 *pct_off(调用方在尺寸解析处加上) —— 因为 % 只有在
+   知道包含块尺寸时才能展开, 而 sv_len 看不到它。
+   两个以上的 % 项 / 嵌套 calc / 乘除都不支持: 返回 0 让声明被忽略,
+   与"解析失败跳过"的既有口径一致。 */
+static float g_calc_off;   /* 上一次 sv_len 里 calc 的绝对偏移(px) */
+static int sv_calc(sv t, float font_px, float *out, int *unit, float *off) {
+    char buf[96];
+    if (t.n < 7 || t.n >= sizeof(buf)) return 0;
+    memcpy(buf, t.s, t.n); buf[t.n] = 0;
+    if (strncasecmp(buf, "calc(", 5)) return 0;
+    const char *p = buf + 5;
+    float pct = 0, abs_v = 0;
+    int n_pct = 0, sign = 1, any_term = 0;
+    while (*p && *p != ')') {
+        while (*p == ' ') p++;
+        if (*p == '+') { sign = 1; p++; continue; }
+        if (*p == '-') { sign = -1; p++; continue; }
+        char *e = NULL;
+        float v = strtof(p, &e);
+        if (e == p) return 0;
+        p = e;
+        if (*p == '%') {
+            n_pct++; pct += sign * v; p++;
+        } else if (!strncmp(p, "px", 2)) { abs_v += sign * v; p += 2; }
+        else if (!strncmp(p, "pt", 2)) { abs_v += sign * v * 96.0f / 72.0f; p += 2; }
+        else if (!strncmp(p, "rem", 3)) { abs_v += sign * v * g_root_font; p += 3; }
+        else if (!strncmp(p, "em", 2)) { abs_v += sign * v * font_px; p += 2; }
+        else if (!strncmp(p, "vw", 2)) { abs_v += sign * v * g_vw / 100.0f; p += 2; }
+        else if (!strncmp(p, "vh", 2)) { abs_v += sign * v * g_vh / 100.0f; p += 2; }
+        else return 0;                 /* 未知单位 / 裸数字按不支持处理 */
+        sign = 1; any_term = 1;
+        while (*p == ' ') p++;
+    }
+    if (!any_term || n_pct > 1) return 0;
+    if (n_pct == 1) {
+        *out = pct; *unit = HN_U_PCT; *off = abs_v;
+    } else {
+        *out = abs_v; *unit = HN_U_PX; *off = 0;
+    }
+    return 1;
+}
+
 /* 数值 + 可选单位后缀; 无后缀视为 px */
 static int sv_len(sv t, float font_px, float *out, int *unit) {
     char buf[40];
     if (t.n == 0 || t.n >= sizeof(buf)) return 0;
+    g_calc_off = 0;
+    if (t.n > 5 && t.s[4] == '(' && (t.s[0]=='c'||t.s[0]=='C')
+        && (t.s[1]=='a'||t.s[1]=='A') && (t.s[2]=='l'||t.s[2]=='L'))
+        return sv_calc(t, font_px, out, unit, &g_calc_off);
     memcpy(buf, t.s, t.n);
     buf[t.n] = 0;
     char *e = NULL;
@@ -365,7 +413,14 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) st->gap = f;
     } else if (!strcmp(name, "width")) {
         int u;
-        if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) { st->width = f; st->width_u = (unsigned char)u; }
+        /* calc(100% - 40px) 值里**带空格**, next_tok 只能拿到 "calc(100%" ——
+           所以先按整值试 calc, 不是 calc 再走单 token 路径。 */
+        sv whole = { value, strlen(value) };
+        if (sv_len(whole, st->font_size, &f, &u)) {
+            st->width = f; st->width_u = (unsigned char)u; st->width_calc_px = g_calc_off;
+        } else if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) {
+            st->width = f; st->width_u = (unsigned char)u; st->width_calc_px = 0;
+        }
     } else if (!strcmp(name, "height")) {
         /* 不能带 "height_u == HN_U_AUTO" 这种守卫 —— 那会让**第一条**规则胜出,
            级联彻底失效。这是 CSS 里极常见的写法:
@@ -375,9 +430,11 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             "同样是多 class 覆盖, width 生效而 height 不生效", 很难怀疑到
              级联本身。) */
         int u;
-        if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) {
-            st->height = f;
-            st->height_u = (unsigned char)u;
+        sv whole = { value, strlen(value) };
+        if (sv_len(whole, st->font_size, &f, &u)) {
+            st->height = f; st->height_u = (unsigned char)u; st->height_calc_px = g_calc_off;
+        } else if (next_tok(&v, &t) && sv_len(t, st->font_size, &f, &u)) {
+            st->height = f; st->height_u = (unsigned char)u; st->height_calc_px = 0;
         }
     } else if (!strcmp(name, "margin") || !strncmp(name, "margin-", 7)) {
         if (strlen(name) == 6) {
@@ -621,6 +678,29 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         else { char b2[24]; if (t.n < sizeof(b2)) { memcpy(b2, t.s, t.n); b2[t.n] = 0; st->z_index = atoi(b2); } }
     } else if (!strcmp(name, "text-overflow")) {
         if (next_tok(&v, &t)) st->text_overflow = sv_eq(t, "ellipsis") ? 1 : 0;
+    } else if (!strcmp(name, "text-shadow")) {
+        /* <ox> <oy> <blur>? <color>; 多个阴影只取第一个(逗号分隔回退到整组忽略)。
+           颜色可出现在任意位置(与 CSS 一致), 剩下的数字按序即 ox/oy/blur。 */
+        float nums[3]; int nn = 0; hn_color sc = 0x000000C0u; int got_c = 0;
+        sv vv = v;
+        sv tok;
+        while (next_tok(&vv, &tok)) {
+            if (tok.n && tok.s[0] == ',') break;           /* 只取第一组 */
+            if (!got_c && sv_color(tok, &sc)) { got_c = 1; continue; }
+            if (nn < 3) {
+                char b2[32]; size_t cp = tok.n < sizeof(b2) - 1 ? tok.n : sizeof(b2) - 1;
+                memcpy(b2, tok.s, cp); b2[cp] = 0;
+                char *e = NULL; float fv = strtof(b2, &e);
+                if (e != b2 && (!*e || !strcmp(e, "px"))) nums[nn++] = fv;
+            }
+        }
+        if (nn >= 2) {
+            st->text_shadow = 1;
+            st->text_shadow_ox = nums[0];
+            st->text_shadow_oy = nums[1];
+            st->text_shadow_blur = nn >= 3 ? nums[2] : 0;
+            st->text_shadow_color = sc;
+        }
     } else if (!strcmp(name, "white-space")) {
         if (!next_tok(&v, &t)) return;
         if (sv_eq(t, "nowrap")) st->white_space = 1;
@@ -757,12 +837,75 @@ static int has_class(hn_node *n, const char *cls) {
     return 0;
 }
 
+/* 属性选择器匹配。op: 0 存在 1 = 2 ^= 3 $= 4 *= 5 ~= (空白分词含)。
+   未声明属性的元素对任何 [attr=…] 都不匹配 —— 与浏览器一致。 */
+static int attr_matches(const hn_compound *cp, hn_node *n) {
+    for (int i = 0; i < cp->n_attr; i++) {
+        const char *v = get_attr(n, cp->attr[i].name);
+        if (!v) return 0;
+        const char *want = cp->attr[i].val;
+        switch (cp->attr[i].op) {
+        case 0: break;                                   /* [attr] 存在即可 */
+        case 1: if (strcmp(v, want)) return 0; break;
+        case 2: { size_t l = strlen(want);
+                  if (strncmp(v, want, l)) return 0; break; }   /* 前缀 */
+        case 3: { size_t l = strlen(want), vl = strlen(v);
+                  if (vl < l || strcmp(v + vl - l, want)) return 0; break; }  /* 后缀 */
+        case 4: if (!strstr(v, want)) return 0; break;   /* 子串 */
+        case 5: {  /* 空白分词之一全等 */
+                  size_t l = strlen(want); int hit = 0;
+                  const char *p = v;
+                  while (*p && !hit) {
+                      while (*p == ' ') p++;
+                      const char *st = p;
+                      while (*p && *p != ' ') p++;
+                      if ((size_t)(p - st) == l && !strncmp(st, want, l)) hit = 1;
+                  }
+                  if (!hit) return 0; break; }
+        }
+    }
+    return 1;
+}
+
+/* :nth-of-type 系: 只数**同标签**的元素兄弟(标准语义; nth-child 是全部元素)。
+   表格/列表里两类序号经常被混用, 混了就会出现"隔行变色错位"。 */
+static int nth_type_matches(const hn_compound *cp, hn_node *n) {
+    if (!cp->nth_type || !n->parent) return 1;
+    const char *tg = n->tag;
+    if (cp->nth_type == -3) {                 /* first-of-type */
+        for (hn_node *s = n->prev; s; s = s->prev)
+            if (s->kind == HN_ELEM && s->tag && tg && !strcmp(s->tag, tg)) return 0;
+        return 1;
+    }
+    if (cp->nth_type == -4) {                 /* last-of-type */
+        for (hn_node *s = n->next; s; s = s->next)
+            if (s->kind == HN_ELEM && s->tag && tg && !strcmp(s->tag, tg)) return 0;
+        return 1;
+    }
+    int idx = 0, found = 0;
+    for (hn_node *s = n->parent->first; s; s = s->next) {
+        if (s->kind != HN_ELEM) continue;
+        if (!s->tag || !tg || strcmp(s->tag, tg)) continue;   /* 只数同标签 */
+        idx++;
+        if (s == n) { found = 1; break; }
+    }
+    if (!found) return 0;
+    if (cp->nth_type == -1) { if ((idx & 1) == 0) return 0; }
+    else if (cp->nth_type == -2) { if (idx & 1) return 0; }
+    else if (idx != cp->nth_type) return 0;
+    return 1;
+}
+
 static int compound_matches(const hn_compound *cp, hn_node *n, hn_context *c) {
     if (n->kind != HN_ELEM) return 0;
     if (cp->tag && (!n->tag || strcmp(cp->tag, n->tag))) return 0;
     if (cp->id && (!n->id || strcmp(cp->id, n->id))) return 0;
     for (int i = 0; i < cp->n_cls; i++)
         if (!has_class(n, cp->cls[i])) return 0;
+    if (!attr_matches(cp, n)) return 0;
+    if (!nth_type_matches(cp, n)) return 0;
+    /* :not(...) — 实参匹配则整体不匹配。 */
+    if (cp->not_cp && compound_matches(cp->not_cp, n, c)) return 0;
     /* 伪类状态匹配 */
     if (cp->pseudo == 1 && (!c || n != c->hover_node)) return 0;
     if (cp->pseudo == 2 && (!c || n != c->active_node)) return 0;

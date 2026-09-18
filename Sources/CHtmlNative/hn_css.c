@@ -96,11 +96,99 @@ static char *read_value(cps *s) {
     return hn_arena_strndup(s->ar, st, (size_t)(e - st));
 }
 
+static int read_compound(cps *s, hn_compound *cp);
+
+/* [attr] / [attr=v] / [attr^=v] / [attr$=v] / [attr*=v] / [attr~=v]
+   值可带引号("v" 或 'v'), 也可裸写。解析失败返回 0 并回退位置(让上层跳过
+   这个非法 token, 而不是把整条规则吞掉)。 */
+static int read_attr_sel(cps *s, hn_compound *cp) {
+    if (s->p >= s->end || *s->p != '[') return 0;
+    const char *save = s->p;
+    s->p++;
+    skip_ws(s);
+    const char *nst = s->p;
+    while (s->p < s->end && (isalnum((unsigned char)*s->p) || *s->p == '-' || *s->p == '_'))
+        s->p++;
+    if (s->p == nst) { s->p = save; return 0; }
+    char *name = hn_arena_strndup(s->ar, nst, (size_t)(s->p - nst));
+    skip_ws(s);
+    unsigned char op = 0;
+    char *val = NULL;
+    if (s->p < s->end && *s->p != ']') {
+        if (s->p + 1 < s->end && *s->p == '^' && s->p[1] == '=') { op = 2; s->p += 2; }
+        else if (s->p + 1 < s->end && *s->p == '$' && s->p[1] == '=') { op = 3; s->p += 2; }
+        else if (s->p + 1 < s->end && *s->p == '*' && s->p[1] == '=') { op = 4; s->p += 2; }
+        else if (s->p + 1 < s->end && *s->p == '~' && s->p[1] == '=') { op = 5; s->p += 2; }
+        else if (*s->p == '=') { op = 1; s->p++; }
+        else { s->p = save; return 0; }
+        skip_ws(s);
+        char q = 0;
+        if (s->p < s->end && (*s->p == '"' || *s->p == '\'')) { q = *s->p; s->p++; }
+        const char *vst = s->p;
+        while (s->p < s->end && *s->p != ']' && (q ? *s->p != q : !isspace((unsigned char)*s->p)))
+            s->p++;
+        if (s->p == vst && q) { s->p = save; return 0; }
+        val = hn_arena_strndup(s->ar, vst, (size_t)(s->p - vst));
+        if (q && s->p < s->end && *s->p == q) s->p++;
+        skip_ws(s);
+    }
+    if (s->p >= s->end || *s->p != ']') { s->p = save; return 0; }
+    s->p++;
+    if (cp->n_attr < 4) {
+        cp->attr[cp->n_attr].name = name;
+        cp->attr[cp->n_attr].val = val;
+        cp->attr[cp->n_attr].op = op;
+        cp->n_attr++;
+    }
+    return 1;
+}
+
+/* :nth-child 系的括号实参 → nth 编码。
+   odd/even/2n/2n+1 → -1/-2; 纯整数 N → N; 其余(公式)就近取整后按 N。 */
+static int read_nth_arg(cps *s) {
+    int v = 0;
+    if (s->p < s->end && *s->p == '(') {
+        s->p++;
+        const char *b = s->p;
+        while (s->p < s->end && *s->p != ')') s->p++;
+        size_t ln = (size_t)(s->p - b);
+        if (s->p < s->end) s->p++;
+        if (ln == 3 && !strncasecmp(b, "odd", 3)) v = -1;
+        else if (ln == 4 && !strncasecmp(b, "even", 4)) v = -2;
+        else {
+            const char *np = memchr(b, 'n', ln);
+            int base = atoi_n(b, ln);
+            if (np) v = (base % 2 == 0) ? -2 : -1;
+            else v = base;
+        }
+    }
+    return v;
+}
+
+/* 解析 :not(...) 的实参(一层简单复合: tag/.class/#id/[attr]/伪类)。
+   返回 arena 分配的 compound; 解析不了返回 NULL(该 :not 被忽略, 不致命)。 */
+static hn_compound *read_not_arg(cps *s) {
+    if (s->p >= s->end || *s->p != '(') return NULL;
+    const char *save = s->p;
+    s->p++;
+    hn_compound *inner = hn_arena_alloc(s->ar, sizeof(hn_compound));
+    int any = read_compound(s, inner);
+    skip_ws(s);
+    if (!any || s->p >= s->end || *s->p != ')') { s->p = save; return NULL; }
+    s->p++;
+    return inner;
+}
+
 static int read_compound(cps *s, hn_compound *cp) {
     memset(cp, 0, sizeof(*cp));
     int any = 0;
     for (;;) {
         if (s->p < s->end && *s->p == '*') { s->p++; any = 1; continue; }
+        if (s->p < s->end && *s->p == '[') {
+            if (read_attr_sel(s, cp)) any = 1;
+            else break;
+            continue;
+        }
         if (s->p < s->end && (isalpha((unsigned char)*s->p) || *s->p == '_' || (unsigned char)*s->p >= 0x80)) {
             char *t = read_ident(s);
             if (t && !cp->tag) cp->tag = t;
@@ -131,28 +219,19 @@ static int read_compound(cps *s, hn_compound *cp) {
                 else if (!strcmp(pse, "active")) cp->pseudo = 2;
                 else if (!strcmp(pse, "focus") || !strcmp(pse, "focus-visible")) cp->pseudo = 3;
                 else if (!strcmp(pse, "nth-child")) {
-                    /* 括号参数: odd / even / 2n / 2n+1 / 整数 */
-                    int v = 0;
-                    if (s->p < s->end && *s->p == '(') {
-                        s->p++;
-                        const char *b = s->p;
-                        while (s->p < s->end && *s->p != ')') s->p++;
-                        size_t ln = (size_t)(s->p - b);
-                        if (s->p < s->end) s->p++;   /* 吃掉 ')' */
-                        if (ln == 3 && !strncasecmp(b, "odd", 3)) v = -1;
-                        else if (ln == 4 && !strncasecmp(b, "even", 4)) v = -2;
-                        else {
-                            /* 含 'n' 的公式: 2n→even, 2n+1→odd, 其余按首整数 */
-                            const char *np = memchr(b, 'n', ln);
-                            int base = atoi_n(b, ln);
-                            if (np) v = (base % 2 == 0) ? -2 : -1;
-                            else v = base;
-                        }
-                    }
-                    cp->nth = v;
+                    cp->nth = read_nth_arg(s);
+                }
+                else if (!strcmp(pse, "nth-of-type")) {
+                    cp->nth_type = read_nth_arg(s);
                 }
                 else if (!strcmp(pse, "first-child")) cp->nth = -3;
                 else if (!strcmp(pse, "last-child")) cp->nth = -4;
+                else if (!strcmp(pse, "first-of-type")) cp->nth_type = -3;
+                else if (!strcmp(pse, "last-of-type")) cp->nth_type = -4;
+                else if (!strcmp(pse, "not")) {
+                    hn_compound *inner = read_not_arg(s);
+                    if (inner) cp->not_cp = inner;
+                }
                 any = 1;
                 continue;
             }
@@ -177,10 +256,20 @@ static void emit_rule(hn_sheet *sh, hn_compound *parts, int n_parts,
     r->n_decls = nd;
     int spec = 0;
     for (int i = 0; i < n_parts; i++) {
-        /* 伪类与 :nth-child 按类级特异性计(标准行为) */
-        spec += (parts[i].id ? 256 : 0)
-              + (parts[i].n_cls + (parts[i].nth ? 1 : 0) + (parts[i].pseudo ? 1 : 0)) * 16
-              + (parts[i].tag ? 1 : 0);
+        /* 伪类与 :nth-child 按类级特异性计(标准行为)。
+           属性选择器同样按类级; :not 自身不计, 但实参按其自身级别计 ——
+           :not(#x) 是 id 级, :not(.a) 是类级, 这正是标准的记法。 */
+        int cls_lv = parts[i].n_cls + (parts[i].nth ? 1 : 0)
+                   + (parts[i].nth_type ? 1 : 0) + (parts[i].pseudo ? 1 : 0)
+                   + parts[i].n_attr;
+        int id_lv = parts[i].id ? 1 : 0, tag_lv = parts[i].tag ? 1 : 0;
+        if (parts[i].not_cp) {
+            id_lv  += parts[i].not_cp->id ? 1 : 0;
+            tag_lv += parts[i].not_cp->tag ? 1 : 0;
+            cls_lv += parts[i].not_cp->n_cls + parts[i].not_cp->n_attr
+                    + (parts[i].not_cp->nth ? 1 : 0) + (parts[i].not_cp->pseudo ? 1 : 0);
+        }
+        spec += id_lv * 256 + cls_lv * 16 + tag_lv;
     }
     r->spec = spec > 0xFFFF ? 0xFFFF : spec;
     r->order = (*order)++;

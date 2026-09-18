@@ -213,6 +213,15 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
         cmd.font.italic = st->font_italic;
         cmd.font.letter_spacing = st->letter_spacing;
         cmd.fill = mul_alpha(st->color, alpha);
+        /* text-shadow: 借用 RECT 的阴影字段(结构里是共享的)。
+           绘制端按"先画阴影偏移版、再画正文"两遍处理。 */
+        if (st->text_shadow) {
+            cmd.shadow = 1;
+            cmd.shadow_color = mul_alpha(st->text_shadow_color, alpha);
+            cmd.shadow_blur = st->text_shadow_blur;
+            cmd.shadow_ox = st->text_shadow_ox;
+            cmd.shadow_oy = st->text_shadow_oy;
+        }
         push_cmd(c, &cmd);
         push_deco(c, st, r->x, r->baseline, r->width, alpha, sx, sy);
     }

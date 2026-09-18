@@ -100,12 +100,25 @@ public enum HNPainter {
             count: Int(cmd.text_len)), as: UTF8.self)
         guard !s.isEmpty else { return }
         let f = cmd.font
-        let attr: [NSAttributedString.Key: Any] = [
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: [
             .font: TextShaper.shared.nsfont(f),
             .kern: CGFloat(f.letter_spacing),
             .foregroundColor: color(cmd.fill),
-        ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attr))
+        ]))
+        // text-shadow: 两遍绘制。CoreGraphics 的 setShadow 自带高斯模糊,
+        // 阴影遍用它画一次(颜色取阴影色), 再关掉画正文 —— 正文压在阴影上。
+        // 注意 y 轴: 显示列表的 shadow_oy 向下为正, CG 的 offset 也是
+        // (dx, dy) 且 dy 向上为正, 所以这里要取负。
+        if cmd.shadow != 0 {
+            cg.saveGState()
+            cg.setShadow(offset: CGSize(width: CGFloat(cmd.shadow_ox),
+                                        height: -CGFloat(cmd.shadow_oy)),
+                         blur: CGFloat(cmd.shadow_blur),
+                         color: color(cmd.shadow_color).cgColor)
+            cg.textPosition = CGPoint(x: CGFloat(cmd.tx), y: CGFloat(cmd.baseline))
+            CTLineDraw(line, cg)
+            cg.restoreGState()
+        }
         cg.textPosition = CGPoint(x: CGFloat(cmd.tx), y: CGFloat(cmd.baseline))
         CTLineDraw(line, cg)
     }

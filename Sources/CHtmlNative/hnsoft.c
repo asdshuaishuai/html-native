@@ -590,6 +590,39 @@ static void paint_text(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
     col.a *= alpha;
     if (col.a <= 0.01f) return;
 
+    /* text-shadow: 阴影遍(偏移 + 阴影色)。此实现**不带模糊** —— hnsoft 是
+       零依赖兜底, 高斯模糊的近似(降采样放大)需要一整块临时帧缓冲, 对纯软件
+       路径不划算; cairo/CoreGraphics 后端有真模糊。要模糊请用那两个后端。 */
+    if (c->shadow) {
+        fcolor sc2 = unpack(c->shadow_color);
+        sc2.a *= alpha;
+        if (sc2.a > 0.01f) {
+            const unsigned char *ss = (const unsigned char *)c->text;
+            size_t slen = c->text_len, si = 0;
+            float spen = (c->tx + ox + c->shadow_ox) * scale + ox;
+            float sbase = (c->baseline + oy + c->shadow_oy) * scale + oy;
+            while (si < slen) {
+                int cp;
+                int n2 = utf8_next(ss, slen, si, &cp);
+                if (!n2) break;
+                si += (size_t)n2;
+                if (cp == ' ') { spen += 0; continue; }
+                const glyph *g2 = glyph_get(cp, size_px);
+                if (!g2 || !g2->bm) continue;
+                int gx2 = (int)spen + g2->left, gy2 = (int)sbase - g2->top;
+                for (int yy2 = 0; yy2 < g2->h; yy2++)
+                    for (int xx2 = 0; xx2 < g2->w; xx2++) {
+                        unsigned char a2 = g2->bm[yy2 * g2->w + xx2];
+                        if (!a2) continue;
+                        fcolor gc2 = sc2;
+                        gc2.a = sc2.a * (a2 / 255.0f);
+                        fb_blend(f, gx2 + xx2, gy2 + yy2, gc2);
+                    }
+                spen += (float)g2->advance;
+            }
+        }
+    }
+
     const unsigned char *s = (const unsigned char *)c->text;
     size_t len = c->text_len;
     float pen_x = (c->tx + ox) * scale + ox;

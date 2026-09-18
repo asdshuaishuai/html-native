@@ -271,6 +271,14 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   (函数式颜色支持含空格写法); 单位 **px/pt/%/em/rem/vw/vh**;
   `display:inline-flex`(外层原子行内盒); `border-radius:50%`(百分比圆角);
   `text-decoration(underline/line-through/overline)`; `list-style(none/square/circle)`;
+  **选择器引擎强化**:**属性选择器**(`[a]` `[a=v]` `[a^=]` `[a$=]` `[a*=]` `[a~=]`)、
+  **`:not()`**(否定一层简单复合, 实参按标准计入特异性)、
+  **`:nth-of-type()` / `:first-of-type` / `:last-of-type`**(只数同标签兄弟 ——
+  与 nth-child 的差别正是表格/列表隔行错位的根源)、
+  **`calc()`**(`calc(100% - 40px)` 等; % 走包含块基准, 纯绝对值就地求值, 负宽 clamp 到 0)、
+  **`text-shadow`**(三个绘制后端都支持; macOS 走 CoreGraphics setShadow 真高斯模糊,
+  cairo 走降采样放大近似, hnsoft 偏移无模糊)。
+  这一批的共同点是**之前声明了不生效也不报错** —— 探针先行把它们全部翻了出来。
   **排版精细化**:`margin:0 auto` 居中 / flex `margin-left:auto` 推右(标准优先级压 justify)、
   `min/max-width/height` 约束、**完整 margin 简写正确展开 TRBL**(修复历史越界 bug)、
   `font-family(monospace/serif 系统设计, code 等默认等宽)**、默认行高 1.45、

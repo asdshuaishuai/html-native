@@ -54,6 +54,9 @@ typedef struct hn_style {
     float      gap;
     float      width;    unsigned char width_u;
     float      height;   unsigned char height_u;
+    /* calc(<pct>% ± <len>) 的长度偏移(px): 值仍走 PCT 通道, 偏移在尺寸
+       解析处加上。纯绝对项的 calc 在 sv_len 里就地算完, 不落这里。 */
+    float      width_calc_px, height_calc_px;
     float      margin[4];    /* top right bottom left */
     /* margin/padding 的单位(HN_U_*)。百分比必须留到布局期才能解析 ——
        它基于**包含块的行内尺寸(宽度)**, 而样式计算时还拿不到容器宽。
@@ -99,6 +102,11 @@ typedef struct hn_style {
     hn_color border_c4[4];     /* 同上, 0 = 用 border_color */
     /* ---- 文本溢出与折行 ---- */
     unsigned char text_overflow;  /* 1 = ellipsis */
+    /* text-shadow: <ox> <oy> <blur>? <color>(多个阴影取第一个)。
+       之前完全没有 —— 声明了不生效也不报错。 */
+    unsigned char text_shadow;
+    hn_color      text_shadow_color;
+    float         text_shadow_blur, text_shadow_ox, text_shadow_oy;
     unsigned char white_space;    /* 0=normal 1=nowrap 2=pre 3=pre-wrap */
     /* ---- 几何与动画声明(可插值) ---- */
     float      translate_x, translate_y;  /* translate: x y */
@@ -247,7 +255,7 @@ void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len);
 
 /* ---------- CSS AST ---------- */
 
-typedef struct {
+typedef struct hn_compound {
     const char *tag;           /* 可为 NULL */
     const char *id;            /* 可为 NULL */
     const char *cls[8]; int n_cls;
@@ -255,6 +263,14 @@ typedef struct {
     int nth;                   /* 0=无 -1=:nth-child(odd) -2=even >0=第 N 个(1 起)
                                   -3=:first-child -4=:last-child */
     int comb;                  /* 与左侧的组合器: 0 后代 1 子代(>) 2 相邻(+) 3 通用兄弟(~) */
+    /* 属性选择器: [attr] / [attr=v] / [attr^=v] / [attr$=v] / [attr*=v] / [attr~=v]。
+       之前完全没有 —— 声明了不报错也不生效, 是最典型的静默失败。 */
+    struct { const char *name; const char *val; unsigned char op; } attr[4];
+    int n_attr;                /* op: 0 存在 1 = 2 ^= 3 $= 4 *= 5 ~= */
+    /* :not(...) 的实参(一层简单复合)。:not 自身不计特异性, 实参按其自身级别计。 */
+    struct hn_compound *not_cp;
+    /* :nth-of-type / :first-of-type / :last-of-type: 同 nth 的编码, 但只数同标签兄弟 */
+    int nth_type;
 } hn_compound;
 
 typedef struct { hn_compound *parts; int n_parts; } hn_selector;

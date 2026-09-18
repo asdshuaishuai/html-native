@@ -382,6 +382,66 @@ b = run(page("#x{height:200}.a{height:50}.b{height:80}",
              "<div class='a b' id='x'></div>")).get("x", [None])[0]
 ck("特异性: id 高于任意数量 class", b, (0, 0, 400, 200))
 
+# ============ 选择器引擎强化(2026-09-19) ============
+# 这一批是先探针后实现: 声明了不生效也不报错的静默失败组。
+
+# 属性选择器六种操作符
+b = run(page("[data-on]{height:30}", "<div data-on='1' id='x'></div><div id='y'></div>")
+        ).get("x",[None])[0]
+ck("[attr] 存在选择器", b, (0,0,400,30))
+b = run(page("[data-k=\"v\"]{height:30}", "<div data-k='v' id='x'></div><div data-k='w' id='y'></div>")
+        ).get("x",[None])[0]
+ck("[attr=v] 全等", b, (0,0,400,30))
+b = run(page("[href^=\"ht\"]{height:30}", "<div href='https://a' id='x'></div>")
+        ).get("x",[None])[0]
+ck("[attr^=] 前缀", b, (0,0,400,30))
+b = run(page("[href$=\"cn\"]{height:30}", "<div href='https://a.cn' id='x'></div>")
+        ).get("x",[None])[0]
+ck("[attr$=] 后缀", b, (0,0,400,30))
+b = run(page("[data-k*=\"mid\"]{height:30}", "<div data-k='a-mid-b' id='x'></div>")
+        ).get("x",[None])[0]
+ck("[attr*=] 子串", b, (0,0,400,30))
+b = run(page("[rel~=\"no\"]{height:30}", "<div rel='yes no maybe' id='x'></div><div rel='yesno' id='y'></div>")
+        ).get("x",[None])[0]
+ck("[attr~=] 空白分词之一全等", b, (0,0,400,30))
+
+# :not()
+b = run(page(".i{height:20}.i:not(.x){height:40}",
+             "<div class='i a' id='x'></div><div class='i x' id='y'></div>"))
+ck(":not(.x) 否定 class", b.get("x",[None])[0], (0,0,400,40))
+ck(":not() 不影响未否定的", b.get("y",[None])[0], (0,40,400,20))
+b = run(page(".i{height:20}.i:not(#z){height:40}",
+             "<div class='i' id='x'></div><div class='i' id='z'></div>"))
+ck(":not(#z) 否定 id", b.get("x",[None])[0], (0,0,400,40))
+
+# :nth-of-type(只数同标签; 与 nth-child 混用是表格/列表错位的根源)
+b = run(page(".i{height:10}.i:nth-of-type(2){height:50}",
+             "<div><div class='i' id='a'></div><div class='i' id='b'></div><div class='i' id='c'></div></div>"))
+ck(":nth-of-type(2) 命中第二个", b.get("b",[None])[0], (0,10,400,50))
+ck(":nth-of-type(2) 不影响其他", b.get("a",[None])[0][3] if b.get("a") else 0, 10)
+# 混排: 中间插一个不同标签的元素, nth-of-type 应忽略它, nth-child 应算它
+b = run(page("div.t{height:10}span.s{height:5;display:block}div.t:nth-of-type(2){height:50}",
+             "<div><div class='t' id='a'></div><span class='s'></span><div class='t' id='b'></div></div>"))
+ck("nth-of-type 忽略异类兄弟", b.get("b",[None])[0][3] if b.get("b") else 0, 50)
+b = run(page("div.t{height:10}span.s{height:5;display:block}div.t:nth-child(2){height:50}",
+             "<div><div class='t' id='a'></div><span class='s'></span><div class='t' id='b'></div></div>"))
+ck("nth-child 把异类兄弟计入", b.get("b",[None])[0][3] if b.get("b") else 0, 10)
+
+# calc()
+b = run(page("#x{width:calc(100% - 40px);height:10}", "<div id='x'></div>")
+        ).get("x",[None])[0]
+ck("calc(100% - 40px)", b, (0,0,360,10))
+b = run(page("#p{width:200}#x{width:calc(50% + 10px);height:10}", "<div id='p'><div id='x'></div></div>")
+        ).get("x",[None])[0]
+ck("calc(50% + 10px) 按包含块", b, (0,0,110,10))
+b = run(page("#x{width:calc(100px + 20px);height:10}", "<div id='x'></div>")
+        ).get("x",[None])[0]
+ck("calc 纯绝对值就地求值", b, (0,0,120,10))
+b = run(page("#x{width:calc(100% - 40px);height:10}", "<div id='x'></div>")
+        ).get("x",[None])[0]
+ck("calc 负值 clamp 到 0", run(page("#x{width:calc(100% - 900px)}", "<div id='x'></div>")
+        ).get("x",[None])[0][2] >= 0, True)
+
 # ============ 报告 ============
 print("通过 %d / 失败 %d" % (len(passed), len(failed)))
 for name, want, got in failed:

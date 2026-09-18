@@ -3171,6 +3171,92 @@ do {
     HNAppletStore.remove(named: capSlot)
 }
 
+print("== 选择器引擎强化 + text-shadow(macOS CoreGraphics 路径) ==")
+do {
+    /* 先探针后实现的一批: 声明了不生效也不报错的静默失败组。 */
+    func box(_ html: String, _ id: String) -> (Float, Float, Float, Float)? {
+        guard let d = hn_parse_html(html, html.utf8.count) else { return nil }
+        let cc = hn_context_create()
+        hn_context_set_doc(cc, d)
+        hn_context_layout(cc, 400, 300, &backend)
+        guard let n = hn_doc_find_by_id(d, id) else { return nil }
+        var x: Float = 0, y: Float = 0, bw: Float = 0, bh: Float = 0
+        hn_node_box(n, &x, &y, &bw, &bh)
+        return (x, y, bw, bh)
+    }
+    func page(_ css: String, _ body: String) -> String {
+        "<html><head><style>\(css)</style></head><body>\(body)</body></html>"
+    }
+    // :not()
+    let nb = box(page(".i{height:20}.i:not(.x){height:40}",
+                      "<div class='i a' id='x'></div><div class='i x' id='y'></div>"), "x")
+    check(nb?.3 == 40, String(format: ":not(.x) 否定 class (高=%.0f, 期望 40)", nb?.3 ?? -1))
+    // 属性选择器
+    let ab = box(page("[data-on]{height:30}", "<div data-on='1' id='x'></div>"), "x")
+    check(ab?.3 == 30, String(format: "[attr] 存在选择器 (高=%.0f, 期望 30)", ab?.3 ?? -1))
+    let av = box(page("[data-k*=\"mid\"]{height:30}", "<div data-k='a-mid-b' id='x'></div>"), "x")
+    check(av?.3 == 30, String(format: "[attr*=] 子串 (高=%.0f, 期望 30)", av?.3 ?? -1))
+    // :nth-of-type 忽略异类兄弟
+    let nt = box(page("div.t{height:10}span.s{height:5;display:block}div.t:nth-of-type(2){height:50}",
+                      "<div><div class='t' id='a'></div><span class='s'></span><div class='t' id='b'></div></div>"), "b")
+    check(nt?.3 == 50, String(format: ":nth-of-type(2) 忽略异类兄弟 (高=%.0f, 期望 50)", nt?.3 ?? -1))
+    // calc()
+    let cb = box(page("#x{width:calc(100% - 40px);height:10}", "<div id='x'></div>"), "x")
+    check(cb?.2 == 344, String(format: "calc(100%% - 40px) (宽=%.0f, 期望 344=body 内宽 384-40)", cb?.2 ?? -1))
+    let cc = box(page("#p{width:200}#x{width:calc(50% + 10px);height:10}",
+                      "<div id='p'><div id='x'></div></div>"), "x")
+    check(cc?.2 == 110, String(format: "calc(50%% + 10px) 按包含块 (宽=%.0f, 期望 110=200*0.5+10)", cc?.2 ?? -1))
+
+    /* text-shadow: 差分验证 —— 同一页有无阴影两次渲染, 差异必须落在
+       字形区域+偏移范围内, 且阴影区像素呈阴影色、正文区保持黑。 */
+    func renderShadow(_ css: String) -> [UInt8]? {
+        let v = HtmlNativeView(html: page("body{margin:0;background:#fff}#t{font-size:40;color:#000;\(css)",
+                                          "<div id='t'>A</div>"))
+        v.frame = NSRect(x: 0, y: 0, width: 120, height: 80)
+        v.relayout()
+        let ctx = v.engineContext
+        guard let dl = hn_context_display_list(ctx) else { return nil }
+        guard let cg = CGContext(data: nil, width: 120, height: 80, bitsPerComponent: 8,
+                                 bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        // CG 原点是左下; 翻到左上原点与显示列表一致
+        cg.translateBy(x: 0, y: 80)
+        cg.scaleBy(x: 1, y: -1)
+        HNPainter.draw(dl.pointee, into: cg)
+        guard let img = cg.makeImage() else { return nil }
+        let rep = NSBitmapImageRep(cgImage: img)
+        var out = [UInt8](repeating: 0, count: 120 * 80 * 4)
+        for y in 0..<80 {
+            for x in 0..<120 {
+                if let c = rep.colorAt(x: x, y: y) {
+                    // 注意 rep 的 y 也是左下原点, 翻转
+                    let o = ((79 - y) * 120 + x) * 4
+                    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                    c.getRed(&r, green: &g, blue: &b, alpha: &a)
+                    out[o] = UInt8(r * 255); out[o+1] = UInt8(g * 255)
+                    out[o+2] = UInt8(b * 255); out[o+3] = UInt8(a * 255)
+                }
+            }
+        }
+        return out
+    }
+    if let plain = renderShadow(""), let shad = renderShadow("text-shadow:4px 4px 0px #888888") {
+        var diff = 0, pure = 0
+        for i in 0..<(120 * 80) {
+            let o = i * 4
+            if plain[o] != shad[o] || plain[o+1] != shad[o+1] || plain[o+2] != shad[o+2] {
+                diff += 1
+                // 阴影色 #888 ≈ 136
+                if abs(Int(shad[o+1]) - 136) < 70 && plain[o+1] > 190 { pure += 1 }
+            }
+        }
+        check(diff > 50, String(format: "text-shadow: 画面发生变化 (%d 像素)", diff))
+        check(pure > 5, String(format: "text-shadow: 偏移区呈阴影色 #888 (%d 像素)", pure))
+    } else {
+        check(false, "text-shadow: 渲染失败")
+    }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

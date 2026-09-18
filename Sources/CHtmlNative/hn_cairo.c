@@ -212,6 +212,72 @@ static cairo_surface_t *glyph_surface(int cp, int size_px,
     return s;
 }
 
+/* 文本阴影: 把整行字形画进一张临时面(阴影色), 降采样放大做一次模糊,
+ * 再按 (ox,oy) 偏移合成。按**整行**做而不是按字形 —— 每个字形单独模糊
+ * 既慢又会在相邻字形处出现亮斑。
+ * 先画阴影后画正文, 由调用方保证。 */
+static void paint_text_shadow(cairo_t *cr, const hn_cmd *c, int size_px) {
+    fcolor scol = unpack(c->shadow_color);
+    if (scol.a <= 0.003f) return;
+    double blur = c->shadow_blur;
+    int sc = blur > 24 ? 6 : (blur > 48 ? 8 : 4);
+    double pad = blur + 4;
+
+    /* 行包围盒: 先量一遍字形推进, 求总宽; 高按字号的 1.6 倍近似
+       (CJK 字形的 top/bottom 都在字号量级内, 1.6 倍足够容纳)。 */
+    double tw = 0;
+    const unsigned char *s = (const unsigned char *)c->text;
+    size_t len = c->text_len, i = 0;
+    while (i < len) {
+        int cp; int n = utf8_next(s, len, i, &cp);
+        if (!n) break;
+        i += (size_t)n;
+        if (cp == ' ') { tw += size_px * 0.28; continue; }
+        if (FT_Set_Pixel_Sizes(ft_face, 0, (FT_UInt)size_px)) return;
+        if (FT_Load_Char(ft_face, (FT_ULong)cp, FT_LOAD_DEFAULT) == 0)
+            tw += (double)(ft_face->glyph->advance.x >> 6);
+    }
+    double th = size_px * 1.6;
+    int sw = (int)((tw + pad * 2) / sc) + 2, sh = (int)((th + pad * 2) / sc) + 2;
+    if (sw < 2 || sh < 2 || sw > 4096 || sh > 512) return;
+
+    cairo_surface_t *t = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh);
+    if (cairo_surface_status(t) != CAIRO_STATUS_SUCCESS) return;
+    cairo_t *tc = cairo_create(t);
+    /* 清零 + 白色画字形(alpha 当蒙版, 颜色不受插值污染) */
+    cairo_set_operator(tc, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(tc, 0, 0, 0, 0);
+    cairo_paint(tc);
+    cairo_set_operator(tc, CAIRO_OPERATOR_OVER);
+    cairo_scale(tc, 1.0 / sc, 1.0 / sc);
+    cairo_set_source_rgba(tc, 1, 1, 1, 1);
+    i = 0;
+    double pen_x = pad, baseline = pad + th * 0.8;
+    while (i < len) {
+        int cp; int n = utf8_next(s, len, i, &cp);
+        if (!n) break;
+        i += (size_t)n;
+        if (cp == ' ') { pen_x += size_px * 0.28; continue; }
+        int left, top, adv;
+        cairo_surface_t *gs = glyph_surface(cp, size_px, &left, &top, &adv);
+        if (gs) {
+            cairo_mask_surface(tc, gs, pen_x + left, baseline - top);
+            cairo_surface_destroy(gs);
+        }
+        pen_x += (double)adv;
+    }
+    cairo_destroy(tc);
+
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, scol.r, scol.g, scol.b, scol.a);
+    /* 放大即模糊(与矩形阴影同一手法); 偏移 (ox,oy) 向下为正 */
+    cairo_translate(cr, c->tx - pad + c->shadow_ox, c->baseline - th * 0.8 - pad + c->shadow_oy);
+    cairo_scale(cr, (double)sc, (double)sc);
+    cairo_mask_surface(cr, t, 0, 0);
+    cairo_restore(cr);
+    cairo_surface_destroy(t);
+}
+
 static void paint_text(cairo_t *cr, const hn_cmd *c) {
     font_init();
     if (!ft_ok) return;
@@ -219,6 +285,8 @@ static void paint_text(cairo_t *cr, const hn_cmd *c) {
     if (size_px < 4) return;
     fcolor col = unpack(c->fill);
     if (col.a <= 0.01f) return;
+
+    if (c->shadow) paint_text_shadow(cr, c, size_px);
 
     const unsigned char *s = (const unsigned char *)c->text;
     size_t len = c->text_len, i = 0;

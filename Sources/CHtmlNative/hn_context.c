@@ -500,7 +500,12 @@ int hn_node_run_range(hn_node *n, int i, size_t *begin, size_t *end) {
 }
 
 const char *hn_node_text(hn_node *n, size_t *len_out) {
-    if (!n || n->kind != HN_TEXT) { if (len_out) *len_out = 0; return NULL; }
+    /* 元素节点也可能持有文本: 布局为省略号/列表序号合成的片段就是挂在
+       容器元素上的(见 la_clip_ellipsis)。之前对非 TEXT 节点一律返回 NULL,
+       于是 `hn text` 读不到这类 run —— 而绘制路径(paint_runs 读 n->text)
+       是能画出来的, 表现为"看得见却读不到", agent 侧极难排查。 */
+    if (!n) { if (len_out) *len_out = 0; return NULL; }
+    if (n->kind != HN_TEXT && !n->text) { if (len_out) *len_out = 0; return NULL; }
     if (len_out) *len_out = n->text_len;
     return n->text;
 }
