@@ -159,13 +159,34 @@ public final class HNEngine {
             }
             window = panel
         }
+        /* ---- 插件感: 让它"不像一个 App" ----
+           macOS 上这几项正是"桌面小组件/插件"与"常规应用"的分界:
+           - collectionBehavior .ignoresCycle: 不进 Cmd+Tab 的应用切换列表
+           - .canJoinAllSpaces / .fullScreenAuxiliary: 跟随所有空间、可浮在
+             全屏应用之上(悬浮工具的预期行为)
+           - .moveToActiveSpace: 打开时出现在当前空间而不是自己的空间
+           注意 collectionBehavior 会整体覆盖, 所以这里显式列全需要的项。 */
+        if kind != .window {
+            /* 注意: canJoinAllSpaces 与 moveToActiveSpace 在 macOS 上互斥,
+               同时设置会抛 NSInternalInconsistencyException 直接崩掉宿主。
+               小组件语义要的是"跟随所有空间", 所以取 canJoinAllSpaces。 */
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary,
+                                         .ignoresCycle]
+            /* 无边框表面默认不夺取焦点(插件不该把用户的键盘抢走)。
+               需要交互的页面用 hn-window 声明 window 表面。 */
+            window.hidesOnDeactivate = false
+        }
+
         window.contentView = host.asView
         if at != nil {
             window.setFrameOrigin(frame.origin)
         } else {
             window.center()
         }
-        Self.activateAppIdentity()
+        /* 存在感: 只有明确声明 app(或 window 表面)才把宿主提升为带 Dock
+           图标的常规应用。此前**每次 open 都提升**, 于是一张透明卡片也会
+           让宿主在 Dock 里出现并带上图标 —— 与"引擎弱化存在感"正好相反。 */
+        Self.applyPresence(m.presence, surface: kind)
 
         let label = title
             ?? m.title.map { String(cString: $0) }
@@ -178,6 +199,12 @@ public final class HNEngine {
         // (webkit 路径由注入脚本自理 → loadActions 为空)
         for action in host.loadActions() { host.performHx(action) }
         host.startPolling()
+        /* 小程序式生命周期: 首帧就绪后派发 launch —— 页面据此做初始化
+           (读启动参数、拉首屏数据)。未声明 hn-lifecycle 的页面零开销。 */
+        if let nv = host as? HtmlNativeView {
+            nv.dispatchLifecycle(HN_EV_LAUNCH)
+            nv.dispatchLifecycle(HN_EV_SHOW)
+        }
         // 消息卡片语义: ttl 到期热销毁(关闭窗口并注销)
         if let ttl {
             app.ttlTimer = Timer.scheduledTimer(withTimeInterval: ttl, repeats: false) { [weak self] _ in
@@ -239,6 +266,11 @@ public final class HNEngine {
     public func app(id: String) -> HNApp? { apps[id] }
 
     public func close(id: String) {
+        /* 关闭前给页面一次收尾机会(未声明则不打扰) */
+        if let app = apps[id], let nv = app.view {
+            nv.dispatchLifecycle(HN_EV_HIDE)
+            nv.dispatchLifecycle(HN_EV_DESTROY)
+        }
         guard let app = apps.removeValue(forKey: id) else { return }
         app.ttlTimer?.invalidate()
         if let mon = dismissMonitors.removeValue(forKey: id) {
@@ -249,15 +281,29 @@ public final class HNEngine {
         if apps.isEmpty { Self.deactivateAppIdentity() }
     }
 
-    /// 应用身份: 首个窗口打开时驻留 Dock(含图标), 全部关闭后归还后台形态。
-    /// 图标由 CoreGraphics 现场绘制(渐变圆角方块 + hn 字标), 无需资源文件。
-    static func activateAppIdentity() {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.applicationIconImage = Self.drawAppIcon()
+    /// 按声明施加系统身份。ghost = 全程不碰 Dock(默认形态 accessory);
+    /// app = 驻留 Dock 并带图标。图标由 CoreGraphics 现场绘制
+    /// (渐变圆角方块 + hn 字标), 无需资源文件。
+    static func applyPresence(_ presence: hn_presence, surface: HNSurface) {
+        let wantApp: Bool
+        switch presence {
+        case HN_PRESENCE_GHOST: wantApp = false
+        case HN_PRESENCE_APP:  wantApp = true
+        default:                wantApp = (surface == .window)
+        }
+        if wantApp {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.applicationIconImage = Self.drawAppIcon()
+        } else {
+            NSApp.setActivationPolicy(.accessory)
+            NSApp.applicationIconImage = nil
+        }
     }
 
+    /// 全部关闭后归还后台形态(不留 Dock 残留)
     static func deactivateAppIdentity() {
         NSApp.setActivationPolicy(.accessory)
+        NSApp.applicationIconImage = nil
     }
 
     /// 程序化生成 1024px 应用图标: 深蓝→紫渐变圆角方块, 中心 "hn" 字标

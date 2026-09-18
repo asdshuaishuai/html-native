@@ -239,6 +239,14 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   `font-family(monospace/serif 系统设计, code 等默认等宽)**、默认行高 1.45、
   **窗口标题栏无缝**(透明标题条 + 底色跟随 body 背景 + 可拖拽空白区)
 - **图片**: `<img>`(尺寸回退链: 样式 > 属性 > 固有尺寸), 图片后端注入
+- **弱化存在感 / 小程序 · 插件形态**: 引擎默认"不像一个 App"。
+  `hn-presence=ghost`(默认于 popup/layer)完全**不占系统身份** —— 不进 Dock、
+  无图标、不进 Cmd+Tab 的应用切换; 无边框表面还会带上 `.canJoinAllSpaces` +
+  `.ignoresCycle` + 非辅助面板, 即 macOS 上"桌面小组件"的标准语义。
+  只有 `hn-surface=window`(或显式 `hn-presence=app`)才驻留 Dock。
+  `hn-lifecycle="launch show hide destroy"` 声明关心哪些生命周期事件,
+  未声明的页面一次都不打扰; 事件走**同一条统一事件管道**(JS 处理器与 hx 共用)。
+  agent 可用 `hn lifecycle <id> --kind hide` 手动触发, 模拟应用被切到后台
 - **跨平台确定性**: 引擎是纯 C99, `-ffp-contract=off` 关掉 FMA 融合(arm64 有
   而 x86_64 基线没有, 默认融合会让同一文档算出不同 px 值)。构建脚本带**跨架构
   确定性门禁**: 同 HN_NO_TEXT 口径下比对各架构产物的布局输出, 不一致即构建失败。

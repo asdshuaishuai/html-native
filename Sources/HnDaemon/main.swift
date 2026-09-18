@@ -179,6 +179,29 @@ enum HNProtocol {
             DevWatcher.start(id: id, html: htmlURL, css: cssURL)
             return resp(true, ["id": id, "watching": path])
 
+        case "lifecycle":
+            /* 小程序式生命周期: 运行时在表面状态变化时自动派发(launch/show/
+               hide/destroy), 这里提供 agent 手动触发的能力 —— 例如模拟
+               应用被切到后台再回来, 验证页面的 onHide/onShow 行为。 */
+            guard let id = obj["id"] as? String, let k = obj["kind"] as? String else {
+                return resp(false, ["error": "id/kind required"])
+            }
+            var out = false
+            DispatchQueue.main.sync {
+                if let app = HNEngine.shared.app(id: id), let nv = app.view {
+                    let kind: hn_event_kind
+                    switch k {
+                    case "launch":  kind = HN_EV_LAUNCH
+                    case "show":    kind = HN_EV_SHOW
+                    case "hide":    kind = HN_EV_HIDE
+                    case "destroy": kind = HN_EV_DESTROY
+                    default:        return
+                    }
+                    out = nv.dispatchLifecycle(kind)
+                }
+            }
+            return resp(true, ["dispatched": out, "id": id, "kind": k])
+
         case "close":
             guard let id = obj["id"] as? String else { return resp(false, ["error": "id required"]) }
             DispatchQueue.main.sync { HNEngine.shared.close(id: id) }

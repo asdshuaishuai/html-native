@@ -1,0 +1,34 @@
+<html><head>
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="300x180">
+<meta name="hn-title" content="生命周期">
+<!-- presence=ghost: 不占 Dock/图标/Cmd+Tab —— 桌面上一张卡而已 -->
+<meta name="hn-presence" content="ghost">
+<!-- 声明关心哪些生命周期事件; 未声明则一次都不打扰 -->
+<meta name="hn-lifecycle" content="launch show hide destroy">
+<style>
+html,body{margin:0;width:100%;height:100%;background:#0e1117;}
+.log{padding:14;display:flex;flex-direction:column;gap:6;}
+.title{color:#e8eaf0;font-size:14;font-weight:700;}
+.line{color:#7fe0a8;font-size:12;}
+.sub{color:#6b7386;font-size:10;}
+</style>
+</head><body>
+<div class="log" id="root">
+  <div class="title">小程序式生命周期</div>
+  <div class="sub">launch/show 由运行时自动派发; hide/destroy 用 hn lifecycle 手动触发</div>
+  <div class="line" id="out">等待事件…</div>
+</div>
+<script>
+var out = document.getElementById('out');
+var n = 0;
+function add(name) {
+  n++;
+  out.textContent = '已收到 ' + n + ' 个: ' + name;
+}
+document.getElementById('root').addEventListener('launch', function () { add('launch'); });
+document.getElementById('root').addEventListener('show', function () { add('show'); });
+document.getElementById('root').addEventListener('hide', function () { add('hide'); });
+document.getElementById('root').addEventListener('destroy', function () { add('destroy'); });
+</script>
+</body></html>

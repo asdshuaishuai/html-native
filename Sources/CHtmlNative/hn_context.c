@@ -985,8 +985,36 @@ const char *hn_event_name(hn_event_kind k) {
     case HN_EV_SUBMIT:     return "submit";
     case HN_EV_SCROLL:     return "scroll";
     case HN_EV_HOVER:      return "hover";
+    case HN_EV_LAUNCH:     return "launch";
+    case HN_EV_SHOW:       return "show";
+    case HN_EV_HIDE:       return "hide";
+    case HN_EV_DESTROY:    return "destroy";
     default:               return "unknown";
     }
+}
+
+const char *hn_lifecycle_name(hn_event_kind k) {
+    switch (k) {
+    case HN_EV_LAUNCH:  return "launch";
+    case HN_EV_SHOW:    return "show";
+    case HN_EV_HIDE:    return "hide";
+    case HN_EV_DESTROY: return "destroy";
+    default:            return NULL;
+    }
+}
+
+int hn_lifecycle_wants(const char *decl, hn_event_kind k) {
+    const char *name = hn_lifecycle_name(k);
+    if (!decl || !*decl || !name) return 0;
+    size_t nl = strlen(name);
+    const char *p = decl;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        const char *st = p;
+        while (*p && *p != ' ' && *p != ',') p++;
+        if ((size_t)(p - st) == nl && !strncmp(st, name, nl)) return 1;
+    }
+    return 0;
 }
 
 /* 冒泡路径只含"有 id 的元素": 运行时与 JS 都以 id 寻址。
@@ -1360,6 +1388,8 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
     out->transparent = 0;
     out->shadow = 1;        /* 默认带投影 */
     out->draggable = 1;     /* 默认可拖动 */
+    out->lifecycle = NULL;
+    out->presence = HN_PRESENCE_AUTO;
     if (!doc || !doc->root) return;
 
     hn_node *stack[256];
@@ -1397,6 +1427,17 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
                     }
                 } else if (!strcmp(name, "hn-title")) {
                     out->title = content;
+                } else if (!strcmp(name, "hn-presence")) {
+                    /* ghost = 完全不占系统身份; app = 明确要 Dock 身份 */
+                    if (!strcmp(content, "ghost") || !strcmp(content, "none"))
+                        out->presence = HN_PRESENCE_GHOST;
+                    else if (!strcmp(content, "app"))
+                        out->presence = HN_PRESENCE_APP;
+                    else
+                        out->presence = HN_PRESENCE_AUTO;
+                } else if (!strcmp(name, "hn-lifecycle")) {
+                    /* 关心哪些生命周期事件: "launch show hide destroy"(空格分隔) */
+                    out->lifecycle = content;
                 }
             }
         }

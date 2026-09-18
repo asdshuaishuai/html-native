@@ -767,9 +767,20 @@ public final class HtmlNativeView: NSView, HNWebHost {
     public func emit(_ kind: hn_event_kind, at p: NSPoint?, node target: OpaquePointer?,
               keyCode: Int32 = 0, key: String? = nil, modifiers: UInt32 = 0,
               repeat isRepeat: Bool = false, delta: Float = 0, text: String? = nil) -> Bool {
-        guard let ctx else { return false }
-        let hit = target ?? (p.flatMap { hn_context_hit_node(ctx, Float($0.x), Float($0.y)) })
-        guard let hit else { return false }
+        guard let ctx, let doc = hn_context_doc(ctx) else { return false }
+        /* 生命周期事件没有坐标也没有命中元素: 直接派发到"该表面声明的 id"
+           或文档根 —— 与小程序里 onLaunch 挂在 App 实例上一致。 */
+        let hit: OpaquePointer
+        if let target {
+            hit = target
+        } else if let p {
+            guard let n = hn_context_hit_node(ctx, Float(p.x), Float(p.y)) else { return false }
+            hit = n
+        } else if let root = hn_doc_root(doc) {
+            hit = root
+        } else {
+            return false
+        }
 
         let name = String(cString: hn_event_name(kind))
         let detail: [String: Any] = [
@@ -823,6 +834,31 @@ public final class HtmlNativeView: NSView, HNWebHost {
     /// 最近一次 emit 的三态结果(供宿主/agent 读取, 见 emit 的注释)
     public private(set) var lastEventOutcome: (handled: Bool, prevented: Bool, hx: Bool)
         = (false, false, false)
+
+    /// 派发一个小程序式生命周期事件(launch / show / hide / destroy)。
+    /// 只有文档用 hn-lifecycle 声明关心该事件时才真正派发 —— 未声明的页面
+    /// 一次都不打扰, 保持"引擎弱化存在感"。返回是否派发了。
+    @discardableResult
+    public func dispatchLifecycle(_ kind: hn_event_kind) -> Bool {
+        guard let ctx, let doc = hn_context_doc(ctx) else { return false }
+        var m = hn_manifest()
+        hn_doc_manifest(doc, &m)
+        let decl = m.lifecycle.map { String(cString: $0) } ?? ""
+        guard hn_lifecycle_wants(decl, kind) == 1 else { return false }
+        /* 目标: 文档里带 id 的第一个元素(通常就是页面根容器),
+           否则文档根 —— 冒泡路径只含带 id 的元素, 所以必须有 id 才派得出去。 */
+        var target: OpaquePointer? = hn_doc_root(doc)
+        var stack: [OpaquePointer] = [hn_doc_root(doc)].compactMap { $0 }
+        while let n = stack.popLast() {
+            if hn_node_tag(n) != nil, hn_node_attr(n, "id") != nil { target = n; break }
+            var kids: [OpaquePointer] = []
+            var ch = hn_node_first_child(n)
+            while let k = ch { kids.append(k); ch = hn_node_next_sibling(k) }
+            stack.append(contentsOf: kids)
+        }
+        emit(kind, at: nil, node: target)
+        return true
+    }
 
     /// hx-trigger 与事件名的匹配(含 hx 的 hover 语义: 进入也触发)
     public static func triggerMatches(_ trig: String, event: String) -> Bool {

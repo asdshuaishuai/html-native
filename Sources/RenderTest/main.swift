@@ -2757,6 +2757,84 @@ do {
     } else { check(false, "回归: 未找到 i2 节点") }
 }
 
+print("== 弱化存在感 / 小程序生命周期 ==")
+do {
+    /* 1) 清单: presence 与 lifecycle 必须被解析 —— 未解析的声明等于文档里
+          写什么都没用, 而且不报错(静默失效)。 */
+    func manifest(_ html: String) -> hn_manifest {
+        var m = hn_manifest()
+        if let d = hn_parse_html(html, html.utf8.count) { hn_doc_manifest(d, &m) }
+        return m
+    }
+    let ghost = manifest("<html><head>"
+        + "<meta name=\"hn-presence\" content=\"ghost\">"
+        + "</head><body></body></html>")
+    check(ghost.presence == HN_PRESENCE_GHOST, "清单: hn-presence=ghost 被解析")
+
+    let appp = manifest("<html><head>"
+        + "<meta name=\"hn-presence\" content=\"app\">"
+        + "</head><body></body></html>")
+    check(appp.presence == HN_PRESENCE_APP, "清单: hn-presence=app 被解析")
+
+    let none = manifest("<html><head></head><body></body></html>")
+    check(none.presence == HN_PRESENCE_AUTO, "清单: 未声明时 presence=auto(不擅自占身份)")
+
+    /* 2) 生命周期声明匹配: 空格分隔, 且不能子串误判
+          (lifecycle="launch" 不应被 "hide" 命中) */
+    check(hn_lifecycle_wants("launch show hide destroy", HN_EV_LAUNCH) == 1,
+          "生命周期: 声明里命中 launch")
+    check(hn_lifecycle_wants("launch show hide destroy", HN_EV_DESTROY) == 1,
+          "生命周期: 声明里命中 destroy")
+    check(hn_lifecycle_wants("launch show", HN_EV_DESTROY) == 0,
+          "生命周期: 未声明的事件不被命中")
+    check(hn_lifecycle_wants("launch", HN_EV_SHOW) == 0,
+          "生命周期: 不做子串匹配(launch 不命中 show)")
+    check(hn_lifecycle_wants("", HN_EV_LAUNCH) == 0,
+          "生命周期: 未声明的页面一次都不打扰")
+
+    /* 3) 生命周期事件名与事件系统对齐(页面用 addEventListener 消费) */
+    check(String(cString: hn_event_name(HN_EV_LAUNCH)) == "launch", "事件名: launch")
+    check(String(cString: hn_event_name(HN_EV_SHOW)) == "show", "事件名: show")
+    check(String(cString: hn_event_name(HN_EV_HIDE)) == "hide", "事件名: hide")
+    check(String(cString: hn_event_name(HN_EV_DESTROY)) == "destroy", "事件名: destroy")
+
+    /* 4) 端到端: 生命周期事件走**同一条统一事件管道**(JS 处理器 / hx 共用),
+          而不是另起一套 —— 这是"小程序感"能成立的前提。 */
+    let lcHTML = "<html><head><style>html,body{margin:0}</style></head><body>"
+               + "<div id=\"root\">"
+               + "<script>"
+               + "window.__hits = [];"
+               + "document.getElementById('root').addEventListener('launch', function(){ window.__hits.push('launch'); });"
+               + "document.getElementById('root').addEventListener('hide', function(){ window.__hits.push('hide'); });"
+               + "</script></div></body></html>"
+    let v = HtmlNativeView(html: lcHTML)
+    v.frame = NSRect(x: 0, y: 0, width: 200, height: 200)
+    v.relayout()
+    check(v.dispatchLifecycle(HN_EV_LAUNCH) == false,
+          "生命周期: 未声明 hn-lifecycle 时不派发(零打扰)")
+    let rt = v.jsRuntimeForTest
+    let n0 = rt?.probe("String((window.__hits||[]).length)") ?? "nil"
+    check(n0 == "0", String(format: "生命周期: 未声明时 JS 无回调 (实际 %@)", n0))
+
+    /* 声明之后再派发, 应走统一管道到达 JS */
+    let lc2 = "<html><head><meta name=\"hn-lifecycle\" content=\"launch hide\">"
+            + "<style>html,body{margin:0}</style></head><body>"
+            + "<div id=\"root\">"
+            + "<script>"
+            + "window.__hits = [];"
+            + "document.getElementById('root').addEventListener('launch', function(){ window.__hits.push('launch'); });"
+            + "document.getElementById('root').addEventListener('hide', function(){ window.__hits.push('hide'); });"
+            + "</script></div></body></html>"
+    let v2 = HtmlNativeView(html: lc2)
+    v2.frame = NSRect(x: 0, y: 0, width: 200, height: 200)
+    v2.relayout()
+    _ = v2.dispatchLifecycle(HN_EV_LAUNCH)
+    _ = v2.dispatchLifecycle(HN_EV_HIDE)
+    let hits = v2.jsRuntimeForTest?.probe("(window.__hits||[]).join(',')") ?? "nil"
+    check(hits == "launch,hide",
+          String(format: "生命周期: 走统一事件管道到达 JS (实际 %@)", hits))
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

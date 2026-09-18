@@ -178,6 +178,15 @@ typedef enum hn_surface_kind {
     HN_SURFACE_LAYER       /* 覆盖图层(依附宿主窗口或浮层) */
 } hn_surface_kind;
 
+/* 存在感(presence): 应用在系统里"多像一个 App"。
+   这是"引擎弱化存在感"的核心开关 —— 同一份文档可以只是桌面上的一张卡片,
+   也可以是一个有 Dock 图标的常规应用, 由文档自己声明。 */
+typedef enum {
+    HN_PRESENCE_AUTO = 0, /* 默认: 跟随 surface(window → app, 其余 → ghost) */
+    HN_PRESENCE_GHOST,    /* 完全不占系统身份: 不进 Dock、无图标、不进 Cmd+Tab */
+    HN_PRESENCE_APP       /* 明确要求应用身份: 驻留 Dock 并带图标 */
+} hn_presence;
+
 typedef struct hn_manifest {
     hn_surface_kind surface;
     float w, h;            /* 0 = 自动 */
@@ -187,6 +196,10 @@ typedef struct hn_manifest {
     int transparent;       /* hn-transparent: 1 = 窗口无底色(逐像素 alpha) */
     int shadow;            /* hn-shadow: 1 = 窗口投影(默认开); 0 = 关闭 */
     int draggable;         /* hn-draggable: 1 = 空白区域可拖动窗口(默认开) */
+    /* 小程序式生命周期: 页面关心自己被显示/隐藏/销毁(见 hn_lifecycle)。
+       声明后运行时按顺序派发同名事件; 缺省不派发。 */
+    const char *lifecycle;
+    hn_presence presence;  /* hn-presence: 见上 */
 } hn_manifest;
 
 /* 从文档解析清单(meta 缺省时给默认值: window / 自动) */
@@ -311,7 +324,14 @@ typedef enum {
     HN_EV_FOCUS, HN_EV_BLUR,
     HN_EV_INPUT, HN_EV_CHANGE,
     HN_EV_SUBMIT, HN_EV_SCROLL,
-    HN_EV_HOVER                     /* hx 语义: 进入与离开共用 */
+    HN_EV_HOVER,                    /* hx 语义: 进入与离开共用 */
+    /* 小程序式生命周期: 运行时在表面状态变化时派发, 页面用 hn-lifecycle
+       声明关心哪些(空格分隔, 如 "launch show hide destroy")。
+       target 为该表面声明的 id, 缺省文档根。 */
+    HN_EV_LAUNCH,                   /* 表面首次可见 */
+    HN_EV_SHOW,                     /* 变为可见(含从隐藏恢复) */
+    HN_EV_HIDE,                     /* 变为不可见 */
+    HN_EV_DESTROY                   /* 表面即将销毁(可做收尾) */
 } hn_event_kind;
 
 /* 修饰键位掩码 */
@@ -351,6 +371,11 @@ int hn_event_path_len(hn_node *target);
 
 /* 从 n(含自身)向上找最近的 input/textarea(供事件派发定位编辑目标) */
 hn_node *hn_node_ancestor_input(hn_node *n);
+
+/* 生命周期事件名("launch" / "show" / "hide" / "destroy"); 非生命周期返回 NULL */
+const char *hn_lifecycle_name(hn_event_kind k);
+/* hn-lifecycle 声明里是否包含该事件 */
+int  hn_lifecycle_wants(const char *decl, hn_event_kind k);
 
 /* ---- 交互: 滚动 ---- */
 /* 点位下最深的 overflow 容器(可滚动元素), 无则 NULL */

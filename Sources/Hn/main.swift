@@ -339,6 +339,15 @@ case "eval":
     let r = rpc(["op": "eval", "id": id, "js": js]) ?? [:]
     if let v = r["value"] { print(v) } else { print("失败: \(r["error"] ?? "?")"); exit(1) }
 
+case "lifecycle":
+    /* 事件类型走 --kind(与 event 一致); o.message 从未被 --message 填充,
+       用它会导致命令永远打印用法。 */
+    guard let id = o.id, let k = o.kind ?? o.message else { usage(); exit(2) }
+    let r = rpc(["op": "lifecycle", "id": id, "kind": k]) ?? [:]
+    if let d = r["dispatched"] as? Bool {
+        print(d ? "已派发: \(k)" : "该页面未声明 hn-lifecycle=\"\(k)\"")
+    } else { print("失败: \(r["error"] ?? "?")"); exit(1) }
+
 case "anim":
     guard let id = o.id else { usage(); exit(2) }
     let r = rpc(["op": "anim", "id": id]) ?? [:]
