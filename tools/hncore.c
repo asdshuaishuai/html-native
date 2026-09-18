@@ -79,7 +79,13 @@ static const char *asset_load(void *ctx, const char *path, size_t *len) {
     size_t n = 0;
     char *d = read_asset(path, &n);
     if (!d) return NULL;
-    asset_tab[asset_n].path = strdup(path);
+    /* strdup 是 POSIX 而非 C99, 严格 c99 下(musl/Windows libc)不声明它 ——
+       交叉构建会报 implicit declaration 并因此把返回值当 int。 */
+    size_t pn = strlen(path);
+    char *pcopy = (char *)malloc(pn + 1);
+    if (!pcopy) { free(d); return NULL; }
+    memcpy(pcopy, path, pn + 1);
+    asset_tab[asset_n].path = pcopy;
     asset_tab[asset_n].data = d;
     asset_tab[asset_n].len = n;
     asset_n++;

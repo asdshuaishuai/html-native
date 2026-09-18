@@ -88,6 +88,17 @@ void hn_context_set_assets(hn_context *c, const hn_asset_backend *backend) {
 
 const hn_asset_backend *hn_context_assets(hn_context *c) { return c ? c->assets : NULL; }
 
+/* strdup 是 POSIX 而非 C99 —— 在 `-std=c99` 下 musl/Windows libc 不声明它,
+   交叉构建直接报 implicit declaration。自己实现一份, 保持引擎纯 C99。 */
+static char *hn_strdup(const char *s) {
+    if (!s) return NULL;
+    size_t n = strlen(s);
+    char *p = (char *)malloc(n + 1);
+    if (!p) return NULL;
+    memcpy(p, s, n + 1);
+    return p;
+}
+
 /* ---- Lottie 缓存(按路径) ---- */
 
 struct hn_lottie *hn_context_lottie(hn_context *c, const char *path) {
@@ -103,7 +114,7 @@ struct hn_lottie *hn_context_lottie(hn_context *c, const char *path) {
             if (!nv) return NULL;
             c->lot = nv; c->cap_lot = nc;
         }
-        c->lot[c->n_lot].path = strdup(path);
+        c->lot[c->n_lot].path = hn_strdup(path);
         c->lot[c->n_lot].lottie = NULL;
         c->n_lot++;
         return NULL;
@@ -114,7 +125,7 @@ struct hn_lottie *hn_context_lottie(hn_context *c, const char *path) {
         if (!nv) { hn_lottie_free(l); return NULL; }
         c->lot = nv; c->cap_lot = nc;
     }
-    c->lot[c->n_lot].path = strdup(path);
+    c->lot[c->n_lot].path = hn_strdup(path);
     c->lot[c->n_lot].lottie = l;
     c->n_lot++;
     return l;

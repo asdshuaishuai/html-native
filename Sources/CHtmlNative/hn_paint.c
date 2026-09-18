@@ -287,6 +287,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     if (alpha <= 0.001f) return;
     if (g->depth > HN_PAINT_MAX_DEPTH) return;      /* 纵向异常 */
     if (++g->nodes > HN_PAINT_MAX_NODES) return;    /* 横向环/规模异常 */
+    int clipped = 0;   /* 见下方 goto 处的说明: 必须在此初始化 */
 
     if (n->kind == HN_TEXT) {
         paint_runs(c, n, pst, alpha, sx, sy, g);
@@ -587,8 +588,13 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         push_cmd(c, &cmd);
     }
 
-    /* overflow 容器: 裁剪 + 子树滚动偏移 */
-    int clipped = st->overflow != 0;
+    /* overflow 容器: 裁剪 + 子树滚动偏移。
+       clipped 在函数开头就初始化: 上面的 3D 分支会 `goto draw_children`
+       跳过本声明, 在 C 里那等于**未初始化**(不是 0)。后果是 3D 变换的
+       overflow 容器可能在没 push 过 CLIP_PUSH 的情况下走到末尾的
+       `if (clipped)` 发一个 CLIP_POP —— 后端裁剪栈弹出空栈,
+       CoreGraphics 的 restoreGState 与 hnsoft 的 clip 栈都会错位。 */
+    clipped = st->overflow != 0;
     if (clipped) {
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
