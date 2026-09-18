@@ -110,7 +110,17 @@ typedef struct hn_style {
     unsigned char white_space;    /* 0=normal 1=nowrap 2=pre 3=pre-wrap */
     /* ---- 几何与动画声明(可插值) ---- */
     float      translate_x, translate_y;  /* translate: x y */
-    float      scale;                     /* scale: n (默认 1) */
+    float      scale;                     /* scale: n (默认 1) —— 等比 */
+    /* scaleX()/scaleY()/scale(x,y) 的**非等比**分量。与 scale 相乘生效:
+       scale 既是"等比那一路"的载体也是动画插值字段, 所以非等比单独存,
+       不能把 scale 覆盖成 x 分量 —— 那会让动画只驱动一个轴。 */
+    float      scale_x, scale_y;          /* 默认 1; 与 scale 相乘 */
+    /* transform-origin: <x> <y>(px 或 %)。缺省 = 盒中心(50% 50%)。
+       之前完全没有 —— 于是所有 rotate/scale 都以盒中心为原点,
+       想绕左上角转(铰链/表盘)只能靠 translate 硬凑。 */
+    float      origin_x, origin_y;        /* 相对盒左上角的 px 偏移 */
+    unsigned char has_origin;
+    unsigned char origin_pct_x, origin_pct_y;  /* 1 = 上两项是 0..1 的分数 */
     unsigned char anim_ease;              /* 过渡缓动(HN_EASE_*) */
     float      cb[4];                     /* cubic-bezier 参数 */
     unsigned char anim_enter;             /* 入场动画预设(HN_ENTER_*), 0=无 */

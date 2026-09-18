@@ -271,6 +271,12 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   (函数式颜色支持含空格写法); 单位 **px/pt/%/em/rem/vw/vh**;
   `display:inline-flex`(外层原子行内盒); `border-radius:50%`(百分比圆角);
   `text-decoration(underline/line-through/overline)`; `list-style(none/square/circle)`;
+  **变换引擎**:**非等比缩放**(`scale(x,y)` / `scaleX()` / `scaleY()` ——
+  之前只取第一个参数, `scale(2,1)` 被当成等比 2, 图形纵向也被拉高一倍)、
+  **`transform-origin`**(px 与 %; 之前完全没有, 所有 rotate/scale 都以盒中心
+  为原点, 想绕左上角转只能靠 translate 硬凑而且角度是错的)、
+  **3D 变换**(`rotateX/Y/Z` + 透视投影 + `translateZ` 深度缩放)。
+  `translateZ`/`rotate3d` 目前只解析不投影(需完整 3D 矩阵管线), 其余全部生效。
   **选择器引擎强化**:**属性选择器**(`[a]` `[a=v]` `[a^=]` `[a$=]` `[a*=]` `[a~=]`)、
   **`:not()`**(否定一层简单复合, 实参按标准计入特异性)、
   **`:nth-of-type()` / `:first-of-type` / `:last-of-type`**(只数同标签兄弟 ——

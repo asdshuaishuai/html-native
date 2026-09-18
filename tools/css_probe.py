@@ -442,6 +442,43 @@ b = run(page("#x{width:calc(100% - 40px);height:10}", "<div id='x'></div>")
 ck("calc 负值 clamp 到 0", run(page("#x{width:calc(100% - 900px)}", "<div id='x'></div>")
         ).get("x",[None])[0][2] >= 0, True)
 
+# ============ 变换引擎(非等比缩放 / transform-origin) ============
+# 先探针后实现: 三项都是"写了不生效"且不报错。
+
+def quads(html, w=400, h=300):
+    """返回绘制指令里 RECT/QUAD 的行(带坐标), 用来判断变换是否真的应用。"""
+    p = os.path.join(D, "t.html")
+    open(p, "w").write(html)
+    out = subprocess.run([HN, "paint", p, str(w), str(h)],
+                         capture_output=True, text=True).stdout
+    return [l for l in out.splitlines()
+            if l.startswith("RECT") or l.startswith("QUAD")]
+
+R = "<div id='c' style='width:100;height:40;background:#ff0000;%s'></div>"
+
+# scale(x, y) 非等比: 之前只取第一个参数, scale(2,1) 被当成等比 2
+q = quads(R % "transform:scale(2,1)")
+ck("scale(x,y) 非等比(200x40)", True,
+   len(q) == 1 and " 200.0" in q[0] and " 40.0" in q[0])
+# scaleX()
+q = quads(R % "transform:scaleX(2)")
+ck("scaleX(2) 生效(200x40)", True,
+   len(q) == 1 and " 200.0" in q[0] and " 40.0" in q[0])
+# scaleY()
+q = quads(R % "transform:scaleY(2)")
+ck("scaleY(2) 生效(100x80)", True,
+   len(q) == 1 and " 100.0" in q[0] and " 80.0" in q[0])
+# transform-origin: 0 0 绕左上角转 90° —— 100x40 应变成 40x100 且向左下延伸
+q0 = quads(R % "transform:rotate(90deg);transform-origin:0 0")
+qc = quads(R % "transform:rotate(90deg)")
+ck("transform-origin 生效(与缺省输出不同)", True, q0 != qc and len(q0) == 1)
+# 绕左上角转 90°: 角点应落在 (0,0) 与 (-40,100) 上
+ck("transform-origin:0 0 的旋转角点正确", True,
+   len(q0) == 1 and "(0.0,0.0)" in q0[0] and "(-40.0,100.0)" in q0[0])
+# 缺省 origin(盒中心)旋转后中心应仍约在原盒中心
+ck("缺省 transform-origin 仍为盒中心", True,
+   len(qc) == 1 and "(30.0,70.0)" in qc[0])
+
 # ============ 透明背景层(端到端) ============
 # 这是核心卖点之一: hn-transparent 的文档必须真的逐像素透明。
 # 两个曾导致"声明了透明却是一块实色"的 bug 都在光栅器里(见

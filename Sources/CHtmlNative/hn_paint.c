@@ -31,32 +31,44 @@ static hn_color anim_color(const float v[4]) {
 typedef struct {
     int   depth;
     int   nodes;
-    float scale;   /* 累积缩放(默认 1) */
+    float scale;   /* 累积等比缩放(默认 1) */
+    float scale_x, scale_y;  /* 累积**非等比**分量(默认 1) */
     float ox, oy;  /* 缩放原点(绝对坐标) */
 } paint_guard;
 
 /* ---- 3D 变换 ---- */
 
 /* 把盒子四角经 3D 旋转 + 透视投影得到屏幕坐标。
-   旋转原点 = 盒中心(与 CSS transform-origin: 50% 50% 一致)。
+   旋转原点 = transform-origin(缺省 50% 50% 即盒中心)。
    返回 1 表示存在实际 3D 倾斜(需要按四边形绘制), 0 表示无需变换。 */
 static int project_3d(const hn_style *st, float bx, float by, float bw, float bh,
                       float persp, float sx, float sy,
                       float ox[4], float oy[4]) {
     if (st->rotate_x == 0 && st->rotate_y == 0 && st->rotate == 0) return 0;
     const float D2R = 3.14159265358979f / 180.0f;
-    float cx = bx + bw * 0.5f, cy = by + bh * 0.5f;
+    /* transform-origin: 之前这里写死盒中心, 声明了 origin 也无效 ——
+       绕左上角转(铰链/表盘)只能靠 translate 硬凑, 而且凑出来的角度是错的。 */
+    float cx = bx + (st->has_origin
+                     ? (st->origin_pct_x ? st->origin_x * bw : st->origin_x)
+                     : bw * 0.5f);
+    float cy = by + (st->has_origin
+                     ? (st->origin_pct_y ? st->origin_y * bh : st->origin_y)
+                     : bh * 0.5f);
     float rx = st->rotate_x * D2R, ry = st->rotate_y * D2R, rz = st->rotate * D2R;
     float cxr = cosf(rx), sxr = sinf(rx);
     float cyr = cosf(ry), syr = sinf(ry);
     float czr = cosf(rz), szr = sinf(rz);
     float dist = persp > 0 ? persp : 0;      /* 0 = 正交投影 */
-    /* 四角(局部坐标, 相对盒中心) */
-    float lx[4] = { -bw * 0.5f,  bw * 0.5f,  bw * 0.5f, -bw * 0.5f };
-    float ly[4] = { -bh * 0.5f, -bh * 0.5f,  bh * 0.5f,  bh * 0.5f };
+    /* 四角取**盒左上为基准**, 再减 origin 得到相对原点的局部坐标。
+       早先这里存的是"相对盒中心"的坐标, 而 origin 支持加进来之后
+       cx/cy 可能不是盒中心 —— 于是盒子自身相对原点的偏移被丢掉,
+       表现为"绕左上角转"实际绕的是"变换后图形的中心"。
+       origin 缺省(盒中心)时两者等价, 所以只有显式声明 origin 才暴露。 */
+    float lx[4] = { 0, bw, bw, 0 };
+    float ly[4] = { 0, 0, bh, bh };
     int tilted = 0;
     for (int i = 0; i < 4; i++) {
-        float x = lx[i], y = ly[i], z = 0;
+        float x = bx + lx[i] - cx, y = by + ly[i] - cy, z = 0;
         /* 绕 X */
         float y1 = y * cxr - z * sxr, z1 = y * sxr + z * cxr;
         /* 绕 Y */
@@ -84,12 +96,14 @@ static int project_3d(const hn_style *st, float bx, float by, float bw, float bh
     return 1;
 }
 
-/* 绝对坐标 → 设备坐标(先绕原点缩放, 再减滚动偏移) */
+/* 绝对坐标 → 设备坐标(先绕原点缩放, 再减滚动偏移)。
+   x/y 各自用**自己的**缩放分量 —— 之前只有一个 scale, 于是 scale(2,1)
+   被当成等比 2 处理(图形纵向也被拉高一倍)。 */
 static inline float tfx(const paint_guard *g, float sx, float x) {
-    return (x - g->ox) * g->scale + g->ox - sx;
+    return (x - g->ox) * g->scale * g->scale_x + g->ox - sx;
 }
 static inline float tfy(const paint_guard *g, float sy, float y) {
-    return (y - g->oy) * g->scale + g->oy - sy;
+    return (y - g->oy) * g->scale * g->scale_y + g->oy - sy;
 }
 
 static void push_cmd(hn_context *c, hn_cmd *cmd);
@@ -249,7 +263,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
 
 static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
                        float alpha, float sx, float sy) {
-    paint_guard g = { 0, 0, 1.0f, 0, 0 };
+    paint_guard g = { 0, 0, 1.0f, 1.0f, 1.0f, 0, 0 };
     paint_walk_g(c, n, pst, alpha, sx, sy, &g);
 }
 
@@ -310,17 +324,34 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
        两者都由动画插值写入样式字段, 这里只读消费。 */
     float saved_sx = sx, saved_sy = sy;
     float saved_scale = g->scale, saved_ox = g->ox, saved_oy = g->oy;
+    float saved_scale_x = g->scale_x, saved_scale_y = g->scale_y;
     /* 透视视距: 元素自身的 perspective, 否则取父级的(与 CSS 一致) */
     float persp = st->perspective;
     if (persp <= 0 && pst) persp = pst->perspective;
     if (st->translate_x != 0) sx -= st->translate_x;
     if (st->translate_y != 0) sy -= st->translate_y;
-    if (st->scale != 1.0f && st->scale > 0.01f) {
-        /* 新原点 = 元素盒中心(绝对坐标) */
+    /* ---- 缩放 + 缩放原点 ----
+       transform-origin 之前完全没实现: 所有 rotate/scale 都以**盒中心**为原点。
+       想绕左上角转(铰链/表盘)只能靠 translate 硬凑 —— 凑出来的角度还不对。
+       origin 的 % 在此处才能解出(要盒尺寸), 所以解析期只存分数。
+       注意 origin 只在**有缩放或旋转**时才需要, 但设了也要生效(即使只有
+       rotate —— 旋转同样围绕它)。 */
+    float ox_want = 0.0f, oy_want = 0.0f;
+    int want_origin = (st->scale != 1.0f && st->scale > 0.01f)
+                   || st->scale_x != 1.0f || st->scale_y != 1.0f;
+    if (st->has_origin && want_origin) {
+        ox_want = st->origin_pct_x ? st->origin_x * n->bw : st->origin_x;
+        oy_want = st->origin_pct_y ? st->origin_y * n->bh : st->origin_y;
+        g->ox = n->bx + ox_want;
+        g->oy = n->by + oy_want;
+    } else if (want_origin) {
+        /* 缺省 = 盒中心(50% 50%), 与 CSS 一致 */
         g->ox = n->bx + n->bw * 0.5f;
         g->oy = n->by + n->bh * 0.5f;
-        g->scale = saved_scale * st->scale;
     }
+    if (st->scale != 1.0f && st->scale > 0.01f) g->scale = saved_scale * st->scale;
+    if (st->scale_x != 1.0f) g->scale_x = saved_scale_x * st->scale_x;
+    if (st->scale_y != 1.0f) g->scale_y = saved_scale_y * st->scale_y;
 
     /* 列表标记: li 且父为 ul/ol(背景之上、内容之左) */
     if (n->tag && !strcmp(n->tag, "li") && n->parent && n->parent->tag
@@ -336,7 +367,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         if (lsrc) {
             struct hn_lottie *l = hn_context_lottie(c, lsrc);
             if (l) {
-                float bw = n->bw * g->scale, bh = n->bh * g->scale;
+                float bw = n->bw * g->scale * g->scale_x, bh = n->bh * g->scale * g->scale_y;
                 float bx = tfx(g, sx, n->bx), by = tfy(g, sy, n->by);
                 /* 元素盒背景仍要画(承载底色/圆角), 动画画在其上 */
                 int lf = (st->background & 0xFFu) || st->has_gradient;
@@ -371,7 +402,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     if (n->tag && (hn_node_attr(n, "hn-mesh") || n->mesh_verts)) {
         const char *msrc = hn_node_attr(n, "src");
         if (msrc && *msrc) {
-            hn_mesh_emit(c, n, msrc, n->bw * g->scale, n->bh * g->scale,
+            hn_mesh_emit(c, n, msrc, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
                          tfx(g, sx, n->bx), tfy(g, sy, n->by), alpha);
             return;
         }
@@ -385,7 +416,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_IMAGE;
             cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by);
-            cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
+            cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
             cmd.text = src;
             cmd.text_len = strlen(src);
@@ -402,7 +433,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_RECT;
-            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
+            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
             cmd.fill = mul_alpha(st->background, alpha);
             cmd.stroke = mul_alpha(st->border_color, alpha);
@@ -502,7 +533,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_RECT;
-            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
+            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
             cmd.radius = st->radius;
             cmd.fill = mul_alpha(st->background, alpha);
             cmd.stroke = mul_alpha(st->border_color, alpha);
@@ -524,7 +555,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             memset(&bg, 0, sizeof(bg));
             bg.kind = HN_CMD_RECT;
             bg.x = tfx(g, sx, n->bx); bg.y = tfy(g, sy, n->by);
-            bg.w = n->bw * g->scale; bg.h = n->bh * g->scale;
+            bg.w = n->bw * g->scale * g->scale_x; bg.h = n->bh * g->scale * g->scale_y;
             bg.radius = eff_radius(st, bg.w, bg.h);
             bg.fill = mul_alpha(st->background, alpha);
             if (st->has_gradient) {
@@ -576,7 +607,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             goto draw_children;
         }
         cmd.kind = HN_CMD_RECT;
-        cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale; cmd.h = n->bh * g->scale;
+        cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
         cmd.radius = eff_radius(st, cmd.w, cmd.h);
         cmd.fill = mul_alpha(st->background, alpha);
         cmd.stroke = mul_alpha(st->border_color, alpha);
@@ -637,7 +668,8 @@ draw_children:
 
     /* 恢复本层之前的变换状态(兄弟节点不受影响) */
     sx = saved_sx; sy = saved_sy;
-    g->scale = saved_scale; g->ox = saved_ox; g->oy = saved_oy;
+    g->scale = saved_scale; g->scale_x = saved_scale_x; g->scale_y = saved_scale_y;
+    g->ox = saved_ox; g->oy = saved_oy;
 
     if (clipped) {
         hn_cmd cmd;

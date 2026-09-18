@@ -52,6 +52,7 @@ void hn_style_default(hn_style *st) {
     for (int i = 0; i < 4; i++) { st->margin_u[i] = HN_U_PX; st->padding_u[i] = HN_U_PX; }
     st->flex_shrink = 1;
     st->scale = 1.0f;
+    st->scale_x = st->scale_y = 1.0f;
     st->z_index = 0;
 }
 
@@ -196,6 +197,13 @@ static int sv_color(sv t, hn_color *out) {
 
 /* 整条声明值按一个颜色解析(hsl(120, 50%, 50%) 这类含空格的函数式) */
 static int sv_color_full(sv t, hn_color *out) { return sv_color(t, out); }
+
+/* next_tok 取一个 token 再 sv_len(独立属性用) */
+static int sv_len_nt(sv *v, float font_px, float *out, int *unit) {
+    sv t;
+    if (!next_tok(v, &t)) return 0;
+    return sv_len(t, font_px, out, unit);
+}
 
 /* ---------- 声明应用 ---------- */
 
@@ -572,13 +580,53 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             if (!strcasecmp(buf, "rotate") || !strcasecmp(buf, "rotatez")) st->rotate = a1;
             else if (!strcasecmp(buf, "rotatex")) st->rotate_x = a1;
             else if (!strcasecmp(buf, "rotatey")) st->rotate_y = a1;
-            else if (!strcasecmp(buf, "scale")) st->scale = a1;
+            else if (!strcasecmp(buf, "scale")) {
+                /* scale(x, y): 第二个参数缺省 = 第一个(等比)。之前只取 a1,
+                   于是 scale(2,1) 被当成等比 2 —— 图形被纵向拉高一倍。 */
+                st->scale_x = a1;
+                st->scale_y = comma ? a2v : a1;
+                if (!comma) st->scale = a1;
+            }
+            else if (!strcasecmp(buf, "scalex")) st->scale_x = a1;
+            else if (!strcasecmp(buf, "scaley")) st->scale_y = a1;
             else if (!strcasecmp(buf, "skewx")) st->skew_x = a1;
             else if (!strcasecmp(buf, "skewy")) st->skew_y = a1;
             else if (!strcasecmp(buf, "translatex")) st->translate_x = a1;
             else if (!strcasecmp(buf, "translatey")) st->translate_y = a1;
             else if (!strcasecmp(buf, "translate")) { st->translate_x = a1; st->translate_y = a2v; }
         }
+    } else if (!strcmp(name, "transform-origin")) {
+        /* <x> <y>, px 或 %。缺省 50% 50%(盒中心)。
+           % 在解析期换算不了 —— 要知道盒尺寸, 所以保留百分比标记,
+           由绘制期按盒宽高解出(见 hn_paint.c)。 */
+        int nth = 0;
+        float vv[2]; unsigned char pct[2];
+        while (next_tok(&v, &t) && nth < 2) {
+            char b3[32]; size_t cp = t.n < sizeof(b3) - 1 ? t.n : sizeof(b3) - 1;
+            memcpy(b3, t.s, cp); b3[cp] = 0;
+            char *e = NULL; float fv = strtof(b3, &e);
+            if (e == b3) continue;
+            pct[nth] = (*e == '%') ? 1 : 0;
+            vv[nth] = fv; nth++;
+        }
+        if (nth > 0) {
+            st->has_origin = 1;
+            /* 百分比先存百分数, 绘制期换算; px 直接存像素 */
+            if (pct[0]) { st->origin_x = vv[0] * 0.01f; st->origin_pct_x = 1; }
+            else { st->origin_x = vv[0]; st->origin_pct_x = 0; }
+            if (nth > 1) {
+                if (pct[1]) { st->origin_y = vv[1] * 0.01f; st->origin_pct_y = 1; }
+                else { st->origin_y = vv[1]; st->origin_pct_y = 0; }
+            } else {
+                st->origin_y = 0.5f; st->origin_pct_y = 1;   /* 单值时 y 默认 50% */
+            }
+        }
+    } else if (!strcmp(name, "scale-x")) {
+        int u; float f2;
+        if (sv_len_nt(&v, st->font_size, &f2, &u)) st->scale_x = f2;
+    } else if (!strcmp(name, "scale-y")) {
+        int u; float f2;
+        if (sv_len_nt(&v, st->font_size, &f2, &u)) st->scale_y = f2;
     } else if (!strcmp(name, "perspective")) {
         int u; float f2;
         if (next_tok(&v, &t) && sv_eq(t, "none")) st->perspective = 0;
