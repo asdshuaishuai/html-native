@@ -432,7 +432,17 @@ int main(int argc, char **argv) {
         const hn_display_list *dl = hn_context_display_list(ctx);
         if (!dl) { fprintf(stderr, "hncore: 无绘制指令\n"); rc = 1; }
         else {
-            unsigned char *px = hnsoft_render(dl, (int)W, (int)H, 0x0B0E13FF);
+            /* 声明 hn-transparent 的文档画布必须是全透明的 —— 否则引擎把
+               html/body 底色剥掉了, 光栅器却又铺了一层不透明底, 透明背板
+               直接失效(表现为"声明了透明却渲染出一块实色")。 */
+            hn_color rbg = 0x0B0E13FFu;
+            {
+                hn_manifest mm;
+                memset(&mm, 0, sizeof(mm));
+                hn_doc_manifest(doc, &mm);
+                if (mm.transparent == 1) rbg = 0x00000000u;
+            }
+            unsigned char *px = hnsoft_render(dl, (int)W, (int)H, rbg);
             if (!px) { fprintf(stderr, "hncore: 渲染失败\n"); rc = 1; }
             else {
                 size_t pn = 0;
@@ -462,7 +472,13 @@ int main(int argc, char **argv) {
         const hn_display_list *dl = hn_context_display_list(ctx);
         if (!dl) { fprintf(stderr, "hncore: 无绘制指令\n"); rc = 1; }
         else {
-            unsigned char *px = hncairo_render(dl, (int)W, (int)H, 0x0B0E13FF);
+            hn_color cbg = 0x0B0E13FFu;
+            {
+                hn_manifest mm; memset(&mm, 0, sizeof(mm));
+                hn_doc_manifest(doc, &mm);
+                if (mm.transparent == 1) cbg = 0x00000000u;
+            }
+            unsigned char *px = hncairo_render(dl, (int)W, (int)H, cbg);
             if (!px) { fprintf(stderr, "hncore: cairo 渲染失败\n"); rc = 1; }
             else {
                 size_t pn = 0;

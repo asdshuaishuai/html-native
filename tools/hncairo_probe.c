@@ -21,7 +21,16 @@
 #include <string.h>
 #include <cairo.h>
 #include <math.h>
+#include <stdarg.h>
 
+/* printf 到静态缓冲后当 label 用(ck 只取 const char*) */
+static char g_fmt[160];
+static const char *fmt(const char *f, ...) {
+    va_list ap; va_start(ap, f);
+    vsnprintf(g_fmt, sizeof(g_fmt), f, ap);
+    va_end(ap);
+    return g_fmt;
+}
 static int fails = 0;
 static void ck(int c, const char *l) { printf("%s %s\n", c ? "  v" : "  X", l); if (!c) fails++; }
 
@@ -200,6 +209,44 @@ int main(void) {
             ck(op > 5000, "透明背板: 矩形本体不透明");
             ck(pa > 0, "透明背板: 圆角边缘有半透明过渡");
         } else { ck(0, "透明背板: 渲染失败"); }
+    }
+
+    /* alpha 合成语义: 半透明色画到**透明**像素上, 颜色必须不被折半、alpha
+       必须是源 alpha。这是 hnsoft 曾经的 bug 现场 —— 它的 blend() 只写 RGB
+       不写 alpha, 于是半透明绿画到透明画布上变成 (0,128,0,255) 而不是
+       (0,255,0,128): 颜色深了一半, 而且整张画布 alpha 恒为 255,
+       透明背板直接失效成一块黑底。 */
+    {
+        PW = 100; PH = 100;
+        hn_cmd one = (hn_cmd){0};
+        one.kind = HN_CMD_RECT; one.x = 10; one.y = 10;
+        one.w = 80; one.h = 80; one.fill = 0x00FF0080u;   /* 绿 50% */
+        if (draw(&one, 1, 0x00000000u)) {
+            unsigned c = px(50, 50);
+            ck(((c >> 24) & 0xFF) == 128, fmt("alpha 合成: 半透明绿落透明底 alpha=0x80 (实际 0x%02X)", (unsigned)(c >> 24)));
+            ck(((c >> 8) & 0xFF) > 240, fmt("alpha 合成: 绿色不被折半 (实际 0x%02X)", (unsigned)((c >> 8) & 0xFF)));
+            int outside = 0;
+            for (int y = 92; y < 100; y++)
+                for (int x = 92; x < 100; x++)
+                    if (P[((size_t)y * PW + x) * 4 + 3] == 0) outside++;
+            ck(outside == 64, fmt("alpha 合成: 图形之外仍全透明 (%d/64)", outside));
+        } else { ck(0, "alpha 合成: 渲染失败"); }
+    }
+
+    /* 双重半透明叠加: 两层 50% 应得 75% alpha(1-(1-0.5)^2),
+       既不是 100% 也不是 50% —— 这条能抓住"alpha 被 clamp 到 255"和
+       "alpha 直接取源值"两类实现错误。 */
+    {
+        hn_cmd two[2]; memset(two, 0, sizeof(two));
+        for (int i = 0; i < 2; i++) {
+            two[i].kind = HN_CMD_RECT; two[i].x = 20; two[i].y = 20;
+            two[i].w = 40; two[i].h = 40; two[i].fill = 0xFF000080u;
+        }
+        if (draw(two, 2, 0x00000000u)) {
+            unsigned a = P[((size_t)40 * PW + 40) * 4 + 3];
+            ck(a > 165 && a < 215,
+               fmt("alpha 合成: 两层 50%% 叠加得 ≈75%% (实际 %u)", a));
+        } else { ck(0, "alpha 叠加: 渲染失败"); }
     }
 
     /* MESH: UV 贴图(Live2D 类网格变形)。用 cairo 现造一张 64x64 四色源图,

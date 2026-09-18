@@ -36,11 +36,35 @@ static fcolor unpack(hn_color c) {
     return r;
 }
 
+/* source-over 合成(**非预乘** RGBA 空间 —— 与 hn_color 语义一致, 也是调用方
+   拿到缓冲后直接期待的布局)。
+   之前这个函数只写 RGB 不写 alpha, 于是光栅器里 alpha 恒为 255 ——
+   半透明色画到透明像素上, 颜色被折半(变得很深)而 alpha 仍是 255, 出来是一块
+   深色而不是"淡色叠加"。透明背板之所以必须修这里, 就是因为整条 alpha 链
+   在最后一环断了。 */
 static void blend(unsigned char *px, fcolor c) {
-    float ia = 1.0f - c.a;
-    px[0] = (unsigned char)((c.r * 255.0f * c.a + px[0] * ia) + 0.5f);
-    px[1] = (unsigned char)((c.g * 255.0f * c.a + px[1] * ia) + 0.5f);
-    px[2] = (unsigned char)((c.b * 255.0f * c.a + px[2] * ia) + 0.5f);
+    float sa = c.a;
+    if (sa <= 0.0f) return;
+    float da = px[3] / 255.0f;
+    if (sa >= 0.999f && da >= 0.999f) {          /* 快路: 双不透明 */
+        px[0] = (unsigned char)(c.r * 255.0f + 0.5f);
+        px[1] = (unsigned char)(c.g * 255.0f + 0.5f);
+        px[2] = (unsigned char)(c.b * 255.0f + 0.5f);
+        px[3] = 255;
+        return;
+    }
+    float oa = sa + da * (1.0f - sa);            /* 出 alpha */
+    if (oa <= 0.0005f) { px[0]=px[1]=px[2]=px[3]=0; return; }
+    /* 非预乘: 先把两侧转预乘再相加, 最后除回去 */
+    float sr = c.r * sa, sg = c.g * sa, sb = c.b * sa;
+    float dr = (px[0] / 255.0f) * da, dg = (px[1] / 255.0f) * da, db = (px[2] / 255.0f) * da;
+    float orr = (sr + dr * (1.0f - sa)) / oa;
+    float og = (sg + dg * (1.0f - sa)) / oa;
+    float ob = (sb + db * (1.0f - sa)) / oa;
+    px[0] = (unsigned char)(orr * 255.0f + 0.5f);
+    px[1] = (unsigned char)(og * 255.0f + 0.5f);
+    px[2] = (unsigned char)(ob * 255.0f + 0.5f);
+    px[3] = (unsigned char)(oa * 255.0f + 0.5f);
 }
 
 /* ---------------- 帧缓冲 ---------------- */
@@ -60,8 +84,13 @@ static void fb_init(fb *f, int w, int h, hn_color bg) {
     unsigned char r = (unsigned char)(b.r * 255 + 0.5f);
     unsigned char g = (unsigned char)(b.g * 255 + 0.5f);
     unsigned char bl = (unsigned char)(b.b * 255 + 0.5f);
+    /* alpha 取**底色自己的** alpha: 之前这里硬编码 255, 于是调用方传全透明
+       底色(hnwin.c 就是 hnsoft_render(dl,w,h,0x00000000))时整张画布变成
+       不透明黑 —— 透明背板直接失效, 而且症状是"声明了透明却是一块黑",
+       完全不会怀疑到光栅器。 */
+    unsigned char ba = (unsigned char)(b.a * 255 + 0.5f);
     for (int i = 0; i < w * h; i++) {
-        f->px[i * 4] = r; f->px[i * 4 + 1] = g; f->px[i * 4 + 2] = bl; f->px[i * 4 + 3] = 255;
+        f->px[i * 4] = r; f->px[i * 4 + 1] = g; f->px[i * 4 + 2] = bl; f->px[i * 4 + 3] = ba;
     }
 }
 
@@ -100,7 +129,14 @@ static float sd_rounded(float px, float py, float x, float y, float w, float h, 
     float qx = fabsf(px - (x + w * 0.5f)) - (w * 0.5f - r);
     float qy = fabsf(py - (y + h * 0.5f)) - (h * 0.5f - r);
     float ax = qx > 0 ? qx : 0, ay = qy > 0 ? qy : 0;
-    return sqrtf(ax * ax + ay * ay) + (qx > qy ? qx : (qy > qx ? qy : 0)) - r;
+    /* 最后一项必须用 fmaxf(qx, qy)。原先是
+           (qx > qy ? qx : (qy > qx ? qy : 0))
+       它在 qx == qy 时落到 0 —— 而正方形矩形的中心正好 qx == qy, 于是
+       "内部距离"整项丢失, d 塌成 0, 覆盖率 cov = 0.5。
+       后果: 正方形正中心那个像素的不透明度只有一半(半透明色变成四分之一,
+       不透明色变成 50% alpha)。45° 对角线上每一处都受影响。
+       用 fmaxf 才是圆角盒 SDF 的标准写法。 */
+    return sqrtf(ax * ax + ay * ay) + fmaxf(qx, qy) - r;
 }
 
 /* ---------------- 渐变 ---------------- */

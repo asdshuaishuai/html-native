@@ -292,6 +292,13 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   `hn-lifecycle="launch show hide destroy"` 声明关心哪些生命周期事件,
   未声明的页面一次都不打扰; 事件走**同一条统一事件管道**(JS 处理器与 hx 共用)。
   agent 可用 `hn lifecycle <id> --kind hide` 手动触发, 模拟应用被切到后台
+- **透明背景层**: 引擎剥离 `html/body` 底色 + 三个绘制后端的真逐像素 alpha
+  (cairo 直通、hnsoft 非预乘 source-over、CoreGraphics) + 三平台窗口
+  (`isOpaque=false` / `UpdateLayeredWindow`)。三个光栅层上的历史 bug 都在
+  `tools/hnsoft_alpha_probe.c` 与 css 探针的端到端断言里守着:
+  底色 alpha 曾被硬编码 255、`blend()` 只写 RGB 不写 alpha、
+  `sd_rounded` 在 `qx==qy` 时内部距离塌成 0。实测 `examples/transparent.html`
+  81.7% 全透明 + 10.6% 抗锯齿过渡 + 7.7% 内容。
 - **胶囊持久化(一个文件装下全部)**: `.hnapp` 是单个可携带文件, 参照 Capsule
   "documents that run like apps" 的形态 —— 不再把应用散落在运行时目录里:
   - **文档** html / css

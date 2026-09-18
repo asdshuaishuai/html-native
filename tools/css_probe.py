@@ -442,6 +442,61 @@ b = run(page("#x{width:calc(100% - 40px);height:10}", "<div id='x'></div>")
 ck("calc 负值 clamp 到 0", run(page("#x{width:calc(100% - 900px)}", "<div id='x'></div>")
         ).get("x",[None])[0][2] >= 0, True)
 
+# ============ 透明背景层(端到端) ============
+# 这是核心卖点之一: hn-transparent 的文档必须真的逐像素透明。
+# 两个曾导致"声明了透明却是一块实色"的 bug 都在光栅器里(见
+# tools/hnsoft_alpha_probe.c), 所以这里用真实示例做端到端断言。
+import struct as _st, zlib as _zl
+
+def _alpha_stats(png_path):
+    d = open(png_path, "rb").read()
+    pos, idat, w, h = 8, b"", 0, 0
+    while pos < len(d):
+        ln = _st.unpack(">I", d[pos:pos+4])[0]; typ = d[pos+4:pos+8]
+        if typ == b"IHDR": w, h = _st.unpack(">II", d[pos+8:pos+16])
+        if typ == b"IDAT": idat += d[pos+8:pos+8+ln]
+        pos += 12 + ln
+    raw = _zl.decompress(idat); stride = w*4
+    o = bytearray(); prev = bytearray(stride); i = 0
+    for _y in range(h):
+        f = raw[i]; i += 1
+        line = bytearray(raw[i:i+stride]); i += stride
+        for x in range(stride):
+            a = line[x-4] if x >= 4 else 0
+            b = prev[x]; c2 = prev[x-4] if x >= 4 else 0
+            if f == 1: line[x] = (line[x]+a) & 255
+            elif f == 2: line[x] = (line[x]+b) & 255
+            elif f == 3: line[x] = (line[x]+(a+b)//2) & 255
+            elif f == 4:
+                pp = a+b-c2; pa, pb, pc = abs(pp-a), abs(pp-b), abs(pp-c2)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c2)
+                line[x] = (line[x]+pr) & 255
+        o += line; prev = line
+    tot = tr = pa = 0
+    for i in range(0, w*h, 7):
+        a = o[i*4+3]; tot += 1
+        if a == 0: tr += 1
+        elif a != 255: pa += 1
+    return tr*100.0/tot, pa*100.0/tot
+
+_tr = os.path.join(D, "tr.png")
+_r = subprocess.run([HN, "render", "examples/transparent.html", _tr, "460", "560"],
+                    capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)) + "/..")
+if _r.returncode == 0 and os.path.exists(_tr):
+    trpct, papct = _alpha_stats(_tr)
+    ck("透明背板: 文档大面积真透明(>60%)", True, trpct > 60.0)
+    ck("透明背板: 有半透明过渡(抗锯齿)", True, papct > 1.0)
+else:
+    ck("透明背板: 示例可渲染", False, _r.stderr[:80])
+
+# 未声明透明的文档必须仍然完全不透明(别把普通页面也弄透明了)
+_op = os.path.join(D, "op.png")
+_r2 = subprocess.run([HN, "render", "examples/dashboard.html", _op, "460", "560"],
+                     capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)) + "/..")
+if _r2.returncode == 0 and os.path.exists(_op):
+    trpct2, _ = _alpha_stats(_op)
+    ck("普通文档仍完全不透明(0% 透明)", True, trpct2 == 0.0)
+
 # ============ 报告 ============
 print("通过 %d / 失败 %d" % (len(passed), len(failed)))
 for name, want, got in failed:
