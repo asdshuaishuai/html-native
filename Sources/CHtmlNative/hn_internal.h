@@ -92,6 +92,14 @@ typedef struct hn_style {
     float      rotate_y;      /* rotateY(): 绕 Y 轴, 度 */
     float      perspective;   /* 父级 perspective(n): 视距 px; >0 启用透视 */
     float      skew_x, skew_y;/* skew(): 斜切, 度 */
+    /* translateZ(): 沿 Z 的深度位移(px)。>0 靠近观察者 → 透视下变大。
+       之前只解析不投影 —— 声明了毫无视觉效果。 */
+    float      translate_z;
+    /* rotate3d(x, y, z, angle): 绕**任意轴**旋转。轴在解析期归一化。
+       之前只解析不投影。 */
+    float      r3d_x, r3d_y, r3d_z;   /* 归一化轴 */
+    unsigned char has_r3d;
+    float      r3d_deg;
     /* ---- 定位(脱离流的浮层: 弹窗/下拉/遮罩/固定头) ---- */
     unsigned char position;    /* HN_POS_* */
     unsigned char has_top, has_right, has_bottom, has_left;

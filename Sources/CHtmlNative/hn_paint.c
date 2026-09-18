@@ -44,7 +44,10 @@ typedef struct {
 static int project_3d(const hn_style *st, float bx, float by, float bw, float bh,
                       float persp, float sx, float sy,
                       float ox[4], float oy[4]) {
-    if (st->rotate_x == 0 && st->rotate_y == 0 && st->rotate == 0) return 0;
+    /* 只有"完全没有 3D 变换"时才走矩形快路径。translateZ 与 rotate3d 同样
+       会破坏轴对齐性(透视缩放 / 任意轴旋转), 漏掉它们就等于声明了没反应。 */
+    if (st->rotate_x == 0 && st->rotate_y == 0 && st->rotate == 0
+        && !st->has_r3d && st->translate_z == 0) return 0;
     const float D2R = 3.14159265358979f / 180.0f;
     /* transform-origin: 之前这里写死盒中心, 声明了 origin 也无效 ——
        绕左上角转(铰链/表盘)只能靠 translate 硬凑, 而且凑出来的角度是错的。 */
@@ -58,6 +61,17 @@ static int project_3d(const hn_style *st, float bx, float by, float bw, float bh
     float cxr = cosf(rx), sxr = sinf(rx);
     float cyr = cosf(ry), syr = sinf(ry);
     float czr = cosf(rz), szr = sinf(rz);
+    /* rotate3d(x,y,z,angle): 绕任意轴旋转(Rodrigues 公式)。先于 X/Y/Z 轴旋转
+       施加 —— 与 CSS 的函数复合顺序一致(先写的先作用)。
+       轴已在解析期归一化, 这里只做 sin/cos。 */
+    float c3 = cosf(st->r3d_deg * D2R), s3 = sinf(st->r3d_deg * D2R);
+    float ax = st->r3d_x, ay = st->r3d_y, az = st->r3d_z;
+    float t3 = 1.0f - c3;
+    /*  Rodrigues 的 3x3(行主序):
+        R = t3*A⊗A + c3*I + s3*[A]×  */
+    float r00 = t3*ax*ax + c3,     r01 = t3*ax*ay - s3*az, r02 = t3*ax*az + s3*ay;
+    float r10 = t3*ax*ay + s3*az,  r11 = t3*ay*ay + c3,    r12 = t3*ay*az - s3*ax;
+    float r20 = t3*ax*az - s3*ay,  r21 = t3*ay*az + s3*ax, r22 = t3*az*az + c3;
     float dist = persp > 0 ? persp : 0;      /* 0 = 正交投影 */
     /* 四角取**盒左上为基准**, 再减 origin 得到相对原点的局部坐标。
        早先这里存的是"相对盒中心"的坐标, 而 origin 支持加进来之后
@@ -68,7 +82,17 @@ static int project_3d(const hn_style *st, float bx, float by, float bw, float bh
     float ly[4] = { 0, 0, bh, bh };
     int tilted = 0;
     for (int i = 0; i < 4; i++) {
-        float x = bx + lx[i] - cx, y = by + ly[i] - cy, z = 0;
+        float x = bx + lx[i] - cx, y = by + ly[i] - cy;
+        /* translateZ: 沿 Z 的深度位移。>0 靠近观察者, 透视下图形变大 ——
+           这就是"声明了 translateZ 却毫无变化"缺的那一步。 */
+        float z = st->translate_z;
+        /* 任意轴旋转先施加 */
+        if (st->has_r3d) {
+            float nx = r00*x + r01*y + r02*z;
+            float ny = r10*x + r11*y + r12*z;
+            float nz = r20*x + r21*y + r22*z;
+            x = nx; y = ny; z = nz;
+        }
         /* 绕 X */
         float y1 = y * cxr - z * sxr, z1 = y * sxr + z * cxr;
         /* 绕 Y */
@@ -91,7 +115,10 @@ static int project_3d(const hn_style *st, float bx, float by, float bw, float bh
     /* 判定: 绕 X/Y 旋转或绕 Z 旋转(非 0 角度)都会让矩形不再轴对齐,
        必须按四边形绘制。只有"完全没有旋转变换"时才走矩形快路径
        (translate/scale 不改变轴对齐性, 仍可用矩形 + 宽高缩放)。 */
-    if (st->rotate_x == 0 && st->rotate_y == 0 && fabsf(st->rotate) < 0.01f) return 0;
+    /* translateZ/rotate3d 也会让矩形不再轴对齐(透视缩放或任意轴旋转),
+       所以它们同样必须走四边形路径。 */
+    if (st->rotate_x == 0 && st->rotate_y == 0 && fabsf(st->rotate) < 0.01f
+        && !st->has_r3d && st->translate_z == 0) return 0;
     (void)tilted;
     return 1;
 }

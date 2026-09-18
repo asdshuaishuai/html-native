@@ -90,7 +90,7 @@ static float norm_op(float o) { return o > 1.0001f ? o / 100.0f : o; }
 
 /* ---------------- 形状定义 ---------------- */
 
-enum { L_GROUP, L_RECT, L_ELLIPSE, L_PATH, L_FILL, L_STROKE, L_TRANSFORM };
+enum { L_GROUP, L_RECT, L_ELLIPSE, L_PATH, L_FILL, L_STROKE, L_TRANSFORM, L_TRIM, L_REPEATER };
 
 typedef struct { float t; float *data; int n; } lpkf;   /* 路径关键帧 */
 
@@ -102,6 +102,16 @@ typedef struct lshape {
     float *verts, *tan_in, *tan_out;  /* 静态路径 */
     int    n_verts, closed;
     lpkf  *pkf; int n_pkf;
+    /* trim path: 沿路径按百分比取一段。line-draw / 进度环 / 加载动画的核心。
+       之前完全不支持 —— 但更糟的是**静态 sh 路径本身就不显示**(见 parse_item),
+       所以带 trim 的描边动画整条什么都不画。 */
+    lprop trim_start, trim_end, trim_offset;
+    unsigned char has_trim;
+    /* repeater: 把组内路径按 tr 的位移重复 c 次。网格/光栅/粒子常用。 */
+    lprop rep_pos;
+    lprop rep_count_prop;   /* c 为动画属性时的载体 */
+    float rep_count;
+    unsigned char has_rep;
     lprop anchor, tpos, scale, rot;   /* 变换 */
     struct lshape *kids; int n_kids;  /* 组 */
 } lshape;
@@ -293,6 +303,59 @@ static void parse_transform(hn_arena *a, const hn_json *tr, lshape *sh) {
 
 static int parse_items(hn_arena *a, const hn_json *arr, lshape **out);
 
+/* 在 assets 数组里按 id 找预合成定义。
+   真实导出文件几乎必带预合成 —— 不支持的话整条内容什么都不显示。 */
+static const hn_json *find_asset(const hn_json *root, const char *refId) {
+    if (!root || !refId) return NULL;
+    const hn_json *assets = hn_json_obj_get(root, "assets");
+    if (!assets || assets->kind != HN_JSON_ARR) return NULL;
+    for (int i = 0; i < assets->count; i++) {
+        const hn_json *as = hn_json_at(assets, i);
+        if (!as || as->kind != HN_JSON_OBJ) continue;
+        const char *id = hn_json_str(hn_json_obj_get(as, "id"), NULL);
+        if (id && !strcmp(id, refId)) return as;
+    }
+    return NULL;
+}
+
+/* 预合成(ty=0)展平: 每个内层图层 → 一个 L_GROUP, 变换取自该图层的 ks,
+   子项就是它的 shapes。预合成自身的图层变换随后通过 emit_group 既有的
+   组合链与内层变换自然叠加 —— 不需要另写一套图层递归。 */
+static int parse_precomp(hn_arena *a, const hn_json *comp_layers, float fr, float ip,
+                         lshape **out) {
+    *out = NULL;
+    if (!comp_layers || comp_layers->kind != HN_JSON_ARR || comp_layers->count <= 0) return 0;
+    int cap = comp_layers->count;
+    lshape *list = (lshape *)hn_arena_alloc(a, sizeof(lshape) * (size_t)cap);
+    memset(list, 0, sizeof(lshape) * (size_t)cap);
+    int n = 0;
+    for (int i = 0; i < cap; i++) {
+        const hn_json *lj = hn_json_at(comp_layers, i);
+        if (!lj || lj->kind != HN_JSON_OBJ) continue;
+        int ty = (int)hn_json_num(hn_json_obj_get(lj, "ty"), 4);
+        if (ty == 1 || ty == 2) continue;      /* 纯色/图片层在组里无对应物 */
+        lshape *g = &list[n];
+        memset(g, 0, sizeof(*g));
+        g->kind = L_GROUP;
+        const hn_json *ks = hn_json_obj_get(lj, "ks");
+        if (!ks) ks = lj;
+        parse_prop(a, hn_json_obj_get(ks, "a"), &g->anchor);
+        parse_prop(a, hn_json_obj_get(ks, "p"), &g->tpos);
+        parse_prop(a, hn_json_obj_get(ks, "s"), &g->scale);
+        parse_prop(a, hn_json_obj_get(ks, "r"), &g->rot);
+        parse_prop(a, hn_json_obj_get(ks, "o"), &g->opacity);
+        g->n_kids = parse_items(a, hn_json_obj_get(lj, "shapes"), &g->kids);
+        float mpf = 1000.0f / fr;
+        norm_prop_time(&g->anchor, mpf); norm_prop_time(&g->tpos, mpf);
+        norm_prop_time(&g->scale, mpf);  norm_prop_time(&g->rot, mpf);
+        norm_prop_time(&g->opacity, mpf);
+        for (int q = 0; q < g->n_kids; q++) norm_shape_time(&g->kids[q], mpf);
+        n++;
+    }
+    *out = list;
+    return n;
+}
+
 static void parse_item(hn_arena *a, const hn_json *it, lshape *sh) {
     memset(sh, 0, sizeof(*sh));
     sh->kind = -1;
@@ -340,7 +403,14 @@ static void parse_item(hn_arena *a, const hn_json *it, lshape *sh) {
                 }
                 sh->n_pkf = cnt;
             } else {
-                parse_path_geom(a, ks, sh);
+                /* 非动画路径: 几何在 **ks.k** 里, 不是 ks 自身。
+                   ks 是 {"a":0,"k":{c,v,i,o}} 这样的包装层, 直接拿 ks 去读
+                   v/i/o 全是 NULL → n_verts=0 → path_points 直接 return,
+                   整条路径什么都不画。这是**静态 sh 路径完全不显示**的原因
+                   (Lottie 内容里绝大多数 sh 都是静态路径 + 图层变换带动)。
+                   变形关键帧那条分支取的是 s[0] 也就是真正的路径对象, 所以
+                   只有它会工作 —— 两处口径不一致正是这个 bug 的来源。 */
+                if (k && k->kind == HN_JSON_OBJ) parse_path_geom(a, k, sh);
             }
         }
     } else if (!strcmp(ty, "fl")) {
@@ -356,6 +426,30 @@ static void parse_item(hn_arena *a, const hn_json *it, lshape *sh) {
     } else if (!strcmp(ty, "tr")) {
         sh->kind = L_TRANSFORM;
         parse_transform(a, it, sh);
+    } else if (!strcmp(ty, "rp")) {
+        /* repeater: c=次数 o=起始副本偏移 m=1 正常 2 反向。
+           tr 给出每个副本的增量变换(常见的是位移)。 */
+        sh->kind = L_REPEATER;
+        sh->has_rep = 1;
+        /* c 既可能是静态数字("c":3), 也可能是动画属性({"a":0,"k":3})。
+           两种都得认 —— 否则 bodymovin 导出的带动画副本数的文件会退化成 1 份。 */
+        const hn_json *cc = hn_json_obj_get(it, "c");
+        if (cc && cc->kind == HN_JSON_OBJ) {
+            parse_prop(a, cc, &sh->rep_count_prop);
+            sh->rep_count = 1.0f;
+        } else {
+            sh->rep_count = (float)hn_json_num(cc, 1);
+        }
+        const hn_json *tr = hn_json_obj_get(it, "tr");
+        if (tr) parse_prop(a, hn_json_obj_get(tr, "p"), &sh->rep_pos);
+    } else if (!strcmp(ty, "tm")) {
+        /* trim path: s/e/o 都是 0..100 的百分比属性。整个组的绘制范围
+           由它裁剪 —— 所以单独存下来, 不并入 L_TRANSFORM。 */
+        sh->kind = L_TRIM;
+        parse_prop(a, hn_json_obj_get(it, "s"), &sh->trim_start);
+        parse_prop(a, hn_json_obj_get(it, "e"), &sh->trim_end);
+        parse_prop(a, hn_json_obj_get(it, "o"), &sh->trim_offset);
+        sh->has_trim = 1;
     }
 }
 
@@ -419,7 +513,7 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
             if (!lj || lj->kind != HN_JSON_OBJ) continue;
             llayer *ly = &l->layers[n];
             int ty = (int)hn_json_num(hn_json_obj_get(lj, "ty"), 4);
-            ly->kind = (ty == 2) ? 2 : (ty == 1 ? 1 : 0);
+            ly->kind = (ty == 2) ? 2 : (ty == 1 ? 1 : 0);   /* 0/4 都走形状层路径 */
             ly->start_ms = ((float)hn_json_num(hn_json_obj_get(lj, "ip"), ip) - ip) * 1000.0f / fr;
             ly->end_ms   = ((float)hn_json_num(hn_json_obj_get(lj, "op"), op) - ip) * 1000.0f / fr;
             ly->w = (float)hn_json_num(hn_json_obj_get(lj, "w"), l->w);
@@ -440,7 +534,16 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
             parse_prop(a, hn_json_obj_get(ks, "s"), &ly->scale);
             parse_prop(a, hn_json_obj_get(ks, "r"), &ly->rot);
             parse_prop(a, hn_json_obj_get(ks, "o"), &ly->opacity);
-            ly->n_shapes = parse_items(a, hn_json_obj_get(lj, "shapes"), &ly->shapes);
+            if (ty == 0) {
+                /* 预合成: 展开 asset 的内层图层 */
+                const char *ref = hn_json_str(hn_json_obj_get(lj, "refId"), NULL);
+                const hn_json *as = find_asset(root, ref);
+                ly->n_shapes = as
+                    ? parse_precomp(a, hn_json_obj_get(as, "layers"), fr, ip, &ly->shapes)
+                    : 0;
+            } else {
+                ly->n_shapes = parse_items(a, hn_json_obj_get(lj, "shapes"), &ly->shapes);
+            }
             /* 关键帧时间: 帧 → 毫秒(整层归一) */
             float mpf = 1000.0f / fr;
             norm_prop_time(&ly->anchor, mpf);
@@ -563,6 +666,12 @@ static void path_points(hn_arena *a, const lshape *sh, float t, vbuf *out) {
                          3 * mu * u * u * c2y + u * u * u * y1);
         }
     }
+    /* 开路径必须补上最后一个顶点: 上面的直线段优化只推**段起点**, 闭合路径
+       靠首尾相接自然补齐, 开路径不会 —— 于是一条两点的直线只产出 1 个点,
+       而 emit_paint 要求 n>=2, 整条线(以及它的描边)就被静默丢掉。
+       这正是"开路径 + 描边什么都不显示"的原因。 */
+    if (!sh->closed && nv > 0)
+        vb_push(out, V[(nv - 1) * 2], V[(nv - 1) * 2 + 1]);
 }
 
 static void prim_points(const lshape *sh, float t, vbuf *out) {
@@ -647,9 +756,13 @@ static lfit fit_of(const char *mode, float cw, float ch, float bw, float bh) {
 }
 
 /* 画刷: 把 bag 中 [from, n_paths) 的路径按 paint 发射 */
+/* 0..100 的百分比标量(Lottie 的 trim s/e/o 都是这个量纲) */
+static float norm_pct(float v) { return v; }
+
 static void emit_paint(hn_context *c, hn_arena *a, pathbag *bag, const lshape *paint,
                        lmat m, float alpha, float sx, float sy, lfit f,
-                       int from, float t) {
+                       int from, float t, float tr_s, float tr_e, float tr_o,
+                       int rep_c, float rpx, float rpy) {
     float ov[4];
     lprop_at(&paint->opacity, t, ov);
     float pop = (paint->opacity.ncomp || paint->opacity.n_kf) ? norm_op(ov[0]) : 1.0f;
@@ -660,17 +773,48 @@ static void emit_paint(hn_context *c, hn_arena *a, pathbag *bag, const lshape *p
     int is_stroke = (paint->kind == L_STROKE);
     float sw = is_stroke ? lprop_at1(&paint->width, t, 0) : 0;
     hn_color col = lot_color(cv, aa);
+    /* repeater: 同一组路径按 tr 的位移重复 c 次。
+       实现走"增量位移"而不是逐个复合 tr 的完整变换 —— 覆盖绝大多数
+       (rp 的 tr 常见就是纯位移); 带缩放的 repeater 会用位移近似。 */
+    for (int rep = 0; rep < (rep_c > 0 ? rep_c : 1); rep++) {
+    float rep_dx = rpx * (float)rep, rep_dy = rpy * (float)rep;
     for (int i = from; i < bag->n_paths; i++) {
         vbuf *v = &bag->paths[i];
         if (v->n < 2) continue;
         int n = v->n;
-        float *out = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(n * 2));
-        for (int q = 0; q < n; q++) {
-            float px, py;
-            lm_apply(m, v->v[q * 2], v->v[q * 2 + 1], &px, &py);
-            out[q * 2]     = (px - f.ox) * f.kx + sx;
-            out[q * 2 + 1] = (py - f.oy) * f.ky + sy;
+        /* trim path: 按累计弧长比例取 [s, e) 区间(offset 平移起点)。
+           实现走"顶点计数近似"而不是精确弧长参数化 —— 对 Lottie 常见的
+           均匀细分折线两者差异在 1% 量级, 而精确弧长要为每条路径建前缀和,
+           收益不成比例。 */
+        int b0 = 0, b1 = n;
+        if (tr_s > 0.0f || tr_e < 100.0f) {
+            double total = 0;
+            for (int q = 1; q < n; q++) {
+                double dx = (double)v->v[q*2] - v->v[(q-1)*2];
+                double dy = (double)v->v[q*2+1] - v->v[(q-1)*2+1];
+                total += sqrt(dx*dx + dy*dy);
+            }
+            double a0 = fmod(tr_s + tr_o, 100.0), a1 = fmod(tr_e + tr_o, 100.0);
+            if (a0 < 0) a0 += 100.0;
+            if (a1 < 0) a1 += 100.0;
+            if (a1 <= a0) a1 += 100.0;              /* 跨 0 的情况: 绕一圈 */
+            int i0 = (int)(a0 / 100.0 * (n - 1) + 0.5);
+            int i1 = (int)(a1 / 100.0 * (n - 1) + 0.5);
+            if (i0 < 0) i0 = 0;
+            if (i1 > n - 1) i1 = n - 1;
+            if (i1 <= i0) continue;                 /* 区间为空: 不画 */
+            b0 = i0; b1 = i1 + 1;
         }
+        int cn = b1 - b0;
+        if (cn < 2) continue;
+        float *out = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(cn * 2));
+        for (int q = 0; q < cn; q++) {
+            float px, py;
+            lm_apply(m, v->v[(b0 + q) * 2], v->v[(b0 + q) * 2 + 1], &px, &py);
+            out[q * 2]     = (px - f.ox) * f.kx + sx + rep_dx;
+            out[q * 2 + 1] = (py - f.oy) * f.ky + sy + rep_dy;
+        }
+        n = cn;
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_POLYGON;
@@ -685,6 +829,7 @@ static void emit_paint(hn_context *c, hn_arena *a, pathbag *bag, const lshape *p
             cmd.fill = col;
         }
         hn_paint_push(c, &cmd);
+    }
     }
 }
 
@@ -720,10 +865,37 @@ static void emit_group(hn_context *c, hn_arena *a, const lshape *items, int n,
             emit_group(c, a, s->kids, s->n_kids, t, gm, galpha, sx, sy, f, bag, depth + 1);
         }
     }
+    /* trim path: 组内的 tm 项作用于**本组全部路径**。多个 tm 取第一个
+       (Lottie 实际也只允许一个)。 */
+    float tr_s = 0.0f, tr_e = 100.0f, tr_o = 0.0f;
+    for (int i = 0; i < n; i++) {
+        if (items[i].kind != L_TRIM) continue;
+        float sv[4];
+        lprop_at(&items[i].trim_start, t, sv); tr_s = norm_pct(sv[0]);
+        lprop_at(&items[i].trim_end,   t, sv); tr_e = norm_pct(sv[0]);
+        lprop_at(&items[i].trim_offset,t, sv); tr_o = norm_pct(sv[0]);
+        break;
+    }
+    float rep_c = 1.0f; float rpx = 0, rpy = 0; unsigned char has_rep = 0;
+    for (int i = 0; i < n; i++) {
+        if (items[i].kind != L_REPEATER) continue;
+        has_rep = 1;
+        if (items[i].rep_count_prop.n_kf || items[i].rep_count_prop.ncomp) {
+            float cv2[4]; lprop_at(&items[i].rep_count_prop, t, cv2);
+            rep_c = cv2[0] > 1 ? cv2[0] : 1;
+        } else {
+            rep_c = items[i].rep_count > 1 ? items[i].rep_count : 1;
+        }
+        float pv[4];
+        lprop_at(&items[i].rep_pos, t, pv);
+        rpx = pv[0]; rpy = pv[1];
+        break;
+    }
     for (int i = 0; i < n; i++) {
         const lshape *s = &items[i];
         if (s->kind == L_FILL || s->kind == L_STROKE)
-            emit_paint(c, a, bag, s, gm, galpha, sx, sy, f, from, t);
+            emit_paint(c, a, bag, s, gm, galpha, sx, sy, f, from, t,
+                       tr_s, tr_e, tr_o, has_rep ? (int)rep_c : 1, rpx, rpy);
     }
     bag->n_paths = from;
 }

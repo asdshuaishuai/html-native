@@ -591,6 +591,21 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             else if (!strcasecmp(buf, "scaley")) st->scale_y = a1;
             else if (!strcasecmp(buf, "skewx")) st->skew_x = a1;
             else if (!strcasecmp(buf, "skewy")) st->skew_y = a1;
+            else if (!strcasecmp(buf, "translatez")) st->translate_z = a1;
+            else if (!strcasecmp(buf, "rotate3d")) {
+                /* rotate3d(x, y, z, angle) —— 四个参数, 逗号分隔。
+                   strtod 依次取: a1=x, 之后三个。 */
+                const char *q = lp + 1;
+                float ax = (float)strtod(q, (char **)&q); while (*q == ',' || *q == ' ') q++;
+                float ay = (float)strtod(q, (char **)&q); while (*q == ',' || *q == ' ') q++;
+                float az = (float)strtod(q, (char **)&q); while (*q == ',' || *q == ' ') q++;
+                float ad = (float)strtod(q, NULL);
+                float len = sqrtf(ax*ax + ay*ay + az*az);
+                if (len > 0.0001f) {
+                    st->r3d_x = ax / len; st->r3d_y = ay / len; st->r3d_z = az / len;
+                    st->r3d_deg = ad; st->has_r3d = 1;
+                }
+            }
             else if (!strcasecmp(buf, "translatex")) st->translate_x = a1;
             else if (!strcasecmp(buf, "translatey")) st->translate_y = a1;
             else if (!strcasecmp(buf, "translate")) { st->translate_x = a1; st->translate_y = a2v; }
