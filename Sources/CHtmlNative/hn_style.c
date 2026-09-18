@@ -181,6 +181,15 @@ static void apply_len4(sv v, float font_px, float out[4]) {
     float vals[4];
     int units[4], autos[4], n = 0;
     sv tok;
+    /* units/autos 必须清零: TRBL 简写只解析前 n 个 token, 而下面的
+       em 折算与 g_len4_unit 回传都要读满 4 项。读未初始化的栈内存是
+       未定义行为 —— 实测 zig cc -O2 arm64 下 units[2] 恰好等于 HN_U_EM,
+       于是 `padding: 8 12` 被算成 8×字号(13) = 104px 下内边距,
+       元素凭空高出一大截; 而同一份源码用 clang 或 -O0 编译就正常,
+       所以它表现为"换个编译器/架构结果不一样", 极难定位。 */
+    memset(vals, 0, sizeof(vals));
+    memset(units, 0, sizeof(units));
+    memset(autos, 0, sizeof(autos));
     while (n < 4 && next_tok(&v, &tok)) {
         autos[n] = sv_eq(tok, "auto");
         if (autos[n]) { vals[n] = 0; units[n] = HN_U_PX; }
@@ -188,23 +197,23 @@ static void apply_len4(sv v, float font_px, float out[4]) {
         n++;
     }
     if (!n) return;
-    /* TRBL 展开 */
+    /* TRBL 展开: 值、单位、auto 位三者按同一规则补齐。
+       (早先只补齐了值和 auto, 单位漏了 —— 这正是上面那个 bug 的来源。) */
     if (n == 1) {
-        for (int i = 0; i < 4; i++) { out[i] = vals[0]; autos[i] = autos[0]; }
+        for (int i = 1; i < 4; i++) {
+            vals[i] = vals[0]; units[i] = units[0]; autos[i] = autos[0];
+        }
     } else if (n == 2) {
-        out[0] = out[2] = vals[0]; out[1] = out[3] = vals[1];
-        autos[0] = autos[2] = autos[0]; autos[1] = autos[3] = autos[1];
+        vals[2] = vals[0]; units[2] = units[0]; autos[2] = autos[0];
+        vals[3] = vals[1]; units[3] = units[1]; autos[3] = autos[1];
     } else if (n == 3) {
-        out[0] = vals[0]; out[1] = out[3] = vals[1]; out[2] = vals[2];
-        int a1 = autos[1]; autos[0] = autos[0]; autos[1] = autos[3] = a1; autos[2] = autos[2];
-    } else {
-        out[0] = vals[0]; out[1] = vals[1]; out[2] = vals[2]; out[3] = vals[3];
+        vals[3] = vals[1]; units[3] = units[1]; autos[3] = autos[1];
     }
-    /* em 单位按当前字号折算 */
+    out[0] = vals[0]; out[1] = vals[1]; out[2] = vals[2]; out[3] = vals[3];
+    /* em 单位按当前字号折算; 百分比保留原数, 由布局期按容器宽解析 */
     for (int i = 0; i < 4; i++)
-        /* em 在此展开; 百分比保留原数, 由布局期按容器宽解析 */
         if (units[i] == HN_U_EM) out[i] *= font_px;
-    /* 调用方通过全局暂存读取 auto 位(margin 专用) */
+    /* 调用方通过全局暂存读取 auto 位与单位(margin 专用) */
     g_len4_auto = (autos[0] ? 1 : 0) | (autos[1] ? 2 : 0) | (autos[2] ? 4 : 0) | (autos[3] ? 8 : 0);
     for (int i = 0; i < 4; i++) g_len4_unit[i] = (unsigned char)units[i];
 }

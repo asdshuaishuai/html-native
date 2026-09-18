@@ -390,6 +390,13 @@ int  hn_node_trim_children(hn_node *n, int keep_last);
    node_budget 为本次遍历允许访问的最大节点数(防环导致的死循环)。 */
 int  hn_doc_validate(hn_doc *doc, int node_budget);
 
+/* 命中自洽自检: 每个带 id 且尺寸非零的元素, 其盒中心点必须命中到自身或
+   某个带 id 的后代。返回问题数量(0=健康), 并把检查过的元素数写入 *checked。
+   这是**纯引擎语义**(命中测试与平台无关), 因此放在引擎里而不是某个运行时
+   —— 此前只有 Windows 的 hnwin --probe 做了这项检查, macOS/Linux 一直没验,
+   而它恰恰是最容易因布局改动而回归的一环。 */
+int  hn_context_verify_hits(hn_context *c, int *checked);
+
 /* ---- 交互: 命中测试 ---- */
 const char *hn_context_hit_test(hn_context *c, float x, float y); /* 元素 id 或 NULL */
 hn_node    *hn_context_hit_node(hn_context *c, float x, float y); /* 最深层元素节点 */

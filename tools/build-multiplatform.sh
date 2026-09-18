@@ -120,7 +120,14 @@ build "hnwin-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
       "$WIN_LIBS" "${WIN_RT[@]}"
 echo
 
-# 本机产物自检(其余平台无法在本机执行, 但可验证是可执行格式)
+# ---------------- 自检 ----------------
+# 1) 布局不变量 + 命中自洽(引擎语义, 与平台无关)
+# 2) **跨架构确定性**: 同为 HN_NO_TEXT 口径下, 不同架构的产物对同一文档
+#    必须给出逐字节相同的布局输出。这是 `-ffp-contract=off` 存在的理由
+#    (arm64 有 FMA 而 x86_64 基线没有, 默认融合会让同一文档算出不同 px 值),
+#    但此前没有任何门禁守住它 —— 只能靠人肉比对。
+#    Linux/Windows 产物无法在本机执行, 因此这里比的是本机可跑的两个目标
+#    (macOS arm64 vs macOS x86_64, 后者经 Rosetta 执行)。
 HOST_BIN="$OUT/hncore-macos-arm64"
 if [ -x "$HOST_BIN" ]; then
     echo "自检(macOS arm64 实跑):"
@@ -131,6 +138,47 @@ if [ -x "$HOST_BIN" ]; then
         exit 1
     fi
 fi
+
+echo
+echo "跨架构确定性(同 HN_NO_TEXT 口径, 布局输出须逐字节一致):"
+# 注意口径: 发布用的 macos-arm64 带 FreeType(真实字形测量), 与无文本产物
+# 的排版结果本就不同。要验的是"同一份引擎代码在不同架构上算出的几何一致",
+# 所以这里额外编一个 **HN_NO_TEXT 的本机架构**产物专门用于比对
+# (只进临时目录, 不污染 dist 的发布产物)。
+HOST_NT="$(mktemp -t hncore-notext)"
+trap 'rm -f "$HOST_NT"' EXIT
+# zig cc 产出的文件权限是 0600, 必须 chmod 才能执行(否则后面调用会
+# "permission denied", 且 `set -e` 会让整个脚本以 126 退出)
+if "$ZIG" cc -target aarch64-macos "${CFLAGS[@]}" -DHN_NO_TEXT "${SRC[@]}" \
+        -o "$HOST_NT" 2>/dev/null && chmod +x "$HOST_NT"; then
+    det_ok=0
+    det_bad=0
+    for f in dashboard showcase webpage lottie transparent; do
+        html="$ROOT/examples/$f.html"
+        [ -f "$html" ] || continue
+        a=$("$HOST_NT" boxes "$html" 460 560 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+        b=$("$OUT/hncore-macos-x86_64" boxes "$html" 460 560 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+        if [ -n "$a" ] && [ "$a" = "$b" ]; then
+            printf '  ✓ %-12s %s\n' "$f" "${a:0:16}"
+            det_ok=$((det_ok + 1))
+        else
+            printf '  ✗ %-12s arm64=%s x86_64=%s\n' "$f" "${a:0:16}" "${b:0:16}"
+            det_bad=$((det_bad + 1))
+        fi
+    done
+    if [ "$det_bad" -gt 0 ]; then
+        echo "  ✗ 跨架构不一致 $det_bad 个 —— 检查 -ffp-contract=off 是否被去掉"
+        exit 1
+    fi
+    echo "  ✓ $det_ok 个文档跨架构一致"
+else
+    echo "  (跳过: 无法构建 HN_NO_TEXT 本机产物用于比对)"
+fi
+if [ "$det_bad" -gt 0 ]; then
+    echo "  ✘ 跨架构不一致 $det_bad 个 —— 检查 -ffp-contract=off 是否被去掉"
+    exit 1
+fi
+echo "  ✓ $det_ok 个文档跨架构一致"
 
 echo
 echo "产物清单:"

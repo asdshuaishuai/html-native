@@ -1111,6 +1111,42 @@ int hn_node_trim_children(hn_node *n, int keep_last) {
 }
 
 /* 结构自检: 显式 visited 表 + 预算上限, 任何环都会被检出而不是死循环 */
+/* 命中自洽: 带 id 的元素盒中心必须命中自身或带 id 后代。
+   深度上限防 DOM 异常时爆栈(与 hn_doc_validate 的 node_budget 同理)。 */
+#define HN_VERIFY_MAX_DEPTH 256
+
+static int verify_hits_d(hn_context *c, hn_node *n, int *checked, int depth) {
+    int bad = 0;
+    if (depth > HN_VERIFY_MAX_DEPTH) return 0;
+    if (n && hn_node_tag(n)) {
+        const char *id = hn_node_attr(n, "id");
+        if (id && id[0]) {
+            float x, y, w, h;
+            hn_node_box(n, &x, &y, &w, &h);
+            if (w > 0 && h > 0) {
+                (*checked)++;
+                const char *hit = hn_context_hit_test(c, x + w / 2, y + h / 2);
+                if (!hit) {
+                    fprintf(stderr, "  ✘ 命中缺失: id=%s 中心点 (%.0f,%.0f) 无命中\n",
+                            id, x + w / 2, y + h / 2);
+                    bad++;
+                } else if (strcmp(hit, id) != 0) {
+                    /* 命中到带 id 的后代是正常的(后代覆盖父级中心) */
+                }
+            }
+        }
+    }
+    for (hn_node *ch = hn_node_first_child(n); ch; ch = hn_node_next_sibling(ch))
+        bad += verify_hits_d(c, ch, checked, depth + 1);
+    return bad;
+}
+
+int hn_context_verify_hits(hn_context *c, int *checked) {
+    if (checked) *checked = 0;
+    if (!c || !c->doc || !c->doc->root) return 0;
+    return verify_hits_d(c, c->doc->root, checked, 0);
+}
+
 int hn_doc_validate(hn_doc *doc, int node_budget) {
     if (!doc || !doc->root) return 1;
     if (node_budget <= 0) node_budget = 100000;

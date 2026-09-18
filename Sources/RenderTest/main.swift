@@ -2709,6 +2709,54 @@ do {
                  bn.map { String(format: "%.0f", $0) }.joined(separator: "/")))
 }
 
+print("== 回归: padding 简写单位未初始化(跨编译器结果不一致) ==")
+do {
+    /* apply_len4 曾只把"值"按 TRBL 展开, 单位与 auto 位漏了 —— 于是
+       units[2]/units[3] 保持未初始化, 后面的 em 折算会读到栈上垃圾。
+       实测 zig cc -O2 arm64 下那个垃圾恰好等于 HN_U_EM, 于是
+       `padding: 8 12` 变成 8×字号(13) = 104px 下内边距。
+       同一份源码用 clang 或 -O0 编译却正常, 所以症状是"换编译器/换架构
+       结果不一样" —— 这类未定义行为极难靠读代码发现, 是跨架构确定性门禁
+       把它抓出来的。
+       下面这条断言把最敏感的结构固定下来: flex 列 + 第二项的 padding
+       必须只来自声明的 8, 而不是 8×字号。 */
+    let html = "<html><head><style>html,body{margin:0}"
+             + ".sidebar { display: flex; flex-direction: column; width: 208; padding: 18 12; }"
+             + ".nav { display: flex; flex-direction: column; gap: 2; }"
+             + ".nav-item { padding: 8 12; font-size: 13; }"
+             + ".nav-item.active { font-weight: 600; }"
+             + "</style></head><body><div class=\'sidebar\'><div class=\'nav\'>"
+             + "<div class=\'nav-item active\' id=\'i1\'>\u{56e2}\u{961f}</div>"
+             + "<div class=\'nav-item\' id=\'i2\'>\u{56e2}\u{961f}</div>"
+             + "</div></div></body></html>"
+    guard let d = hn_parse_html(html, html.utf8.count) else {
+        check(false, "回归: padding 单位用例解析失败"); exit(2)
+    }
+    let cc = hn_context_create()
+    hn_context_set_doc(cc, d)
+    hn_context_layout(cc, 460, 560, &backend)
+    var stack: [OpaquePointer] = [hn_doc_root(d)]
+    var i2: (Float, Float, Float, Float)?
+    while let n = stack.popLast() {
+        if let id = hn_node_attr(n, "id"), String(cString: id) == "i2" {
+            var x: Float = 0, y: Float = 0, bw: Float = 0, bh: Float = 0
+            hn_node_box(n, &x, &y, &bw, &bh)
+            i2 = (x, y, bw, bh)
+            break
+        }
+        var kids: [OpaquePointer] = []
+        var k = hn_node_first_child(n)
+        while let kk = k { kids.append(kk); k = hn_node_next_sibling(kk) }
+        stack.append(contentsOf: kids)
+    }
+    hn_context_destroy(cc)
+    if let b = i2 {
+        /* 8(上 padding) + 18.85(一行 13×1.45) + 8(下 padding) ≈ 34.85 */
+        check(abs(b.3 - 34.85) < 1.0,
+              String(format: "回归: padding 简写只展开声明值 (高=%.2f, 期望≈34.85 而非 130.9)", b.3))
+    } else { check(false, "回归: 未找到 i2 节点") }
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

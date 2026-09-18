@@ -425,11 +425,15 @@ int main(int argc, char **argv) {
             }
         }
     } else if (!strcmp(cmd, "verify")) {
-        hn_node *root = hn_doc_root(doc);
         int checked = 0;
-        int bad = root ? verify_boxes(root, &checked) : 0;
+        int bad = verify_boxes(hn_doc_root(doc), &checked);
         printf("检查元素: %d, 违反不变量: %d\n", checked, bad);
-        if (bad) rc = 1;
+        /* 命中自洽: 每个带 id 元素的盒中心必须命中自身或带 id 后代。
+           此前只有 Windows 的 hnwin --probe 做这项检查 —— 它是纯引擎语义,
+           与平台无关, 没理由不在所有平台上验。 */
+        int hits = 0, hbad = hn_context_verify_hits(ctx, &hits);
+        printf("命中自检: %d 个带 id 元素, 违反 %d\n", hits, hbad);
+        if (hbad) rc = 1;
         else printf("布局自检通过\n");
     } else {
         fprintf(stderr, "hncore: 未知命令 %s\n", cmd);

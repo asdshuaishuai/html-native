@@ -549,36 +549,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 /* ---------------- --probe: 无窗口自检 ----------------
    验证管线在 Windows 上完整跑通, 并采样命中点。退出码 0 = 健康。 */
-/* 遍历带 id 元素, 对盒中心做命中 —— 验证命中/冒泡语义自洽。
-   中心点必命中自身或后代, 冒泡向上必经自身, 因此 hit==id 或后代 id;
-   NULL 说明盒坐标无效, 判失败。 */
-/* 递归带深度上限: DOM 若因异常结构成环, 无保护的递归会爆栈。
-   (引擎侧有 hn_doc_validate 做结构自检, 这里是独立入口, 需要自己的护栏。) */
-#define PROBE_MAX_DEPTH 256
-static int probe_id_hits_d(hn_context *ctx, hn_node *n, int *count, int depth) {
-    int bad = 0;
-    if (depth > PROBE_MAX_DEPTH) return 0;
-    if (n && hn_node_tag(n)) {
-        const char *id = hn_node_attr(n, "id");
-        if (id && id[0]) {
-            float x, y, w, h;
-            hn_node_box(n, &x, &y, &w, &h);
-            if (w > 0 && h > 0) {
-                (*count)++;
-                const char *hit = hn_context_hit_test(ctx, x + w / 2, y + h / 2);
-                if (!hit) { printf("FAIL id=%s: 中心点无命中\n", id); bad++; }
-                else if (strcmp(hit, id) != 0)
-                    printf("note id=%s: 中心命中=%s (带 id 后代覆盖, 正常)\n", id, hit);
-            }
-        }
-    }
-    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
-        bad += probe_id_hits_d(ctx, c, count, depth + 1);
-    return bad;
-}
-static int probe_id_hits(hn_context *ctx, hn_node *n, int *count) {
-    return probe_id_hits_d(ctx, n, count, 0);
-}
+/* 命中自洽检查由引擎提供(hn_context_verify_hits) —— 它是纯引擎语义,
+   与窗口无关。此前这份逻辑只存在于 Windows 运行时, macOS/Linux 一直没验;
+   提到引擎后所有平台验同一份实现, 也避免了两处复制漂移。 */
 
 /* 调试/视觉回归: HN_WIN_SNAP=<png> 时, 首帧后从窗口 DC 抓取真实显示
    像素存 PNG —— 验证的是真正贴进窗口的位图(含 BGRA 通道转换), 而非
@@ -674,7 +647,7 @@ static int probe_mode(hn_context *ctx, int w, int h) {
                n ? hn_node_tag(n) : "?", id ? id : "(无id)");
     }
     /* id 命中自洽: 每个带 id 元素的盒中心必须命中自身(或带 id 后代) */
-    int idn = 0, idbad = probe_id_hits(ctx, hn_doc_root(hn_context_doc(ctx)), &idn);
+    int idn = 0, idbad = hn_context_verify_hits(ctx, &idn);
     printf("id-hits=%d bad=%d\n", idn, idbad);
     if (idbad) return 1;
     printf("probe OK\n");
