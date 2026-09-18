@@ -63,9 +63,15 @@ static void base_verts(hn_arena *a, int cols, int rows, float bw, float bh,
                 float d = sqrtf(dx * dx + dy * dy) * 2.0f;
                 wgt = d > 1.0f ? 1.0f : d;
             } else if (fixed_bottom) {
-                wgt = 1.0f - v;                       /* 底部固定 */
-            } else if (fixed_top) {
+                /* wgt 必须 = 0 在**固定端**。v 向下增大, 底部是 v=0,
+                   所以底部固定 → wgt = v。之前写成 1-v, 于是底部(固定端)
+                   拿到最大摆幅、顶部反而纹丝不动 —— 与"根在底部、梢在顶部"
+                   的物理直觉正好相反, 表现为"草/角色从顶上开始摇"。
+                   横向那对(left=u / right=1-u)是对的, 参照它们即可看出
+                   竖向这一对是写反了。 */
                 wgt = v;
+            } else if (fixed_top) {
+                wgt = 1.0f - v;
             } else if (fixed_left) {
                 wgt = u;
             } else if (fixed_right) {

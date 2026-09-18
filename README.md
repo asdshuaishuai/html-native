@@ -340,6 +340,14 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
     `hn-window` 看不到变化; `window` 表面则连 resize 后的尺寸一起记
   - 存**绝对屏幕坐标**, 与窗口停在哪块屏无关; 副屏位置原样还原
   - agent: `hn applet list` / `hn applet remove <名>`(`{"op":"applets"}`)
+- **网格变形(Live2D 类原语)**: `<img src="char.png" hn-mesh="12x10" hn-mesh-sway="8"
+  hn-mesh-speed="1.4" hn-mesh-anchor="bottom">` —— 贴图映射到可变形网格, 顶点由
+  正弦摆动驱动(**anchor 六模式**: bottom/top/left/right/center-radial, 固定端位移
+  恒为 0), 也可由脚本 `hn_node_set_mesh_verts()` 逐帧写入顶点(rig 逻辑属应用层,
+  与 Live2D 把 SDK 与建模工具分层的做法一致)。`.moc3` 是专有格式需 Cubism SDK
+  商业授权, 无法自研解码, 但底层技术以本原语形式交付。UV 在变形下仍是均匀网格
+  (贴图跟着网格走)。`tools/mesh_probe.c` 19 条断言覆盖网格解析/六种 anchor/
+  UV 正确性/脚本驱动。
 - **跨平台确定性**: 引擎是纯 C99, `-ffp-contract=off` 关掉 FMA 融合(arm64 有
   而 x86_64 基线没有, 默认融合会让同一文档算出不同 px 值)。构建脚本带**跨架构
   确定性门禁**: 同 HN_NO_TEXT 口径下比对各架构产物的布局输出, 不一致即构建失败。

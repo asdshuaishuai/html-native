@@ -479,6 +479,36 @@ ck("transform-origin:0 0 的旋转角点正确", True,
 ck("缺省 transform-origin 仍为盒中心", True,
    len(qc) == 1 and "(30.0,70.0)" in qc[0])
 
+# ============ 3D 投影(translateZ / rotate3d) ============
+# 这两项曾经"只解析不投影" —— project_3d 顶部有两个提前返回, 只改靠外的那个
+# 毫无效果(靠内的仍然先 fire)。这里用输出坐标断言, 而不是"可解析"。
+
+def quad3d(html, w=400, h=300):
+    return quads(html, w, h)
+
+# translateZ: perspective 400 下 k = dist/(dist-z)。
+# translateZ(200) → k=2, 100x60 的盒变成 200x120 且以盒中心为基准。
+P3 = "<div id='p' style='width:300;height:200;perspective:400'>" \
+     "<div id='c' style='width:100;height:60;background:#ff0000;%s'></div></div>"
+q = quad3d(P3 % "")
+ck("3D 基线: 无变换走 RECT", True, len(q) == 1 and q[0].startswith("RECT"))
+q = quad3d(P3 % "transform:translateZ(200px)")
+ck("translateZ(200) 走四边形(投影生效)", True, len(q) == 1 and q[0].startswith("QUAD"))
+# k=2 → 宽 200 高 120, 盒中心 (50,30) → x ∈ [-50,150], y ∈ [-30,90]
+ck("translateZ(200) 缩放 k=2(角点正确)", True,
+   len(q) == 1 and "(-50.0,-30.0)" in q[0] and "(150.0,90.0)" in q[0])
+q = quad3d(P3 % "transform:translateZ(-200px)")
+# k = 400/(400+200) = 2/3 → 66.7x40, x ∈ [16.7,83.3], y ∈ [10,50]
+ck("translateZ(-200) 缩小 k=2/3(角点正确)", True,
+   len(q) == 1 and "(16.7,10.0)" in q[0] and "(83.3,50.0)" in q[0])
+
+# rotate3d(0,1,0,45deg) 与 rotateY(45deg) 必须**完全一致**(绕 Y 轴就是 rotateY)
+q1 = quad3d(P3 % "transform:rotate3d(0,1,0,45deg)")
+q2 = quad3d(P3 % "transform:rotateY(45deg)")
+ck("rotate3d(0,1,0,45) 与 rotateY(45) 输出一致", True, q1 == q2 and len(q1) == 1)
+# 绕 Y 转 45° 后盒不再轴对齐 → 必须是四边形
+ck("rotate3d 走四边形", True, len(q1) == 1 and q1[0].startswith("QUAD"))
+
 # ============ 透明背景层(端到端) ============
 # 这是核心卖点之一: hn-transparent 的文档必须真的逐像素透明。
 # 两个曾导致"声明了透明却是一块实色"的 bug 都在光栅器里(见
