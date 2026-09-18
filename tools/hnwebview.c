@@ -412,16 +412,38 @@ static HWND g_parent;
 static char *g_pending_html;   /* 环境就绪前到达的文档 */
 static const char *g_store_id = "default";
 
-/* ---- IUnknown 共用实现(回调均为进程内静态单例, 不计数) ---- */
-static HRESULT STDMETHODCALLTYPE cb_qi(IUnknown *This, REFIID riid, void **ppv) {
-    (void)This;
-    if (!ppv) return E_POINTER;
-    if (IsEqualIID(riid, &IID_IUnknown)) { *ppv = This; return S_OK; }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-static ULONG STDMETHODCALLTYPE cb_addref(IUnknown *This) { (void)This; return 1; }
-static ULONG STDMETHODCALLTYPE cb_release(IUnknown *This) { (void)This; return 1; }
+/* ---- IUnknown: 每个 handler 接口各一份(不能共用) ----
+   两个原因, 都是规范要求而非风格问题:
+   1) 函数签名必须用**该接口自己的** this 类型。共用一份 `IUnknown *This`
+      的实现再塞进 handler 的 vtable, ABI 上"指针是指针"所以能跑, 但类型
+      不匹配 —— 严格编译器直接拒绝(本文件此前正是因此从未编过)。
+   2) QueryInterface 必须应答**对象自身接口**的 IID。只答 IID_IUnknown 的话,
+      WebView2 对 handler 做 QI 会拿到 E_NOINTERFACE → 回调不被调用 →
+      环境/Controller 创建不出来 → 兜底静默失效(不报错, 就是没反应)。
+   回调都是进程内静态单例, 引用计数恒为 1。 */
+#define HN_HANDLER_IUNKNOWN(NAME, TYPE, IID)                                   \
+static HRESULT STDMETHODCALLTYPE NAME##_qi(TYPE *This, REFIID riid, void **ppv) { \
+    (void)This;                                                                \
+    if (!ppv) return E_POINTER;                                                \
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID)) {           \
+        *ppv = This;                                                           \
+        return S_OK;                                                           \
+    }                                                                          \
+    *ppv = NULL;                                                               \
+    return E_NOINTERFACE;                                                      \
+}                                                                              \
+static ULONG STDMETHODCALLTYPE NAME##_addref(TYPE *This) { (void)This; return 1; }   \
+static ULONG STDMETHODCALLTYPE NAME##_release(TYPE *This) { (void)This; return 1; }
+
+HN_HANDLER_IUNKNOWN(env,
+    ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
+    IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler)
+HN_HANDLER_IUNKNOWN(ctrl,
+    ICoreWebView2CreateCoreWebView2ControllerCompletedHandler,
+    IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler)
+HN_HANDLER_IUNKNOWN(msg,
+    ICoreWebView2WebMessageReceivedEventHandler,
+    IID_ICoreWebView2WebMessageReceivedEventHandler)
 
 /* ---- 环境创建完成 → 创建 Controller ---- */
 static HRESULT STDMETHODCALLTYPE env_completed_Invoke(
@@ -429,7 +451,7 @@ static HRESULT STDMETHODCALLTYPE env_completed_Invoke(
     HRESULT err, ICoreWebView2Environment *env);
 
 static ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandlerVtbl g_env_vtbl = {
-    cb_qi, cb_addref, cb_release, env_completed_Invoke
+    env_qi, env_addref, env_release, env_completed_Invoke
 };
 static ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler g_env_handler = {
     &g_env_vtbl
@@ -441,7 +463,7 @@ static HRESULT STDMETHODCALLTYPE ctrl_completed_Invoke(
     HRESULT err, ICoreWebView2Controller *ctrl);
 
 static ICoreWebView2CreateCoreWebView2ControllerCompletedHandlerVtbl g_ctrl_vtbl = {
-    cb_qi, cb_addref, cb_release, ctrl_completed_Invoke
+    ctrl_qi, ctrl_addref, ctrl_release, ctrl_completed_Invoke
 };
 static ICoreWebView2CreateCoreWebView2ControllerCompletedHandler g_ctrl_handler = {
     &g_ctrl_vtbl
@@ -453,7 +475,7 @@ static HRESULT STDMETHODCALLTYPE msg_received_Invoke(
     ICoreWebView2 *sender, ICoreWebView2WebMessageReceivedEventArgs *args);
 
 static ICoreWebView2WebMessageReceivedEventHandlerVtbl g_msg_vtbl = {
-    cb_qi, cb_addref, cb_release, msg_received_Invoke
+    msg_qi, msg_addref, msg_release, msg_received_Invoke
 };
 static ICoreWebView2WebMessageReceivedEventHandler g_msg_handler = {
     &g_msg_vtbl

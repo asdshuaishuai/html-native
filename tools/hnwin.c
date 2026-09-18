@@ -82,21 +82,50 @@ static const char *asset_load(void *ctx, const char *path, size_t *len) {
     return d;
 }
 
+/* 收集全部 CSS 并按文档顺序拼接:
+   1) 与 HTML 同名的 .css(约定优先)
+   2) 所有 <link rel="stylesheet" href="..."> 的内容
+   曾只返回**第一个**命中的 —— 多样式表的文档后半部分样式全部丢失
+   (表现为"引了三个 css 只有一个生效")。 */
 static char *load_css(const char *html_path, const char *html, size_t *out_len) {
+    *out_len = 0;
+    size_t cap = 4096, len = 0;
+    char *acc = (char *)malloc(cap);
+    if (!acc) return NULL;
+    acc[0] = 0;
+
+    /* 追加一段文本到累积缓冲 */
+    #define CSS_APPEND(SRC, N) do {                                         \
+        if ((N) > 0) {                                                      \
+            if (len + (N) + 2 > cap) {                                      \
+                while (len + (N) + 2 > cap) cap *= 2;                       \
+                char *na = (char *)realloc(acc, cap);                       \
+                if (!na) { free(acc); return NULL; }                        \
+                acc = na;                                                   \
+            }                                                               \
+            memcpy(acc + len, (SRC), (N));                                  \
+            len += (N);                                                     \
+            acc[len++] = '\n';                                              \
+            acc[len] = 0;                                                    \
+        }                                                                   \
+    } while (0)
+
     /* 1) 同名 .css */
     size_t plen = strlen(html_path);
     if (plen > 5 && !strcmp(html_path + plen - 5, ".html")) {
         char *css_path = (char *)malloc(plen + 1);
-        memcpy(css_path, html_path, plen - 5);
-        strcpy(css_path + plen - 5, ".css");
-        size_t clen = 0;
-        char *css = read_all(css_path, &clen);
-        free(css_path);
-        if (css) { *out_len = clen; return css; }
+        if (css_path) {
+            memcpy(css_path, html_path, plen - 5);
+            strcpy(css_path + plen - 5, ".css");
+            size_t clen = 0;
+            char *css = read_all(css_path, &clen);
+            free(css_path);
+            if (css) { CSS_APPEND(css, clen); free(css); }
+        }
     }
-    /* 2) <link rel="stylesheet" href="..."> 内联 */
+    /* 2) 所有 <link rel="stylesheet"> */
     const char *p = html;
-    while ((p = strstr(p, "<link")) != NULL) {
+    while (html && (p = strstr(p, "<link")) != NULL) {
         const char *end = strchr(p, '>');
         if (!end) break;
         const char *rel = strstr(p, "stylesheet");
@@ -110,19 +139,23 @@ static char *load_css(const char *html_path, const char *html, size_t *out_len) 
                 if (e2 && e2 <= end) {
                     size_t n = (size_t)(e2 - q);
                     char *path = (char *)malloc(n + 1);
-                    memcpy(path, q, n);
-                    path[n] = 0;
-                    size_t clen = 0;
-                    char *css = read_all(path, &clen);
-                    free(path);
-                    if (css) { *out_len = clen; return css; }
+                    if (path) {
+                        memcpy(path, q, n);
+                        path[n] = 0;
+                        size_t clen = 0;
+                        char *css = read_all(path, &clen);
+                        free(path);
+                        if (css) { CSS_APPEND(css, clen); free(css); }
+                    }
                 }
             }
         }
         p = end + 1;
     }
-    *out_len = 0;
-    return NULL;
+    #undef CSS_APPEND
+    if (len == 0) { free(acc); return NULL; }
+    *out_len = len;
+    return acc;
 }
 
 /* ---------------- 应用状态 ---------------- */
@@ -132,7 +165,6 @@ typedef struct {
     int w, h;               /* client 区尺寸(CSS px) */
     int transparent;        /* manifest: 逐像素 alpha 窗口 */
     unsigned char *px;      /* hnsoft 输出的 RGBA 位图 */
-    int px_n;
     HBITMAP dib;            /* 不透明窗口用的 DIB section */
     unsigned char *dib_bits;
     hn_node *hover;         /* 当前 hover 元素(避免每像素重排) */
@@ -173,7 +205,6 @@ static int app_render(int w, int h) {
     if (!dl) return 0;
     free(g_app.px);
     g_app.px = hnsoft_render(dl, w, h, 0x00000000);
-    g_app.px_n = w * h * 4;
     return g_app.px != NULL;
 }
 
@@ -192,8 +223,14 @@ static void rgba_to_bgra(unsigned char *dst, const unsigned char *src, int n, in
 }
 
 /* 把引擎位图送进窗口: 透明走 UpdateLayeredWindow, 不透明走 DIB+Invalidate。 */
+/* hwnd 可为 NULL 吗? 不能 —— hx_perform 会被 run_load_actions / poll_tick
+   以 NULL 调用(那些路径没有窗口句柄), 而下面两条分支都要真实窗口:
+     透明: UpdateLayeredWindow(NULL, ...) 必然失败(要求有效 HWND)
+           → 透明窗口的 hx-load / hx-poll 更新永远不上屏(DOM 变了画面不变)
+     不透明: InvalidateRect(NULL, ...) 也不是预期目标
+   所以这里显式要求有效句柄; 无窗口的调用方应改走 app_render + 标记脏。 */
 static void app_present(HWND hwnd) {
-    if (!g_app.px) return;
+    if (!g_app.px || !hwnd) return;
     if (g_app.transparent) {
         /* 全窗口逐像素更新: 构造 32bpp DIB(临时)喂给 UpdateLayeredWindow */
         HDC hdc = GetDC(hwnd);
@@ -263,6 +300,9 @@ static hn_node *hx_carrier(hn_node *n) {
 }
 
 /* 对一个载体执行 sys:// 请求并换入目标元素; 返回 1 表示发生了 swap */
+/* 内容已变但尚未上屏(load/poll 路径没有窗口句柄时置位) */
+static int g_dirty = 0;
+
 static int hx_perform(HWND hwnd, hn_node *carrier) {
     const char *post = hn_node_attr(carrier, "hx-post");
     const char *get = hn_node_attr(carrier, "hx-get");
@@ -288,7 +328,15 @@ static int hx_perform(HWND hwnd, hn_node *carrier) {
     }
     int ok = hn_doc_swap(doc, tid, m, frag, strlen(frag));
     free(frag);
-    if (ok && app_render(g_app.w, g_app.h)) app_present(hwnd);
+    if (ok && app_render(g_app.w, g_app.h)) {
+        if (hwnd) {
+            app_present(hwnd);
+        } else {
+            /* 没有窗口句柄(load / poll): 先标脏, 由帧循环上屏。
+               否则 DOM 更新了但画面不动 —— 透明窗口尤其明显。 */
+            g_dirty = 1;
+        }
+    }
     return ok;
 }
 
@@ -412,12 +460,30 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         int x = LOWORD(lp), y = HIWORD(lp);
         hn_node *n = hn_context_hit_node(g_app.ctx, (float)x, (float)y);
+        /* 必须请求 WM_MOUSELEAVE: 不调用 TrackMouseEvent 的话, 光标移出窗口
+           后 hover 状态不会被清除 —— 高亮一直亮着(macOS 侧用 NSTrackingArea)。
+           HOVER_DEFAULT 让它自己维护, 无需在 leave 里取消。 */
+        TRACKMOUSEEVENT tme;
+        memset(&tme, 0, sizeof(tme));
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
         if (n != g_app.hover) {
             g_app.hover = n;
             hn_context_set_hover(g_app.ctx, n); /* 触发 :hover 重新匹配 */
             if (app_render(g_app.w, g_app.h)) app_present(hwnd);
         }
         SetCursor(LoadCursor(NULL, (n && hn_node_cursor(n) == 1) ? IDC_HAND : IDC_ARROW));
+        return 0;
+    }
+    case WM_MOUSELEAVE: {
+        /* 光标离开窗口: 清除 hover, 否则高亮不灭 */
+        if (g_app.hover) {
+            g_app.hover = NULL;
+            hn_context_set_hover(g_app.ctx, NULL);
+            if (app_render(g_app.w, g_app.h)) app_present(hwnd);
+        }
         return 0;
     }
     case WM_LBUTTONDOWN:
@@ -440,6 +506,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER: {
+        /* load/poll 路径没有窗口句柄, 只标了脏; 在这里统一上屏 */
+        if (g_dirty) { g_dirty = 0; app_present(hwnd); }
         /* 首帧完成后抓一次真实窗口像素(HN_WIN_SNAP 调试用) */
         static int snapped = 0;
         if (!snapped) {
@@ -484,8 +552,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 /* 遍历带 id 元素, 对盒中心做命中 —— 验证命中/冒泡语义自洽。
    中心点必命中自身或后代, 冒泡向上必经自身, 因此 hit==id 或后代 id;
    NULL 说明盒坐标无效, 判失败。 */
-static int probe_id_hits(hn_context *ctx, hn_node *n, int *count) {
+/* 递归带深度上限: DOM 若因异常结构成环, 无保护的递归会爆栈。
+   (引擎侧有 hn_doc_validate 做结构自检, 这里是独立入口, 需要自己的护栏。) */
+#define PROBE_MAX_DEPTH 256
+static int probe_id_hits_d(hn_context *ctx, hn_node *n, int *count, int depth) {
     int bad = 0;
+    if (depth > PROBE_MAX_DEPTH) return 0;
     if (n && hn_node_tag(n)) {
         const char *id = hn_node_attr(n, "id");
         if (id && id[0]) {
@@ -501,8 +573,11 @@ static int probe_id_hits(hn_context *ctx, hn_node *n, int *count) {
         }
     }
     for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
-        bad += probe_id_hits(ctx, c, count);
+        bad += probe_id_hits_d(ctx, c, count, depth + 1);
     return bad;
+}
+static int probe_id_hits(hn_context *ctx, hn_node *n, int *count) {
+    return probe_id_hits_d(ctx, n, count, 0);
 }
 
 /* 调试/视觉回归: HN_WIN_SNAP=<png> 时, 首帧后从窗口 DC 抓取真实显示

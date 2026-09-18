@@ -213,31 +213,75 @@ static void store_path(char *buf, size_t cap, const char *store_id) {
     snprintf(buf, cap, "%s/.html-native/store/%s.json", home_utf8, store_id);
 }
 
+/* 逐级创建目录。起点要跳过盘符("C:\")或 UNC 前缀("\\\\server\\share\\"),
+   否则会拿 "C:" 当目录去 mkdir(必然失败, 且 UNC 路径会整体算错)。 */
 static void ensure_store_dir(const char *path) {
     char dir[MAX_PATH * 2];
     snprintf(dir, sizeof(dir), "%s", path);
     char *slash = strrchr(dir, '/');
     if (!slash) slash = strrchr(dir, '\\');
-    if (slash) {
-        *slash = 0;
-        /* 逐级创建 */
-        for (char *p = dir + 3; *p; p++) {
-            if (*p == '/' || *p == '\\') { *p = 0; _mkdir(dir); *p = '/'; }
+    if (!slash) return;
+    *slash = 0;
+    if (!dir[0]) return;
+
+    char *start;
+    if ((dir[0] == '/' || dir[0] == '\\') && (dir[1] == '/' || dir[1] == '\\')) {
+        /* UNC: \\server\share\... —— 跳过前两段(server 与 share) */
+        start = dir + 2;
+        int segs = 0;
+        while (*start && segs < 2) {
+            if (*start == '/' || *start == '\\') segs++;
+            start++;
         }
-        _mkdir(dir);
+    } else {
+        /* 盘符: 跳过 "X:" 与紧跟的分隔符 */
+        start = dir + 1;                       /* 跳过盘字母 */
+        if (*start == ':') start++;
+        while (*start == '/' || *start == '\\') start++;
     }
+    for (char *p = start; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            *p = 0;
+            _mkdir(dir);
+            *p = '/';
+        }
+    }
+    _mkdir(dir);
 }
 
-/* 从 JSON 文本里找 "key":"value"(键精确匹配) */
+/* 从 JSON 文本里找 "key":"value"(键名按完整 token 比较, 不是子串)。
+   值里的 **\\" 必须按转义处理** —— 否则存过的含双引号的值再读回来会被
+   截断(实测 {"k":"va\\"lue"} 只读出 "va")。
+   还原规则: \\" → " , \\\\ → \\ , \\/ → / , \\n → 换行(与写入侧一致)。 */
 static int json_get(const char *json, const char *key, char *out, size_t cap) {
+    if (!json || !key || !out || !cap) return 0;
+    if (out && cap) out[0] = 0;
     char pat[512];
     snprintf(pat, sizeof(pat), "\"%s\":\"", key);
-    const char *p = strstr(json, pat);
+    size_t plen = strlen(pat);
+    const char *p = json;
+    while ((p = strstr(p, pat)) != NULL) {
+        /* 键名必须是完整 token: 前一个字符不能是键字符的一部分 */
+        int boundary = (p == json) || (p[-1] == '{' || p[-1] == ',' ||
+                                       p[-1] == ' ' || p[-1] == '\n');
+        if (boundary) break;
+        p += plen;
+    }
     if (!p) return 0;
-    p += strlen(pat);
+    p += plen;
     size_t i = 0;
-    while (*p && *p != '"' && i < cap - 1) {
-        if (*p == '\\' && p[1]) p++;
+    while (*p && i < cap - 1) {
+        if (*p == '\\' && p[1]) {
+            char e = p[1];
+            if (e == '"')       { out[i++] = '"';  p += 2; }
+            else if (e == '\\'){ out[i++] = '\\'; p += 2; }
+            else if (e == '/')  { out[i++] = '/';  p += 2; }
+            else if (e == 'n')  { out[i++] = '\n'; p += 2; }
+            else if (e == 't')  { out[i++] = '\t'; p += 2; }
+            else                { out[i++] = e;    p += 2; }
+            continue;
+        }
+        if (*p == '"') break;              /* 未转义的引号 = 值结束 */
         out[i++] = *p++;
     }
     out[i] = 0;
@@ -303,6 +347,21 @@ static int json_set(const char *path, const char *key, const char *value) {
     return 1;
 }
 
+/* HTML 转义: & < > 三个字符(与 macOS HNAppRoutes.escape 同口径)。
+   存进 KV 的值会被原样拼进 HTML 片段 —— 不转义的话, 值里的 < > & 会变成
+   标记(macOS 侧一直是 escape(v), Windows 漏了)。 */
+static void html_escape(const char *s, char *out, size_t cap) {
+    size_t i = 0;
+    if (!s) s = "";
+    for (const char *p = s; *p && i + 8 < cap; p++) {
+        if (*p == '&')      { memcpy(out + i, "&amp;", 5);  i += 5; }
+        else if (*p == '<') { memcpy(out + i, "&lt;", 4);   i += 4; }
+        else if (*p == '>') { memcpy(out + i, "&gt;", 4);   i += 4; }
+        else                { out[i++] = *p; }
+    }
+    out[i] = 0;
+}
+
 /* ---------- URL 解析 + 路由 ---------- */
 
 /* sys://cpu?x=1 → route="cpu", query="x=1" */
@@ -318,23 +377,49 @@ static void parse_sys_url(const char *url, char *route, size_t rcap, char *query
     else if (qcap > 0) query[0] = 0;
 }
 
-/* query 里取指定参数(URL 解码) */
+/* query 里取指定参数(URL 解码)。
+   必须**先按 & 切成 pair 再比较键名** —— 用 strstr("key=") 子串匹配的话,
+   键名只要是另一个参数的子串就会取错: 实测
+       mykey=WRONG&key=RIGHT  取 "key" → 得到 "WRONG"
+   (sys://store/get?mykey=1&key=2 会读到 mykey 的值)。
+   macOS 侧 HNAppRoutes.parsePairs 就是先 split("&") 再 split("="),
+   这里对齐同一口径。 */
 static void query_param(const char *query, const char *name, char *out, size_t cap) {
-    char pat[256];
-    snprintf(pat, sizeof(pat), "%s=", name);
-    const char *p = strstr(query, pat);
-    if (!p) { out[0] = 0; return; }
-    p += strlen(pat);
-    size_t i = 0;
-    while (*p && *p != '&' && i < cap - 1) {
-        if (*p == '%' && p[1] && p[2]) {
-            char hex[3] = { p[1], p[2], 0 };
-            out[i++] = (char)strtol(hex, NULL, 16);
-            p += 3;
-        } else if (*p == '+') { out[i++] = ' '; p++; }
-        else out[i++] = *p++;
+    if (out && cap) out[0] = 0;
+    if (!query || !name || !out || !cap) return;
+    size_t nlen = strlen(name);
+    const char *p = query;
+    while (p && *p) {
+        const char *amp = strchr(p, '&');
+        size_t seg = amp ? (size_t)(amp - p) : strlen(p);
+        /* 本段内的 '=' 位置 */
+        const char *eq = (const char *)memchr(p, '=', seg);
+        size_t klen = eq ? (size_t)(eq - p) : seg;
+        if (klen == nlen && !strncmp(p, name, nlen)) {
+            const char *v = eq ? eq + 1 : p + seg;
+            size_t vlen = eq ? (size_t)(p + seg - v) : 0;
+            size_t i = 0;
+            for (size_t k = 0; k < vlen && i < cap - 1; ) {
+                if (v[k] == '%' && k + 2 < vlen) {
+                    char hex[3] = { v[k + 1], v[k + 2], 0 };
+                    char *endp = NULL;
+                    long b = strtol(hex, &endp, 16);
+                    /* 非法十六进制按字面量处理(不写 NUL 字节 —— 那会截断值) */
+                    int okhex = (endp && *endp == 0 && b >= 0 && b <= 255);
+                    out[i++] = okhex ? (char)b : v[k];
+                    k += okhex ? 3 : 1;
+                } else if (v[k] == '+') {
+                    out[i++] = ' ';
+                    k++;
+                } else {
+                    out[i++] = v[k++];
+                }
+            }
+            out[i] = 0;
+            return;
+        }
+        p = amp ? amp + 1 : NULL;
     }
-    out[i] = 0;
 }
 
 /* sys:// 应答: 返回 malloc 的 HTML 片段(caller free); 不识别的路由返回 NULL */
@@ -399,9 +484,11 @@ char *sys_fragment(const char *url, const char *form_body, const char *store_id)
         if (f) { size_t l = fread(buf, 1, sizeof(buf) - 1, f); buf[l] = 0; fclose(f); }
         char val[2048];
         if (key[0] && json_get(buf, key, val, sizeof(val))) {
-            size_t n = strlen(head) + strlen(val) + 64;
+            char esc[4096];
+            html_escape(val, esc, sizeof(esc));
+            size_t n = strlen(head) + strlen(esc) + 64;
             char *out = (char *)malloc(n);
-            snprintf(out, n, "%s已存</div><div class=\"sysv\">%s</div>", head, val);
+            snprintf(out, n, "%s已存</div><div class=\"sysv\">%s</div>", head, esc);
             return out;
         }
         {
@@ -421,9 +508,13 @@ char *sys_fragment(const char *url, const char *form_body, const char *store_id)
         char path[MAX_PATH * 2];
         store_path(path, sizeof(path), store_id ? store_id : "default");
         if (json_set(path, key, val)) {
-            size_t n = strlen(head) + 64;
+            /* 存储用原文(round-trip 要保真), 展示做转义 —— 与 macOS 一致 */
+            char esc[4096];
+            html_escape(val, esc, sizeof(esc));
+            size_t n = strlen(head) + strlen(esc) + 64;
             char *out = (char *)malloc(n);
-            snprintf(out, n, "%s已保存</div>", head);
+            if (esc[0]) snprintf(out, n, "%s已保存: <span class=\"sysv\">%s</span></div>", head, esc);
+            else        snprintf(out, n, "%s已保存</div>", head);
             return out;
         }
         return NULL;

@@ -60,9 +60,19 @@ echo "本机验证(与交叉产物同源, 保证语义一致):"
 # 本机架构: FreeType 可用(homebrew arm64), 文本可渲染
 # 其余目标: HN_NO_TEXT(无文本, 但矩形/渐变/裁剪/布局全部可用)
 HOST_ARCH=$(uname -m)
-build() {  # tag target ext
-    local tag="$1" target="$2" ext="${3:-}" with_text="${4:-}"
-    local out="$OUT/hncore-$tag$ext"
+# build <tag> <target> <ext> <text?> [<额外链接库>] [<源文件...>]
+# 源文件缺省 = SRC(引擎核心 CLI)。Windows 运行时目标传入自己的源文件,
+# 产物名 <tag><ext>(与核心产物同名同目录, 便于部署时二选一)。
+build() {  # tag target ext with_text [libs] [srcs...]
+    # 先把参数取进数组再解析 —— 不要用 `shift N`: 调用方有时只传 2 个参数
+    # (tag + target), `shift 4` 会失败, 而脚本带 `set -e` 会直接退出。
+    local -a args=("$@")
+    local tag="${args[0]:-}" target="${args[1]:-}"
+    local ext="${args[2]:-}" with_text="${args[3]:-}"
+    local libs="${args[4]:-}"
+    local srcs=("${SRC[@]}")
+    if [ "${#args[@]}" -gt 5 ]; then srcs=("${args[@]:5}"); fi
+    local out="$OUT/$tag$ext"
     printf '  %-22s ' "$tag"
     local extra=""
     if [ "$with_text" = "text" ]; then
@@ -70,7 +80,7 @@ build() {  # tag target ext
     else
         extra="-DHN_NO_TEXT"
     fi
-    if "$ZIG" cc -target "$target" "${CFLAGS[@]}" $extra "${SRC[@]}" -o "$out" 2>/tmp/hn_build_err.txt; then
+    if "$ZIG" cc -target "$target" "${CFLAGS[@]}" $extra $libs "${srcs[@]}" -o "$out" 2>/tmp/hn_build_err.txt; then
         local size
         size=$(wc -c < "$out" | tr -d ' ')
         printf '✓  %s (%s KB)%s\n' "$(basename "$out")" "$((size / 1024))" \
@@ -91,6 +101,23 @@ build "linux-aarch64"  "aarch64-linux-musl" "" "-DHN_NO_TEXT"
 echo
 echo "Windows (mingw 静态, HN_NO_TEXT):"
 build "windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
+
+# Windows 运行时: Win32 窗口 + hnsoft 软件光栅 + sys:// 系统桥 + WebView2 兜底。
+# 需要链接 win32 系统库(user32/gdi32/ole32/oleaut32/shell32)。
+# 这三个文件(hnwin.c / sysbridge.c / hnwebview.c)此前**不在任何构建入口里** ——
+# 提交了却从未被编译, 所以 hnwebview.c 的 COM vtable 类型错误能一直留着。
+# 接进来之后交叉编译立刻暴露它们。
+WIN_RT=(tools/hnwin.c tools/sysbridge.c tools/hnwebview.c
+        Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+        Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
+        Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+        Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
+        Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
+        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+        Sources/CHtmlNative/hnsoft.c)
+WIN_LIBS="-luser32 -lgdi32 -lole32 -loleaut32 -lshell32"
+build "hnwin-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
+      "$WIN_LIBS" "${WIN_RT[@]}"
 echo
 
 # 本机产物自检(其余平台无法在本机执行, 但可验证是可执行格式)
