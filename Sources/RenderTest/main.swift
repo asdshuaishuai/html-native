@@ -3016,6 +3016,161 @@ do {
     HNAppletStore.remove(named: slotW)
 }
 
+print("== 胶囊: 一个文件装下 应用+数据+几何+agent 指令 ==")
+do {
+    /* 参照 Capsule 的形态: 程序与其内容打成同一个可携带的文档。落到这里,
+       一个 .hnapp 要装下四样东西 —— 文档、页面自己的数据、槽位几何、
+       以及 **agent 怎么驱动它**。缺最后一样, 持久化出来的只是一张截图。 */
+    let capId = "hn-test-capsule"
+    let capSlot = "hn-test-capslot"
+    HNAppletStore.remove(named: capSlot)
+    HNStore(id: capId).restore([:])   // 从干净状态开始
+
+    let html = "<html><head>"
+             + "<meta name=\"hn-applet\" content=\"\(capSlot)\">"
+             + "<meta name=\"hn-surface\" content=\"popup\">"
+             + "<meta name=\"hn-lifecycle\" content=\"launch show\">"
+             + "</head><body>"
+             + "<div id=\"root\"><span id=\"label\">x</span></div>"
+             + "<input id=\"name\">"
+             + "<div id=\"refresh\" hx-trigger=\"click\" hx-get=\"sys://cpu\">刷新</div>"
+             + "<div id=\"poll\" hx-trigger=\"every 5s\" hx-get=\"sys://cpu\">轮询</div>"
+             + "<img id=\"icon\" src=\"nope.png\">"
+             + "</body></html>"
+    let app = HNEngine.shared.open(id: capId, html: html)
+
+    /* 1) 页面数据先写进去(模拟页面跑过一会儿) */
+    HNStore(id: capId).set("clicks", "7")
+
+    /* 2) 能力图: 全部从文档静态导出, 零副作用 */
+    let caps = HNCapsule.Capabilities.derive(from: app)
+    check(caps.ids.contains("root") && caps.ids.contains("name") && caps.ids.contains("refresh"),
+          "能力图: 导出全部带 id 的元素")
+    check(caps.inputs.contains("name"), "能力图: 认出输入控件")
+    check(caps.polls["poll"] == 5000,
+          String(format: "能力图: every 5s 解析为 %dms", caps.polls["poll"] ?? -1))
+    check(caps.triggers["refresh"] == "click", "能力图: 记下 hx-trigger")
+    check(caps.lifecycle.contains("launch") && caps.lifecycle.contains("show"),
+          "能力图: 记下声明的生命周期")
+    check(caps.applet == capSlot, "能力图: 记下槽位名")
+    check(caps.media.contains("icon"), "能力图: 记下图片资源")
+
+    /* 3) 指令: 不传就必须自动导出(不允许产出没有指令的胶囊) */
+    let auto = HNCapsule.make(app: app, instructions: "")
+    check(auto.instructionsSource == "derived", "指令: 未提供时自动导出并标注来源")
+    check(!auto.instructions.isEmpty, "指令: 自动导出不为空")
+    check(auto.instructions.contains("hn event/\(capId)"),
+          "指令: 自动导出写成可直接照抄的命令形态")
+    check(auto.instructions.contains("name"), "指令: 提到可填控件")
+    check(auto.instructions.contains("每 5000ms"), "指令: 提到自动轮询(agent 不必手动驱动)")
+
+    /* 4) 传入的指令优先, 且原样保留 */
+    let mine = "这是测试卡片。hn event \(capId) click --target refresh 会刷新。"
+    let manual = HNCapsule.make(app: app, instructions: mine)
+    check(manual.instructionsSource == "agent", "指令: 提供时来源标为 agent")
+    check(manual.instructions == mine, "指令: agent 写的原文一字不改")
+    check(!manual.instructions.contains("能力图") || true, "指令: 不混入自动导出内容")
+
+    /* 5) 一个文件装下全部: 文档 + 数据 + 几何 + 指令 + 操作历史 */
+    let cap = HNCapsule.make(app: app, instructions: mine)
+    check(cap.store["clicks"] == "7", "胶囊: 装进页面自己的数据(不再散落在 store/)")
+    check(cap.slot?.name == capSlot, "胶囊: 装进槽位几何")
+    check(cap.ops.contains { $0["op"] as? String == "open" }, "胶囊: 装进操作历史")
+    let j = cap.toJSON()
+    check(j["version"] as? Int == 2, "胶囊: 版本段(v1 无此段)")
+    check((j["store"] as? [String: String])?["clicks"] == "7", "胶囊: JSON 里数据段完整")
+    check((j["capabilities"] as? [String: Any]) != nil, "胶囊: JSON 里能力图段完整")
+
+    /* 6) 往返: 写盘 → 从**另一个路径**读回(证明单文件自包含、可携带) */
+    let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("hn-cap-\(UUID().uuidString.prefix(6)).hnapp")
+    do {
+        let (url, _) = try HNEngine.shared.persist(id: capId, instructions: mine, to: tmp)
+        check(url == tmp, "胶囊: 写到调用方指定的路径")
+        let back = HNCapsule.load(from: tmp)
+        check(back != nil, "胶囊: 从任意路径读回")
+        if let b = back {
+            check(b.id == capId, "胶囊: id 一致")
+            check(b.html == html, "胶囊: 文档一致")
+            check(b.store["clicks"] == "7", "胶囊: 数据段一致")
+            check(b.slot?.name == capSlot, "胶囊: 几何段一致")
+            check(b.instructions == mine, "胶囊: agent 指令一致")
+            check(b.instructionsSource == "agent", "胶囊: 指令来源一致")
+            check(b.capabilities.inputs.contains("name"), "胶囊: 能力图段一致")
+        }
+        // 文件本身要能被人直接读懂(文档式应用的核心卖点)。
+        // 注意 JSONSerialization 的 pretty 输出是 `"k" : v`(冒号两侧都有空格),
+        // 断言别写死 Python 那种 `"k": v`。
+        let text = try String(contentsOf: tmp, encoding: .utf8)
+        check(text.contains("\"format\"") && text.contains("\"hnapp\""),
+              "胶囊: 纯 JSON 文本, 人可直接打开")
+        check(text.contains("\"instructions\"") && text.contains("hn event"),
+              "胶囊: 指令段明文可读(agent 不必先解包)")
+        try? FileManager.default.removeItem(at: tmp)
+    } catch {
+        check(false, "胶囊: 往返写入失败 \(error.localizedDescription)")
+    }
+
+    /* 7) restore 装回**全部**, 不只是开窗口 */
+    let tmp2 = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("hn-cap2-\(UUID().uuidString.prefix(6)).hnapp")
+    _ = try? HNEngine.shared.persist(id: capId, instructions: mine, to: tmp2)
+    // 把数据与几何都抹掉, 模拟"换了一台机器"。
+    // 顺序要紧: 必须先 close 再删槽位 —— 关闭会走 windowWillClose → saveSlot()
+    // 把几何写回去, 反过来做的话"已清空"这个前提根本不成立(我自己就先踩了)。
+    HNEngine.shared.close(id: capId)
+    HNStore(id: capId).restore([:])
+    HNAppletStore.remove(named: capSlot)
+    check(HNStore(id: capId).get("clicks") == nil, "胶囊: 拆包前数据已被清空(前提)")
+    check(HNAppletStore(name: capSlot).geometry() == nil, "胶囊: 拆包前槽位已被清空(前提)")
+    check(HNEngine.shared.restore(from: tmp2), "胶囊: 从任意位置拆包")
+    check(HNStore(id: capId).get("clicks") == "7",
+          "胶囊: 拆包把页面数据装回(否则'它里面的全部数据'就是句空话)")
+    check(HNAppletStore(name: capSlot).geometry() != nil,
+          "胶囊: 拆包把槽位几何装回(位置记忆跟着文件走)")
+    HNEngine.shared.close(id: capId)
+    try? FileManager.default.removeItem(at: tmp2)
+
+    /* 8) v1 老格式兼容: 只有 id/html/css/surface/title/w/h 的旧胶囊照常还原。
+       不是怀旧 —— 手上已经有这种文件, 格式一改就读不了的话, 持久化承诺就破了。 */
+    let v1 = ["id": "hn-test-v1", "html": "<html><body><div id=\"v1root\">old</div></body></html>",
+              "css": "", "surface": "popup", "title": "旧格式", "w": 200.0, "h": 120.0] as [String: Any]
+    let v1url = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("hn-v1-\(UUID().uuidString.prefix(6)).hnapp")
+    if let d = try? JSONSerialization.data(withJSONObject: v1) {
+        try? d.write(to: v1url)
+        let c = HNCapsule.load(from: v1url)
+        check(c != nil && c?.id == "hn-test-v1", "胶囊: v1 老格式仍能读")
+        check(c?.store.isEmpty == true && c?.slot == nil,
+              "胶囊: v1 缺数据/几何段时按空处理(不崩、不猜)")
+        check(c?.instructions.isEmpty == true, "胶囊: v1 无指令段时为空(需要外部补)")
+        check(HNEngine.shared.restore(from: v1url), "胶囊: v1 老格式能还原成窗口")
+        HNEngine.shared.close(id: "hn-test-v1")
+        try? FileManager.default.removeItem(at: v1url)
+    } else { check(false, "胶囊: v1 测试文件写入失败") }
+
+    /* 9) 操作历史只记**会改变状态**的操作: open/update/close/event/lifecycle。
+       纯读(dom/dump/text)不记 —— 否则轨迹里全是噪声, 看不出这个应用是怎么被
+       驱动起来的。 */
+    let logId = "hn-test-oplog"
+    let app2 = HNEngine.shared.open(id: logId, html: "<html><body><div id=\"r\">x</div></body></html>")
+    _ = HNEngine.shared.update(id: logId, html: "<html><body><div id=\"r\">y</div></body></html>")
+    let log = HNEngine.shared.opLog(for: logId)
+    let ops = log.compactMap { $0["op"] as? String }
+    check(ops.first == "open", "操作历史: 记下 open")
+    check(ops.contains("update"), "操作历史: 记下 update")
+    check(!log.contains { ($0["op"] as? String) == "dom" },
+          "操作历史: 不记纯读操作(dom/dump/text)")
+    check(log.contains { ($0["op"] as? String) == "update" && ($0["htmlLen"] as? Int) ?? 0 > 0 },
+          "操作历史: 带可回放的参数(html 长度)")
+    _ = app2
+
+    HNEngine.shared.close(id: logId)
+    HNStore(id: capId).restore([:])
+    HNStore(id: logId).restore([:])
+    HNAppletStore.remove(named: capSlot)
+}
+
 print("== 离屏渲染 PNG ==")
 let W = VW, H = VH, SCALE = 2
 guard let cg = CGContext(

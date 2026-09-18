@@ -138,11 +138,23 @@ let tools: [Tool] = [
          description: "列出当前运行中的应用(id / 表面 / 标题)。",
          schema: ["type": "object", "properties": [:]]),
     Tool(name: "hn_persist",
-         description: "把应用持久化为 .hnapp 离线包(~/.html-native/apps/)。",
-         schema: ["type": "object", "properties": ["id": ["type": "string"]], "required": ["id"]]),
+         description: "把应用打成 .hnapp 胶囊: 一个文件装下文档 + 页面数据 + 槽位几何 + agent 操作指令, 可随意拷贝/发送。instructions 是这个应用'怎么驱动它'的说明 —— 持久化应用必须带它, 否则下一个 agent 拿到也驱动不了; 不传时运行时会按能力图(元素 id / 触发器 / 轮询 / 生命周期)自动导出一段, 并在结果里标 instructionsSource=derived。path 可指定写到别处。",
+         schema: [
+            "type": "object",
+            "properties": [
+                "id": ["type": "string"],
+                "instructions": ["type": "string", "description": "这个应用是什么、该怎么驱动它(元素 id / 命令 / 注意事项)"],
+                "path": ["type": "string", "description": "写到哪; 缺省 ~/.html-native/apps/<id>.hnapp"],
+            ],
+            "required": ["id"],
+         ]),
     Tool(name: "hn_restore",
-         description: "从 .hnapp 离线包恢复应用。",
-         schema: ["type": "object", "properties": ["id": ["type": "string"]], "required": ["id"]]),
+         description: "从任意位置的 .hnapp 胶囊拆包: 文档、页面数据、槽位几何一并装回, 不只是开窗口。",
+         schema: [
+            "type": "object",
+            "properties": ["path": ["type": "string", "description": "胶囊文件路径"]],
+            "required": ["path"],
+         ]),
     Tool(name: "hn_sys",
          description: "读取系统数据片段(返回 HTML, 自带样式, 可直接换入页面或作为 tool 结果返回给用户看)。route 取值: info/cpu/memory/disk/battery/uptime/host。",
          schema: [
@@ -264,15 +276,25 @@ func callTool(_ name: String, _ args: [String: Any]) -> String {
 
     case "hn_persist":
         guard let id = args["id"] as? String else { return "错误: 缺少 id" }
-        let r = rpc(["op": "persist", "id": id]) ?? [:]
-        if let p = r["path"] as? String { return "已持久化: \(p)" }
-        return "失败: \(r["error"] as? String ?? "?")"
+        var req: [String: Any] = ["op": "persist", "id": id]
+        if let ins = args["instructions"] as? String { req["instructions"] = ins }
+        if let p = args["path"] as? String { req["path"] = p }
+        let r = rpc(req) ?? [:]
+        guard let p = r["path"] as? String else { return "失败: \(r["error"] as? String ?? "?")" }
+        var out = "已打成胶囊: \(p)"
+        /* derived 必须显式告知: 说明这次没给真指令, 胶囊里是运行时按能力图导出
+           的。能用, 但下一次应当补一段 —— 这是"持久化应用必须带 agent 指令"
+           这条要求的可观测出口。 */
+        if (r["instructionsSource"] as? String) == "derived" {
+            out += "\n(指令为运行时自动导出。下次请传 instructions: 这个应用是什么、该怎么驱动它)"
+        }
+        return out
 
     case "hn_restore":
-        guard let id = args["id"] as? String else { return "错误: 缺少 id" }
-        let r = rpc(["op": "restore", "id": id]) ?? [:]
+        guard let path = args["path"] as? String else { return "错误: 缺少 path(胶囊文件)" }
+        let r = rpc(["op": "restore", "path": path]) ?? [:]
         if let err = r["error"] as? String { return "失败: \(err)" }
-        return "已恢复: \(id)"
+        return "已拆胶囊: \(r["restored"] ?? path)"
 
     case "hn_sys":
         let route = args["route"] as? String ?? "info"

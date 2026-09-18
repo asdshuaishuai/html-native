@@ -150,4 +150,22 @@ public final class HNStore {
         lock.lock(); defer { lock.unlock() }
         return cache.count
     }
+
+    /// 整份快照 —— 打包胶囊用(把页面数据装进 .hnapp, 而不是留在
+    /// ~/.html-native/store/ 里跟文件走散)。
+    public func snapshot() -> [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        return cache
+    }
+
+    /// 用一份快照整体替换(拆胶囊时把数据装回来)
+    public func restore(_ snap: [String: String]) {
+        lock.lock()
+        cache = snap
+        let out = cache
+        lock.unlock()
+        if let data = try? JSONSerialization.data(withJSONObject: out) {
+            try? data.write(to: file, options: .atomic)
+        }
+    }
 }

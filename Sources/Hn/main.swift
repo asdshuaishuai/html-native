@@ -8,8 +8,9 @@ import IOKit
 //   hn update <id> [file.html|-]                     热更新(窗口保持)
 //   hn close <id>                                    销毁
 //   hn list                                          列出运行中的应用
-//   hn persist <id>                                  持久化为 .hnapp 包
-//   hn restore <id>                                  从包恢复
+//   hn applet list | hn applet remove <名>           轻应用槽位
+//   hn persist <id> [文件.hnapp] [--instructions "…"] 打成胶囊
+//   hn restore <文件.hnapp>                          从任意位置拆胶囊
 //   hn ping
 //
 // 宿主未运行时自动拉起 HnDaemon(常驻, 不占 Dock)。
@@ -34,10 +35,16 @@ func usage() {
       hn list                       列出所有运行中的应用(含所占轻应用槽位)
       hn applet list                列出所有轻应用槽位(位置/尺寸/是否开着)
       hn applet remove <名字>       忘记某槽位: 下次打开回到页面声明的位置
-      hn persist <id> <文件.json>   把该应用的本地存储落盘
-      hn restore <id> <文件.json>   从文件恢复
+      hn persist <id> [文件.hnapp] [--instructions "…"]
+                                     打成胶囊: 文档+页面数据+槽位几何+agent指令
+      hn restore <文件.hnapp>       从任意位置的胶囊拆包(数据/几何一并装回)
       hn syscard                    打开系统信息卡
       hn ping                       探测宿主(并自动拉起)
+
+    胶囊(.hnapp)
+      一个文件装下"应用 + 它里面的全部数据 + agent 怎么驱动它", 可随意拷贝/发送。
+      持久化应用**必须**带操作指令 —— 不传 --instructions 时运行时会按能力图
+      自动导出一段并提示你补; 没有指令的胶囊对下一个 agent 等于一张截图。
 
     轻应用(桌面小组件)
       页面加 <meta name="hn-applet" content="名字"> 即成为半固化的轻应用:
@@ -82,6 +89,7 @@ struct Opts {
     var mods: Int?
     var text: String?
     var kind: String?      /* event 的事件类型 */
+    var instructions: String?  /* persist 时写进胶囊的 agent 操作指令 */
 }
 var o = Opts()
 var i = 0
@@ -108,6 +116,7 @@ while i < args.count {
     case "--element": i += 1; o.target = i < args.count ? args[i] : nil
     case "--js": i += 1; o.message = i < args.count ? args[i] : nil
     case "--kind": i += 1; o.kind = i < args.count ? args[i] : nil
+    case "--instructions": i += 1; o.instructions = i < args.count ? args[i] : nil
     default:
         if o.id == nil { o.id = a } else if o.file == nil { o.file = a }
     }
@@ -415,15 +424,34 @@ case "dom":
     for l in lines { print(l) }
 
 case "persist":
+    /* 打成胶囊: 文档 + 页面数据 + 槽位几何 + agent 操作指令。
+       注意这里的 <文件> 之前是**假的** —— 用法写了 `hn persist <id> <文件.json>`,
+       而代码只取 o.id, 第二个位置参数被静默丢弃。命令看着完全正确、跑完还报
+       成功, 只是文件根本没写到指定位置。 */
     guard let id = o.id else { usage(); exit(2) }
-    let r = rpc(["op": "persist", "id": id]) ?? [:]
-    if let path = r["path"] as? String { print("已持久化: \(path)") }
-    else { print("失败: \(r["error"] as? String ?? "?")"); exit(1) }
+    let target = (o.file ?? o.kind).map { URL(fileURLWithPath: $0) }
+    var req: [String: Any] = ["op": "persist", "id": id]
+    if let target { req["path"] = target.path }
+    if let ins = o.instructions { req["instructions"] = ins }
+    let r = rpc(req) ?? [:]
+    guard let path = r["path"] as? String else {
+        print("失败: \(r["error"] as? String ?? "?")"); exit(1)
+    }
+    print("已持久化: \(path)")
+    /* 指令来源必须报出来: derived 说明这次没给真指令, 胶囊里是运行时按能力图
+       自动导出的一段 —— 能用, 但下一个 agent 该补一段更好的。 */
+    if (r["instructionsSource"] as? String) == "derived" {
+        print("注意: 本次未提供操作指令, 胶囊里是运行时按能力图导出的。")
+        print("      用 --instructions \"…\" 补一段(这个应用是什么、怎么驱动它)。")
+    }
 
 case "restore":
-    guard let id = o.id else { usage(); exit(2) }
-    let r = rpc(["op": "restore", "id": id]) ?? [:]
-    if (r["ok"] as? Bool) == true { print("已恢复: \(id)") }
+    guard let src = o.id else { usage(); exit(2) }
+    /* 按路径拆胶囊(而不是只按 id 从默认目录找) —— 胶囊的意义就是可携带,
+       所以恢复必须能从任意位置读。 */
+    let url = URL(fileURLWithPath: src)
+    let r = rpc(["op": "restore", "path": url.path]) ?? [:]
+    if (r["ok"] as? Bool) == true { print("已拆胶囊: \(r["restored"] ?? "?")") }
     else { print("失败: \(r["error"] as? String ?? "?")"); exit(1) }
 
 default:

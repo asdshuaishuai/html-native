@@ -114,6 +114,7 @@ public final class HNEngine {
                      size: NSSize? = nil, origin: NSPoint? = nil,
                      ttl: TimeInterval? = nil) -> HNApp {
         if let app = apps[id] {
+            record("update", id: id, ["htmlLen": html.utf8.count])
             app.host.render(html, css: css)
             app.host.startPolling()
             return app
@@ -265,6 +266,9 @@ public final class HNEngine {
            回不到原处", 而且没有任何迹象。还原自槽位时也不必写(值已在盘上)。 */
         if origin == nil, size == nil, slotGeo == nil { app.saveSlot() }
         apps[id] = app
+        record("open", id: id, ["surface": kind.rawValue,
+                                "w": Int(w), "h": Int(h),
+                                "applet": slotName ?? ""])
         // 页面声明的自动行为: hx-trigger="load" 即时拉取, every Ns 启动轮询
         // (webkit 路径由注入脚本自理 → loadActions 为空)
         for action in host.loadActions() { host.performHx(action) }
@@ -304,6 +308,9 @@ public final class HNEngine {
     @discardableResult
     public func update(id: String, html: String) -> Bool {
         guard let app = apps[id] else { return false }
+        /* 记在 render 之前: 万一 render 抛了, 轨迹里也该留下"曾经想改成什么" ——
+           排查"界面怎么变成这样"时, 那次失败的尝试往往正是线索。 */
+        record("update", id: id, ["htmlLen": html.utf8.count])
         app.host.render(html, css: app.css)
         // webkit 路径: render 即整页重载, 注入脚本会自行跑 load/轮询
         if app.renderer == .native { refreshLabel(app) }
@@ -341,6 +348,7 @@ public final class HNEngine {
             nv.dispatchLifecycle(HN_EV_HIDE)
             nv.dispatchLifecycle(HN_EV_DESTROY)
         }
+        record("close", id: id)
         guard let app = apps.removeValue(forKey: id) else { return }
         app.ttlTimer?.invalidate()
         if let mon = dismissMonitors.removeValue(forKey: id) {
@@ -416,6 +424,33 @@ public final class HNEngine {
         apps.removeValue(forKey: id)
     }
 
+    // MARK: - 操作历史(打进胶囊, 让"怎么驱动它"可回放)
+
+    /// 每个应用最近经历过的可回放操作。上限刻意压小: 这是给人/agent 读的轨迹,
+    /// 不是审计日志; 真需要全量应当外挂到自己的存储里。
+    private static let opLogLimit = 200
+    private var opLogs: [String: [[String: Any]]] = [:]
+    private let opLock = NSLock()
+
+    /// 记录一次操作。只记**会改变状态**的: open/update/event/lifecycle/close,
+    /// 纯读(dom/dump/text/eval/list)不记 —— 否则轨迹里全是噪声, 反而看不出
+    /// 这个应用是怎么被驱动起来的。
+    public func record(_ op: String, id: String, _ fields: [String: Any] = [:]) {
+        opLock.lock(); defer { opLock.unlock() }
+        var entry: [String: Any] = ["op": op, "id": id,
+                                    "at": ISO8601DateFormatter().string(from: Date())]
+        for (k, v) in fields { entry[k] = v }
+        var log = opLogs[id] ?? []
+        log.append(entry)
+        if log.count > Self.opLogLimit { log.removeFirst(log.count - Self.opLogLimit) }
+        opLogs[id] = log
+    }
+
+    public func opLog(for id: String) -> [[String: Any]] {
+        opLock.lock(); defer { opLock.unlock() }
+        return opLogs[id] ?? []
+    }
+
     public struct AppInfo {
         public let id: String
         public let surface: HNSurface
@@ -439,44 +474,56 @@ public final class HNEngine {
         for app in apps.values where app.applet == name { app.applet = nil }
     }
 
-    // MARK: - 持久化(.hnapp = JSON 文档包, 可离线再次唤起)
+    // MARK: - 胶囊持久化(.hnapp = 单文件: 文档 + 数据 + 几何 + agent 指令)
 
-    public func persist(id: String) throws -> URL {
+    /// 打成胶囊。指令缺失时按能力图自动导出, 来源标为 derived ——
+    /// **不允许**产出没有指令的胶囊: 一个没有"怎么驱动它"的持久化应用等于
+    /// 一张截图, 下一个 agent 拿到也用不动。
+    public func capsule(id: String, instructions: String = "") throws -> HNCapsule {
         guard let app = apps[id] else {
             throw NSError(domain: "HNEngine", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "应用不存在: \(id)"])
         }
-        let fm = FileManager.default
-        try fm.createDirectory(at: HNPaths.apps, withIntermediateDirectories: true)
-        let obj: [String: Any] = [
-            "id": app.id,
-            "html": app.html,
-            "css": app.css ?? "",
-            "surface": app.surface.rawValue,
-            "title": app.window.title,
-            "w": Int(app.host.asView.bounds.width),
-            "h": Int(app.host.asView.bounds.height),
-        ]
-        let data = try JSONSerialization.data(withJSONObject: obj)
-        let url = HNPaths.apps.appendingPathComponent("\(app.id).hnapp")
-        try data.write(to: url)
-        return url
+        return HNCapsule.make(app: app, instructions: instructions)
     }
 
+    /// 写入胶囊文件(默认 ~/.html-native/apps/<id>.hnapp)。
+    /// 返回 (URL, 胶囊): 调用方需要 instructionsSource 来提示 agent 补指令。
+    @discardableResult
+    public func persist(id: String, instructions: String = "",
+                        to url: URL? = nil) throws -> (url: URL, capsule: HNCapsule) {
+        let cap = try capsule(id: id, instructions: instructions)
+        let target = url ?? HNPaths.apps.appendingPathComponent("\(cap.id).hnapp")
+        let fm = FileManager.default
+        try fm.createDirectory(at: target.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        try cap.serialize().write(to: target, options: .atomic)
+        return (target, cap)
+    }
+
+    /// 拆胶囊: 文档 + 数据 + 几何全部装回, 不只是窗口。
+    /// v1 老格式(无 version 段)同样支持 —— 那时没有数据和几何可装。
+    @discardableResult
+    public func restore(from url: URL) -> Bool {
+        guard let cap = HNCapsule.load(from: url) else { return false }
+        // 页面自己的数据: 装进该应用的 KV 文件
+        if !cap.store.isEmpty { HNStore(id: cap.id).restore(cap.store) }
+        // 槽位几何: 装回槽位文件, 让 open 时能还原到原处
+        if let s = cap.slot {
+            HNAppletStore(name: s.name).save(x: s.x, y: s.y, w: s.w, h: s.h, appId: cap.id)
+        }
+        var size: NSSize?
+        if cap.w > 0, cap.h > 0 { size = NSSize(width: cap.w, height: cap.h) }
+        _ = open(id: cap.id, html: cap.html, css: cap.css.isEmpty ? nil : cap.css,
+                 surface: HNSurface(rawValue: cap.surface),
+                 title: cap.title.isEmpty ? nil : cap.title, size: size)
+        record("restore", id: cap.id, ["from": url.lastPathComponent])
+        return true
+    }
+
+    /// 兼容旧调用形态: 从默认位置按 id 恢复
     @discardableResult
     public func restore(id: String) -> Bool {
-        let url = HNPaths.apps.appendingPathComponent("\(id).hnapp")
-        guard let data = try? Data(contentsOf: url),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let html = obj["html"] as? String else { return false }
-        let surface = (obj["surface"] as? String).flatMap { HNSurface(rawValue: $0) }
-        let title = obj["title"] as? String
-        var size: NSSize?
-        if let w = obj["w"] as? Double, let h = obj["h"] as? Double, w > 0, h > 0 {
-            size = NSSize(width: w, height: h)
-        }
-        _ = open(id: id, html: html, css: obj["css"] as? String,
-                 surface: surface, title: title, size: size)
-        return true
+        restore(from: HNPaths.apps.appendingPathComponent("\(id).hnapp"))
     }
 }

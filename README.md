@@ -36,7 +36,7 @@
    的 `hx-*` 属性由运行时解释, transport 可注入(进程内 / URLSession /
    `sys://` 系统桥, 不绑定 HTTP 服务)。
 2. **应用是易变对象**。像 PWA/小程序一样: 生成(秒开一个表面)、
-   销毁(close)、持久化(persist → `.hnapp` 包, 离线可再唤起)、
+   销毁(close)、持久化(persist → `.hnapp` 胶囊, 离线可再唤起)、
    热更新(同 id 推送新 hn 编码, 窗口与状态保持)。
 3. **HTML 是最低成本的 UI 语言**。人类手写或 AI 生成是两条等价入口:
    人类走 `hn new → hn dev` 热重载循环(保存即生效, 无构建链);
@@ -64,7 +64,7 @@ hn dev app.html --css app.css # 开发模式: 保存即热更新
 | 创建 / 热更新 / 销毁 | `hn_open` `hn_update` `hn_close` | 传 HTML 内容或文件路径 |
 | 感知 | `hn_dom` `hn_text` `hn_dump` `hn_list` | DOM 树 / 某元素文本 / 绘制指令 / 应用列表 |
 | **驱动** | `hn_event` `hn_eval` | 注入点击键盘等事件；在该应用 JS 上下文里求值 |
-| 离线 / 系统 / 截图 | `hn_persist` `hn_restore` `hn_sys` `hn_shot` | `.hnapp` 离线包 / `sys://` 数据 / 渲染 PNG |
+| 离线 / 系统 / 截图 | `hn_persist` `hn_restore` `hn_sys` `hn_shot` | `.hnapp` 胶囊 / `sys://` 数据 / 渲染 PNG |
 
 `hn_event` 回传三态，agent 能区分"已处理""已派发但无人监听""目标未找到"；
 `hn_eval` 在 native 与 webkit 两个渲染器上都可用（native 走系统自带的
@@ -130,9 +130,12 @@ $D/Hn open agent-card examples/agent-card.html --css examples/agent-card.css
 $D/Hn list                 # 运行中的应用(含所占轻应用槽位)
 $D/Hn applet list          # 轻应用槽位: 位置 / 尺寸 / 此刻是否开着
 $D/Hn update agent-card examples/agent-card.html   # 热更新(窗口保持)
-$D/Hn persist agent-card   # 持久化 → ~/.html-native/apps/agent-card.hnapp
 $D/Hn close agent-card     # 销毁
-$D/Hn restore agent-card   # 从包恢复
+
+# 胶囊: 一个文件装下 文档 + 页面数据 + 槽位几何 + agent 操作指令
+$D/Hn persist agent-card ~/Desktop/card.hnapp \
+    --instructions "仓库分析卡。hn event agent-card click --target rerun 重跑; 数据在 sys://cpu。"
+$D/Hn restore ~/Desktop/card.hnapp      # 从任意位置拆包(数据/几何一并装回)
 
 # 轻应用: 页面带 <meta name="hn-applet" content="clock"> 即半固化
 $D/Hn open clock examples/applet.html --ttl 30   # 30 秒后自毁, 位置仍记得
@@ -195,9 +198,9 @@ $D/Hn dev app.html --css app.css
 ```json
 {"op":"open","id":"card","html":"<h1>hi</h1>","surface":"popup","w":360,"h":520}
 {"op":"update","id":"card","html":"..."}
-{"op":"close","id":"card"} / {"op":"list"} / {"op":"persist","id":"card"} / {"op":"restore","id":"card"}
-{"op":"applets"}                        → 轻应用槽位清单
-{"op":"applet-remove","name":"clock"}   → 忘记某槽位
+{"op":"close","id":"card"} / {"op":"list"} / {"op":"applets"} / {"op":"applet-remove","name":"clock"}
+{"op":"persist","id":"card","path":"~/x.hnapp","instructions":"怎么驱动它"}   # 打成胶囊
+{"op":"restore","path":"~/x.hnapp"}                                          # 拆胶囊
 ```
 
 ### 截图(真实视图自绘, 无需屏幕权限)
@@ -255,6 +258,22 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   `hn-lifecycle="launch show hide destroy"` 声明关心哪些生命周期事件,
   未声明的页面一次都不打扰; 事件走**同一条统一事件管道**(JS 处理器与 hx 共用)。
   agent 可用 `hn lifecycle <id> --kind hide` 手动触发, 模拟应用被切到后台
+- **胶囊持久化(一个文件装下全部)**: `.hnapp` 是单个可携带文件, 参照 Capsule
+  "documents that run like apps" 的形态 —— 不再把应用散落在运行时目录里:
+  - **文档** html / css
+  - **数据** 页面自己的 KV(原 `~/.html-native/store/<id>.json`)
+  - **几何** 轻应用槽位位置(原 `~/.html-native/applets/<名>.json`)
+  - **agent 操作指令** + **能力图**(元素 id / 触发器 / 轮询 / 生命周期)
+    + **操作历史**(open/update/event/lifecycle 的可回放轨迹)
+  纯 JSON 文本: 人能直接打开读、能 diff、任何编辑器都能看。实测一个时钟轻应用
+  打出来 5.4 KB。`hn persist <id> <文件>` 写、`hn restore <文件>` 从任意位置拆
+  (数据与几何一并装回), 换个 id 打开同一份页面照常还原。
+  **持久化应用必须带 agent 指令**: 这些应用绝大多数是 agent 造的, 下一个 agent
+  拿到文件唯一需要的就是"这是什么、怎么驱动它"。不传 `--instructions` 时运行时
+  会按能力图自动导出一段(写成可直接照抄的 `hn event …` 命令形态), 并在响应里标
+  `instructionsSource: "derived"` 提示补一段更好的 —— 但没有指令的胶囊不存在,
+  因为没有指令的持久化应用对下一个 agent 等于一张截图。
+  v1 老格式(只有 id/html/css/surface/title/w/h)照常读取, 缺的段按空处理。
 - **轻应用槽位(半固化)**: 声明 `hn-applet="clock"` 的表面成为**具名桌面轻应用**
   (KDE Plasmoid 那类形态, 不是 PWA 也不是页面栈): 位置按槽位名记在
   `~/.html-native/applets/<名>.json`, 销毁后再打开回到原处。四个特征由此齐备 ——

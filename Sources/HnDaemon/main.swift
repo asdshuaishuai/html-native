@@ -198,10 +198,10 @@ enum HNProtocol {
                     default:        return
                     }
                     out = nv.dispatchLifecycle(kind)
+                    if out { HNEngine.shared.record("lifecycle", id: id, ["kind": k]) }
                 }
             }
             return resp(true, ["dispatched": out, "id": id, "kind": k])
-
         case "close":
             guard let id = obj["id"] as? String else { return resp(false, ["error": "id required"]) }
             DispatchQueue.main.sync { HNEngine.shared.close(id: id) }
@@ -261,6 +261,12 @@ enum HNProtocol {
                         oc = ["handled": oc2.handled,
                               "prevented": oc2.prevented,
                               "hx": oc2.hx]
+                        // 记进操作历史: 这条轨迹是"怎么驱动它"的一半答案
+                        HNEngine.shared.record("event", id: id, [
+                            "kind": kindStr,
+                            "target": obj["target"] as? String ?? "",
+                            "handled": oc2.handled, "hx": oc2.hx,
+                        ])
                     }
                 }
             }
@@ -402,20 +408,34 @@ enum HNProtocol {
             return resp(true, ["name": name, "removed": existed])
 
         case "persist":
+            /* 打成胶囊: 文档 + 页面数据 + 槽位几何 + agent 操作指令。
+               instructions 是**指令**, 不是备注 —— 少了它下一个 agent 拿到文件
+               也驱动不了这个应用。传空则由运行时按能力图自动导出, 并在响应里
+               标出来源是 derived, 让 agent 知道该补一段更好的。 */
             guard let id = obj["id"] as? String else { return resp(false, ["error": "id required"]) }
+            let instructions = obj["instructions"] as? String ?? ""
+            let path = (obj["path"] as? String).map { URL(fileURLWithPath: $0) }
+            var out: (url: URL, capsule: HNCapsule)?
             do {
-                var url: URL = HNPaths.apps
-                try DispatchQueue.main.sync { url = try HNEngine.shared.persist(id: id) }
-                return resp(true, ["id": id, "path": url.path])
+                try DispatchQueue.main.sync {
+                    out = try HNEngine.shared.persist(id: id, instructions: instructions, to: path)
+                }
             } catch {
                 return resp(false, ["error": "\(error.localizedDescription)"])
             }
+            guard let r = out else { return resp(false, ["error": "persist failed: \(id)"]) }
+            return resp(true, [
+                "id": id, "path": r.url.path,
+                "instructionsSource": r.capsule.instructionsSource,
+                "capsule": r.capsule.toJSON(),
+            ])
 
         case "restore":
-            guard let id = obj["id"] as? String else { return resp(false, ["error": "id required"]) }
+            guard let path = obj["path"] as? String else { return resp(false, ["error": "path required"]) }
             var ok = false
-            DispatchQueue.main.sync { ok = HNEngine.shared.restore(id: id) }
-            return ok ? resp(true, ["id": id]) : resp(false, ["error": "no saved app: \(id)"])
+            DispatchQueue.main.sync { ok = HNEngine.shared.restore(from: URL(fileURLWithPath: path)) }
+            return ok ? resp(true, ["restored": URL(fileURLWithPath: path).lastPathComponent])
+                      : resp(false, ["error": "bad capsule: \(path)"])
 
         default:
             return resp(false, ["error": "unknown op: \(op)"])

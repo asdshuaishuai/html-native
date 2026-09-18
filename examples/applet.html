@@ -3,10 +3,13 @@
      hn-applet   → 具名槽位(半固化: 位置按名字记得, 回来回到原处)
      --ttl(CLI)  → 随用随消(到期自毁, 但槽位仍在)
      presence/applet → 不占 Dock、不进 Cmd+Tab(系统级但弱存在感)
-     lifecycle   → 关心自己被显示/隐藏/销毁 -->
+     lifecycle   → 关心自己被显示/隐藏/销毁
+   半固化有两层, 这个例子两层都用到:
+     · 几何: 位置由槽位记住
+     · 数据: 打开次数写进 store —— 关掉再开还在, 且会跟着胶囊文件走 -->
 <meta name="hn-applet" content="clock">
 <meta name="hn-surface" content="popup">
-<meta name="hn-window" content="260x120">
+<meta name="hn-window" content="260x130">
 <meta name="hn-presence" content="ghost">
 <meta name="hn-lifecycle" content="launch show hide destroy">
 <style>
@@ -19,11 +22,12 @@ html,body{margin:0;width:100%;height:100%;background:#141821;}
 </head><body>
 <div class="card" id="root">
   <div class="t" id="clock">--:--:--</div>
-  <div class="s">槽位: clock · 随用随消, 但位置记得</div>
-  <div class="hint" id="state">拖动我到任意位置, 关掉再开 —— 会回到这里</div>
+  <div class="s" id="count">槽位: clock · 位置记得</div>
+  <div class="hint" id="state">拖动我, 关掉再开 —— 位置与计数都在</div>
 </div>
 <script>
 var clock = document.getElementById('clock');
+var count = document.getElementById('count');
 var state = document.getElementById('state');
 function tick() {
   var d = new Date();
@@ -31,13 +35,18 @@ function tick() {
                       ('0'+d.getMinutes()).slice(-2) + ':' +
                       ('0'+d.getSeconds()).slice(-2);
 }
+/* 数据层的半固化: hn.get/hn.set 是本地 KV(按 app id 隔离并落盘),
+   关掉再开还在; 打胶囊时这份数据会一并装进 .hnapp, 跟着文件走。
+   注意键名一律当字符串处理 —— KV 里没有类型, 读回来要自己 parseInt。 */
 document.getElementById('root').addEventListener('launch', function () {
+  var n = parseInt(hn.get('opens') || '0', 10) + 1;
+  hn.set('opens', String(n));
+  count.textContent = '槽位: clock · 第 ' + n + ' 次打开';
+  state.textContent = 'hn.get("opens") = ' + n;
   tick();
-  state.textContent = 'launch: 初始化(读槽位、拉首屏数据都该在这里)';
 });
-document.getElementById('root').addEventListener('show',   function () { state.textContent = 'show'; });
-document.getElementById('root').addEventListener('hide',   function () { state.textContent = 'hide: 挂起动画/停轮询'; });
-document.getElementById('root').addEventListener('destroy',function () { state.textContent = 'destroy: 收尾(几何由运行时落盘)'; });
+document.getElementById('root').addEventListener('hide',    function () { state.textContent = 'hide: 挂起动画/停轮询'; });
+document.getElementById('root').addEventListener('destroy', function () { state.textContent = 'destroy: 收尾(几何与数据都已落盘)'; });
 setInterval(tick, 1000);
 </script>
 </body></html>
@@ -49,7 +58,14 @@ setInterval(tick, 1000);
     $D/Hn applet list                                # 看到位置/尺寸/开着
     # 把卡片拖到别处, 然后:
     $D/Hn close clock
-    $D/Hn open clock examples/applet.html            # 回到你拖到的位置
+    $D/Hn open clock examples/applet.html            # 回到你拖到的位置, 计数 +1
+
+  打成一个可携带的胶囊(文档 + 数据 + 几何 + agent 指令):
+    $D/Hn persist clock ~/Desktop/clock.hnapp \
+        --instructions "时钟轻应用。计数存在 store 的 opens 键; 位置由槽位 clock 记忆。"
+    # 换台机器 / 发给别人:
+    $D/Hn restore ~/Desktop/clock.hnapp
+
     $D/Hn open clock examples/applet.html --ttl 20   # 20 秒后自毁; 槽位仍在
     $D/Hn applet remove clock                        # 忘记槽位 → 回到屏幕居中
 -->
