@@ -11,6 +11,20 @@ import HtmlNative
 
 var failures = 0
 
+// 仓库根目录: 以本源文件的编译期路径为锚(#filePath 上溯三级到 Package.swift 所在目录)。
+// 测试进程的 CWD 不一定是仓库根(如在外部目录 swift run --package-path 执行),
+// examples/ 下的资产定位不能依赖 CWD。
+let repoRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()   // Sources/RenderTest
+    .deletingLastPathComponent()   // Sources
+    .deletingLastPathComponent()   // 仓库根
+
+/// 解析仓库内资产: 仓库根优先, 不存在时退回原样(CWD 相对, 兼容旧行为)。
+func repoAsset(_ rel: String) -> String {
+    let abs = repoRoot.appendingPathComponent(rel).path
+    return FileManager.default.fileExists(atPath: abs) ? abs : rel
+}
+
 func t_pointee_bg(_ n: OpaquePointer) -> UInt32 {
     var bg: UInt32 = 0
     hn_node_debug_background(n, &bg)
@@ -839,9 +853,9 @@ do {
 
 print("== 流式视图: 轮询驱动追加(端到端) ==")
 do {
-    let path = "examples/agent-stream.html"
+    let path = repoAsset("examples/agent-stream.html")
     if let raw = try? String(contentsOfFile: path, encoding: .utf8) {
-        let css = (try? String(contentsOfFile: "examples/agent-stream.css", encoding: .utf8)) ?? ""
+        let css = (try? String(contentsOfFile: repoAsset("examples/agent-stream.css"), encoding: .utf8)) ?? ""
         let v12 = HtmlNativeView(html: raw, css: css)
         v12.setFrameSize(NSSize(width: 520, height: 660))
         v12.layout()
@@ -1016,8 +1030,8 @@ do {
 
 print("== 流式压测: 模拟帧循环 120Hz + 每秒追加(复现守护进程场景) ==")
 do {
-    let raw = (try? String(contentsOfFile: "examples/agent-stream.html", encoding: .utf8)) ?? ""
-    let css = (try? String(contentsOfFile: "examples/agent-stream.css", encoding: .utf8)) ?? ""
+    let raw = (try? String(contentsOfFile: repoAsset("examples/agent-stream.html"), encoding: .utf8)) ?? ""
+    let css = (try? String(contentsOfFile: repoAsset("examples/agent-stream.css"), encoding: .utf8)) ?? ""
     let v = HtmlNativeView(html: raw, css: css)
     v.setFrameSize(NSSize(width: 520, height: 660))
     v.layout()
@@ -1073,6 +1087,7 @@ do {
     </div></body></html>
     """
     let vi = HtmlNativeView(html: hI)
+    vi.imageRoot = repoRoot   // <img> 相对路径以仓库根解析, 不依赖进程 CWD
     vi.setFrameSize(NSSize(width: 300, height: 220))
     vi.layout()
     let cmds = vi.dumpDisplayList()
@@ -2173,7 +2188,7 @@ do {
         </script></body></html>
         """
         let jv = HtmlNativeView(html: jsHTML)
-        jv.imageRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        jv.imageRoot = repoRoot.appendingPathComponent("examples/assets")   // src 以仓库 assets 解析, 不依赖 CWD
         jv.frame = NSRect(x: 0, y: 0, width: 120, height: 120)
         jv.relayout()
         let jsErr = jv.jsError ?? ""
@@ -2336,7 +2351,7 @@ do {
     /* 背景: hnsoft 此前完全没有图像解码能力, Linux/Windows/无头环境里
        所有图片都退化成蓝色网格线占位 —— 跨平台在"有图"场景下其实不完整。
        这里直接调用解码器, 并断言解出的像素与源图统计一致。 */
-    guard let pngData = FileManager.default.contents(atPath: "examples/assets/avatar-a.png") else {
+    guard let pngData = FileManager.default.contents(atPath: repoAsset("examples/assets/avatar-a.png")) else {
         check(false, "PNG 解码: 找不到测试资源"); exit(2)
     }
     let n = pngData.count

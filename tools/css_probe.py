@@ -7,9 +7,32 @@
 """
 import subprocess, os, sys, tempfile, re
 
-HN = sys.argv[1] if len(sys.argv) > 1 else "/tmp/hncore"
+_raw = sys.argv[1] if len(sys.argv) > 1 else "/tmp/hncore"
+# 门禁调用本探针的 cwd 不保证是哪个目录(三轮实测分别撞上工作区根与
+# .zcode/workflow-drafts), 却会传**仓库根相对**的产物路径(如
+# dist/hncore-macos-arm64)。先按调用方 cwd 解析; 不存在再以本文件位置
+# (<仓库>/tools/)为基准解析一次。后半段的 render 子进程还带 cwd=<仓库根>
+# (examples/... 相对仓库根), 所以 HN 最终必须是绝对路径。
+HN = os.path.abspath(_raw)
+if not os.path.exists(HN) and not os.path.isabs(_raw):
+    _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _alt = os.path.normpath(os.path.join(_repo, _raw))
+    if os.path.exists(_alt):
+        HN = _alt
 if not os.path.exists(HN):
-    sys.exit("找不到 hncore: %s" % HN)
+    print("找不到 hncore: %s(调用方 cwd 与仓库根下都不存在)" % HN)
+    print("先构建: bash tools/build-multiplatform.sh")
+    sys.exit(1)
+
+
+# 门禁只收集本进程的 stdout: 未捕获异常默认打 stderr, 门禁里就成了一条
+# 空失败(第 1/2 轮的 "css_probe 失败:" 后面一片空白正是这么来的)。
+# 挂个钩子把崩溃原因打进 stdout, 解释器仍以非零码退出。
+def _crash(t, v, _tb):
+    print("探针异常退出: %s: %s" % (t.__name__, v))
+
+
+sys.excepthook = _crash
 D = tempfile.mkdtemp(prefix="hncss-")
 passed, failed = [], []
 
