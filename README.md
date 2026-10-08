@@ -101,8 +101,11 @@ hncore renderc app.html out.png 460 560   # cairo 后端(同一份显示列表)
 一个实测差距：同一份文档 cairo 输出的 PNG 是 31 KB，hnsoft 是 1007 KB ——
 后者用存储型 deflate(不压缩)，前者走真 zlib。
 
-**三平台引擎二进制**：`ZIG=zig ./tools/build-multiplatform.sh` 一条命令产出
-macOS/Linux/Windows 五个目标产物（`hncore` 引擎 CLI，用于验证与集成测试）。
+**三平台二进制**：`ZIG=zig ./tools/build-multiplatform.sh` 一条命令产出
+macOS/Linux/Windows 产物 —— 除五个 `hncore` 引擎 CLI（验证与集成测试）外，
+还有**跨平台运行时** `hnweb-*`：Linux（x86_64/aarch64, X11 运行期 dlopen,
+零编译期依赖）与 Windows（x86_64, Win32）各一套，实现同一份 `tools/hnweb.h`
+门面（能力面见下"Linux 内置 webview 运行时"一条）。
 详见 [release](https://github.com/asdshuaishuai/html-native/releases)。
 
 ## 架构与代码地图
@@ -141,6 +144,11 @@ Sources/HnShot/        真实视图截图(cacheDisplay 自绘, @2x, 可注入 ho
 Sources/HnMcp/         MCP server(stdio): 13 个工具(open/update/close/dom/text/dump/list/event/eval/persist/restore/sys/shot)
 screenshots/           引擎效果截图(showcase / 行内 / 输入 / 交互 / 主题 / 系统卡 /
                        消息卡 / 脚手架 dev-app / 桌面仪表盘 dashboard / 网页习惯 webpage)
+tools/hnweb.h          跨平台运行时门面: 壳管窗口表面/事件收集/位图上屏,
+                       门面管引擎生命周期/像素/命中/帧步进 —— 平台壳只实现这一个头
+tools/hnweb_linux.c    Linux 运行时(M1+M2): X11(运行期 dlopen, 零编译期依赖) +
+                       hnsoft 软件光栅; M2 事件派发管道与动画帧循环(见下)
+tools/hnweb_win.c      Windows 运行时: hnwin.c 的收编版, 同一 hnweb.h 门面
 ```
 
 ## 使用
@@ -459,6 +467,12 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   hx 请求自动携带表单参数(GET 拼 query / POST 发 body)、
   **过渡动画**(`transition`, 引擎持有当前值 + 运行时帧循环插值)、
   热更新三通道(render 整体 / swap 片段 / set_text)
+- **Linux 内置 webview 壳**: `tools/hnweb_linux.c` —— X11 窗口(运行期
+  `dlopen("libX11.so.6")`, 编译期零依赖) + **hnsoft 软件光栅**,
+  镜像 `hnwin.c` 的 Windows 模式(同一份 C99 引擎管线, 换的只是
+  窗口/事件/像素搬运层); 零外部依赖、musl 静态,
+  `ZIG=zig ./tools/build-multiplatform.sh` 交叉编译产物 `hnweb-linux-*`
+  (x86_64 / aarch64, 无头 CI 走 `--probe`/`--shot` 自检)
 
 ## 已知简化与路线图
 

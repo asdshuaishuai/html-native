@@ -92,20 +92,31 @@ build() {  # tag target ext with_text [libs] [srcs...]
               extra="-DHN_USE_CAIRO $(pkg-config --cflags --libs cairo freetype2 2>/dev/null)" ;;
       *)      extra="-DHN_NO_TEXT" ;;
     esac
-    if "$ZIG" cc -target "$target" "${CFLAGS[@]}" $extra $libs "${srcs[@]}" -o "$out" 2>/tmp/hn_build_err.txt; then
+    # zig cc -o 是就地截断重写: 构建期间任何人对同一产物 exec 都会撞上半个
+    # ELF(ENOEXEC), cp 覆盖正被执行的产物则 ETXTBSY —— 实测两个工作流共用
+    # 本仓库时, 门禁探针因此空 stdout 崩掉过两轮。先写带 PID 的临时文件,
+    # 完成后 mv 原子替换(rename 不受"旧 inode 正被执行"影响)。
+    local tmp_out="$out.tmp$$"
+    if "$ZIG" cc -target "$target" "${CFLAGS[@]}" $extra $libs "${srcs[@]}" -o "$tmp_out" 2>/tmp/hn_build_err.txt \
+       && mv -f "$tmp_out" "$out"; then
         local size
         size=$(wc -c < "$out" | tr -d ' ')
         printf '✓  %s (%s KB)%s\n' "$(basename "$out")" "$((size / 1024))" \
             "$([ "$with_text" = "text" ] && echo ' +文本' || echo ' 无文本')"
     else
+        rm -f "$tmp_out"
         printf '✘ 失败\n'
         sed 's/^/      /' /tmp/hn_build_err.txt | head -6
         return 1
     fi
 }
 # 本机 arm64 带文本; 其余 HN_NO_TEXT(部署平台自行接 FreeType 即可开启)
-build "macos-arm64"    "aarch64-macos" "" "text"
-build "macos-x86_64"   "x86_64-macos"
+# tag 必须是**完整产物名**(build() 直接拿它拼 dist/<tag>): 核心产物统一
+# hncore- 前缀 —— 文件头契约、产物清单/SHA256SUMS 的 glob、门禁与探针
+# 的默认路径(dist/hncore-macos-arm64)都按这个名字找。曾把前缀从 tag 里
+# 丢掉, 于是 dist 里同名新旧二进制并存, 探针跑到的是几周前的旧引擎。
+build "hncore-macos-arm64"  "aarch64-macos" "" "text"
+build "hncore-macos-x86_64" "x86_64-macos"
 
 # cairo 绘制后端: 一份实现喂所有平台。产物用 hncore-cairo-* 命名,
 # 子命令 renderc 走 hncairo_render, render 仍走 hnsoft_render —— 同一份
@@ -118,11 +129,11 @@ else
 fi
 echo
 echo "Linux (musl 静态, HN_NO_TEXT — 文本需平台 FreeType):"
-build "linux-x86_64"   "x86_64-linux-musl" "" "-DHN_NO_TEXT"
-build "linux-aarch64"  "aarch64-linux-musl" "" "-DHN_NO_TEXT"
+build "hncore-linux-x86_64"  "x86_64-linux-musl" "" "-DHN_NO_TEXT"
+build "hncore-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT"
 echo
 echo "Windows (mingw 静态, HN_NO_TEXT):"
-build "windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
+build "hncore-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
 
 # Windows 运行时: Win32 窗口 + hnsoft 软件光栅 + sys:// 系统桥 + WebView2 兜底。
 # 需要链接 win32 系统库(user32/gdi32/ole32/oleaut32/shell32)。
@@ -141,6 +152,45 @@ WIN_RT=(tools/hnwin.c tools/sysbridge.c tools/hnwebview.c
 WIN_LIBS="-luser32 -lgdi32 -lole32 -loleaut32 -lshell32"
 build "hnwin-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
       "$WIN_LIBS" "${WIN_RT[@]}"
+echo
+
+# Linux 内置 webview 运行时: X11 窗口(运行期 dlopen("libX11.so.6"), 编译期
+# 零依赖) + hnsoft 软件光栅。平台壳只实现 tools/hnweb.h 这一个门面。
+# 源与 WIN_RT 同一套引擎核心, 但**不含 hncore.c**: 那是 CLI 的 main
+# (hncore.c:248), 而壳自带 --probe/--shot 的 main(镜像 hnwin.c:669),
+# 两份 main 链接即重复定义; sysbridge.c 是 Windows 专属(#include <windows.h>)。
+# musl 静态 + 运行期 dlopen: 无 X 环境时壳退化为无头 probe/shot。
+LINUX_RT=(tools/hnweb_linux.c
+          Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+          Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
+          Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+          Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
+          Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
+          Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+          Sources/CHtmlNative/hnsoft.c)
+build "hnweb-linux-x86_64"  "x86_64-linux-musl"  "" "-DHN_NO_TEXT" \
+      "" "${LINUX_RT[@]}"
+build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
+      "" "${LINUX_RT[@]}"
+
+# Windows 门面运行时: tools/hnweb.h 门面的 Windows 平台实现(hnwin.c 的收编版)。
+# 源 = tools/hnweb_win.c + 与 hnweb-linux 目标同一套引擎核心(含 hnsoft.c);
+# **不含 hncore.c**(CLI 的 main, 同 hnweb-linux 的理由: 壳自带 --probe/--shot
+# 的 main, 两份 main 链接即重复定义); **也不含 sysbridge.c / hnwebview.c** ——
+# 那是 hnwin-windows-x86_64 目标的 CLI 运行时套件, 门面二进制的 hx 传输先以
+# 桩位收口(tools/hnweb_win.c 的 sys_fragment, 与 hnweb_linux.c 同一口径)。
+# 系统库照 hnwin 目标的 WIN_LIBS(user32 窗口/消息, gdi32 位图; ole* 是
+# WIN_LIBS 整组沿用, COM 兜底仅 hnwebview.c 路径用到)。
+WINWEB_RT=(tools/hnweb_win.c
+           Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+           Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
+           Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+           Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
+           Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
+           Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+           Sources/CHtmlNative/hnsoft.c)
+build "hnweb-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
+      "$WIN_LIBS" "${WINWEB_RT[@]}"
 echo
 
 # ---------------- 自检 ----------------
@@ -230,7 +280,7 @@ echo "  ✓ $det_ok 个文档跨架构一致"
 
 echo
 echo "产物清单:"
-for f in "$OUT"/hncore-*; do
+for f in "$OUT"/hncore-* "$OUT"/hnweb-*; do
     [ -f "$f" ] || continue
     printf '  %-34s %8s KB  %s\n' "$(basename "$f")" "$(( $(wc -c < "$f" | tr -d ' ') / 1024 ))" \
         "$(file -b "$f" | cut -c1-56)"
@@ -238,7 +288,7 @@ done
 
 # 校验和(发布用)
 if command -v shasum >/dev/null 2>&1; then
-    (cd "$OUT" && shasum -a 256 hncore-* > SHA256SUMS)
+    (cd "$OUT" && shasum -a 256 hncore-* hnweb-* > SHA256SUMS)
     echo
     echo "已生成 $OUT/SHA256SUMS"
 fi
