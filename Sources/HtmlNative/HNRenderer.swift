@@ -3,25 +3,46 @@ import Foundation
 
 /// 渲染器选择: 同一份 HTML/CSS 可走两条渲染路径。
 ///
-/// - `native`(默认): 我们的 C99 引擎 → 原生渲染, 零 WebKit 依赖
-/// - `webkit`(显式声明): 系统 WKWebView 兜底, 用于引擎暂不支持的构造
-///   (grid / position:absolute / canvas / svg / video 等)
+/// **项目定位(2026-09): webview 优先** —— 参考 GPUI / Tauri 的渲染方式,
+/// 内置一个通用的跨平台 webview 层, 优先用**系统级 webview**(零打包体积):
 ///
-/// 设计原则: **绝不静默切换**。必须由页面显式声明, 否则同一文件在不同
-/// 机器上会渲染出不同结果——那是灾难, 不是兜底。
+/// - `webview`(默认): macOS 走 WKWebView、Windows 走 WebView2 —— 都是系统
+///   自带, 不打 Node.js 也不打 Chromium。追赶"AI 生成即所见"的智能 UI,
+///   任何 CSS 构造都能渲染, 不再受限于自研引擎的能力面。
+/// - `engine`: 自带 C99 引擎。**不再作为默认**, 但保留且是 Linux 的 webview
+///   —— Linux 禁用 WebKitGTK, 所以 Linux 的"系统 webview"就是自带引擎。
+///   同时服务无 GUI 场景(服务器端截图 / CI 视觉回归 / 确定性渲染)。
+/// - `native`: `engine` 的旧名, 作为别名保留(已有页面不必改)。
+///
+/// `hn-renderer` meta 仍是显式出口: 写 `hn-renderer=engine` 可强制引擎路径,
+/// 用于两条路径对同一文档做视觉对照。未声明或写 `auto` 走平台默认。
 public enum HNRenderer: String {
-    case native
-    case webkit
+    case webview
+    case engine
+    case native        // engine 的旧名(别名)
 
-    /// 从页面 meta 读取渲染器声明; 未声明默认 native
+    /// 平台默认渲染器。有系统 webview 的平台走 webview; 没有的(以及
+    /// 无 GUI 的构建)走自带引擎 —— Linux 的 webview 就是自带引擎。
+    public static func preferred() -> HNRenderer {
+        #if canImport(WebKit)
+        return .webview
+        #else
+        return .engine
+        #endif
+    }
+
+    /// 从页面 meta 读取渲染器声明; 未声明/auto 走平台默认。
     public static func declared(in html: String) -> HNRenderer {
-        guard let content = metaContent("hn-renderer", in: html) else { return .native }
-        return HNRenderer(rawValue: content.lowercased().trimmingCharacters(in: .whitespaces)) ?? .native
+        guard let content = metaContent("hn-renderer", in: html) else { return preferred() }
+        let v = content.lowercased().trimmingCharacters(in: .whitespaces)
+        if v.isEmpty || v == "auto" { return preferred() }
+        guard let r = HNRenderer(rawValue: v) else { return preferred() }
+        return r == .native ? .engine : r      // 旧名归一
     }
 
     /// 取 <meta name="X" content="Y"> 的 Y(大小写不敏感, 单双引号均可)
     static func metaContent(_ name: String, in html: String) -> String? {
-        let pattern = "<meta[^>]*name\\s*=\\s*[\"']\(name)[\"'][^>]*>"
+        let pattern = "<meta[^>]*name\\s*=\\s*[\"\']\(name)[\"\'][^>]*>"
         guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
               let m = re.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               let tagRange = Range(m.range, in: html) else { return nil }
@@ -29,7 +50,7 @@ public enum HNRenderer: String {
     }
 
     static func attribute(_ name: String, in tag: String) -> String? {
-        let pattern = "\(name)\\s*=\\s*[\"']([^\"']*)[\"']"
+        let pattern = "\(name)\\s*=\\s*[\"\']([^\"\']*)[\"\']"
         guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
               let m = re.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
               m.numberOfRanges > 1, let r = Range(m.range(at: 1), in: tag) else { return nil }

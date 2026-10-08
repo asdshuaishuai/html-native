@@ -131,9 +131,9 @@ public final class HNEngine {
         let renderer = HNRenderer.declared(in: html)
         let host: any HNWebHost
         switch renderer {
-        case .native:
+        case .native, .engine:
             host = HtmlNativeView(doc: doc, css: css)
-        case .webkit:
+        case .webview:
             let wk = HNWebKitHost()
             host = wk
             wk.render(html, css: css)

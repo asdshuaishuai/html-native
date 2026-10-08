@@ -31,11 +31,22 @@ public protocol HNWebHost: AnyObject {
     /// "顺手调引擎 API" 都会解引用非法地址而崩溃。
     var engineContextOrNil: OpaquePointer? { get }
 
+    /// 向页面注入一次**合成交互事件**(agent 驱动 UI 的入口)。
+    /// 返回 handled(有没有人监听)。engine 路径走引擎事件管道, webview 路径
+    /// 在页面里 dispatchEvent —— 两边语义对齐: 都触发真实的监听器链。
+    /// 默认实现见下方 extension(返回 false)。
+    func syntheticEvent(kind: String, target: String?) -> Bool
+
     /// 同步执行一段 JS 并返回结果的字符串形式; 该应用无 JS 环境返回 nil。
     /// **两个渲染器都必须实现**: native 走 JavaScriptCore(引擎仍是纯 C,
     /// 与 JS 隔离), webkit 走 WKWebView。少一个就会让 agent 的 eval 能力
     /// 只在某个渲染器上可用 —— 表现为"同一条 daemon 命令时好时坏"。
     func evalSync(_ js: String) -> Any?
+}
+
+extension HNWebHost {
+    /// 默认: 该渲染器不支持合成交互(由具体实现覆写)。
+    func syntheticEvent(kind: String, target: String?) -> Bool { false }
 }
 
 /// sys:// 桥对象 —— 必须在 WKWebView 创建**之前**注册到 config,
@@ -184,6 +195,52 @@ public final class HNWebKitHost: NSObject, HNWebHost, WKNavigationDelegate {
     }
 
     public var engineContextOrNil: OpaquePointer? { nil }
+
+    /// webview 路径的合成交互: 在页面里构造并派发真实 DOM 事件。
+    /// 与 eval 不同的是它走"事件语义"而不是"求值语义" —— 冒泡/默认行为/表单
+    /// 提交都会发生, 因此 agent 的 click/focus/input 驱动与真人操作一致。
+    public func syntheticEvent(kind: String, target: String?) -> Bool {
+        guard let t = target, !t.isEmpty else { return false }
+        let esc = t.replacingOccurrences(of: "\\", with: "\\\\")
+                   .replacingOccurrences(of: "\"", with: "\\\"")
+        // 用 PointerEvent/MouseEvent 兼容 click; 键盘/输入类派发对应构造器
+        let ctor: String
+        switch kind.lowercased() {
+        case "click":           ctor = "MouseEvent"
+        case "dblclick":        ctor = "MouseEvent"
+        case "mousedown", "mouseup", "mousemove",
+             "mouseenter", "mouseleave": ctor = "MouseEvent"
+        case "keydown", "keyup":      ctor = "KeyboardEvent"
+        case "focus":           ctor = "FocusEvent"
+        case "blur":            ctor = "FocusEvent"
+        case "input", "change": ctor = "Event"
+        case "submit":          ctor = "Event"
+        case "scroll":          ctor = "Event"
+        default:                ctor = "Event"
+        }
+        let js = """
+        (function () {
+          var el = document.getElementById("\(esc)");
+          if (!el) return "noTarget";
+          if (el.matches("input,textarea,select") && ("\(kind.lowercased())" === "input")) {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            return "handled";
+          }
+          var Ctor = window["\(ctor)"] || Event;
+          try {
+            el.dispatchEvent(new Ctor("\(kind.lowercased())", { bubbles: true, cancelable: true, view: window }));
+            return "handled";
+          } catch (e) {
+            var ev = document.createEvent("Events");
+            ev.initEvent("\(kind.lowercased())", true, true);
+            el.dispatchEvent(ev);
+            return "handled";
+          }
+        })()
+        """
+        let v = evalSync(js)
+        return (v as? String) == "handled"
+    }
 
     public func evalSync(_ js: String) -> Any? {
         var result: Any?

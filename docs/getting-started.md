@@ -161,7 +161,7 @@ head 里声明主题, 引擎注入一整套设计令牌基底(暗/亮):色彩系
 
 ## 需要时, 让系统 WebKit 兜底
 
-引擎实现了日常所需的大部分 CSS, 但有些构造还没做(`grid`、`position: absolute`、
+引擎实现了日常所需的大部分 CSS, 但有些构造还没做(`grid`、
 `canvas`/`svg`/`video`)。这类页面可以显式声明走系统 WebKit:
 
 ```html
@@ -199,7 +199,7 @@ hn open myapp app.html --css app.css    # 生成(表面由 meta 决定)
 hn list                                # 在运行的应用
 hn update myapp app.html               # 热更新(窗口/状态保持)
 hn persist myapp                       # 持久化 → ~/.html-native/apps/myapp.hnapp
-hn restore myapp                       # 离线恢复
+hn restore myapp.hnapp                 # 离线恢复(传 .hnapp 文件路径)
 hn close myapp                         # 销毁
 
 hn open msg.html --ttl 8               # 消息卡:8 秒后自动热销毁
@@ -230,7 +230,7 @@ hn-shot examples/showcase.html examples/showcase.css out.png 920 620
 hn-shot app.html app.png 480 620 --live            # css 可省略; --live 执行 sys:// 拉取
 hn-shot … hover.png 920 620 --hover nav-team     # 注入悬停态
 hn-shot … scroll.png 920 620 --scroll frames,220 # 注入滚动
-.build/debug/RenderTest                            # 46 项回归断言
+.build/debug/RenderTest                            # 415 项回归断言
 ```
 
 HnShot 用真实视图自绘(@2x),所见即窗口所得,不需要屏幕录制权限。
@@ -238,9 +238,10 @@ HnShot 用真实视图自绘(@2x),所见即窗口所得,不需要屏幕录制权
 ## 边界(诚实清单)
 
 - 无 JavaScript——交互全部声明式(hx-*)或由宿主注入的 transport 承担。
-- CSS 是实用子集,不是全量(无 grid、无 nth-child,在路线图上)。
+- CSS 是实用子集,不是全量(无 grid 等;`nth-child` 已支持,其余在路线图上)。
 - 图片支持 `<img>`;字体用系统字体栈。
-- 目前运行时是 macOS;引擎核心 C99 无关性,Linux/Windows 运行时在路线图。
+- 目前原生运行时是 macOS;Windows 已有 hnwin MVP(C + hnsoft/WebView2),Linux 可经 cairo
+  后端无头运行;原生 Linux 运行时在路线图。
 
 遇到问题先跑 `RenderTest`(全绿说明引擎层健康),
 再用 `hn-shot` 单独渲染你的文件定位是内容还是引擎的问题。

@@ -1284,6 +1284,24 @@ public final class HtmlNativeView: NSView, HNWebHost {
     }
 
     /// 内省: DOM 树 + 布局盒 + run 数(排查节点位置错乱)
+    /// agent 的合成交互: 走引擎统一事件管道(与真实鼠标/键盘同一入口)。
+    public func syntheticEvent(kind: String, target: String?) -> Bool {
+        guard let ctx, let doc = hn_context_doc(ctx) else { return false }
+        let map: [String: hn_event_kind] = [
+            "click": HN_EV_CLICK, "dblclick": HN_EV_DBLCLICK,
+            "mousedown": HN_EV_MOUSEDOWN, "mouseup": HN_EV_MOUSEUP,
+            "mousemove": HN_EV_MOUSEMOVE, "mouseenter": HN_EV_MOUSEENTER,
+            "mouseleave": HN_EV_MOUSELEAVE, "keydown": HN_EV_KEYDOWN,
+            "keyup": HN_EV_KEYUP, "focus": HN_EV_FOCUS, "blur": HN_EV_BLUR,
+            "input": HN_EV_INPUT, "change": HN_EV_CHANGE,
+            "submit": HN_EV_SUBMIT, "scroll": HN_EV_SCROLL,
+        ]
+        guard let kd = map[kind.lowercased()] else { return false }
+        var node: OpaquePointer? = target.flatMap { hn_doc_find_by_id(doc, $0) }
+        if node == nil { node = hn_doc_root(doc) }
+        return emit(kd, at: nil, node: node)
+    }
+
     public func dumpDOM() -> [String] {
         guard let ctx, let doc = hn_context_doc(ctx) else { return [] }
         var out: [String] = []

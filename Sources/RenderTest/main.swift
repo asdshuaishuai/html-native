@@ -672,13 +672,20 @@ do {
 
 print("== 双渲染器: 声明解析 / CSS 归一化 ==")
 do {
-    // 1) hn-renderer 声明解析(默认 native, 显式 webkit 才切换)
-    let nativeHTML = "<html><head><meta name=\"hn-title\" content=\"x\"></head><body></body></html>"
-    let webkitHTML = "<html><head><meta name=\"hn-renderer\" content=\"webkit\"></head><body></body></html>"
-    let single = "<html><head><meta name='hn-renderer' content='WEBKIT'></head><body></body></html>"
-    check(HNRenderer.declared(in: nativeHTML) == .native, "渲染器: 未声明默认 native")
-    check(HNRenderer.declared(in: webkitHTML) == .webkit, "渲染器: 显式声明 webkit")
-    check(HNRenderer.declared(in: single) == .webkit, "渲染器: 单引号/大写同样识别")
+    /* 渲染器选择(2026-09 定位: webview 优先) ——
+       未声明/auto 走**平台默认**(macOS=webview), engine 需显式声明,
+       旧名 native 归一成 engine。 */
+    let plainHTML = "<html><head><meta name=\"hn-title\" content=\"x\"></head><body></body></html>"
+    let autoHTML = "<html><head><meta name=\"hn-renderer\" content=\"auto\"></head><body></body></html>"
+    let engineHTML = "<html><head><meta name=\"hn-renderer\" content=\"engine\"></head><body></body></html>"
+    let aliasHTML = "<html><head><meta name=\"hn-renderer\" content=\"native\"></head><body></body></html>"
+    let junkHTML = "<html><head><meta name=\"hn-renderer\" content=\"bogus\"></head><body></body></html>"
+    check(HNRenderer.preferred() == .webview, "渲染器: 平台默认是 webview(有系统 webview 的平台)")
+    check(HNRenderer.declared(in: plainHTML) == .webview, "渲染器: 未声明默认 webview")
+    check(HNRenderer.declared(in: autoHTML) == .webview, "渲染器: auto 走平台默认")
+    check(HNRenderer.declared(in: engineHTML) == .engine, "渲染器: 显式 engine 才走引擎")
+    check(HNRenderer.declared(in: aliasHTML) == .engine, "渲染器: 旧名 native 归一成 engine")
+    check(HNRenderer.declared(in: junkHTML) == .webview, "渲染器: 无法识别的值回退平台默认")
 
     // 2) CSS 归一化: 免单位数值补 px(否则 WebKit 路径会忽略, 两条路径长相不同)
     let css = """
@@ -1957,7 +1964,8 @@ do {
 
     // 透明背板: hn-transparent 应把 body 底色抹掉
     let trHTML = """
-    <html><head><meta name="hn-transparent" content="1">
+    <html><head><meta name="hn-renderer" content="engine">
+    <meta name="hn-transparent" content="1">
     <style>html,body{margin:0;width:100%;height:100%;background:#1b1f27;}
     .c{width:40;height:40;background:#ff0000;}</style>
     </head><body><div class="c"></div></body></html>
@@ -2019,6 +2027,7 @@ do {
     do {
         let winHTML = """
         <html><head>
+        <meta name="hn-renderer" content="engine">
         <meta name="hn-surface" content="popup">
         <meta name="hn-window" content="200x120">
         <meta name="hn-transparent" content="1">
@@ -2869,7 +2878,7 @@ do {
 
     /* 3) 坐标: 槽位存**绝对屏幕坐标**(与窗口停在哪块屏无关)。
           这里用真实窗口验往返: 存进去的必须原样回来。 */
-    let popupHTML = "<html><head><meta name=\"hn-applet\" content=\"\(slot)\">"
+    let popupHTML = "<html><head><meta name=\"hn-renderer\" content=\"engine\"><meta name=\"hn-applet\" content=\"\(slot)\">"
                   + "<meta name=\"hn-surface\" content=\"popup\">"
                   + "<meta name=\"hn-window\" content=\"300x180\">"
                   + "<style>html,body{margin:0}</style></head><body>x</body></html>"
@@ -2956,7 +2965,7 @@ do {
            在 `hn applet list` 里完全不存在, 而声明看着是对的、也不报错。 */
     let slotB = "hn-test-fresh"
     HNAppletStore.remove(named: slotB)
-    let freshHTML = "<html><head><meta name=\"hn-applet\" content=\"\(slotB)\">"
+    let freshHTML = "<html><head><meta name=\"hn-renderer\" content=\"engine\"><meta name=\"hn-applet\" content=\"\(slotB)\">"
                   + "<meta name=\"hn-surface\" content=\"popup\">"
                   + "<meta name=\"hn-window\" content=\"200x100\">"
                   + "<style>html,body{margin:0}</style></head><body>x</body></html>"
@@ -2990,7 +2999,7 @@ do {
     /* 7) 可调整大小的表面(window)才记尺寸 —— 用户的 resize 要能被记住 */
     let slotW = "hn-test-window"
     HNAppletStore.remove(named: slotW)
-    let winHTML = "<html><head><meta name=\"hn-applet\" content=\"\(slotW)\">"
+    let winHTML = "<html><head><meta name=\"hn-renderer\" content=\"engine\"><meta name=\"hn-applet\" content=\"\(slotW)\">"
                 + "<meta name=\"hn-surface\" content=\"window\">"
                 + "<meta name=\"hn-window\" content=\"320x220\">"
                 + "<style>html,body{margin:0}</style></head><body>x</body></html>"
@@ -3027,6 +3036,7 @@ do {
     HNStore(id: capId).restore([:])   // 从干净状态开始
 
     let html = "<html><head>"
+             + "<meta name=\"hn-renderer\" content=\"engine\">"
              + "<meta name=\"hn-applet\" content=\"\(capSlot)\">"
              + "<meta name=\"hn-surface\" content=\"popup\">"
              + "<meta name=\"hn-lifecycle\" content=\"launch show\">"

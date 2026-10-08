@@ -216,7 +216,18 @@ enum HNProtocol {
             var out = false
             var oc: [String: Any] = [:]
             DispatchQueue.main.sync {
-                if let app = HNEngine.shared.app(id: id), let nv = app.view {
+                if let app = HNEngine.shared.app(id: id) {
+                    /* webview 路径没有引擎视图: 在页面里派发真实 DOM 事件。
+                       与 engine 路径语义对齐 —— 都触发真实的监听器链,
+                       agent 的 click/focus/input 驱动与真人操作一致。 */
+                    if app.view == nil {
+                        let handled = app.host.syntheticEvent(kind: kindStr,
+                                                              target: obj["target"] as? String)
+                        out = handled
+                        oc = ["handled": handled, "webview": true]
+                        return
+                    }
+                    let nv = app.view!
                     let kind: hn_event_kind
                     switch kindStr {
                     case "click": kind = HN_EV_CLICK

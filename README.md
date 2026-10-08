@@ -85,7 +85,7 @@ JavaScriptCore），因此自动化不必关心用了哪个渲染器。
 圆角裁剪被简化为轴对齐矩形、PNG 用存储型 deflate(无压缩)。cairo 把这三件事换成
 生产级实现，同时给 macOS/Linux/Windows/iOS/Android 同一份代码。
 
-对照显示列表 8 类指令逐项实测过(`tools/hncairo_probe.c`, 25 条断言全通过)：
+对照显示列表 8 类指令逐项实测过(`tools/hncairo_probe.c`, 35 条断言全通过)：
 圆角矩形+实色/渐变填充、**任意路径裁剪(含圆角)**、even-odd/非零环绕多边形、
 四边形、UV 贴图、真实覆盖率抗锯齿、**真模糊阴影**、逐像素透明背板。
 
@@ -108,7 +108,7 @@ macOS/Linux/Windows 五个目标产物（`hncore` 引擎 CLI，用于验证与�
 ## 架构与代码地图
 
 ```
-Sources/CHtmlNative/  引擎核心(C99, ~2200 行, 零依赖)
+Sources/CHtmlNative/  引擎核心(C99, ~10400 行, 零依赖)
   hn_html.c    hn 编码解析 → DOM(arena)
   hn_css.c     样式表解析 → 规则(选择器展开/特异性)
   hn_style.c   级联 + 继承 + UA 样式表
@@ -120,7 +120,7 @@ Sources/CHtmlNative/  引擎核心(C99, ~2200 行, 零依赖)
   hn_mesh.c    网格变形贴图 → MESH 指令(Live2D 类效果的原语)
   hn_context.c 会话: 布局编排/命中/hot-update/清单解析
   hn_cairo.c   **可选**绘制后端: 显示列表 → cairo(一份实现喂所有平台)
-Sources/HtmlNative/   macOS 运行时 + 应用模型
+Sources/HtmlNative/   macOS 运行时 + 应用模型(16 个 Swift 文件, 此处列主要文件)
   TextShaper.swift     CoreText 文本后端(测量回调)
   HNPainter.swift      display list → CoreGraphics(macOS 运行时; cairo 后端在 C 侧)
   HNLayerCompositor.swift 网格变形合成(三角形仿射纹理映射)
@@ -138,6 +138,7 @@ Sources/Hn/            hn 命令行(open/update/dev/new/…, 自动拉起宿主)
 Sources/DemoApp/       嵌入式使用示例(引擎作为库嵌进一个应用)
 Sources/RenderTest/    离屏验收(断言 + 任意文件出 PNG, 即窗口所见)
 Sources/HnShot/        真实视图截图(cacheDisplay 自绘, @2x, 可注入 hover/scroll 态)
+Sources/HnMcp/         MCP server(stdio): 13 个工具(open/update/close/dom/text/dump/list/event/eval/persist/restore/sys/shot)
 screenshots/           引擎效果截图(showcase / 行内 / 输入 / 交互 / 主题 / 系统卡 /
                        消息卡 / 脚手架 dev-app / 桌面仪表盘 dashboard / 网页习惯 webpage)
 ```
@@ -189,12 +190,18 @@ $D/Hn dev app.html --css app.css
 <meta name="hn-renderer" content="webkit">   <!-- 显式兜底: 系统 WKWebView -->
 ```
 
-- **native(默认)**: 我们的 C99 引擎解析 → 布局 → 绘制指令 → CoreGraphics 落屏。
-  零 WebKit 渲染进程, 这是主力路径。
-- **webkit(显式声明)**: 交给系统 WKWebView, 用于引擎暂不支持的构造
-  (`grid` / `position:absolute` / `canvas` / `svg` / `video` / 复杂选择器)。
-- **绝不静默切换**: 必须页面显式声明。否则同一文件在不同环境下渲染出不同结果,
-  那是灾难而非兜底。
+- **webview(默认, 2026-09 定位)**: 内置通用的跨平台 webview 层 ——
+  macOS 走系统 **WKWebView**、Windows 走系统 **WebView2**, 都是系统自带,
+  **不打 Node.js 也不打 Chromium**(Tauri/GPUI 的取舍)。
+  追赶"AI 生成即所见"的智能 UI: agent 现场生成的任何 HTML/CSS/JS 都能渲染,
+  不受自研引擎能力面限制; canvas/svg/video/grid 原生支持。
+  agent 双向驱动: `hn eval` 求值 + `hn event` 派发**真实 DOM 事件**
+  (在页面里 dispatchEvent, 冒泡/监听器/表单提交都会发生, 与真人操作一致)。
+- **engine(自带 C99 引擎, 不再默认)**: 仍是**Linux 的 webview** —— Linux
+  禁用 WebKitGTK, 所以 Linux 的系统 webview 就是自带引擎。同时服务无 GUI
+  场景(服务器端截图 / CI 视觉回归 / 确定性渲染)与需引擎专属能力(Lottie/
+  网格变形/能力图)的页面。页面可用 `hn-renderer=engine` 显式声明
+  (`native` 是旧名, 仍兼容)。
 - **两条路径共用一切上层语义**: 窗口生命周期(秒开/TTL/热更新/持久化/`hn dev` 热重载)、
   `sys://` 系统桥、`hx-*` 交互(click/load/`every Ns`/回车提交/表单参数)、
   `hn-theme` 设计令牌、本地 KV —— 换的只是渲染层, 应用模型完全一致。
@@ -456,9 +463,32 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
 ## 已知简化与路线图
 
 - 片段热更新走 arena, 旧节点不回收; class/id 选择器统一小写
-- 近期: select/checkbox、grid 布局、position:absolute、多屏/多表面组合
+- 近期: select/checkbox、grid 布局、多屏/多表面组合
 - 弹窗原生交互: `hn-drag`(元素即拖拽手柄)、`hn-dismiss`(点击弹窗外自动关闭)
-- 中期: Rust 运行时(winit + skia) 覆盖 Windows/Linux、宿主协议鉴权、
+- 中期: Windows 已有 hnwin MVP(C + hnsoft/WebView2); 继续: 原生 Linux 运行时、宿主协议鉴权、
   `.hnapp` 包签名与资源(字体/图片)打包、动画
 - 远期: 常驻宿主的发现机制(Bonjour/命名空间)、组件生态层(在引擎之上,
   不进引擎)
+
+<!-- deepgit:begin progress -->
+## 项目进度
+
+> 本区域由 **deepGit** 自动维护（浅更新）· 更新于 2026-10-01 00:05
+> 追踪 1 个分支 · 2 处未提交改动
+
+### 工程脉搏
+
+- 提交构成：`docs` ×3 · `other` ×27
+
+### `main`（默认分支 · 当前）
+
+- **状态**：闲置 · 最近提交 11 天前（`a6b37000` mesh 驱动路径: 竖向 anchor 权重写反了 + 新增 19…）
+- **摘要**：最近 30 个提交：更新×15、文档×4、新增×3
+- **近期进展**
+  - 新增：“mesh 驱动路径: 竖向 anchor 权重写反了 + 新增 19 条断…
+  - 更新：“Lottie 四个真实缺陷 + translateZ/rotate3d 投影”
+  - 更新：“变换引擎: 非等比缩放 + transform-origin(又是三个静默…
+  - 修复：“透明背景层: 修掉三个让透明背板退化成实色的 bug”
+  - 修复：“选择器引擎与 calc: 修掉一批"声明了不生效也不报错"的…
+- 本次记录 30 个提交
+<!-- deepgit:end progress -->

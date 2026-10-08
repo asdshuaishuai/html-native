@@ -1,6 +1,7 @@
 # html-native 路线图：从玩具到 OS-PWA 级框架
 
-> 版本: 1.0 · 日期: 2026-09-17 · 状态: 规划中
+> 版本: 1.0 · 日期: 2026-09-17（§1 数字为当日快照, 之后 absolute 定位/z-index/逐侧边框/
+> ellipsis/white-space/`:not()` 等已落地, 见 1.2 表内 ✅）· 状态: 规划中
 >
 > 本文档是 html-native 从当前原型(v0.1)演进到生产可用框架的
 > 深度规划。包含差距分析、竞品对标、分阶段路线图与架构演进。
@@ -26,30 +27,29 @@
 
 | 缺口 | 影响 | 涉及层 |
 |---|---|---|
-| `position: absolute/fixed` | 无法做弹窗/下拉/浮层/遮罩/工具提示/Header 固定 | 引擎(C) + 绘制 |
-| `z-index` | 无法控制层叠顺序 | 引擎(C) |
-| `top/right/bottom/left` | 配合 position 使用 | 引擎(C) |
+| ~~`position: absolute/fixed`~~ ✅ | 已实现: 解析 + 脱离流布局 + positioned 祖先参照（examples/overlay.html 在用） | — |
+| ~~`z-index`~~ ✅ | 已实现: 绘制期层叠排序 | — |
+| ~~`top/right/bottom/left`~~ ✅ | 已实现: 配合 position 使用 | — |
 | **增量渲染** | 每次变化触发全量重排——大文档不可用 | 引擎(C) |
 | ~~**真实事件系统**~~ ✅ | 已完成(v0.2): 统一派发管道 + 冒泡 + preventDefault + 键盘/焦点/输入 | — |
 | **组件模型** | 无可复用/可组合的组件、无生命周期钩子 | 运行时(Swift) + JS |
 | ~~**网络层**~~ ✅ | 已完成(v0.2): hn.fetch Promise + 主机白名单 + 错误传播 | — |
-| **网络(HTTP)** | 无法调 API / 加载数据 / WebSocket | 运行时(Swift) |
-| **表单** | 无 form 元素 / submit / validation | 引擎(C) + 运行时 |
-| `text-overflow: ellipsis` | 每个 UI 都需要 | 引擎(C) |
-| **逐侧边框** (border-top/left/...) | 几乎所有设计系统都需要 | 引擎(C) + 绘制 |
+| **表单** | 表单编码 + 回车提交已实现；仍无 form 元素 / validation | 引擎(C) + 运行时 |
+| ~~`text-overflow: ellipsis`~~ ✅ | 已实现 | — |
+| ~~**逐侧边框** (border-top/left/...)~~ ✅ | 已实现: border_w4/border_c4 逐侧解析 + 绘制 | — |
 
 #### 🟡 重要级（没有则严重受限）
 
 | 缺口 | 影响 |
 |---|---|
 | `::before` / `::after` 伪元素 | 装饰性 UI 的标配 |
-| `white-space` / `word-break` / `overflow-wrap` | 文本布局精确控制 |
+| `word-break` / `overflow-wrap`（`white-space` 已实现） | 文本布局精确控制 |
 | CSS Grid | 现代布局（可延后到 flex 覆盖大部分场景后） |
 | ~~`transform` (rotate/matrix)~~ ✅ | 已完成(v0.2): rotate/rotateX/rotateY/perspective + 四边形光栅化 |
 | 路由 / 多视图导航 | 多页面应用 |
 | 状态管理 | 响应式数据绑定 |
 | 背景图片 | 视觉设计 |
-| `:not()` / 属性选择器 `[attr=v]` | 精确样式匹配 |
+| ~~`:not()` / 属性选择器 `[attr=v]`~~ ✅ | 已实现 | — |
 | 无障碍 (ARIA) | 生产必备 |
 | 开发者工具 | 调试效率 |
 
@@ -110,7 +110,7 @@ v0.3 加入了 **Lottie 矢量动画**与**网格变形贴图**，两者都作�
 | 启动时间 | 2-5 s | 0.5-1 s | 0.3-1 s | 0.5-2 s | **< 100 ms (目标)** |
 | CSS 支持 | 完整 | 无(自有 Widget) | 无(StyleSheet) | 完整(WebView) | **子集(持续扩展)** |
 | JS 支持 | 完整(V8) | 无(Dart) | 完整(JSC/Hermes) | 完整(WebView) | **JavaScriptCore 子集** |
-| 跨平台 | ✅ | ✅ | ✅(非 Web) | ✅ | **规划中(hnsoft)** |
+| 跨平台 | ✅ | ✅ | ✅(非 Web) | ✅ | **cairo 后端 + Windows hnwin MVP 已落地** |
 
 **html-native 的独特定位：**
 > **最轻量的原生 UI 框架，但用 Web 的创作语言。**
