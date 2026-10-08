@@ -16,7 +16,7 @@
 |---|---|---|
 | C99 引擎 | 6800+ 行 | HTML 解析 · CSS 级联 · flex/行内布局 · 绘制指令(8 种) · 动画插值 · Lottie 求值 · 网格变形 · PNG 解码 · 结构自检 |
 | macOS 运行时 | ~4100 行 Swift | CoreGraphics 落屏 · 图层合成(网格变形) · 窗口/弹窗/图层物化 · FreeType · JavaScriptCore · sys:// 桥 · hx-* · 流式视图 |
-| Linux 运行时(壳) | ~2000 行 C | **壳已落地(M1: 窗口/渲染/expose/resize/点击命中/`--probe` 自检)**；事件派发与文本是下一步（`tools/hnweb_linux.c`, dlopen X11 + hnsoft, musl 静态交叉编译） |
+| Linux 运行时 | ~2000 行 C | **M1+M2 已落地**: M1 窗口/渲染/expose/resize/点击命中/`--probe` 自检 + M2 **事件派发管道**(点击/键盘/滚轮/hover → 目标解析 → 带 id 冒泡 → hx-trigger 消费, 与 macOS 运行时同构)与**动画帧循环**(dt 推进过渡/@keyframes/Lottie/网格变形时钟, 空闲零唤醒)（`tools/hnweb_linux.c`, dlopen X11 + hnsoft, musl 静态交叉编译; Windows 侧 `tools/hnweb_win.c` 收编 hnwin 走同一 `tools/hnweb.h` 门面。仍缺: sys:// 桥、XIM 键入、交叉口径文本） |
 | 软件光栅器 | ~1400 行 C | SDF 圆角矩形 · 线性渐变 · 多边形扫描线 · 网格纹理映射 · **PNG 解码(自带 inflate)** · FreeType 文本 · PNG 编码 |
 | JS 运行时 | ~400 行 Swift | JavaScriptCore · DOM 桥 · 事件派发 |
 | 测试 | 1700+ 行 | 202 项断言 |
@@ -111,7 +111,7 @@ v0.3 加入了 **Lottie 矢量动画**与**网格变形贴图**，两者都作�
 | 启动时间 | 2-5 s | 0.5-1 s | 0.3-1 s | 0.5-2 s | **< 100 ms (目标)** |
 | CSS 支持 | 完整 | 无(自有 Widget) | 无(StyleSheet) | 完整(WebView) | **子集(持续扩展)** |
 | JS 支持 | 完整(V8) | 无(Dart) | 完整(JSC/Hermes) | 完整(WebView) | **JavaScriptCore 子集** |
-| 跨平台 | ✅ | ✅ | ✅(非 Web) | ✅ | **cairo 后端 + Windows hnwin MVP 已落地** |
+| 跨平台 | ✅ | ✅ | ✅(非 Web) | ✅ | **cairo 后端 + hnweb 门面运行时(Linux M1+M2 / Windows 收编)已落地** |
 
 **html-native 的独特定位：**
 > **最轻量的原生 UI 框架，但用 Web 的创作语言。**

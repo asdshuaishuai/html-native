@@ -240,8 +240,10 @@ HnShot 用真实视图自绘(@2x),所见即窗口所得,不需要屏幕录制权
 - 无 JavaScript——交互全部声明式(hx-*)或由宿主注入的 transport 承担。
 - CSS 是实用子集,不是全量(无 grid 等;`nth-child` 已支持,其余在路线图上)。
 - 图片支持 `<img>`;字体用系统字体栈。
-- 目前原生运行时是 macOS;Windows 已有 hnwin MVP(C + hnsoft/WebView2),Linux 可经 cairo
-  后端无头运行;原生 Linux 运行时在路线图。
+- 目前 Swift 原生运行时是 macOS;跨平台 C 运行时已落地 —— Windows 为
+  `tools/hnweb_win.c`(hnwin 收编版), Linux 为 `tools/hnweb_linux.c`(X11,
+  M2: 事件派发管道 + 动画帧循环), 两者实现同一份 `tools/hnweb.h` 门面;
+  Linux 亦可经 cairo 后端无头运行。
 
 遇到问题先跑 `RenderTest`(全绿说明引擎层健康),
 再用 `hn-shot` 单独渲染你的文件定位是内容还是引擎的问题。

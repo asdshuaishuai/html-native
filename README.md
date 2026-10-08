@@ -210,6 +210,17 @@ $D/Hn dev app.html --css app.css
   场景(服务器端截图 / CI 视觉回归 / 确定性渲染)与需引擎专属能力(Lottie/
   网格变形/能力图)的页面。页面可用 `hn-renderer=engine` 显式声明
   (`native` 是旧名, 仍兼容)。
+- **Linux 内置 webview 运行时(M1+M2 已落地)**: `tools/hnweb_linux.c` ——
+  X11 窗口(运行期 `dlopen("libX11.so.6")`, 编译期零依赖) + hnsoft 软件光栅,
+  与 Windows 的 `tools/hnweb_win.c`(`hnwin.c` 收编版)实现同一份
+  `tools/hnweb.h` 门面。M2 能力已就位: **事件派发管道**(点击/键盘/滚轮/hover
+  → 目标解析 → 带 id 冒泡 → `hx-trigger` 消费, 与 macOS 运行时 `emit()`
+  同构; click/mousedown/mouseup/mouseenter/mouseleave/focus/blur/keydown/
+  keyup/scroll 全走同一管道)与**动画帧循环**(实测 dt 推进
+  `hn_context_anim_tick` —— 过渡/@keyframes 与 Lottie/网格变形的独立时钟
+  共用; select 超时取"16ms 帧 / 最近 hx 轮询 / 无限阻塞"最小者, 空闲零唤醒)。
+  零外部依赖、musl 静态, 交叉编译产物 `hnweb-linux-*`(x86_64/aarch64)与
+  `hnweb-windows-x86_64`; 无头 CI 走 `--probe`/`--shot` 自检。
 - **两条路径共用一切上层语义**: 窗口生命周期(秒开/TTL/热更新/持久化/`hn dev` 热重载)、
   `sys://` 系统桥、`hx-*` 交互(click/load/`every Ns`/回车提交/表单参数)、
   `hn-theme` 设计令牌、本地 KV —— 换的只是渲染层, 应用模型完全一致。
@@ -472,15 +483,21 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   镜像 `hnwin.c` 的 Windows 模式(同一份 C99 引擎管线, 换的只是
   窗口/事件/像素搬运层); 零外部依赖、musl 静态,
   `ZIG=zig ./tools/build-multiplatform.sh` 交叉编译产物 `hnweb-linux-*`
-  (x86_64 / aarch64, 无头 CI 走 `--probe`/`--shot` 自检)
+  (x86_64 / aarch64, 无头 CI 走 `--probe`/`--shot` 自检)。
+  **M2 已落地**: 事件派发管道(点击/键盘/滚轮/hover, 与 macOS 运行时同构)
+  与动画帧循环(过渡/@keyframes/Lottie/网格变形共用, 空闲零唤醒);
+  Windows 侧 `tools/hnweb_win.c`(`hnwin.c` 收编版)走同一份
+  `tools/hnweb.h` 门面, 调用方跨平台一行不改。
 
 ## 已知简化与路线图
 
 - 片段热更新走 arena, 旧节点不回收; class/id 选择器统一小写
 - 近期: select/checkbox、grid 布局、多屏/多表面组合
 - 弹窗原生交互: `hn-drag`(元素即拖拽手柄)、`hn-dismiss`(点击弹窗外自动关闭)
-- 中期: Windows 已有 hnwin MVP(C + hnsoft/WebView2); 继续: 原生 Linux 运行时、宿主协议鉴权、
-  `.hnapp` 包签名与资源(字体/图片)打包、动画
+- 中期: Windows 已有 hnwin MVP(C + hnsoft/WebView2), 并收编为 `tools/hnweb_win.c`
+  门面实现; **原生 Linux 运行时已落地**(`tools/hnweb_linux.c`: M1 窗口/渲染 +
+  M2 事件派发管道与动画帧循环); 继续: sys:// 桥移植到 hnweb 门面、宿主协议鉴权、
+  `.hnapp` 包签名与资源(字体/图片)打包
 - 远期: 常驻宿主的发现机制(Bonjour/命名空间)、组件生态层(在引擎之上,
   不进引擎)
 

@@ -9,6 +9,9 @@
 #   macOS   arm64 / x86_64
 #   Linux   x86_64 / aarch64 (musl 静态: 无 glibc 版本依赖)
 #   Windows x86_64 (mingw, 静态链接)
+# 运行时产物: dist/hnweb-*(tools/hnweb.h 门面的平台实现)
+#   hnweb-linux-x86_64 / hnweb-linux-aarch64  X11 运行期 dlopen, 零编译期依赖
+#   hnweb-windows-x86_64                      Win32(hnwin.c 收编为门面实现)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
