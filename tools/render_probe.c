@@ -1,14 +1,21 @@
-/* RenderTest/main.c — 离屏验收(纯 C99, 零 GUI 依赖)
+/* render_probe.c — 离屏验收(纯 C99, 零 GUI 依赖, 零构建链)
  *
  * 管线与真窗口同一条: 解析 → 级联 → 布局 → 绘制指令 → hnsoft 位图 → PNG。
  * 位图即窗口所见 —— 光栅器就是生产用的 hnsoft, 不存在第二套"测试专用"实现。
  *
- * 用法:
- *   RenderTest                              # 内置用例 + 断言(全绿退出 0)
- *   RenderTest a.html a.css out.png [W H]   # 渲染任意文件(不断言)
+ * 用法(与其他 C 探针同口径, 直接 cc, 无 SPM; 本机 61 断言全绿验证过):
+ *   cc -O2 -I Sources/CHtmlNative/include -I Sources/CHtmlNative \
+ *      -I /opt/homebrew/include/freetype2 tools/render_probe.c \
+ *      Sources/CHtmlNative/hn_{arena,html,css,style,layout,paint,context,theme}.c \
+ *      Sources/CHtmlNative/hn_{json,lottie,mesh,png}.c \
+ *      Sources/CHtmlNative/hnsoft.c -L/opt/homebrew/lib -lfreetype -lm \
+ *      -o /tmp/render_probe
+ *   /tmp/render_probe                           # 内置用例 + 断言(全绿退出 0)
+ *   /tmp/render_probe a.html a.css out.png [W H] # 渲染任意文件(不断言)
  *
  * 历史: 本可执行曾是 Swift 版(415 项断言), c49cfbd 全量 C99 时随 Swift 层
  * 一起移除; 这里以 C99 重生 —— 引擎是唯一渲染路径, 验收也必须同源。
+ * 曾以 Package.swift(SPM)提供入口, 已删 —— 构建链只有 bash + cc/zig cc。
  *
  * 断言口径: 只断与文本度量无关的确定性结论(颜色/几何/指令形态/像素采样),
  * 文字宽度因 FreeType 有无而不同, 不进入断言(引擎同口径回退, 见 hnsoft.c)。
@@ -20,7 +27,7 @@
 #include "hn.h"
 /* hnsoft.h 不在 include/(对包外是模块私有), 但验收必须调用生产光栅器 ——
    以相对路径包含引擎树内的同一份头, 保持单一实现来源。 */
-#include "../CHtmlNative/hnsoft.h"
+#include "../Sources/CHtmlNative/hnsoft.h"
 
 static int g_pass = 0, g_fail = 0;
 
@@ -472,7 +479,7 @@ static void test_raster(void) {
     hn_context_destroy(ctx);
 }
 
-/* 任意文件模式: RenderTest a.html [a.css] out.png [W H] —— 不断言。
+/* 任意文件模式: render_probe a.html [a.css] out.png [W H] —— 不断言。
    第 2 参以 .css 结尾 → 完整四参形态; 否则视为 a.html out.png [W H]。 */
 static int render_file(int argc, char **argv) {
     const char *html_path = argv[1];
@@ -492,7 +499,7 @@ static int render_file(int argc, char **argv) {
     }
     size_t hlen = 0, clen = 0;
     char *html = read_all(html_path, &hlen);
-    if (!html) { fprintf(stderr, "RenderTest: 无法读取 %s\n", html_path); return 1; }
+    if (!html) { fprintf(stderr, "render_probe: 无法读取 %s\n", html_path); return 1; }
     char *css = css_path ? read_all(css_path, &clen) : NULL;
 
     hn_doc *doc = hn_parse_html(html, hlen);
@@ -503,10 +510,10 @@ static int render_file(int argc, char **argv) {
     hn_context_layout(ctx, W, H, &tb);
     const hn_display_list *dl = hn_context_display_list(ctx);
     int rc = 0;
-    if (!dl) { fprintf(stderr, "RenderTest: 无绘制指令\n"); rc = 1; }
+    if (!dl) { fprintf(stderr, "render_probe: 无绘制指令\n"); rc = 1; }
     else {
         unsigned char *px = hnsoft_render(dl, (int)W, (int)H, 0x0B0E13FF);
-        if (!px) { fprintf(stderr, "RenderTest: 渲染失败\n"); rc = 1; }
+        if (!px) { fprintf(stderr, "render_probe: 渲染失败\n"); rc = 1; }
         else {
             size_t pn = 0;
             unsigned char *png = hnsoft_encode_png(px, (int)W, (int)H, &pn);
@@ -517,7 +524,7 @@ static int render_file(int argc, char **argv) {
                 printf("已渲染 %dx%d → %s (%.1f KB)%s\n", (int)W, (int)H, out,
                        (double)pn / 1024.0,
                        hnsoft_font_loaded() ? "" : "  [无字体: 文本未渲染]");
-            } else { fprintf(stderr, "RenderTest: 无法写 %s\n", out); rc = 1; }
+            } else { fprintf(stderr, "render_probe: 无法写 %s\n", out); rc = 1; }
             free(png);
             free(px);
         }
@@ -531,7 +538,7 @@ int main(int argc, char **argv) {
     /* 文件模式: 带路径参数即渲染任意文件(内置用例零参数) */
     if (argc >= 3) return render_file(argc, argv);
 
-    printf("RenderTest — C99 离屏验收(引擎: 解析→级联→布局→指令→hnsoft 位图)\n\n");
+    printf("render_probe — C99 离屏验收(引擎: 解析→级联→布局→指令→hnsoft 位图)\n\n");
     test_parse();
     test_style();
     test_layout();

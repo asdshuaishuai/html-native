@@ -141,6 +141,55 @@ typedef enum { HNP_CURSOR_DEFAULT = 0, HNP_CURSOR_POINTER, HNP_CURSOR_TEXT } hnp
 
 void hnp_set_cursor(hnp_window *w, hnp_cursor c);
 
+/* ---------------- 媒体(追加在 hn_platform.h 光标段之后) ---------------- */
+
+typedef struct hnp_media hnp_media;   /* 不透明句柄(平台实现自定义内部结构) */
+
+/* 本平台是否带媒体实现。headless/Linux/Windows 返回 0(ABI 留位不实现)。
+   macOS 返回 1(不探测 AVFoundation 是否可 dlopen —— dlopen 失败在
+   open 的 err 里如实报告, 不在 supported 里猜)。 */
+int hnp_media_supported(void);
+
+/* 打开媒体(url 为本地路径或 file:// URL; 引擎侧保证先于任何其他调用)。
+   同步返回句柄; 元数据在后台解析, 就绪用 hnp_media_state 查询。
+   失败返回 NULL 并写一行原因进 err(err/err_cap 可为 NULL/0 = 不关心)。
+   纯音频文件合法(没有视频轨 → frame 恒返回 0)。 */
+hnp_media *hnp_media_open(const char *url, char *err, size_t err_cap);
+
+/* 关闭并释放(幂等; NULL 安全)。之后句柄不得再使用。 */
+void hnp_media_close(hnp_media *m);
+
+/* 播放控制。play 返回 1 = 已接受; seek 钳制到 [0, duration](已知时)。 */
+int  hnp_media_play(hnp_media *m);
+void hnp_media_pause(hnp_media *m);
+int  hnp_media_seek(hnp_media *m, double sec);
+
+/* 音量 0..1(越界钳制)与静音。视频音轨与纯音频同此入口。 */
+void hnp_media_set_volume(hnp_media *m, float vol);
+void hnp_media_set_muted(hnp_media *m, int muted);
+
+/* 元数据。duration 未知(直播流)时写 -1 并返回 0。 */
+int  hnp_media_duration(hnp_media *m, double *sec_out);
+
+/* 当前播放位置(秒; 单调性由平台保证: pause 后恒定, seek 落位后更新)。 */
+int  hnp_media_position(hnp_media *m, double *sec_out);
+
+/* 就绪与结束: *ready=1 表示元数据+可起播(时长已知);
+   *ended=1 表示位置到达 duration 平台侧确认(实现可直接用 position>=duration,
+   实测 AVPlayer 的 rate 在播完时不可靠)。两者可同时为 1。 */
+int  hnp_media_state(hnp_media *m, int *ready, int *ended);
+
+/* 拉当前视频帧(RGBA8 非预乘, 原点左上, 顶上到底下)。
+   调用方给缓冲与容量 cap(字节); *w/*h 写实际帧尺寸; *pts_sec 写该帧
+   显示时间戳(秒)。返回: 1=新帧已写入(内容与上次不同), 0=无新帧(内容未变,
+   *w/*h 仍有效), -1=无视频轨或失败。
+   cap 不足以容纳整帧时写 -1 并返回 -1(调用方按 meta 重新分配后重试)。
+   实现注意(实机验证): 实际产出的 CVPixelBuffer 是 '420v' planar,
+   请求 BGRA 的 attributes 会被忽略 —— 用 GetBaseAddressOfPlane(0/1)+
+   GetBytesPerRowOfPlane 取 Y/UV 平面, 平台内做 NV12→RGBA 转换。 */
+int  hnp_media_frame(hnp_media *m, unsigned char *rgba, size_t cap,
+                     int *w, int *h, double *pts_sec);
+
 #ifdef __cplusplus
 }
 #endif

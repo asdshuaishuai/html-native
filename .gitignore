@@ -6,7 +6,6 @@
 *.so
 *.dll
 *.exe
-.swiftpm/
 
 # 分发产物
 dist/

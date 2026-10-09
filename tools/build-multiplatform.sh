@@ -179,9 +179,13 @@ build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
 # 与 hnwin(Windows) / hnweb_linux 同一条管线, 换的只是窗口/事件/像素搬运层。
 # 无需链接任何 framework: AppKit/CoreGraphics/objc 全部经 dlopen+dlsym 使用
 # (这也正是"零平台依赖"的字面含义 —— 连链接期都不需要它们)。
+# 媒体实现(hnp_media_macos.c)只入列 macos 目标: 同为运行期 dlopen
+# AVFoundation/CoreMedia/CoreVideo, 链接期零 framework; headless/linux/windows
+# 不入列 —— hnp_media_supported() 在各自平台文件显式给 0(media-design §2,
+# ABI 留位不实现)。
 # 源不含 hncore.c(那是 CLI 的 main; 壳自带 main, 两份即重复定义 ——
 # 与 hnweb-linux 目标同一理由)。
-MAC_RT=(tools/hnweb_macos.c
+MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
@@ -227,7 +231,7 @@ else
 fi
 printf '  %-22s ' "hnapp-macos-arm64"
 if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF -DHN_VERSION="\"$VERSION\"" \
-        app/hn_app.c $RT_SRC platform/hnp_macos.c "${ENGINE_SRC[@]}" \
+        app/hn_app.c $RT_SRC platform/hnp_macos.c platform/hnp_media_macos.c "${ENGINE_SRC[@]}" \
         -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
     printf '✓  hnapp-macos-arm64 (%s KB) 真窗口\n' "$(($(wc -c < "$OUT/hnapp-macos-arm64") / 1024))"
 else

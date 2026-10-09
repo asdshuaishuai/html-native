@@ -350,3 +350,11 @@ unsigned long hnp_now_ms(void) {
 }
 
 void hnp_set_cursor(hnp_window *w, hnp_cursor c) { (void)w; (void)c; /* M1: 未接 XCreateFontCursor */ }
+
+/* ---------------- 媒体 ABI 留位(docs/media-design.md §2) ----------------
+   Linux 不带媒体实现(Windows Media Foundation / GStreamer 同为"留位不实现",
+   见 media-design §9): supported()=0, 引擎/桥据此整体降级(不播, 不炸)。
+   其余 hnp_media_* 有意不提供 —— 调用方必须先看 supported(), 因此
+   本平台路径对媒体零符号依赖(不走 hn_platform.h 里的 static inline
+   兜底: 那会把真实实现静默遮蔽成 0, 属于坑)。 */
+int hnp_media_supported(void) { return 0; }

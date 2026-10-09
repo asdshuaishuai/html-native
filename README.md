@@ -7,9 +7,11 @@
 > 与 RN / Flutter 同级的原生 UI 框架——UI 描述语言是 HTML。
 > 形态是一个**系统级 PWA / 小程序引擎**：随时生成、销毁、持久化一个应用。
 >
-> 渲染以自研 C99 引擎为主(原生、无 WebView), 可显式声明 WebKit 兜底。
+> 渲染全部走自研 C99 引擎(原生、无 WebView、无 Swift): 平台差异收敛在
+> `platform/hn_platform.h` 的薄胶水层 —— 每平台一个 `hnp_*.c`, 运行期
+> dlopen 系统 API, 编译期零 SDK 依赖。
 > **人类和 AI 都能直接开发**：会 HTML/CSS 就能出原生窗口，无构建、无
-> 依赖、无 JavaScript；目标是把应用开发的技术成本压到最低。
+> 依赖；目标是把应用开发的技术成本压到最低。
 > 人类开发者上手 → [docs/getting-started.md](docs/getting-started.md)。
 
 ## 定位
@@ -33,42 +35,41 @@
 1. **引擎具备无关性**。它只对 hn 编码做一件事——渲染成系统级表面
    (图层/窗口/弹窗/应用)。上层的 UI/UX 实现(组件、设计系统、交互
    模式)不在引擎里, 由使用方在其上构建。引擎也不含网络: htmx 风格
-   的 `hx-*` 属性由运行时解释, transport 可注入(进程内 / URLSession /
+   的 `hx-*` 属性由运行时解释, transport 可注入(进程内 /
    `sys://` 系统桥, 不绑定 HTTP 服务)。
 2. **应用是易变对象**。像 PWA/小程序一样: 生成(秒开一个表面)、
    销毁(close)、持久化(persist → `.hnapp` 胶囊, 离线可再唤起)、
    热更新(同 id 推送新 hn 编码, 窗口与状态保持)。
 3. **HTML 是最低成本的 UI 语言**。人类手写或 AI 生成是两条等价入口:
-   人类走 `hn new → hn dev` 热重载循环(保存即生效, 无构建链);
-   agent 现场生成 hn 编码推给常驻宿主, 系统里即刻出现信息窗口——
+   人类写完 `app.html` 一条命令开窗(无构建链); agent 现场生成 hn 编码
+   推给常驻宿主, 系统里即刻出现信息窗口——
    不拉浏览器, 不装应用。
 
 ## 快速开始
 
 ```bash
 git clone https://github.com/asdshuaishuai/html-native && cd html-native
-swift build
-alias hn=.build/debug/Hn
+ZIG=zig bash tools/build-multiplatform.sh        # 产出 dist/ 全套 C99 二进制
 
-hn new myapp && cd myapp      # 生成骨架: app.html / app.css / head.html
-hn dev app.html --css app.css # 开发模式: 保存即热更新
+dist/hnapp-macos-arm64 examples/agent-card.html   # 秒开一个原生窗口
+dist/hncore-macos-arm64 render app.html out.png 460 560   # 无头渲染出 PNG
 ```
 
-只需要会 HTML 和 CSS。无需 Node、npm、打包器、JavaScript。
+只需要会 HTML 和 CSS。构建链只有 bash + zig cc —— 无 Node、npm、
+打包器、Swift、Xcode 工程。
 
-**不想用命令行**：把这套能力给 agent 用 —— 项目自带 MCP server
-(13 个工具) 与 skill (`SKILL.md`)。除了开窗口与内省，还能**驱动**界面：
+**agent 的入口: C99 常驻宿主 + CLI**(Unix socket JSON-lines, 协议即文档):
 
-| 能力 | 工具 | 说明 |
-|---|---|---|
-| 创建 / 热更新 / 销毁 | `hn_open` `hn_update` `hn_close` | 传 HTML 内容或文件路径 |
-| 感知 | `hn_dom` `hn_text` `hn_dump` `hn_list` | DOM 树 / 某元素文本 / 绘制指令 / 应用列表 |
-| **驱动** | `hn_event` `hn_eval` | 注入点击键盘等事件；在该应用 JS 上下文里求值 |
-| 离线 / 系统 / 截图 | `hn_persist` `hn_restore` `hn_sys` `hn_shot` | `.hnapp` 胶囊 / `sys://` 数据 / 渲染 PNG |
+```bash
+bash tools/build-daemon-cli.sh     # 产出 dist/hn-daemon(宿主) + dist/hn(客户端)
+dist/hn-daemon &                   # 常驻; 默认 ~/.html-native/hn-daemon.sock
+dist/hn open card examples/agent-card.html --css examples/agent-card.css
+dist/hn list / dump card / event card --kind click --target btn / shot card out.png
+```
 
-`hn_event` 回传三态，agent 能区分"已处理""已派发但无人监听""目标未找到"；
-`hn_eval` 在 native 与 webkit 两个渲染器上都可用（native 走系统自带的
-JavaScriptCore），因此自动化不必关心用了哪个渲染器。
+宿主与壳的分工: **开窗走平台壳**(`hnapp-*`/`hnweb-*`, 事件循环在壳里),
+**无头驱动走 daemon**(CI/服务器上 open/update/eval/dom/shot 全链路不触 GUI)。
+任何语言的 socket 客户端都能直接说这套 JSON-lines 协议, 不依赖 hn CLI。
 
 **绘制后端：一个跨平台框架，不是每个平台各写一份**。引擎产出的是纯数据的显示
 列表(8 类指令)，绘制层把它翻译成像素。这个接缝上有两个可互换实现，**签名完全
@@ -76,9 +77,8 @@ JavaScriptCore），因此自动化不必关心用了哪个渲染器。
 
 | 后端 | 用于 | 特点 |
 |---|---|---|
-| `HNPainter.swift` | macOS 运行时 | CoreGraphics, 原生质量 |
-| `hnsoft.c` | 无 GUI / 服务器端 / 无 cairo 的环境 | 纯 C 软件光栅, 零外部依赖 |
-| `hn_cairo.c` | Windows 运行时 / Linux / 无头 | **一份实现喂所有平台** |
+| `hnsoft.c` | 默认光栅器(全部平台) | 纯 C 软件光栅, 零外部依赖 |
+| `hn_cairo.c` | 可选: 生产级阴影/裁剪/压缩 | **一份实现喂所有平台** |
 
 `hn_cairo.c` 是"别再为每个平台手写一份绘制"的答案。此前 Windows 与无头场景只能
 靠 `hnsoft` 手写光栅，而它自己承认几处妥协：阴影是"6 层扩边"近似(无高斯模糊)、
@@ -104,51 +104,44 @@ hncore renderc app.html out.png 460 560   # cairo 后端(同一份显示列表)
 **三平台二进制**：`ZIG=zig ./tools/build-multiplatform.sh` 一条命令产出
 macOS/Linux/Windows 产物 —— 除五个 `hncore` 引擎 CLI（验证与集成测试）外，
 还有**跨平台运行时** `hnweb-*`：Linux（x86_64/aarch64, X11 运行期 dlopen,
-零编译期依赖）与 Windows（x86_64, Win32）各一套，实现同一份 `tools/hnweb.h`
-门面（能力面见下"Linux 内置 webview 运行时"一条）。
+零编译期依赖）与 Windows（x86_64, Win32）各一套, 以及新分层架构的
+`hnapp-*`(见下"架构与代码地图")。
 详见 [release](https://github.com/asdshuaishuai/html-native/releases)。
 
 ## 架构与代码地图
 
 ```
-Sources/CHtmlNative/  引擎核心(C99, ~10400 行, 零依赖)
+Sources/CHtmlNative/  引擎核心(C99, ~10900 行, 零依赖, 不含平台/UI/网络)
   hn_html.c    hn 编码解析 → DOM(arena)
   hn_css.c     样式表解析 → 规则(选择器展开/特异性)
   hn_style.c   级联 + 继承 + UA 样式表
   hn_layout.c  block 流 + flexbox + 文本换行(CJK 硬拆)
   hn_paint.c   DOM → 绘制指令列表(display list)
+  hn_theme.c   hn-theme 设计令牌基底(暗/亮)
   hn_json.c    极简 JSON 解析(零依赖; Lottie 等公开格式需要)
   hn_png.c     PNG 解码(含自带 inflate; 让软件光栅后端真能显示图片)
   hn_lottie.c  Lottie 求值 → 矢量指令(多边形/图片/矩形)
   hn_mesh.c    网格变形贴图 → MESH 指令(Live2D 类效果的原语)
   hn_context.c 会话: 布局编排/命中/hot-update/清单解析
   hn_cairo.c   **可选**绘制后端: 显示列表 → cairo(一份实现喂所有平台)
-Sources/HtmlNative/   macOS 运行时 + 应用模型(16 个 Swift 文件, 此处列主要文件)
-  TextShaper.swift     CoreText 文本后端(测量回调)
-  HNPainter.swift      display list → CoreGraphics(macOS 运行时; cairo 后端在 C 侧)
-  HNLayerCompositor.swift 网格变形合成(三角形仿射纹理映射)
-  ImageStore.swift     图片加载/缓存; AssetStore.swift 外部资产(Lottie JSON)
-  HtmlNativeView.swift 渲染视图 + htmx(hx-*)执行 + sys:// 应用路由
-  HNEngine.swift       应用注册表: open/update/close/persist/restore
-                       表面物化: window(NSWindow)/popup(NSPanel 浮层)
-  SystemBridge.swift   sys:// 只读系统桥(cpu/内存/磁盘/电池/uptime/host)
-  IncludeExpander.swift <include> 展开(零构建组件) + HNStore 本地 KV
-  SysCard.swift        内置系统信息卡
-Sources/HnDaemon/      常驻宿主: accessory 进程 + Unix socket + JSON-lines
-                       DevWatcher(开发模式 mtime 热推送)
-Sources/Hn/            hn 命令行(open/update/dev/new/…, 自动拉起宿主)
-                       Scaffold.swift: hn new 项目脚手架
-Sources/DemoApp/       嵌入式使用示例(引擎作为库嵌进一个应用)
-Sources/RenderTest/    离屏验收(断言 + 任意文件出 PNG, 即窗口所见)
-Sources/HnShot/        真实视图截图(cacheDisplay 自绘, @2x, 可注入 hover/scroll 态)
-Sources/HnMcp/         MCP server(stdio): 13 个工具(open/update/close/dom/text/dump/list/event/eval/persist/restore/sys/shot)
-screenshots/           引擎效果截图(showcase / 行内 / 输入 / 交互 / 主题 / 系统卡 /
-                       消息卡 / 脚手架 dev-app / 桌面仪表盘 dashboard / 网页习惯 webpage)
-tools/hnweb.h          跨平台运行时门面: 壳管窗口表面/事件收集/位图上屏,
-                       门面管引擎生命周期/像素/命中/帧步进 —— 平台壳只实现这一个头
-tools/hnweb_linux.c    Linux 运行时(M1+M2): X11(运行期 dlopen, 零编译期依赖) +
-                       hnsoft 软件光栅; M2 事件派发管道与动画帧循环(见下)
-tools/hnweb_win.c      Windows 运行时: hnwin.c 的收编版, 同一 hnweb.h 门面
+  include/hn.h 引擎公共 API(单头)
+rt/hn_rt.c             公共运行时: 文档生命周期/htmx 执行/sys:// 桥/本地 KV
+                       + QuickJS 求值(HN_HAVE_QUICKJS, 静态链接可选)
+platform/hn_platform.h 平台抽象 API(~15 个函数: init/开窗/blit/事件/时钟/光标)
+  hnp_headless.c       无头平台(CI/服务器/agent 无显示环境)
+  hnp_macos.c          macOS: 运行期 dlopen AppKit + objc_msgSend(零 .m/.swift)
+  hnp_linux.c          Linux: 运行期 dlopen X11
+app/hn_app.c           唯一主循环(~120 行): 链接不同 hnp_*.c 即该平台的应用
+tools/hncore.c         引擎 CLI(render/renderc: hnsoft 与 cairo 同一显示列表)
+tools/hnweb_macos.c    macOS 窗口壳(M1+M2: dlopen AppKit/CoreGraphics)
+tools/hnweb_linux.c    Linux 窗口壳(M1+M2: X11 dlopen + hnsoft, 事件管道+帧循环)
+tools/hnwin.c          Windows 壳(Win32)
+tools/hn_daemon.c      C99 常驻宿主(Unix socket JSON-lines, agent 入口)
+tools/hn_cli.c         C99 命令行客户端(与 daemon 配对)
+tools/build-multiplatform.sh  交叉构建(zig cc, 三平台产物 + 跨架构确定性门禁)
+tools/build-daemon-cli.sh     daemon/CLI 本机构建
+tools/*_probe.c/.py    探针(render/alpha/cairo/mesh/sysbridge/rt + 布局/CSS/HTML/Lottie)
+screenshots/           引擎效果截图
 ```
 
 ## 使用
@@ -156,82 +149,61 @@ tools/hnweb_win.c      Windows 运行时: hnwin.c 的收编版, 同一 hnweb.h �
 ### 命令行(agent 的系统入口)
 
 ```bash
-cd html-native && swift build
-D=.build/debug
+bash tools/build-daemon-cli.sh
+D=dist
 
-# 生成: 秒开一个弹窗(表面类型由 hn 编码里的 meta 声明)
-$D/Hn open agent-card examples/agent-card.html --css examples/agent-card.css
+$D/hn-daemon &                            # 常驻宿主(默认 ~/.html-native/hn-daemon.sock)
 
-$D/Hn list                 # 运行中的应用(含所占轻应用槽位)
-$D/Hn applet list          # 轻应用槽位: 位置 / 尺寸 / 此刻是否开着
-$D/Hn update agent-card examples/agent-card.html   # 热更新(窗口保持)
-$D/Hn close agent-card     # 销毁
+$D/hn open card examples/agent-card.html --css examples/agent-card.css
+$D/hn list                                # 运行中的应用
+$D/hn dump card                           # 绘制指令数(管线健康自检)
+$D/hn text card --element title           # 元素文本(感知)
+$D/hn event card --kind click --target btn  # 注入事件(驱动)
+$D/hn shot card out.png                   # 渲染 PNG
+$D/hn update card examples/agent-card.html  # 热更新(同 id 推新文档)
+$D/hn close card                          # 销毁
 
-# 胶囊: 一个文件装下 文档 + 页面数据 + 槽位几何 + agent 操作指令
-$D/Hn persist agent-card ~/Desktop/card.hnapp \
-    --instructions "仓库分析卡。hn event agent-card click --target rerun 重跑; 数据在 sys://cpu。"
-$D/Hn restore ~/Desktop/card.hnapp      # 从任意位置拆包(数据/几何一并装回)
-
-# 轻应用: 页面带 <meta name="hn-applet" content="clock"> 即半固化
-$D/Hn open clock examples/applet.html --ttl 30   # 30 秒后自毁, 位置仍记得
-$D/Hn applet remove clock    # 忘记槽位 → 下次打开回到声明位置
-
-cat foo.html | $D/Hn open - --surface popup    # 管道: agent 生成 → 成窗
+cat foo.html | $D/hn open -               # 管道: agent 现场生成 → 成窗
 ```
 
-### 开发工作流(人类: 无构建, 保存即热更新)
+daemon 是**无头优先**的: open/update/eval/dom/dump/shot 全链路不触 GUI,
+CI/服务器同样可用; 真窗口由平台壳开(见上"快速开始"的 `hnapp-*`)。
+持久化(`persist`/`restore`)与轻应用槽位(`applets`)走 socket op ——
+任何语言的 socket 客户端都可直接对接, CLI 只是其中一个客户端。
 
-```bash
-$D/Hn new myapp && cd myapp    # 脚手架: app.html/app.css/head.html/README
-$D/Hn dev app.html --css app.css
-# 编辑器里改 HTML/CSS → ⌘S → 窗口半秒内热更新(mtime watch, 窗口与状态保持)
-```
+### 渲染运行时: 全部 C99, 无 WebKit、无 Swift
 
-配套的人类友好能力: `<include src=…>` 文件级组件(嵌套/循环检测)、
-`sys://store` 本地 KV 持久化(`~/.html-native/store/<id>.json`)、
-`sys://clipboard|notify|open`。完整上手: [docs/getting-started.md](docs/getting-started.md)
-
-### 双渲染器: 自研引擎为主, WebKit 显式兜底
-
-```html
-<meta name="hn-renderer" content="native">   <!-- 默认: C99 引擎原生渲染 -->
-<meta name="hn-renderer" content="webkit">   <!-- 显式兜底: 系统 WKWebView -->
-```
-
-- **webview(默认, 2026-09 定位)**: 内置通用的跨平台 webview 层 ——
-  macOS 走系统 **WKWebView**、Windows 走系统 **WebView2**, 都是系统自带,
-  **不打 Node.js 也不打 Chromium**(Tauri/GPUI 的取舍)。
-  追赶"AI 生成即所见"的智能 UI: agent 现场生成的任何 HTML/CSS/JS 都能渲染,
-  不受自研引擎能力面限制; canvas/svg/video/grid 原生支持。
-  agent 双向驱动: `hn eval` 求值 + `hn event` 派发**真实 DOM 事件**
-  (在页面里 dispatchEvent, 冒泡/监听器/表单提交都会发生, 与真人操作一致)。
-- **engine(自带 C99 引擎, 不再默认)**: 仍是**Linux 的 webview** —— Linux
-  禁用 WebKitGTK, 所以 Linux 的系统 webview 就是自带引擎。同时服务无 GUI
-  场景(服务器端截图 / CI 视觉回归 / 确定性渲染)与需引擎专属能力(Lottie/
-  网格变形/能力图)的页面。页面可用 `hn-renderer=engine` 显式声明
-  (`native` 是旧名, 仍兼容)。
-- **Linux 内置 webview 运行时(M1+M2 已落地)**: `tools/hnweb_linux.c` ——
-  X11 窗口(运行期 `dlopen("libX11.so.6")`, 编译期零依赖) + hnsoft 软件光栅,
-  与 Windows 的 `tools/hnweb_win.c`(`hnwin.c` 收编版)实现同一份
-  `tools/hnweb.h` 门面。M2 能力已就位: **事件派发管道**(点击/键盘/滚轮/hover
-  → 目标解析 → 带 id 冒泡 → `hx-trigger` 消费, 与 macOS 运行时 `emit()`
-  同构; click/mousedown/mouseup/mouseenter/mouseleave/focus/blur/keydown/
-  keyup/scroll 全走同一管道)与**动画帧循环**(实测 dt 推进
+- **没有 WKWebView / WebView2 / WebKitGTK**。历史上走过"系统 webview 优先"
+  与"Swift 运行时"两条路, 都已删除 —— 现在只有自研 C99 引擎这一条渲染路径,
+  平台差异收敛为 `platform/hn_platform.h` 的 ~15 个函数(开窗/blit/事件/时钟/
+  光标), 每平台一个 `hnp_*.c`, 全部**运行期 dlopen 系统 API, 编译期零 SDK 依赖**。
+- **新三层(主推)**: `app/hn_app.c` 是唯一主循环(~120 行) + `rt/hn_rt.c`
+  公共运行时(文档/htmx/sys:// 桥/QuickJS) + `platform/hnp_{headless,macos,linux}.c`。
+  链接哪个 hnp_*.c 就是哪个平台的应用: `hnapp-macos-arm64`(真窗口)、
+  `hnapp-macos-headless`(无 GUI 自检/CI)、`hnapp-linux-x86_64`(dlopen X11)。
+  `hn_app file.html` 开窗, `--probe` 管线自检, `--shot out.png` 渲染落盘。
+- **M1+M2 窗口壳(保留)**: `tools/hnweb_macos.c`(dlopen AppKit/CoreGraphics)、
+  `tools/hnweb_linux.c`(X11 运行期 dlopen + hnsoft)与 `tools/hnwin.c`(Win32)。
+  M2 能力: **事件派发管道**(点击/键盘/滚轮/hover → 目标解析 → 带 id 冒泡 →
+  `hx-trigger` 消费; click/mousedown/mouseup/mouseenter/mouseleave/focus/
+  blur/keydown/keyup/scroll 全走同一管道)与**动画帧循环**(dt 推进
   `hn_context_anim_tick` —— 过渡/@keyframes 与 Lottie/网格变形的独立时钟
   共用; select 超时取"16ms 帧 / 最近 hx 轮询 / 无限阻塞"最小者, 空闲零唤醒)。
-  零外部依赖、musl 静态, 交叉编译产物 `hnweb-linux-*`(x86_64/aarch64)与
-  `hnweb-windows-x86_64`; 无头 CI 走 `--probe`/`--shot` 自检。
-- **两条路径共用一切上层语义**: 窗口生命周期(秒开/TTL/热更新/持久化/`hn dev` 热重载)、
-  `sys://` 系统桥、`hx-*` 交互(click/load/`every Ns`/回车提交/表单参数)、
-  `hn-theme` 设计令牌、本地 KV —— 换的只是渲染层, 应用模型完全一致。
-- **CSS 归一化**: 引擎接受免单位数值(`padding: 16`), 标准 CSS 会忽略。
-  兜底前自动补齐单位(长度属性补 `px`, 倍数/百分比/函数式值/关键字不动),
-  保证同一份文件在两条路径下长相一致。
-- **文本编码与中文字体**: 兜底路径自动注入 `charset=utf-8`(缺失时)与
-  **中文系统字体栈**(`-apple-system` + PingFang SC + Hiragino Sans GB),
-  避免 WebKit 默认 Times 导致中文 fallback 成宋体、两条路径字形不一致;
-  `code/pre` 等宽栈与 native UA 对齐。中文解析/布局/表单编码全程 UTF-8 无损。
-- 参考 `examples/webkit-fallback.html`(用 3 列 grid 演示兜底能力)。
+  Linux 壳零外部依赖、musl 静态, 交叉产物 `hnweb-linux-*`(x86_64/aarch64);
+  无头 CI 走 `--probe`/`--shot` 自检。
+- **无头与确定性**: `hncore render` / daemon 无头模式 / `hnp_headless` 服务
+  服务器端截图、CI 视觉回归与确定性渲染 —— 同一份文档跨架构逐字节相同的
+  布局输出(见"支持的子集"的确定性门禁)。
+- **上层语义与渲染解耦**: 窗口生命周期(秒开/热更新/持久化)、`sys://` 系统桥、
+  `hx-*` 交互(click/load/`every Ns`/回车提交/表单参数)、`hn-theme` 设计令牌、
+  本地 KV 都在引擎/运行时层 —— 换壳不换语义。
+- **CSS 归一化**: 引擎接受免单位数值(`padding: 16`), 标准 CSS 会忽略;
+  引擎侧自动补齐单位(长度属性补 `px`, 倍数/百分比/函数式值/关键字不动),
+  所以按浏览器习惯写的文件无需改动。
+- **文本编码与中文字体**: `charset=utf-8` 缺失时自动注入; 默认样式带
+  **中文系统字体栈**(-apple-system + PingFang SC + Hiragino Sans GB),
+  不会 fallback 成宋体; `code/pre` 等宽栈。中文解析/布局/表单编码全程
+  UTF-8 无损。
 
 ### hn 编码里的表面声明(清单)
 
@@ -245,37 +217,42 @@ $D/Hn dev app.html --css app.css
 
 引擎只解析声明(C: `hn_doc_manifest`), 由宿主物化成对应表面。
 
-### 宿主协议(Unix socket, ~/.html-native/hn.sock, JSON-lines)
+### 宿主协议(Unix socket, ~/.html-native/hn-daemon.sock, JSON-lines)
 
 ```json
-{"op":"open","id":"card","html":"<h1>hi</h1>","surface":"popup","w":360,"h":520}
+{"op":"ping"}
+{"op":"open","id":"card","html":"<h1>hi</h1>","css":"...","w":360,"h":520,"headless":0}
 {"op":"update","id":"card","html":"..."}
-{"op":"close","id":"card"} / {"op":"list"} / {"op":"applets"} / {"op":"applet-remove","name":"clock"}
+{"op":"close","id":"card"} / {"op":"list"}
+{"op":"eval","id":"card","js":"..."}   → {"value":"..."}   (QuickJS)
+{"op":"dom","id":"card"} / {"op":"dump","id":"card"} / {"op":"text","id":"card","element":"x"}
+{"op":"event","id":"card","kind":"click","target":"go","x":..,"y":..}
+{"op":"shot","id":"card","path":"out.png"}
+{"op":"applets"} / {"op":"applet-remove","name":"clock"}
 {"op":"persist","id":"card","path":"~/x.hnapp","instructions":"怎么驱动它"}   # 打成胶囊
 {"op":"restore","path":"~/x.hnapp"}                                          # 拆胶囊
 ```
 
-### 截图(真实视图自绘, 无需屏幕权限)
+### 截图(离屏渲染, 无需屏幕权限)
 
 ```bash
-$D/HnShot examples/showcase.html examples/showcase.css shot.png 920 620
-$D/HnShot app.html app.png 480 620 --live        # css 可省略; --live 执行 sys:// 拉取
-$D/HnShot examples/showcase.html examples/showcase.css hover.png 920 620 --hover nav-team
-$D/HnShot examples/showcase.html examples/showcase.css scroll.png 920 620 --scroll frames,220
+dist/hnapp-macos-arm64 app.html --shot out.png 480 620    # 应用壳渲染落盘
+dist/hncore-macos-arm64 render  app.html out.png 460 560  # hnsoft 后端
+dist/hncore-macos-arm64 renderc app.html out.png 460 560  # cairo 后端(同一份显示列表)
+dist/hn shot card out.png                                 # daemon 里的无头应用
 ```
 
-### 嵌入式使用(像 RN 一样嵌进应用)
+### 嵌入式使用(引擎作为库链接)
 
-```swift
-import HtmlNative
+引擎是普通 C99 库: 编译期只要 `include/hn.h` 单头, 运行期只需宿主喂事件与像素。
+最小嵌入 = 三件套链接:
 
-let view = HtmlNativeView(html: html, css: css)
-view.hxTransport = { action, done in   // htmx 网络能力: 注入任意 transport
-    done(PanelFragments.generate(route: action.urlString))
-}
-// 或经应用模型:
-HNEngine.shared.open(id: "panel", html: html, surface: .popup)
-```
+- 引擎核心 `Sources/CHtmlNative/*.c`(解析/级联/布局/绘制指令)
+- 运行时 `rt/hn_rt.c`(htmx 执行 / `sys://` 桥 / QuickJS, 均可裁剪)
+- 任一 `platform/hnp_*.c`(或照 `hn_platform.h` 自己写一个, ~15 个函数)
+
+`app/hn_app.c`(~120 行)就是这份契约的参考实现 —— 换掉它的表面物化,
+就是你自己的应用容器; `tools/hncore.c` 演示零 GUI 嵌入(离屏渲染出 PNG)。
 
 ## 支持的子集(v1)
 
@@ -318,8 +295,8 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **`:nth-of-type()` / `:first-of-type` / `:last-of-type`**(只数同标签兄弟 ——
   与 nth-child 的差别正是表格/列表隔行错位的根源)、
   **`calc()`**(`calc(100% - 40px)` 等; % 走包含块基准, 纯绝对值就地求值, 负宽 clamp 到 0)、
-  **`text-shadow`**(三个绘制后端都支持; macOS 走 CoreGraphics setShadow 真高斯模糊,
-  cairo 走降采样放大近似, hnsoft 偏移无模糊)。
+  **`text-shadow`**(cairo 走降采样放大近似高斯模糊, hnsoft 偏移无模糊;
+  两个绘制后端同一语义)。
   这一批的共同点是**之前声明了不生效也不报错** —— 探针先行把它们全部翻了出来。
   **文字特效**:`word-spacing`(每个"词间隔"附加宽度, 继承; 折叠模式作用于
   被压成的那一枚空格, pre/pre-wrap 作用于串内每个空白)、
@@ -336,31 +313,25 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **窗口标题栏无缝**(透明标题条 + 底色跟随 body 背景 + 可拖拽空白区)
 - **图片**: `<img>`(尺寸回退链: 样式 > 属性 > 固有尺寸), 图片后端注入
 - **弱化存在感 / 小程序 · 插件形态**: 引擎默认"不像一个 App"。
-  `hn-presence=ghost`(默认于 popup/layer)完全**不占系统身份** —— 不进 Dock、
-  无图标、不进 Cmd+Tab 的应用切换; 无边框表面还会带上 `.canJoinAllSpaces` +
-  `.ignoresCycle` + 非辅助面板, 即 macOS 上"桌面小组件"的标准语义。
+  `hn-presence=ghost`(默认于 popup/layer)声明**不占系统身份** —— 不进 Dock、
+  无图标、不进 Cmd+Tab 的应用切换(引擎解析声明并下发给壳, 物化语义由
+  各平台壳实现 —— C99 壳对浮层级别/空间对齐的完整对齐在壳层路线图上)。
   只有 `hn-surface=window`(或显式 `hn-presence=app`)才驻留 Dock。
   `hn-lifecycle="launch show hide destroy"` 声明关心哪些生命周期事件,
   未声明的页面一次都不打扰; 事件走**同一条统一事件管道**(JS 处理器与 hx 共用)。
-  agent 可用 `hn lifecycle <id> --kind hide` 手动触发, 模拟应用被切到后台
-- **透明背景层**: 引擎剥离 `html/body` 底色 + 三个绘制后端的真逐像素 alpha
-  (cairo 直通、hnsoft 非预乘 source-over、CoreGraphics) + 三平台窗口
-  (`isOpaque=false` / `UpdateLayeredWindow`)。三个光栅层上的历史 bug 都在
+- **透明背景层**: 引擎剥离 `html/body` 底色 + 绘制后端的真逐像素 alpha
+  (cairo 直通、hnsoft 非预乘 source-over) + 平台窗口透明背板。光栅层上的历史 bug 都在
   `tools/hnsoft_alpha_probe.c` 与 css 探针的端到端断言里守着:
   底色 alpha 曾被硬编码 255、`blend()` 只写 RGB 不写 alpha、
   `sd_rounded` 在 `qx==qy` 时内部距离塌成 0。实测 `examples/transparent.html`
   81.7% 全透明 + 10.6% 抗锯齿过渡 + 7.7% 内容。
-- **兜底 webview 引擎选型(litehtml + QuickJS, 已探针验证)**: Linux 禁用
-  WebKitGTK、又禁止打 Chromium/Node, 兜底需要嵌入**现成的轻量引擎**而非自研。
-  选型落地: **litehtml**(BSD, ~1.6MB, HTML/CSS 排版, 渲染后端由宿主提供 ——
-  cairo 即可喂它) + **QuickJS**(Zlib, ~2.6MB 静态, JS 层), 合计 ~4MB。
-  探针验证全链路真实可跑: `tools/litehtml_probe.cpp`(7 条断言: 背景色精确命中、
-  圆角裁剪三段、字形绘制、命中测试)与 `tools/quickjs_probe.c`(5 条断言: 求值/
-  状态持久/宿主函数桥/事件处理器/异常传导)。
-  两个集成级约束已实测并记录: ①标准 CSS 不认免单位长度, 喂 litehtml 前必须
-  过 HNCSSNormalizer 同款归一化; ②JS 异常必须 `JS_GetException` 消费, 且该
-  quickjs 构建的 `JS_FreeRuntime` 在有 JS 函数定义时会断言 —— runtime 与进程
-  同生命周期即可规避(daemon 本就常驻)。
+- **JS 运行时选型(QuickJS, 已探针验证)**: 选型落地 **QuickJS**(Zlib 协议,
+  ~2.6MB 静态链接, C99 友好), 集成在 `rt/hn_rt.c` —— `<script>` 求值与
+  daemon `eval` op 的执行体。(历史上曾为"webview 兜底"验证过 litehtml +
+  QuickJS 组合, 兜底路线删除后 QuickJS 保留为 JS 运行时。)
+  集成级约束已实测并记录: ①JS 异常必须 `JS_GetException` 消费; ②该
+  quickjs 构建的 `JS_FreeRuntime` 在有 JS 函数定义时会断言 —— runtime 与
+  进程同生命周期即可规避(daemon 本就常驻)。
 - **胶囊持久化(一个文件装下全部)**: `.hnapp` 是单个可携带文件, 参照 Capsule
   "documents that run like apps" 的形态 —— 不再把应用散落在运行时目录里:
   - **文档** html / css
@@ -379,9 +350,9 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   v1 老格式(只有 id/html/css/surface/title/w/h)照常读取, 缺的段按空处理。
 - **轻应用槽位(半固化)**: 声明 `hn-applet="clock"` 的表面成为**具名桌面轻应用**
   (KDE Plasmoid 那类形态, 不是 PWA 也不是页面栈): 位置按槽位名记在
-  `~/.html-native/applets/<名>.json`, 销毁后再打开回到原处。四个特征由此齐备 ——
-  `--ttl` 管**随用随消**、槽位管**半固化**、`.canJoinAllSpaces` 等管**系统级**、
-  槽位名本身管**具名**。要点:
+  `~/.html-native/applets/<名>.json`, 销毁后再打开回到原处。特征: 槽位管**半固化**、
+  槽位名本身管**具名**、`hn-presence` 管**系统级弱存在感**(随用随消的
+  `--ttl` 在壳层路线图上)。要点:
   - 槽位绑定的是**名字不是 app id**: 换个 id 打开同一份页面, 仍回到原处
   - 优先级: 调用方显式 `--x/--y` > 槽位记忆 > 页面声明 > 屏幕居中。
     显式坐标**不落盘**, agent 临时摆位不会污染记忆
@@ -462,25 +433,25 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **`transition-delay` / `animation-delay`**(负进度实现: 延迟未耗尽停在起始态,
   负值直接从中途开始; stagger 用 `animation-delay: calc(var(--i) * 0.1s)`)。
   全部由引擎插值, 页面只声明; 帧循环与 vsync 对齐
-- **原生 JavaScript(JavaScriptCore)**: `<script>` 内的 JS 走**系统自带的 
-  JavaScriptCore**(非 WebKit, 引擎仍是纯 C 与其隔离)。作为 HTML 
-  **交互业务能力的补充**: 计算/状态机/条件逻辑用 JS, 结构与样式仍用 HTML/CSS。
-  提供 `document.getElementById/querySelector/querySelectorAll/createElement`、
-  元素上的 `textContent`/`innerHTML`/`classList`/`style`/`addEventListener`、
-  以及高层 `hn.request`(复用 hx 语义)/`hn.get|set`(本地 KV)/`hn.log`。
-  JS 的 DOM 变更走**同一条布局绘制管线** —— 与 HTML 写的完全等价。
-  `hn-js="off"` 可关闭; 无 `<script>` 时零开销(不创建 JSContext)
+- **嵌入式 JavaScript(QuickJS)**: `<script>` 内的 JS 走**内嵌 QuickJS**
+  (Zlib 协议, 静态链接进 hn_rt; 构建期探测到才启用 —— 引擎本体仍是零依赖纯 C,
+  没有 QuickJS 时 JS 段整体编译出局)。定位是 HTML **交互业务能力的补充**:
+  计算/状态机/条件逻辑用 JS, 结构与样式仍用 HTML/CSS。
+  桥接函数 `hnSetText(选择器, 文本)` / `hnSetValue(选择器, 值)` 直改 DOM,
+  走**同一条布局绘制管线** —— 与 HTML 写的完全等价; daemon 的 `eval` op
+  即由此求值。runtime 与进程同生命周期(daemon 本就常驻, 规避 GC 断言)。
+  无 `<script>` 且无 eval 时零开销(不创建 JS 上下文)
 - **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 即获得"自动跟随底部"语义
   (运行时提供, 页面零脚本): 内容增长时平滑追上, 用户上翻时让出滚动条;
   `hn-stream-loop="14"` 环形缓冲只保留最近 N 条 —— 内容可无限追加而内存与视觉收敛。
   `sys://agent/step` 每次调用返回一条轨迹条目(思考/输出/工具调用/图片)演示循环滚动。
   见 `examples/agent-stream.html`
-- **动画与呈现**: 帧循环用 `CADisplayLink`/`CVDisplayLink` **与 vsync 对齐**
-  (不用 Timer —— 它与刷新率不同相, 60Hz 定时器配 120Hz 屏只会隔帧更新);
-  缓动是**帧率无关的真指数逼近** `step = gap·(1−e^(−dt/τ))`, 无最小步长、
-  中途步长取整像素(文字不因亚像素相位变化而发虚)。回归断言量化了这些性质:
-  步长单调递减、60Hz 与 120Hz 收敛耗时相差 <35%、中途零小数帧、静止后零开销。
-  实测滚动+重绘 0.02ms/帧(预算 16.6ms), 全量重排 2.44ms
+- **动画与呈现**: 引擎按 t 求值 —— 过渡/@keyframes/Lottie/网格变形由
+  `hn_context_anim_tick(dt)` 单一时钟推进, 壳的帧循环只负责喂 dt
+  (Linux 壳: select 超时取"16ms 帧 / 最近 hx 轮询 / 无限阻塞"最小者,
+  空闲零唤醒); 缓动曲线全部**帧率无关**(同一 t 给同一值, 60/120Hz 一致),
+  弹性族是闭式解(无逐帧积分状态)。这些性质由 render_probe 与各探针的
+  回归断言守着
 - **设计令牌基底(`hn-theme`)**: `dark`/`light` 一行声明即得完整设计系统——
   色彩令牌(`--accent/--bg/--card/--line/--ink/--dim`)、字阶与行距、卡片/按钮/输入/骨架
   居中、sys:// 片段自动皮肤化、卡片投影与 hover 反馈。作者 css 排在其后, 任意令牌可覆盖。
@@ -508,37 +479,42 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
 - **系统集成**: `hx-get="sys://…"` 由本地桥直接应答(零网络):
   `info`(全量卡) / `cpu`(双采样占用) / `memory` / `disk` / `battery` /
   `uptime` / `host`, 返回自带样式的 HTML 片段, 换入即用。
-- **消息卡片**: `hn open <id> file.html --ttl 4` 秒开消息弹窗、到期热销毁;
-  `hn-drag` 拖拽、`hn-dismiss` 点外关闭; `hn syscard` 打开常驻系统信息卡
-  (sys:// 每 2s 轮询)。daemon 路径自动执行 `hx-trigger="load/every"`。
-- **人类开发闭环**: `hn new` 脚手架 → `hn dev` 热重载(mtime watch);
-  `<include src=…>` 零构建组件(嵌套上限 6, 循环检测);
-  `sys://store/get|set` 应用级 KV 持久化、`sys://clipboard/get|set`、
+- **消息卡片**: popup 表面即消息卡 —— `hn open` 秒开、`hn close` 销毁;
+  daemon 路径自动执行 `hx-trigger="load/every"`。`--ttl` 到期自毁、
+  `hn-drag` 拖拽手柄、`hn-dismiss` 点外关闭在壳层路线图上。
+- **人类开发闭环**: 写 `app.html` → `hn_app`/`hn open` 即开(daemon `update`
+  热推送新文档, 窗口状态保持); `<include src=…>` 零构建组件(嵌套上限 6,
+  循环检测); `sys://store/get|set` 应用级 KV 持久化、`sys://clipboard/get|set`、
   `sys://notify`、`sys://open` —— 全部本地, 无网络无服务进程。
+  `hn new` 脚手架与 mtime 热重载(`hn dev`)在路线图上。
 - **交互**: 命中测试(冒泡找 id)、`hx-get/post/target/swap`、
   `hx-trigger`(`click` | `load` | **`every Ns`** 轮询)、
   hx 请求自动携带表单参数(GET 拼 query / POST 发 body)、
   **过渡动画**(`transition`, 引擎持有当前值 + 运行时帧循环插值)、
   热更新三通道(render 整体 / swap 片段 / set_text)
-- **Linux 内置 webview 壳**: `tools/hnweb_linux.c` —— X11 窗口(运行期
-  `dlopen("libX11.so.6")`, 编译期零依赖) + **hnsoft 软件光栅**,
-  镜像 `hnwin.c` 的 Windows 模式(同一份 C99 引擎管线, 换的只是
-  窗口/事件/像素搬运层); 零外部依赖、musl 静态,
+- **平台窗口壳**: `tools/hnweb_linux.c` —— X11 窗口(运行期
+  `dlopen("libX11.so.6")`, 编译期零依赖) + **hnsoft 软件光栅**;
+  Windows 侧 `tools/hnwin.c`(Win32), macOS 侧 `tools/hnweb_macos.c`
+  (dlopen AppKit/CoreGraphics)。三者跑同一份 C99 引擎管线, 换的只是
+  窗口/事件/像素搬运层; Linux 壳零外部依赖、musl 静态,
   `ZIG=zig ./tools/build-multiplatform.sh` 交叉编译产物 `hnweb-linux-*`
   (x86_64 / aarch64, 无头 CI 走 `--probe`/`--shot` 自检)。
-  **M2 已落地**: 事件派发管道(点击/键盘/滚轮/hover, 与 macOS 运行时同构)
+  **M2 已落地**: 事件派发管道(点击/键盘/滚轮/hover, 三壳同构)
   与动画帧循环(过渡/@keyframes/Lottie/网格变形共用, 空闲零唤醒);
-  Windows 侧 `tools/hnweb_win.c`(`hnwin.c` 收编版)走同一份
-  `tools/hnweb.h` 门面, 调用方跨平台一行不改。
+  新三层(`platform/hn_platform.h` + `app/hn_app.c`)是这些壳经验的收敛版。
 
 ## 已知简化与路线图
 
 - 片段热更新走 arena, 旧节点不回收; class/id 选择器统一小写
-- 近期: select/checkbox、grid 布局、多屏/多表面组合
+- 近期: select、grid 布局、多屏/多表面组合、`hn new`/`hn dev` 脚手架与
+  mtime 热重载、daemon 接管开窗 op(目前开窗在平台壳)
+- **进行中**: 音频/视频(`<video>`/`<audio>`, 解码委托平台媒体框架 ——
+  macOS 走 AVFoundation, 非 FFmpeg 路线)与 WASM 运行时缝(wasm3 +
+  `hnWasmLoad`/`hnWasmCall`), 契约见 `docs/media-design.md`
 - 弹窗原生交互: `hn-drag`(元素即拖拽手柄)、`hn-dismiss`(点击弹窗外自动关闭)
-- 中期: Windows 已有 hnwin MVP(C + hnsoft/WebView2), 并收编为 `tools/hnweb_win.c`
-  门面实现; **原生 Linux 运行时已落地**(`tools/hnweb_linux.c`: M1 窗口/渲染 +
-  M2 事件派发管道与动画帧循环); 继续: sys:// 桥移植到 hnweb 门面、宿主协议鉴权、
+- 中期: Windows 壳已有 `tools/hnwin.c`(Win32 + hnsoft, 纯 C99);
+  **原生 Linux 运行时已落地**(`tools/hnweb_linux.c`: M1 窗口/渲染 +
+  M2 事件派发管道与动画帧循环); 继续: 宿主协议鉴权、
   `.hnapp` 包签名与资源(字体/图片)打包
 - 远期: 常驻宿主的发现机制(Bonjour/命名空间)、组件生态层(在引擎之上,
   不进引擎)
