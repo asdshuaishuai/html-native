@@ -734,8 +734,42 @@ int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8) {
     if (key == 2 /*RETURN*/) {
         hn_node *carrier = hx_carrier(target);
         if (carrier && hx_perform(rt, carrier)) return rt_render(rt);
+        return 0;
     }
-    (void)utf8;
+    if (key == 3 /*BACKSPACE*/ && rt->focus) {
+        /* 删除末字符 */
+        char val[4096];
+        size_t vl = 0;
+        hn_node_set_value(rt->focus, "", 0);
+        /* 读当前值 → 截末字符 → 写回 */
+        const char *old = NULL;
+        hn_node *n = rt->focus;
+        if (hn_node_attr(n, "value")) old = hn_node_attr(n, "value");
+        if (old) {
+            size_t ol = strlen(old);
+            if (ol > 0) {
+                /* UTF-8: 回退到字符边界(跳过 continuation byte 10xxxxxx) */
+                size_t cut = ol - 1;
+                while (cut > 0 && (old[cut] & 0xC0) == 0x80) cut--;
+                hn_node_set_value(n, old, cut);
+            }
+        }
+        return rt_render(rt);
+    }
+    /* 可打印字符 → 追加到焦点 input 的 value */
+    if (utf8 && *utf8 && rt->focus) {
+        char old_val[4096] = { 0 };
+        const char *old = hn_node_attr(rt->focus, "value");
+        if (old) snprintf(old_val, sizeof(old_val), "%s", old);
+        size_t ol = strlen(old_val);
+        size_t al = strlen(utf8);
+        if (ol + al < sizeof(old_val)) {
+            memcpy(old_val + ol, utf8, al);
+            old_val[ol + al] = 0;
+            hn_node_set_value(rt->focus, old_val, ol + al);
+        }
+        return rt_render(rt);
+    }
     return 0;
 }
 
