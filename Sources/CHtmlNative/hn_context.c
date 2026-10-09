@@ -186,15 +186,61 @@ int hn_context_anim_tick(hn_context *c, float dt_ms) {
 }
 
 void hn_context_set_hover(hn_context *c, hn_node *n) { c->hover_node = n; }
-void hn_context_set_focus(hn_context *c, hn_node *n) { c->focus_node = n; }
-void hn_context_set_caret_visible(hn_context *c, int on) { c->caret_on = on; }
 void hn_context_set_active(hn_context *c, hn_node *n) { c->active_node = n; }
+
+void hn_context_set_focus(hn_context *c, hn_node *n) {
+    /* 禁用的控件不可聚焦(与浏览器一致): 运行时点击命中也不改变焦点 */
+    if (n && hn_node_is_disabled(n)) return;
+    if (c->focus_node == n) return;
+    c->focus_node = n;
+    /* :focus 是样式态 —— 只记指针的话, 若宿主不主动 relayout,
+       :focus 规则与焦点环就静默不生效。已有布局时立即重渲染
+       (样式重算 + 重布局 + 重绘); 首次布局前(vw==0)只记指针,
+       等宿主的第一次 layout 自然带上焦点态。 */
+    if (c->doc && c->vw > 0)
+        hn_context_layout(c, c->vw, c->vh, c->tb_valid ? &c->tb : NULL);
+}
+void hn_context_set_caret_visible(hn_context *c, int on) { c->caret_on = on; }
 
 /* ---------------- 输入控件 ---------------- */
 
 int hn_node_is_input(hn_node *n) {
     if (!n || n->kind != HN_ELEM || !n->tag) return 0;
     return !strcmp(n->tag, "input") || !strcmp(n->tag, "textarea");
+}
+
+/* 布尔属性: 存在且值不为 "false"/"0" 即为真(运行时用 set_attr 写 ""/切换
+   "false" 就能翻转状态, 不需要额外的引擎 API)。 */
+static int flag_attr(hn_node *n, const char *name) {
+    const char *v = hn_node_attr(n, name);
+    if (!v) return 0;
+    return strcmp(v, "false") != 0 && strcmp(v, "0") != 0;
+}
+
+int hn_node_input_kind(hn_node *n) {
+    if (!n || n->kind != HN_ELEM || !n->tag) return HN_IN_NONE;
+    if (!strcmp(n->tag, "textarea")) return HN_IN_TEXTAREA;
+    if (!strcmp(n->tag, "input")) {
+        const char *t = hn_node_attr(n, "type");
+        if (t) {
+            if (!strcmp(t, "checkbox")) return HN_IN_CHECKBOX;
+            if (!strcmp(t, "radio")) return HN_IN_RADIO;
+            if (!strcmp(t, "password")) return HN_IN_PASSWORD;
+        }
+        return HN_IN_TEXT;
+    }
+    return HN_IN_NONE;
+}
+
+int hn_node_is_checked(hn_node *n) {
+    int k = hn_node_input_kind(n);
+    if (k != HN_IN_CHECKBOX && k != HN_IN_RADIO) return 0;
+    return flag_attr(n, "checked");
+}
+
+int hn_node_is_disabled(hn_node *n) {
+    if (!n || n->kind != HN_ELEM) return 0;
+    return flag_attr(n, "disabled");
 }
 
 const char *hn_node_value(hn_node *n, size_t *len_out) {
@@ -227,6 +273,10 @@ static void value_ensure(hn_node *n, size_t need) {
 
 int hn_node_set_value(hn_node *n, const char *utf8, size_t len) {
     if (!hn_node_is_input(n) || !n->arena) return 0;
+    /* checkbox/radio 没有可编辑文本: 值语义是 checked + value 属性,
+       键盘输入不应写进 value 缓冲 */
+    int k = hn_node_input_kind(n);
+    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO) return 0;
     value_ensure(n, len);
     if (len) memcpy(n->value, utf8, len);
     n->value[len] = 0;
@@ -241,19 +291,35 @@ int hn_node_caret(hn_node *n) {
 
 void hn_node_set_caret(hn_node *n, int byte_off) {
     if (!hn_node_is_input(n)) return;
+    int k = hn_node_input_kind(n);
+    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO) return;
     if (byte_off < 0) byte_off = 0;
     if ((size_t)byte_off > n->value_len) byte_off = (int)n->value_len;
     n->caret = byte_off;
 }
 
-/* 收集 name=value 并 URL 编码(application/x-www-form-urlencoded) */
+/* 收集 name=value 并 URL 编码(application/x-www-form-urlencoded)。
+   值语义与浏览器对齐:
+   - disabled 控件不参与提交;
+   - checkbox/radio 仅在选中时提交, 值取 value 属性, 缺省 "on"。 */
 static void form_walk(hn_node *n, char *out, size_t cap, size_t *used, int *first) {
     if (n->kind == HN_ELEM) {
-        if (hn_node_is_input(n)) {
+        if (hn_node_is_input(n) && !hn_node_is_disabled(n)) {
+            int k = hn_node_input_kind(n);
+            int flag = (k == HN_IN_CHECKBOX || k == HN_IN_RADIO);
+            const char *v = NULL;
+            size_t vlen = 0;
+            if (flag) {
+                if (hn_node_is_checked(n)) {
+                    v = hn_node_attr(n, "value");
+                    if (!v) v = "on";
+                    vlen = strlen(v);
+                }
+            } else {
+                v = hn_node_value(n, &vlen);
+            }
             const char *name = hn_node_attr(n, "name");
-            if (name) {
-                size_t vlen = 0;
-                const char *v = hn_node_value(n, &vlen);
+            if (name && v) {
                 if (*used < cap) {
                     if (!*first) *used += (size_t)snprintf(out + *used, cap - *used, "&");
                 }
@@ -606,63 +672,113 @@ static const hn_keyframes *find_kf(hn_context *c, const char *name) {
     return NULL;
 }
 
-/* 在关键帧时间轴 t(0..1) 处取样: 找到相邻两帧并插值, 结果写入 style。
-   只处理可动画的几何与颜色属性(与 transition 支持的范围一致)。 */
+/* 一帧内可动画属性的端点集合。帧里声明了的属性用帧值, 没声明的属性
+   以元素当前值(级联)充当该端 —— 与 CSS"缺失关键帧取当前值"一致。 */
+typedef struct {
+    float op;  unsigned char has_op;
+    float tx, ty, sc, rot, rotx, roty;               /* 几何: has_* 同下 */
+    unsigned char has_tx, has_ty, has_sc, has_rot, has_rotx, has_roty;
+    float bg[4], fg[4];
+    unsigned char has_bg, has_fg;
+} kf_endpoints;
+
+static void kf_collect(const hn_kf_stop *stp, hn_style *st, kf_endpoints *e) {
+    memset(e, 0, sizeof(*e));
+    e->sc = st->scale;
+    e->tx = st->translate_x;
+    e->ty = st->translate_y;
+    e->rot = st->rotate;
+    e->rotx = st->rotate_x;
+    e->roty = st->rotate_y;
+    rgba_of(st->background, e->bg);
+    rgba_of(st->color, e->fg);
+    for (int d = 0; d < stp->n_decls; d++) {
+        const char *nm = stp->decls[d].name;
+        const char *val = stp->decls[d].value;
+        float num = (float)strtod(val, NULL);
+        if (!strcmp(nm, "opacity")) { e->op = num; e->has_op = 1; }
+        else if (!strcmp(nm, "translate-x") || !strcmp(nm, "translate")) { e->tx = num; e->has_tx = 1; }
+        else if (!strcmp(nm, "translate-y")) { e->ty = num; e->has_ty = 1; }
+        else if (!strcmp(nm, "scale")) { e->sc = num; e->has_sc = 1; }
+        else if (!strcmp(nm, "rotate") || !strcmp(nm, "rotate-z")) { e->rot = num; e->has_rot = 1; }
+        else if (!strcmp(nm, "rotate-x")) { e->rotx = num; e->has_rotx = 1; }
+        else if (!strcmp(nm, "rotate-y")) { e->roty = num; e->has_roty = 1; }
+        else if (!strcmp(nm, "background") || !strcmp(nm, "background-color")) {
+            hn_color col;
+            if (hn_color_parse(val, strlen(val), &col)) { rgba_of(col, e->bg); e->has_bg = 1; }
+        } else if (!strcmp(nm, "color")) {
+            hn_color col;
+            if (hn_color_parse(val, strlen(val), &col)) { rgba_of(col, e->fg); e->has_fg = 1; }
+        }
+    }
+}
+
+/* 在关键帧时间轴 t(0..1) 处取样: 找到相邻两帧, 按属性端点插值写入 style。
+   可动画属性与 transition 支持的范围一致。 */
 static void kf_sample(const hn_keyframes *kf, float t, hn_style *st) {
     if (!kf || kf->n_stops == 0) return;
-    /* 找 t 落在的区间 */
     int a = 0, b = kf->n_stops - 1;
-    for (int i = 0; i < kf->n_stops - 1; i++) {
-        if (t >= kf->stops[i].at && t <= kf->stops[i + 1].at) { a = i; b = i + 1; break; }
+    if (kf->n_stops == 1) {
+        /* 单帧定义: 帧位置之前保持级联样式, 之后取帧值 */
+        if (t < kf->stops[0].at) return;
+        b = a;
+    } else {
+        /* 找 t 落在的区间 */
+        int found = 0;
+        for (int i = 0; i < kf->n_stops - 1; i++) {
+            if (t >= kf->stops[i].at && t <= kf->stops[i + 1].at) { a = i; b = i + 1; found = 1; break; }
+        }
+        if (!found) {
+            /* 关键帧未覆盖时间轴两端(如只写了 50%)时, 首帧前/末帧后保持
+               级联样式 —— CSS 语义: 缺失的 0%/100% 帧取元素当前值。
+               此前回退成"首尾帧大跨度插值", 会把整条时间轴压扁到边界外。 */
+            return;
+        }
     }
     const hn_kf_stop *sa = &kf->stops[a], *sb = &kf->stops[b];
     float span = sb->at - sa->at;
     float f = span > 0.0001f ? (t - sa->at) / span : 0;
     if (f < 0) f = 0; else if (f > 1) f = 1;
-    /* 两个端点都要看: 某属性可能只在其中一帧声明(另一帧用元素当前值 = 不插值) */
-    for (int side = 0; side < 2; side++) {
-        const hn_kf_stop *stp = side == 0 ? sa : sb;
-        float k = side == 0 ? (1 - f) : f;
-        if (k <= 0.0001f) continue;
-        for (int d = 0; d < stp->n_decls; d++) {
-            const char *nm = stp->decls[d].name;
-            const char *val = stp->decls[d].value;
-            float num = (float)strtod(val, NULL);
-            if (!strcmp(nm, "opacity")) st->opacity += (num - st->opacity) * k;
-            else if (!strcmp(nm, "translate-x") || !strcmp(nm, "translate")) st->translate_x += (num - st->translate_x) * k;
-            else if (!strcmp(nm, "translate-y")) st->translate_y += (num - st->translate_y) * k;
-            else if (!strcmp(nm, "scale")) st->scale = 1.0f + (num - 1.0f) * k;
-            else if (!strcmp(nm, "rotate") || !strcmp(nm, "rotate-z")) st->rotate = num * k;
-            else if (!strcmp(nm, "rotate-x")) st->rotate_x = num * k;
-            else if (!strcmp(nm, "rotate-y")) st->rotate_y = num * k;
-            else if (!strcmp(nm, "background") || !strcmp(nm, "background-color")) {
-                hn_color col = 0;
-                if (hn_color_parse(val, strlen(val), &col)) {
-                    float c4[4], cur4[4];
-                    rgba_of(col, c4); rgba_of(st->background, cur4);
-                    for (int q = 0; q < 4; q++) cur4[q] += (c4[q] - cur4[q]) * k;
-                    st->background = color_of(cur4);
-                    st->has_gradient = 0;
-                }
-            } else if (!strcmp(nm, "color")) {
-                hn_color col = 0;
-                if (hn_color_parse(val, strlen(val), &col)) {
-                    float c4[4], cur4[4];
-                    rgba_of(col, c4); rgba_of(st->color, cur4);
-                    for (int q = 0; q < 4; q++) cur4[q] += (c4[q] - cur4[q]) * k;
-                    st->color = color_of(cur4);
-                }
-            }
-        }
+    /* 端点式插值: 先收集两端属性值(缺省端 = 当前级联值), 再统一 lerp。
+       此前的顺序混合会把级联当前值混进"两端都声明了"的属性 —— 采样起点
+       不在关键帧曲线上, 首帧值随级联漂移。 */
+    kf_endpoints ea, eb;
+    kf_collect(sa, st, &ea);
+    kf_collect(sb, st, &eb);
+    float op_a = ea.has_op ? ea.op : st->opacity;
+    float op_b = eb.has_op ? eb.op : st->opacity;
+    st->opacity = op_a + (op_b - op_a) * f;
+    st->translate_x = ea.tx + (eb.tx - ea.tx) * f;
+    st->translate_y = ea.ty + (eb.ty - ea.ty) * f;
+    st->scale = ea.sc + (eb.sc - ea.sc) * f;
+    st->rotate = ea.rot + (eb.rot - ea.rot) * f;
+    st->rotate_x = ea.rotx + (eb.rotx - ea.rotx) * f;
+    st->rotate_y = ea.roty + (eb.roty - ea.roty) * f;
+    if (ea.has_bg || eb.has_bg) {
+        float c4[4];
+        lerp4(c4, ea.bg, eb.bg, f);
+        st->background = color_of(c4);
+        st->has_gradient = 0;
+    }
+    if (ea.has_fg || eb.has_fg) {
+        float c4[4];
+        lerp4(c4, ea.fg, eb.fg, f);
+        st->color = color_of(c4);
     }
 }
 
-/* 推进 @keyframes 动画: 返回 1 表示仍在播放 */
+/* 推进 @keyframes 动画: 返回 1 表示仍在播放(含正延迟等待)。
+   fill(forwards/both) 由调用方消费 —— 播完保持末帧需要每帧重放采样,
+   不是单次 tick 能表达的。 */
 static int kf_tick(hn_node *n, const hn_keyframes *kf, float ms, int iter, int dir,
-                   int /* fill */, float *clock_io, int *done_io, hn_style *st) {
+                   float *clock_io, int *done_io, hn_style *st) {
+    (void)n;
     if (!kf || ms <= 0) return 0;
+    /* 正延迟未到: 保持级联样式, 仍算活跃(等待中)。负延迟直接落到
+       下面的取模数学里 —— total 为负时 t = total - floor(total) 恰好
+       是"跳过前段"的进度(CSS 负延迟语义)。 */
+    if (*clock_io < 0) return 1;
     float dur = ms;
-    *clock_io += 0;               /* 时钟由调用方按 dt 累加 */
     float total = *clock_io / dur;          /* 已播放周期数(可为小数) */
     float t;
     if (iter < 0) {                          /* 无限循环 */
@@ -718,6 +834,38 @@ static float ease_apply(int ease, const float cb[4], float t0) {
                                            : 1.0f - 2.0f * (1.0f - t0) * (1.0f - t0);
     case HN_EASE_CSS:    return bezier_axis(bezier_solve(t0, 0.25f, 0.25f), 0.1f, 1.0f);
     case HN_EASE_CUBIC:  return bezier_axis(bezier_solve(t0, cb[0], cb[2]), cb[1], cb[3]);
+    case HN_EASE_SPRING:
+        /* 弹簧: 欠阻尼衰减振荡(闭式解, 无逐帧积分状态)。
+           f(t) = 1 - e^(-7t)·cos(9t) —— 峰值约 11% 过冲, t=1 处衰减到位,
+           越界由外层 t>=1 钳制精确落位。 */
+        return 1.0f - expf(-7.0f * t0) * cosf(9.0f * t0);
+    case HN_EASE_ELASTIC:
+        /* ease-out-elastic(CSS 缓动函数族标准系数 c4 = 2π/3) */
+        return powf(2.0f, -10.0f * t0) * sinf((t0 * 10.0f - 0.75f) * (2.0f * 3.14159265f / 3.0f)) + 1.0f;
+    case HN_EASE_BOUNCE: {
+        /* ease-out-bounce 标准分段(与 CSS 缓动函数族一致)。
+           分段式先减后乘必须拆成两条语句 —— (x -= c) * x 是未定序修改,
+           属未定义行为(不同编译器/优化档会算出不同值)。 */
+        const float n1 = 7.5625f, d1 = 2.75f;
+        float x = t0;
+        if (x < 1.0f / d1) return n1 * x * x;
+        if (x < 2.0f / d1) { x -= 1.5f / d1; return n1 * x * x + 0.75f; }
+        if (x < 2.5f / d1) { x -= 2.25f / d1; return n1 * x * x + 0.9375f; }
+        x -= 2.625f / d1;
+        return n1 * x * x + 0.984375f;
+    }
+    case HN_EASE_BACK: {
+        /* ease-out-back: 先回拉再越过目标收回(c1 = 1.70158, CSS 标准) */
+        const float c1 = 1.70158f, c3 = c1 + 1.0f;
+        float p = t0 - 1.0f;
+        return 1.0f + c3 * p * p * p + c1 * p * p;
+    }
+    case HN_EASE_STEPS: {
+        /* steps(n[, start|end]): cb[0]=段数, cb[1]=1 为 start(段首取值) */
+        float n = cb[0] >= 1.0f ? cb[0] : 1.0f;
+        float x = t0 * n;
+        return (cb[1] > 0.5f ? ceilf(x) : floorf(x)) / n;
+    }
     default:             return t0 * t0 * (3.0f - 2.0f * t0);   /* smoothstep */
     }
 }
@@ -732,6 +880,50 @@ static void enter_from(int preset, float *tx, float *ty, float *sc, float *op) {
     case HN_ENTER_FADE:  *op = 0.0f; break;
     case HN_ENTER_SCALE: *sc = 0.94f; *op = 0.0f; break;
     default: break;
+    }
+}
+
+/* ---- 按属性独立过渡(HN_TPROP_*)的槽位操作 ----
+   各槽写入互不重叠的 anim 字段组, 因此可以独立推进再合成。 */
+
+/* 槽内字段 from ← 当前值(重启该槽) */
+static void slot_snap(hn_anim *a, int s) {
+    switch (s) {
+    case HN_TPROP_OPACITY: a->o_from = a->o; break;
+    case HN_TPROP_BG:      memcpy(a->bg_from, a->bg, sizeof(a->bg)); break;
+    case HN_TPROP_FG:      memcpy(a->fg_from, a->fg, sizeof(a->fg)); break;
+    default:               /* TRANSFORM: translate/scale/rotate 整体插值 */
+        a->tx_from = a->tx; a->ty_from = a->ty;
+        a->sc_from = a->sc; a->rot_from = a->rot;
+        break;
+    }
+}
+
+/* 槽内字段按缓动值 e(0..1, 弹性族可越界)插值 */
+static void slot_lerp(hn_anim *a, int s, float e) {
+    switch (s) {
+    case HN_TPROP_OPACITY: a->o = a->o_from + (a->o_to - a->o_from) * e; break;
+    case HN_TPROP_BG:      lerp4(a->bg, a->bg_from, a->bg_to, e); break;
+    case HN_TPROP_FG:      lerp4(a->fg, a->fg_from, a->fg_to, e); break;
+    default:
+        a->tx  = a->tx_from  + (a->tx_to  - a->tx_from)  * e;
+        a->ty  = a->ty_from  + (a->ty_to  - a->ty_from)  * e;
+        a->sc  = a->sc_from  + (a->sc_to  - a->sc_from)  * e;
+        a->rot = a->rot_from + (a->rot_to - a->rot_from) * e;
+        break;
+    }
+}
+
+/* 槽内字段直接落位目标(该槽未在过渡时) */
+static void slot_settle(hn_anim *a, int s) {
+    switch (s) {
+    case HN_TPROP_OPACITY: a->o = a->o_to; break;
+    case HN_TPROP_BG:      memcpy(a->bg, a->bg_to, sizeof(a->bg)); break;
+    case HN_TPROP_FG:      memcpy(a->fg, a->fg_to, sizeof(a->fg)); break;
+    default:
+        a->tx = a->tx_to; a->ty = a->ty_to;
+        a->sc = a->sc_to; a->rot = a->rot_to;
+        break;
     }
 }
 
@@ -759,22 +951,37 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
 
         /* @keyframes 动画: 声明了 animation-name 且能在样式表里找到定义。
            每帧按时间轴采样, 直接写入样式字段(几何由绘制阶段消费)。
-           与入场预设互斥: 有关键帧动画就不再播入场。 */
+           与入场预设互斥: 有关键帧动画就不再播入场。
+           animation-delay 以负时钟实现: 首次挂载时 kf_clock = -delay,
+           正延迟期间 kf_tick 只报告"等待"不采样(保持级联样式); 负延迟
+           则由取模数学直接从中途进度开始。 */
         if (st->kf_name && st->kf_ms > 0) {
             if (!a->kf) {
                 a->kf = find_kf(c, st->kf_name);
-                a->kf_clock = 0;
+                a->kf_clock = -st->anim_delay;
                 a->kf_done = 0;
             }
-            if (a->kf && !a->kf_done) {
-                if (dt_ms > 0) a->kf_clock += dt_ms;
-                int still = kf_tick(n, a->kf, st->kf_ms, st->kf_iter, st->kf_dir,
-                                    st->kf_fill, &a->kf_clock, &a->kf_done, st);
-                st->opacity = st->opacity;   /* kf_sample 已就地写入 */
-                a->o = st->opacity;
-                a->tx = st->translate_x; a->ty = st->translate_y;
-                a->sc = st->scale;       a->rot = st->rotate;
-                a->dirty_written = 1;
+            if (a->kf) {
+                int still = 0;
+                if (!a->kf_done) {
+                    if (dt_ms > 0) a->kf_clock += dt_ms;
+                    still = kf_tick(n, a->kf, st->kf_ms, st->kf_iter, st->kf_dir,
+                                    &a->kf_clock, &a->kf_done, st);
+                } else if (st->kf_fill) {
+                    /* kf_fill = forwards/both: 播完保持末帧。样式每次 layout
+                       都会从级联重算(把采样值冲掉), 所以每帧重放终点采样 ——
+                       保持 still=1 让帧循环驱动补写(此前 fill 声明被完全
+                       无视, 动画结束一遇 relayout 就跳回级联值)。 */
+                    kf_tick(n, a->kf, st->kf_ms, st->kf_iter, st->kf_dir,
+                            &a->kf_clock, &a->kf_done, st);
+                    still = 1;
+                }
+                if (a->kf_clock >= 0) {   /* 正延迟等待期间不写回(样式保持级联值) */
+                    a->o = st->opacity;   /* kf_sample 已就地写入 */
+                    a->tx = st->translate_x; a->ty = st->translate_y;
+                    a->sc = st->scale;       a->rot = st->rotate;
+                    a->dirty_written = 1;
+                }
                 if (still) active = 1;
                 goto children;
             }
@@ -823,7 +1030,10 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
             memcpy(a->fg_from, a->fg, sizeof(a->fg));
             memcpy(a->bg_to, a->bg, sizeof(a->bg));
             memcpy(a->fg_to, a->fg, sizeof(a->fg));
-            a->t = 0;
+            /* animation-delay: 负进度起步 —— t<0 期间 ease_apply 返回 0,
+               停在起始态(不可见/偏移位)直至延迟耗尽, stagger 列表项因此
+               依次浮现; 负延迟则直接从中途进度开始。 */
+            a->t = a->ms > 0 ? -st->anim_delay / a->ms : 0;
             a->active = 1;
             a->dirty_written = 0;
             goto children;
@@ -833,10 +1043,15 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
         if (!a->inited) {
             a->inited = 1;
             a->ms = st->transition_ms;
+            a->t_delay = st->transition_delay;
             a->tx = a->tx_from = a->tx_to = st->translate_x;
             a->ty = a->ty_from = a->ty_to = st->translate_y;
             a->sc = a->sc_from = a->sc_to = st->scale;
+            a->rot = a->rot_from = a->rot_to = st->rotate;
             a->ease = st->anim_ease;
+            a->per_prop = st->has_tprop ? 1 : 0;   /* 槽配置现读现用, 不缓存 */
+            a->slot_active = 0;
+            for (int s = 0; s < HN_TPROP_N; s++) a->slot_t[s] = 0;
             a->o = a->o_to = st->opacity;
             memcpy(a->bg, bg_now, sizeof(bg_now));
             memcpy(a->fg, fg_now, sizeof(fg_now));
@@ -867,65 +1082,143 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
                 a->dirty_written = 0;   /* 新目标来自样式计算 */
             }
 
-            /* 几何目标: 与颜色同样要区分"样式写入的目标"和"上次写回的插值" */
-            float tx_target, ty_target, sc_target, o_target;
+            /* opacity 的"写回者"判定**独立**于背景/前景: 过渡系统每次 tick
+               都把插值浮点直拷进 st->opacity, 因此"样式字段 == 当前插值"
+               即是我们写的。此前 opacity 搭乘 bg/fg 的 memcmp 判定 —— 只改
+               opacity 的样式重算(透明度 hover/fade)会被误判成"还是我们写的",
+               新目标被 a->o_to 顶掉: 过渡只对第一次变更生效, 回切永远卡死
+               (实测: 1→0.4 正常, 0.4→1 永远停在 0.4)。 */
+            int style_o_ours = a->dirty_written && st->opacity == a->o;
+
+            /* 几何目标: 与颜色同样要区分"样式写入的目标"和"上次写回的插值"。
+               rotate 与 translate/scale 同属 TRANSFORM 槽(CSS transform 是
+               单条属性) —— 此前 rotate 完全不可过渡(kf 路径之外无写点)。 */
+            float tx_target, ty_target, sc_target, o_target, rot_target;
             if (style_is_ours) {
                 tx_target = a->tx_to; ty_target = a->ty_to;
-                sc_target = a->sc_to; o_target = a->o_to;
+                sc_target = a->sc_to;
+                rot_target = a->rot_to;
             } else {
                 tx_target = st->translate_x; ty_target = st->translate_y;
-                sc_target = st->scale;       o_target = st->opacity;
+                sc_target = st->scale;
+                rot_target = st->rotate;
             }
+            o_target = style_o_ours ? a->o_to : st->opacity;
 
-            int changed = 0;
-            for (int i = 0; i < 4; i++) {
-                if (fabsf(bg_target[i] - a->bg_to[i]) > 0.004f) { a->bg_to[i] = bg_target[i]; changed = 1; }
-                if (fabsf(fg_target[i] - a->fg_to[i]) > 0.004f) { a->fg_to[i] = fg_target[i]; changed = 1; }
-            }
-            if (fabsf(tx_target - a->tx_to) > 0.02f) { a->tx_to = tx_target; changed = 1; }
-            if (fabsf(ty_target - a->ty_to) > 0.02f) { a->ty_to = ty_target; changed = 1; }
-            if (fabsf(sc_target - a->sc_to) > 0.0005f) { a->sc_to = sc_target; changed = 1; }
-            if (fabsf(o_target - a->o_to) > 0.004f) { a->o_to = o_target; changed = 1; }
-            if (st->transition_ms != a->ms) { a->ms = st->transition_ms; changed = 1; }
-            if (st->anim_ease != a->ease) { a->ease = st->anim_ease; changed = 1; }
-            memcpy(a->cb, st->cb, sizeof(a->cb));
+            /* per-property 过渡开关(样式声明了属性列表 → 按槽推进) */
+            unsigned char per_prop = st->has_tprop ? 1 : 0;
 
-            if (changed) {
-                memcpy(a->bg_from, a->bg, sizeof(a->bg));
-                memcpy(a->fg_from, a->fg, sizeof(a->fg));
-                a->o_from = a->o;
-                a->tx_from = a->tx;
-                a->ty_from = a->ty;
-                a->sc_from = a->sc;
-                a->t = 0;
-                a->active = (a->ms > 0);
-            }
+            if (per_prop) {
+                /* ---- 每槽独立时长/延迟/缓动 ----
+                   目标变化 → 该槽从当前值重启(延迟换算成负进度);
+                   槽配置现读 st->tprop_*(样式表热换立即生效)。 */
+                int ch[HN_TPROP_N] = {0, 0, 0, 0};
+                int any_active = 0;
+                if (per_prop != a->per_prop) {
+                    /* 单一配置 ↔ 按槽配置翻转: 所有槽视为"目标已变",
+                       从当前值按各自配置重启(避免中途跳变)。 */
+                    a->per_prop = per_prop;
+                    a->slot_active = 0;
+                    for (int s = 0; s < HN_TPROP_N; s++) { ch[s] = 1; a->slot_t[s] = 0; }
+                }
+                a->active = 0;   /* 简写路径的活跃位不参与按槽推进 */
+                for (int i = 0; i < 4; i++) {
+                    if (fabsf(bg_target[i] - a->bg_to[i]) > 0.004f) { a->bg_to[i] = bg_target[i]; ch[HN_TPROP_BG] = 1; }
+                    if (fabsf(fg_target[i] - a->fg_to[i]) > 0.004f) { a->fg_to[i] = fg_target[i]; ch[HN_TPROP_FG] = 1; }
+                }
+                if (fabsf(o_target - a->o_to) > 0.004f) { a->o_to = o_target; ch[HN_TPROP_OPACITY] = 1; }
+                if (fabsf(tx_target - a->tx_to) > 0.02f) { a->tx_to = tx_target; ch[HN_TPROP_TRANSFORM] = 1; }
+                if (fabsf(ty_target - a->ty_to) > 0.02f) { a->ty_to = ty_target; ch[HN_TPROP_TRANSFORM] = 1; }
+                if (fabsf(sc_target - a->sc_to) > 0.0005f) { a->sc_to = sc_target; ch[HN_TPROP_TRANSFORM] = 1; }
+                if (fabsf(rot_target - a->rot_to) > 0.02f) { a->rot_to = rot_target; ch[HN_TPROP_TRANSFORM] = 1; }
 
-            if (a->active && a->ms > 0) {
-                if (dt_ms > 0) a->t += dt_ms / a->ms;
-                if (a->t >= 1.0f) { a->t = 1.0f; a->active = 0; }
-                float e = ease_apply(a->ease, a->cb, a->t);
-                lerp4(a->bg, a->bg_from, a->bg_to, e);
-                lerp4(a->fg, a->fg_from, a->fg_to, e);
-                a->o  = a->o_from  + (a->o_to  - a->o_from)  * e;
-                a->tx = a->tx_from + (a->tx_to - a->tx_from) * e;
-                a->ty = a->ty_from + (a->ty_to - a->ty_from) * e;
-                a->sc = a->sc_from + (a->sc_to - a->sc_from) * e;
+                for (int s = 0; s < HN_TPROP_N; s++) {
+                    float ms_s = st->tprop_ms[s];
+                    if (ch[s]) {
+                        slot_snap(a, s);
+                        a->slot_t[s] = ms_s > 0 ? -st->tprop_delay[s] / ms_s : 0;
+                        if (ms_s > 0) a->slot_active |= (unsigned char)(1 << s);
+                        else a->slot_active &= (unsigned char)~(1 << s);
+                    }
+                    if (a->slot_active & (1 << s)) {
+                        if (dt_ms > 0) a->slot_t[s] += dt_ms / ms_s;
+                        if (a->slot_t[s] >= 1.0f) { a->slot_t[s] = 1.0f; a->slot_active &= (unsigned char)~(1 << s); }
+                        float e = ease_apply(st->tprop_ease[s], st->tprop_cb[s], a->slot_t[s]);
+                        slot_lerp(a, s, e);
+                        if (a->slot_active & (1 << s)) any_active = 1;
+                    } else {
+                        slot_settle(a, s);   /* 未过渡槽直接落位目标 */
+                    }
+                }
+
+                st->background = color_of(a->bg);
+                st->color = color_of(a->fg);
+                st->opacity = a->o;
+                st->translate_x = a->tx;
+                st->translate_y = a->ty;
+                st->scale = a->sc;
+                st->rotate = a->rot;
+                a->dirty_written = 1;
+                if (any_active) active = 1;
             } else {
-                memcpy(a->bg, a->bg_to, sizeof(a->bg));
-                memcpy(a->fg, a->fg_to, sizeof(a->fg));
-                a->o = a->o_to;
-                a->tx = a->tx_to; a->ty = a->ty_to; a->sc = a->sc_to;
-            }
+                /* ---- 单一配置过渡(旧路径 + rotate + 延迟) ---- */
+                int changed = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (fabsf(bg_target[i] - a->bg_to[i]) > 0.004f) { a->bg_to[i] = bg_target[i]; changed = 1; }
+                    if (fabsf(fg_target[i] - a->fg_to[i]) > 0.004f) { a->fg_to[i] = fg_target[i]; changed = 1; }
+                }
+                if (fabsf(tx_target - a->tx_to) > 0.02f) { a->tx_to = tx_target; changed = 1; }
+                if (fabsf(ty_target - a->ty_to) > 0.02f) { a->ty_to = ty_target; changed = 1; }
+                if (fabsf(sc_target - a->sc_to) > 0.0005f) { a->sc_to = sc_target; changed = 1; }
+                if (fabsf(rot_target - a->rot_to) > 0.02f) { a->rot_to = rot_target; changed = 1; }
+                if (fabsf(o_target - a->o_to) > 0.004f) { a->o_to = o_target; changed = 1; }
+                if (st->transition_ms != a->ms) { a->ms = st->transition_ms; changed = 1; }
+                if (st->transition_delay != a->t_delay) { a->t_delay = st->transition_delay; changed = 1; }
+                if (st->anim_ease != a->ease) { a->ease = st->anim_ease; changed = 1; }
+                memcpy(a->cb, st->cb, sizeof(a->cb));
 
-            st->background = color_of(a->bg);
-            st->color = color_of(a->fg);
-            st->opacity = a->o;
-            /* 几何插值写回样式字段: 绘制阶段按此偏移/缩放(read-only 消费) */
-            st->translate_x = a->tx;
-            st->translate_y = a->ty;
-            st->scale = a->sc;
-            a->dirty_written = 1;
+                if (changed) {
+                    memcpy(a->bg_from, a->bg, sizeof(a->bg));
+                    memcpy(a->fg_from, a->fg, sizeof(a->fg));
+                    a->o_from = a->o;
+                    a->tx_from = a->tx;
+                    a->ty_from = a->ty;
+                    a->sc_from = a->sc;
+                    a->rot_from = a->rot;
+                    /* 延迟 = 负进度: t<0 期间 ease_apply 返回 0, 停在起始态 */
+                    a->t = a->ms > 0 ? -a->t_delay / a->ms : 0;
+                    a->active = (a->ms > 0);
+                }
+
+                if (a->active && a->ms > 0) {
+                    if (dt_ms > 0) a->t += dt_ms / a->ms;
+                    if (a->t >= 1.0f) { a->t = 1.0f; a->active = 0; }
+                    float e = ease_apply(a->ease, a->cb, a->t);
+                    lerp4(a->bg, a->bg_from, a->bg_to, e);
+                    lerp4(a->fg, a->fg_from, a->fg_to, e);
+                    a->o  = a->o_from  + (a->o_to  - a->o_from)  * e;
+                    a->tx = a->tx_from + (a->tx_to - a->tx_from) * e;
+                    a->ty = a->ty_from + (a->ty_to - a->ty_from) * e;
+                    a->sc = a->sc_from + (a->sc_to - a->sc_from) * e;
+                    a->rot = a->rot_from + (a->rot_to - a->rot_from) * e;
+                } else {
+                    memcpy(a->bg, a->bg_to, sizeof(a->bg));
+                    memcpy(a->fg, a->fg_to, sizeof(a->fg));
+                    a->o = a->o_to;
+                    a->tx = a->tx_to; a->ty = a->ty_to; a->sc = a->sc_to;
+                    a->rot = a->rot_to;
+                }
+
+                st->background = color_of(a->bg);
+                st->color = color_of(a->fg);
+                st->opacity = a->o;
+                /* 几何插值写回样式字段: 绘制阶段按此偏移/缩放(read-only 消费) */
+                st->translate_x = a->tx;
+                st->translate_y = a->ty;
+                st->scale = a->sc;
+                st->rotate = a->rot;
+                a->dirty_written = 1;
+            }
         }
         if (a->active) active = 1;
     }

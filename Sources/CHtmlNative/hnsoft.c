@@ -4,7 +4,8 @@
  * - 圆角矩形: 有向距离场(SDF) + 0.5px 覆盖率抗锯齿
  * - 线性渐变: 沿渐变轴投影
  * - 阴影: 多层扩边圆角矩形近似(不用高斯模糊, 成本太高)
- * - 裁剪: 轴对齐矩形交叠栈(圆角裁剪简化为矩形, 对 UI 裁剪足够)
+ * - 裁剪: 轴对齐矩形交叠栈; radius>0 时按圆角矩形 SDF 精确判内
+ *   (clip-path: circle 借圆角方盒表达, 角部不能漏)
  * - 文本: FreeType 光栅化 + (字形,字号) 缓存
  * - PNG: 存储型 deflate(合法 PNG, 无压缩) + CRC32
  */
@@ -72,10 +73,15 @@ static void blend(unsigned char *px, fcolor c) {
 typedef struct {
     unsigned char *px;    /* RGBA8, 自上而下 */
     int w, h;
-    /* 裁剪栈(轴对齐交叠) */
-    struct { int x0, y0, x1, y1; } clip[32];
+    /* 裁剪栈(轴对齐交叠 + 圆角半径; radius>0 时按 SDF 精确判内 ——
+       clip-path: circle 借 CLIP_PUSH 的圆角方盒表达, 帧缓冲必须认半径,
+       否则方盒四角漏出, 圆形头像/圆形按钮裁不动)。 */
+    struct { float x0, y0, x1, y1, r; } clip[32];
     int clip_n;
 } fb;
+
+/* 圆角矩形 SDF(定义在下方"圆角矩形 SDF"一节; 裁剪判定先用) */
+static float sd_rounded(float px, float py, float x, float y, float w, float h, float r);
 
 static void fb_init(fb *f, int w, int h, hn_color bg) {
     f->w = w; f->h = h; f->clip_n = 0;
@@ -94,28 +100,39 @@ static void fb_init(fb *f, int w, int h, hn_color bg) {
     }
 }
 
-static void fb_push_clip(fb *f, int x0, int y0, int x1, int y1) {
+static void fb_push_clip(fb *f, float x0, float y0, float x1, float y1, float r) {
     if (f->clip_n >= 32) return;
-    int bx0 = 0, by0 = 0, bx1 = f->w, by1 = f->h;
+    float bx0 = 0, by0 = 0, bx1 = (float)f->w, by1 = (float)f->h;
     if (f->clip_n > 0) {
         bx0 = f->clip[f->clip_n - 1].x0; by0 = f->clip[f->clip_n - 1].y0;
         bx1 = f->clip[f->clip_n - 1].x1; by1 = f->clip[f->clip_n - 1].y1;
     }
-    int cx0 = x0 > bx0 ? x0 : bx0, cy0 = y0 > by0 ? y0 : by0;
-    int cx1 = x1 < bx1 ? x1 : bx1, cy1 = y1 < by1 ? y1 : by1;
-    f->clip[f->clip_n].x0 = cx0; f->clip[f->clip_n].y0 = cy0;
-    f->clip[f->clip_n].x1 = cx1; f->clip[f->clip_n].y1 = cy1;
+    f->clip[f->clip_n].x0 = x0 > bx0 ? x0 : bx0;
+    f->clip[f->clip_n].y0 = y0 > by0 ? y0 : by0;
+    f->clip[f->clip_n].x1 = x1 < bx1 ? x1 : bx1;
+    f->clip[f->clip_n].y1 = y1 < by1 ? y1 : by1;
+    f->clip[f->clip_n].r = r > 0 ? r : 0;
     f->clip_n++;
 }
 
-static void fb_pop_clip(fb *f) { if (f->clip_n > 1) f->clip_n--; }
+/* 此前是 `if (clip_n > 1)` —— 第一层裁剪永远弹不掉: 文档里第一个 overflow
+   容器(或 clip-path)POP 之后, 后续所有绘制仍被裁在它的盒内, 表现为
+   "第一个可滚动区块之后的兄弟内容整块消失"。栈平衡由引擎保证, 归零合法。 */
+static void fb_pop_clip(fb *f) { if (f->clip_n > 0) f->clip_n--; }
 
 static int fb_clip_ok(fb *f, int x, int y) {
     if (x < 0 || y < 0 || x >= f->w || y >= f->h) return 0;
     if (f->clip_n == 0) return 1;
-    int cx0 = f->clip[f->clip_n - 1].x0, cy0 = f->clip[f->clip_n - 1].y0;
-    int cx1 = f->clip[f->clip_n - 1].x1, cy1 = f->clip[f->clip_n - 1].y1;
-    return x >= cx0 && y >= cy0 && x < cx1 && y < cy1;
+    float cx0 = f->clip[f->clip_n - 1].x0, cy0 = f->clip[f->clip_n - 1].y0;
+    float cx1 = f->clip[f->clip_n - 1].x1, cy1 = f->clip[f->clip_n - 1].y1;
+    float cr  = f->clip[f->clip_n - 1].r;
+    float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
+    if (fx < cx0 || fy < cy0 || fx >= cx1 || fy >= cy1) return 0;
+    if (cr > 0) {
+        float d = sd_rounded(fx, fy, cx0, cy0, cx1 - cx0, cy1 - cy0, cr);
+        if (d > 0) return 0;
+    }
+    return 1;
 }
 
 static void fb_blend(fb *f, int x, int y, fcolor c) {
@@ -769,7 +786,7 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, h
             paint_image(&f, c, 1.0f, 0, 0, 1.0f);
             break;
         case HN_CMD_CLIP_PUSH:
-            fb_push_clip(&f, (int)c->x, (int)c->y, (int)(c->x + c->w), (int)(c->y + c->h));
+            fb_push_clip(&f, c->x, c->y, c->x + c->w, c->y + c->h, c->radius);
             break;
         case HN_CMD_QUAD:
             paint_quad(&f, c, 1.0f);

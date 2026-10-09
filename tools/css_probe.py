@@ -510,20 +510,23 @@ def quad3d(html, w=400, h=300):
     return quads(html, w, h)
 
 # translateZ: perspective 400 下 k = dist/(dist-z)。
-# translateZ(200) → k=2, 100x60 的盒变成 200x120 且以盒中心为基准。
+# 投影的消失点是 **perspective-origin = 父盒中心**(CSS 口径; 曾错标成"子盒
+# 自身中心为基准")。探针页是裸片段(无 body 边距): 父 300x200 在 (0,0),
+# 中心 (150,100)。translateZ(200) → k=2, translateZ(-200) → k=2/3,
+# 角点都绕 (150,100) 收放。
 P3 = "<div id='p' style='width:300;height:200;perspective:400'>" \
      "<div id='c' style='width:100;height:60;background:#ff0000;%s'></div></div>"
 q = quad3d(P3 % "")
 ck("3D 基线: 无变换走 RECT", True, len(q) == 1 and q[0].startswith("RECT"))
 q = quad3d(P3 % "transform:translateZ(200px)")
 ck("translateZ(200) 走四边形(投影生效)", True, len(q) == 1 and q[0].startswith("QUAD"))
-# k=2 → 宽 200 高 120, 盒中心 (50,30) → x ∈ [-50,150], y ∈ [-30,90]
+# k=2 绕 (150,100): 角点 (0,0)→(-150,-100), (100,60)→(50,20)
 ck("translateZ(200) 缩放 k=2(角点正确)", True,
-   len(q) == 1 and "(-50.0,-30.0)" in q[0] and "(150.0,90.0)" in q[0])
+   len(q) == 1 and "(-150.0,-100.0)" in q[0] and "(50.0,20.0)" in q[0])
 q = quad3d(P3 % "transform:translateZ(-200px)")
-# k = 400/(400+200) = 2/3 → 66.7x40, x ∈ [16.7,83.3], y ∈ [10,50]
+# k = 400/(400+200) = 2/3 绕 (150,100): (0,0)→(50.0,33.3), (100,60)→(116.7,73.3)
 ck("translateZ(-200) 缩小 k=2/3(角点正确)", True,
-   len(q) == 1 and "(16.7,10.0)" in q[0] and "(83.3,50.0)" in q[0])
+   len(q) == 1 and "(50.0,33.3)" in q[0] and "(116.7,73.3)" in q[0])
 
 # rotate3d(0,1,0,45deg) 与 rotateY(45deg) 必须**完全一致**(绕 Y 轴就是 rotateY)
 q1 = quad3d(P3 % "transform:rotate3d(0,1,0,45deg)")

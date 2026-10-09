@@ -33,6 +33,17 @@ typedef enum { HN_POS_STATIC = 0, HN_POS_RELATIVE, HN_POS_ABSOLUTE, HN_POS_FIXED
 /* CSS 自定义属性(--name / var(--name)): 级联时收集, 继承自父, 子可覆盖 */
 typedef struct { const char *name, *value; } hn_var;
 
+/* transition 的属性槽: 独立时长/延迟/缓动按下标存放。
+   transform 槽覆盖 translate-x/translate-y/scale/rotate(CSS 里 transform
+   是单条属性, 整体插值)。 */
+enum {
+    HN_TPROP_OPACITY = 0,
+    HN_TPROP_BG,          /* background / background-color */
+    HN_TPROP_FG,          /* color */
+    HN_TPROP_TRANSFORM,   /* translate/scale/rotate */
+    HN_TPROP_N
+};
+
 typedef struct hn_style {
     hn_display display;
     int        flex_row;      /* 1=row 0=column */
@@ -73,10 +84,36 @@ typedef struct hn_style {
     float      font_size;
     int        font_weight, font_italic;
     float      letter_spacing;
+    /* word-spacing: 每个"词间隔"(空白分隔符)附加的宽度(px; 继承)。
+       折叠模式下作用于被压成的那一枚空格; pre/pre-wrap 作用于串内每个空白。
+       之前完全没有 —— 声明了不生效也不报错。 */
+    float      word_spacing;
     int        text_align;   /* 0=left 1=center 2=right */
     float      line_height;  /* 倍数 */
+    /* -webkit-line-clamp / line-clamp: 最多显示的行盒数(0 = 不限制, 不继承)。
+       内容超出时最后一行以省略号收尾 —— 此前 ellipsis 只能配 nowrap 做单行
+       截断, 多行场景(卡片摘要)无法表达。 */
+    int        line_clamp;
     int        box_border;   /* box-sizing: border-box */
     float      opacity;
+    /* ---- filter(brightness/contrast/saturate) ----
+       绘制期对 fill 颜色做调色(乘法口径, 不做像素级离屏合成 ——
+       与"QUAD 纯色填充"同级的简化)。缺省 1 = 原色。
+       CSS 同名函数的百分比形式(120%)与数字形式(1.2)等价, 解析期统一。 */
+    float      filter_br;      /* brightness: RGB 乘数 */
+    float      filter_ct;      /* contrast: 围绕中灰 0.5 拉伸 */
+    float      filter_sat;     /* saturate: 向亮度插值, 0 = 灰度 */
+    /* ---- clip-path(circle/inset 简化版) ----
+       裁剪发生在绘制期(CLIP_PUSH), 覆盖元素自身背景与全部子树;
+       ellipse()/polygon()/引用 SVG 均不支持(声明被忽略)。 */
+    unsigned char clip_shape;  /* 0=无 1=circle 2=inset */
+    float      clip_a, clip_b, clip_c, clip_d;
+    /* clip_a..d 按 shape 取值:
+       circle: clip_a = 半径(clip_pct bit4 = 1 时为百分数, 绘制期按
+               sqrt(w²+h²)/√2 解析; 0 且非百分数 = closest-side, 即短边一半)
+       inset:  clip_a..d = top right bottom left(clip_pct bit0..3 = 对应边为百分比) */
+    unsigned char clip_pct;
+    float      clip_round;     /* inset(... round R) 的圆角(px; % 按短边解析) */
     /* 渐变背景(background: linear-gradient(a, c1, c2)) */
     unsigned char has_gradient;
     hn_color   grad_from, grad_to;
@@ -86,6 +123,22 @@ typedef struct hn_style {
     hn_color   sh_color;
     float      sh_ox, sh_oy, sh_blur;
     float      transition_ms; /* 过渡时长(0 = 关闭) */
+    /* transition-delay: 全局延迟(ms, 简写第二个时间值或 longhand)。
+       延迟用"负进度"实现 —— t 从 -delay/ms 起步, ease_apply 对 t<=0 返回 0,
+       即停在起始态直至延迟耗尽; 负延迟则直接从中途开始。 */
+    float      transition_delay;
+    /* 按属性独立过渡(transition: opacity .3s, transform .5s / longhand 列表)。
+       槽位下标 = HN_TPROP_*。has_tprop=1 时未单独声明的槽不过渡(时长 0),
+       与 CSS 一致; 没有任何属性段时全体走 transition_ms(旧简写行为不变)。 */
+    unsigned char has_tprop;
+    float      tprop_ms[HN_TPROP_N];
+    float      tprop_delay[HN_TPROP_N];
+    unsigned char tprop_ease[HN_TPROP_N];
+    float      tprop_cb[HN_TPROP_N][4];
+    /* animation-delay: 关键帧动画与入场预设共用的启动延迟(ms, 可负 ——
+       负值 = 跳过前段直接从中途开始; stagger 列表用
+       style="--i:N" + animation-delay: calc(var(--i) * 0.1s) 表达) */
+    float      anim_delay;
     /* ---- 2D/3D 变换(transform) ---- */
     float      rotate;        /* rotate()/rotateZ(): 绕 Z 轴, 度 */
     float      rotate_x;      /* rotateX(): 绕 X 轴, 度 */
@@ -189,7 +242,13 @@ enum {
     HN_EASE_OUT    = 3,
     HN_EASE_IN_OUT = 4,
     HN_EASE_CSS    = 5,   /* CSS 的 ease(等价 cubic-bezier(.25,.1,.25,1)) */
-    HN_EASE_CUBIC  = 6    /* 显式 cubic-bezier(a,b,c,d) */
+    HN_EASE_CUBIC  = 6,   /* 显式 cubic-bezier(a,b,c,d) */
+    /* 弹性族(闭式解, 无逐帧积分状态 —— 与引擎"按 t 求值"的缓动口径一致) */
+    HN_EASE_SPRING  = 7,  /* 弹簧: 衰减振荡逼近目标, 少量过冲后落位 */
+    HN_EASE_BOUNCE  = 8,  /* ease-out-bounce: 落地弹跳(标准 CSS 分段) */
+    HN_EASE_ELASTIC = 9,  /* ease-out-elastic: 橡皮筋(c4 = 2π/3) */
+    HN_EASE_BACK    = 10, /* ease-out-back: 先回拉再越过目标收回(c1 = 1.70158) */
+    HN_EASE_STEPS   = 11  /* steps(n[, start|end]): cb[0]=n, cb[1]=1 为 start */
 };
 
 /* 入场动画预设: 元素新出现时的起始状态 */
@@ -207,7 +266,8 @@ typedef struct hn_anim {
     int   dirty_written; /* 上次 tick 是否把插值写回过样式(用于区分样式来源) */
     int   active;        /* 仍在过渡 */
     float ms;            /* 时长(0 = 关闭过渡) */
-    float t;             /* 进度 0..1 */
+    float t_delay;       /* 简写过渡的延迟(ms; 重启时换算成负进度) */
+    float t;             /* 进度 0..1(可为负 = 延迟等待) */
     float o,  o_from,  o_to;
     float bg[4], bg_from[4], bg_to[4];
     float fg[4], fg_from[4], fg_to[4];
@@ -222,6 +282,12 @@ typedef struct hn_anim {
     int   kf_done;              /* 已播完(非无限循环且到达终点) */
     int   ease;                 /* 本次过渡的缓动 */
     float cb[4];                /* cubic-bezier 参数 */
+    /* 按属性独立过渡(HN_TPROP_*): 每槽进度与激活位图。
+       槽配置不缓存 —— 每次 tick 现读 st->tprop_*(样式表热换立即生效);
+       需要重启(重取 from)的信号是"槽目标值变化", 配置变化只影响推进速率。 */
+    unsigned char per_prop;     /* 1 = 按槽推进(样式声明了 per-property 列表) */
+    unsigned char slot_active;  /* 位图: bit s = 槽 s 仍在过渡 */
+    float slot_t[HN_TPROP_N];   /* 各槽进度(可为负 = 延迟等待) */
     int   fresh;                /* 刚创建且声明了入场动画: 首次 tick 播放 */
     int   entering;             /* 正在播放入场动画(独立于样式重算) */
 } hn_anim;
@@ -277,7 +343,8 @@ typedef struct hn_compound {
     const char *tag;           /* 可为 NULL */
     const char *id;            /* 可为 NULL */
     const char *cls[8]; int n_cls;
-    int pseudo;                /* 0=无 1=:hover 2=:active 3=:focus */
+    int pseudo;                /* 0=无 1=:hover 2=:active 3=:focus
+                                  4=:disabled 5=:enabled 6=:checked */
     int nth;                   /* 0=无 -1=:nth-child(odd) -2=even >0=第 N 个(1 起)
                                   -3=:first-child -4=:last-child */
     int comb;                  /* 与左侧的组合器: 0 后代 1 子代(>) 2 相邻(+) 3 通用兄弟(~) */
@@ -285,8 +352,11 @@ typedef struct hn_compound {
        之前完全没有 —— 声明了不报错也不生效, 是最典型的静默失败。 */
     struct { const char *name; const char *val; unsigned char op; } attr[4];
     int n_attr;                /* op: 0 存在 1 = 2 ^= 3 $= 4 *= 5 ~= */
-    /* :not(...) 的实参(一层简单复合)。:not 自身不计特异性, 实参按其自身级别计。 */
-    struct hn_compound *not_cp;
+    /* :not(...) 的实参(一层简单复合; **链式** :not(a):not(b) 各占一槽 ——
+       此前单槽实现会让后者覆盖前者, "排除两种类型"写法静默失效)。
+       :not 自身不计特异性, 实参按其自身级别计。 */
+    struct hn_compound *not_cp[4];
+    int n_not;
     /* :nth-of-type / :first-of-type / :last-of-type: 同 nth 的编码, 但只数同标签兄弟 */
     int nth_type;
 } hn_compound;

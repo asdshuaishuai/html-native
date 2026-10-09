@@ -205,18 +205,30 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
             Sources/CHtmlNative/hnsoft.c)
 RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform $FT_INC"
 
+# QuickJS(hn_rt 的 JS 引擎): 构建期可选 —— 本机探测到才定义 HN_HAVE_QUICKJS。
+# homebrew 的 quickjs 是 keg-only: 头文件在 <opt>/include/quickjs/ 子目录,
+# 静态库在 <opt>/lib/quickjs/libquickjs.a, 都不在常规前缀下, 手写全路径最稳。
+# 交叉目标(musl)没有对应架构的库可链, 不定义 —— hn_rt 里整段编译出局。
+QJ_DEF="" QJ_INC="" QJ_LIB=""
+QJ_OPT="/opt/homebrew/opt/quickjs"
+if [ -f "$QJ_OPT/include/quickjs/quickjs.h" ] && [ -f "$QJ_OPT/lib/quickjs/libquickjs.a" ]; then
+    QJ_DEF="-DHN_HAVE_QUICKJS"
+    QJ_INC="-I$QJ_OPT/include/quickjs"
+    QJ_LIB="$QJ_OPT/lib/quickjs/libquickjs.a"
+fi
+
 printf '  %-22s ' "hnapp-headless"
-if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_VERSION="\"$VERSION\"" \
+if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF -DHN_VERSION="\"$VERSION\"" \
         app/hn_app.c $RT_SRC platform/hnp_headless.c "${ENGINE_SRC[@]}" \
-        -L/opt/homebrew/lib -lfreetype -lm -o "$OUT/hnapp-macos-headless" 2>/tmp/hn_build_err.txt; then
+        -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-headless" 2>/tmp/hn_build_err.txt; then
     printf '✓  hnapp-macos-headless (%s KB) 无 GUI\n' "$(($(wc -c < "$OUT/hnapp-macos-headless") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
 fi
 printf '  %-22s ' "hnapp-macos-arm64"
-if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_VERSION="\"$VERSION\"" \
+if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF -DHN_VERSION="\"$VERSION\"" \
         app/hn_app.c $RT_SRC platform/hnp_macos.c "${ENGINE_SRC[@]}" \
-        -L/opt/homebrew/lib -lfreetype -lm -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
+        -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
     printf '✓  hnapp-macos-arm64 (%s KB) 真窗口\n' "$(($(wc -c < "$OUT/hnapp-macos-arm64") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4

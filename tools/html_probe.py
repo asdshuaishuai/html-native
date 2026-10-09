@@ -13,7 +13,14 @@
 """
 import subprocess, os, sys, tempfile, re
 
-HN = sys.argv[1] if len(sys.argv) > 1 else "/tmp/hncore"
+HN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "/tmp/hncore")
+# 门禁传的是仓库根相对路径而 cwd 不保证是仓库根: 先按调用方 cwd 解析,
+# 不存在再以本文件位置(<仓库>/tools/)为基准 —— 与 layout/css_probe 同一口径。
+if not os.path.exists(HN) and len(sys.argv) > 1 and not os.path.isabs(sys.argv[1]):
+    _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _alt = os.path.normpath(os.path.join(_repo, sys.argv[1]))
+    if os.path.exists(_alt):
+        HN = _alt
 if not os.path.exists(HN):
     sys.exit("找不到 hncore: %s" % HN)
 D = tempfile.mkdtemp(prefix="hnhtml-")

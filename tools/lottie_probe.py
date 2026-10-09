@@ -18,8 +18,22 @@ hncore 的 paint 子命令直接看指令, 不涉及任何平台后端。
 
 用法: python3 tools/lottie_probe.py [hncore 路径]
 """
-import subprocess, os, tempfile, json
-HN="/tmp/hncore"
+import subprocess, os, sys, tempfile, json
+
+_raw = sys.argv[1] if len(sys.argv) > 1 else "/tmp/hncore"
+# 门禁调用本探针的 cwd 不保证是哪个目录, 却会传**仓库根相对**的产物路径。
+# 先按调用方 cwd 解析; 不存在再以本文件位置(<仓库>/tools/)为基准解析一次,
+# 统一钉成绝对路径 —— 与 layout/css_probe 同一口径。
+HN = os.path.abspath(_raw)
+if not os.path.exists(HN) and not os.path.isabs(_raw):
+    _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _alt = os.path.normpath(os.path.join(_repo, _raw))
+    if os.path.exists(_alt):
+        HN = _alt
+if not os.path.exists(HN):
+    print("找不到 hncore: %s(调用方 cwd 与仓库根下都不存在)" % HN)
+    print("先构建: bash tools/build-multiplatform.sh")
+    sys.exit(1)
 D=tempfile.mkdtemp()
 fails=[]
 def ck(n,c,d=""):

@@ -264,13 +264,33 @@ int hn_context_anim_tick(hn_context *c, float dt_ms);
 /* 设置/清除当前悬浮与按下元素(触发 :hover/:active 重新匹配), 随后需重布局 */
 void hn_context_set_hover(hn_context *c, hn_node *n);
 void hn_context_set_active(hn_context *c, hn_node *n);
-/* 焦点元素(:focus 伪类)与插入符可见性 */
+/* 焦点元素(:focus 伪类)与插入符可见性。
+   set_focus 在已有布局时会**立即重渲染**(样式重算 + 重布局 + 重绘),
+   使 :focus 规则与引擎默认焦点环即刻生效; 禁用的控件拒绝聚焦。 */
 void hn_context_set_focus(hn_context *c, hn_node *n);
 void hn_context_set_caret_visible(hn_context *c, int on);
 /* 元素计算样式的 cursor(0=default 1=pointer) */
 int  hn_node_cursor(hn_node *n);
 
 /* ---- 输入控件 ---- */
+/* 控件 type 语义。此前引擎只认 tag 名(input/textarea), checkbox/radio/password
+ * 会被当成可编辑文本 —— 布局给出 180px 宽的文本框、键盘往 value 里塞字符。 */
+enum {
+    HN_IN_NONE = 0,       /* 非 input/textarea */
+    HN_IN_TEXT,           /* <input>(缺省) */
+    HN_IN_TEXTAREA,       /* <textarea> */
+    HN_IN_PASSWORD,       /* <input type=password>(绘制时掩码, 值保持原文) */
+    HN_IN_CHECKBOX,       /* <input type=checkbox>(checked 属性表达状态) */
+    HN_IN_RADIO           /* <input type=radio>(checked 属性表达状态) */
+};
+/* 输入控件的 type 语义(HN_IN_*); 非 input/textarea 返回 HN_IN_NONE */
+int  hn_node_input_kind(hn_node *n);
+/* checkbox/radio 是否选中(checked 属性; 值为 "false"/"0" 视为未选)。
+ * 运行时切换状态用 hn_node_set_attr(n, "checked", "" / "false")。 */
+int  hn_node_is_checked(hn_node *n);
+/* 控件是否禁用(disabled 属性; 值为 "false"/"0" 视为启用)。
+ * 禁用的控件不参与表单提交、不可聚焦, 且命中 :disabled 伪类。 */
+int  hn_node_is_disabled(hn_node *n);
 /* 控件当前值(可编辑文本); 无 value 状态时回退到 value 属性, 再无则空串 */
 const char *hn_node_value(hn_node *n, size_t *len_out);
 /* 设置值并移动 caret 到末尾; 返回 1 表示该节点是输入控件 */

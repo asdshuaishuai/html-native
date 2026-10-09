@@ -15,9 +15,17 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <dlfcn.h>
+/* statvfs 的声明: Linux/musl 头文件不自依赖, 必须显式包含 statvfs.h,
+   否则 hnapp 的 musl 交叉报 incomplete type。macOS 侧走既有传递包含路径
+   即可(实测 zig 精简 Darwin 头显式包含 mount.h 反而 u_int 裸奔报错)。 */
+#ifndef __APPLE__
+#include <sys/statvfs.h>
+#endif
 
 #include "hn_rt.h"
+#ifdef HN_HAVE_QUICKJS
 #include <quickjs.h>
+#endif
 
 /* ---------------- 结构 ---------------- */
 
@@ -621,7 +629,11 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     return rt;
 }
 
-/* ---------------- JS 运行时(QuickJS, lazy init) ---------------- */
+/* ---------------- JS 运行时(QuickJS, lazy init) ----------------
+ * QuickJS 是构建期可选项: 构建脚本探测到本机安装才定义 HN_HAVE_QUICKJS。
+ * 交叉目标(如 musl)没有对应架构的 quickjs 库可链, 不定义 —— 整段编译
+ * 出局, hn_rt_eval 按既有"Error: ..."口径如实报告未启用(不静默)。 */
+#ifdef HN_HAVE_QUICKJS
 
 static void js_rt_free(hn_rt *rt) {
     if (rt->js_ctx) { JS_FreeContext((JSContext *)rt->js_ctx); rt->js_ctx = NULL; }
@@ -712,6 +724,19 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     JS_FreeValue(ctx, r);
     return out;
 }
+
+#else
+/* 无 QuickJS 构建: js_rt_free 空实现(hn_rt_close 的调用点无需知道差别) */
+static void js_rt_free(hn_rt *rt) { (void)rt; }
+
+char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
+    (void)js; (void)scope_key; (void)doc;
+    static const char msg[] = "QuickJS 未编入本产物(构建时未定义 HN_HAVE_QUICKJS)";
+    char *out = (char *)malloc(sizeof(msg) + 8);
+    if (out) sprintf(out, "Error: %s", msg);
+    return out;
+}
+#endif
 
 void hn_rt_close(hn_rt *rt) {
     if (!rt) return;

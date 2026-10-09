@@ -1,6 +1,7 @@
 /* hn_css.c — CSS 子集解析器 → 规则表
  * 选择器: tag / .class / #id / * 的复合, 仅后代组合(空格; '>' 按后代宽松处理),
- * 选择器组展开为独立规则(各自 specificity), 伪类 :hover/:active/:focus/:nth-child。
+ * 选择器组展开为独立规则(各自 specificity), 伪类 :hover/:active/:focus/
+ * :disabled/:enabled/:checked/:nth-child。
  * 声明以字符串保存, 具体语义在样式计算阶段解释。
  * @media (min/max-width) 解析为规则的约束条件, 其余 at-rule 跳过。
  */
@@ -209,7 +210,8 @@ static int read_compound(cps *s, hn_compound *cp) {
             any = 1;
             continue;
         }
-        /* 伪类: :hover / :active / :focus / :nth-child(odd|even|N|n 公式) */
+        /* 伪类: :hover/:active/:focus/:disabled/:enabled/:checked/
+           :nth-child(odd|even|N|n 公式) */
         if (s->p + 1 < s->end && *s->p == ':') {
             const char *save = s->p;
             s->p++;
@@ -218,6 +220,9 @@ static int read_compound(cps *s, hn_compound *cp) {
                 if (!strcmp(pse, "hover")) cp->pseudo = 1;
                 else if (!strcmp(pse, "active")) cp->pseudo = 2;
                 else if (!strcmp(pse, "focus") || !strcmp(pse, "focus-visible")) cp->pseudo = 3;
+                else if (!strcmp(pse, "disabled")) cp->pseudo = 4;
+                else if (!strcmp(pse, "enabled")) cp->pseudo = 5;
+                else if (!strcmp(pse, "checked")) cp->pseudo = 6;
                 else if (!strcmp(pse, "nth-child")) {
                     cp->nth = read_nth_arg(s);
                 }
@@ -230,7 +235,7 @@ static int read_compound(cps *s, hn_compound *cp) {
                 else if (!strcmp(pse, "last-of-type")) cp->nth_type = -4;
                 else if (!strcmp(pse, "not")) {
                     hn_compound *inner = read_not_arg(s);
-                    if (inner) cp->not_cp = inner;
+                    if (inner && cp->n_not < 4) cp->not_cp[cp->n_not++] = inner;
                 }
                 any = 1;
                 continue;
@@ -263,11 +268,14 @@ static void emit_rule(hn_sheet *sh, hn_compound *parts, int n_parts,
                    + (parts[i].nth_type ? 1 : 0) + (parts[i].pseudo ? 1 : 0)
                    + parts[i].n_attr;
         int id_lv = parts[i].id ? 1 : 0, tag_lv = parts[i].tag ? 1 : 0;
-        if (parts[i].not_cp) {
-            id_lv  += parts[i].not_cp->id ? 1 : 0;
-            tag_lv += parts[i].not_cp->tag ? 1 : 0;
-            cls_lv += parts[i].not_cp->n_cls + parts[i].not_cp->n_attr
-                    + (parts[i].not_cp->nth ? 1 : 0) + (parts[i].not_cp->pseudo ? 1 : 0);
+        if (parts[i].n_not > 0) {
+            for (int k = 0; k < parts[i].n_not; k++) {
+                const hn_compound *nc = parts[i].not_cp[k];
+                id_lv  += nc->id ? 1 : 0;
+                tag_lv += nc->tag ? 1 : 0;
+                cls_lv += nc->n_cls + nc->n_attr
+                        + (nc->nth ? 1 : 0) + (nc->pseudo ? 1 : 0);
+            }
         }
         spec += id_lv * 256 + cls_lv * 16 + tag_lv;
     }
@@ -373,6 +381,29 @@ static void parse_rules(cps *s, hn_sheet *sh, float min_w, float max_w) {
                     }
                 }
                 if (s->p < s->end && *s->p == '}') s->p++;
+                /* 帧排序: CSS 不要求按位置声明, 采样按"t 落在相邻两帧之间"
+                   线扫 —— 乱序声明会让区间查找失配(静默回退到首尾帧大跨度
+                   插值)。稳定插入排序, 同位置保持声明序。 */
+                for (int i = 1; i < kf->n_stops; i++) {
+                    hn_kf_stop tmp = kf->stops[i];
+                    int j = i - 1;
+                    while (j >= 0 && kf->stops[j].at > tmp.at) {
+                        kf->stops[j + 1] = kf->stops[j];
+                        j--;
+                    }
+                    kf->stops[j + 1] = tmp;
+                }
+                /* 同位置去重: 保留声明序最后一个(CSS 语义: 后声明覆盖先声明) */
+                {
+                    int w = 0;
+                    for (int i = 0; i < kf->n_stops; i++) {
+                        if (w > 0 && kf->stops[w - 1].at == kf->stops[i].at)
+                            kf->stops[w - 1] = kf->stops[i];
+                        else
+                            kf->stops[w++] = kf->stops[i];
+                    }
+                    kf->n_stops = w;
+                }
                 sh->n_kfs++;
                 continue;
             }

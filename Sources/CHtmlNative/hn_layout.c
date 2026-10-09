@@ -159,7 +159,9 @@ static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_ba
                     it.st = st;
                     it.begin = i;
                     it.end = j;
-                    it.w = measure_run(tb, st, s + i, j - i);
+                    /* word-spacing 在 pre 下作用于串内**每个**空白字符 */
+                    it.w = measure_run(tb, st, s + i, j - i)
+                         + st->word_spacing * (float)(j - i);
                     it.space_before = 0;
                     it.is_space_run = 1;      /* 标记: 行首的空白串可被丢弃 */
                     iv_push(iv, it);
@@ -332,14 +334,29 @@ static float align_off(int align, float max_w, float w) {
 /* 省略号截断: 在 max_w 内尽量多放片段, 末尾追加 "…"。
    用于 text-overflow: ellipsis + white-space: nowrap 的组合(单行溢出)。
    做法: 从行尾回退, 直到剩余空间能容纳省略号, 把最后一个片段的文本区间截短。 */
+/* 省略号承载文本: 容器节点上惰性分配一个 "…"(arena 生命周期同显示列表),
+   省略号 run 以 (0..3) 字节区间挂在该节点上, 绘制阶段按普通文本取字。 */
+static void ell_ensure_text(hn_node *container) {
+    static const char ELL[] = "\xE2\x80\xA6";
+    if (!container->text) {
+        container->text = hn_arena_strndup(container->arena, ELL, 3);
+        container->text_len = 3;
+    }
+}
+
 /* 省略号截断: 在 max_w 内尽量多放内容, 末尾追加 "…"。
  *
  * 关键点: CJK 文本没有空格, 整段是**一个片段**(可能几百 px)。所以不能只
  * "整片段取舍" —— 必须支持**片段内按码点回退**, 否则第一段就超预算时会
- * 整行丢空(什么都不画)。 */
+ * 整行丢空(什么都不画)。
+ *
+ * force: line-clamp 的最后一行(内容本行放得下、但**之后还有内容**)也要
+ * 追加省略号 —— 此时行宽 ≤ max_w, 缺省的"行没超宽就不截断"判定会跳过,
+ * 必须强制按"行宽 + 省略号 ≤ max_w"的预算处理。 */
 static void la_clip_ellipsis(line_acc *la, ivec *iv, const hn_text_backend *tb, float max_w,
-                             hn_arena *container_arena, hn_node *ell_parent) {
-    if (la->n == 0 || max_w <= 0 || la->w <= max_w) return;
+                             hn_arena *container_arena, hn_node *ell_parent, int force) {
+    if (la->n == 0 || max_w <= 0) return;
+    if (!force && la->w <= max_w) return;
     const hn_style *st0 = iv->v[la->idx[0]].st;
     float ell_w = measure_run(tb, st0, "\xE2\x80\xA6", 3);
     float budget = max_w - ell_w;
@@ -398,11 +415,7 @@ static void la_clip_ellipsis(line_acc *la, ivec *iv, const hn_text_backend *tb, 
     if (container_arena && ell_parent) {
         /* 承载节点用**容器自身**: 它在 DOM 树里, 绘制阶段会访问到它的 runs。
            (若用游离的临时节点, paint_walk 遍历不到, 省略号永远不显示。) */
-        static const char ELL[] = "\xE2\x80\xA6";
-        if (!ell_parent->text) {
-            ell_parent->text = hn_arena_strndup(container_arena, ELL, 3);
-            ell_parent->text_len = 3;
-        }
+        ell_ensure_text(ell_parent);
         la->ell_owner = ell_parent;
         la->ellipsis_x = la->w;
         la->ellipsis_w = ell_w;
@@ -478,6 +491,11 @@ static void emit_seg(hn_node *owner, size_t b, size_t e, float x, float y_top, f
     run_push(owner, b, e, x + off, w, y_top + half + asc, y_top, lh);
 }
 
+/* 空格宽度(词间隔): 空格本身 + word-spacing 附加 */
+static float space_w_of(const hn_text_backend *tb, const hn_style *st) {
+    return measure_run(tb, st, " ", 1) + st->word_spacing;
+}
+
 /* 摊平 + 布局一个行内格式化上下文; 返回占用高度 */
 static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_node *stop,
                         float x, float y, float max_w,
@@ -502,7 +520,7 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
                 continue;
             }
             if (!it->owner) continue;
-            if (it->space_before && any) cur += measure_run(tb, it->st, " ", 1);
+            if (it->space_before && any) cur += space_w_of(tb, it->st);
             cur += it->pad_before + it->w + it->pad_after;
             float a, d;
             font_metrics(tb, it->st, &a, &d);
@@ -518,6 +536,12 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
         return any ? maxh : 0;
     }
 
+    /* line-clamp 状态: lines_done = 已落盘的行盒数; clamp_n > 0 时最多
+       显示 clamp_n 行, 内容超出时最后一行以省略号收尾(与单行 ellipsis
+       同一手法: la_clip_ellipsis / 手工补省略号 run)。 */
+    const int clamp_n = container->style.line_clamp;
+    int lines_done = 0;
+
     line_acc la;
     la_reset(&la);
     float cur_y = 0;
@@ -525,15 +549,27 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
     while (i < iv.n) {
         iitem *it = &iv.v[i];
 
+        /* 行数已用尽: 剩余内容全部丢弃(省略号已由产生第 clamp_n 行的分支补上) */
+        if (clamp_n > 0 && lines_done >= clamp_n) break;
+
         if (it->forced_break) {
+            /* 强制断行后仍有内容、且本行是最后一行 → 先截断补省略号再落盘 */
+            if (clamp_n > 0 && lines_done + 1 >= clamp_n && i + 1 < iv.n && max_w > 0) {
+                la_clip_ellipsis(&la, &iv, tb, max_w, container->arena, container, 1);
+                la_emit(&la, &iv, x, y + cur_y, max_w, align);
+                cur_y += la.lh;
+                lines_done++;
+                la_reset(&la);
+                break;
+            }
             la_emit(&la, &iv, x, y + cur_y, max_w, align);
-            if (la.n) cur_y += la.lh;
+            if (la.n) { cur_y += la.lh; lines_done++; }
             la_reset(&la);
             i++;
             continue;
         }
 
-        float space_w = (it->space_before && la.n > 0) ? measure_run(tb, it->st, " ", 1) : 0;
+        float space_w = (it->space_before && la.n > 0) ? space_w_of(tb, it->st) : 0;
         float need = it->pad_before + it->w + it->pad_after;
 
         /* white-space: nowrap — 不因宽度换行(超出部分由 text-overflow 处理) */
@@ -546,8 +582,18 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
 
         /* 本行放不下: 已有内容则换行后重试 */
         if (la.n > 0 && max_w > 0 && la.w + space_w + need > max_w) {
+            /* 换行即说明本行之后还有内容: 若本行已是最后一行, 截断补省略号 */
+            if (clamp_n > 0 && lines_done + 1 >= clamp_n) {
+                la_clip_ellipsis(&la, &iv, tb, max_w, container->arena, container, 1);
+                la_emit(&la, &iv, x, y + cur_y, max_w, align);
+                cur_y += la.lh;
+                lines_done++;
+                la_reset(&la);
+                break;
+            }
             la_emit(&la, &iv, x, y + cur_y, max_w, align);
             cur_y += la.lh;
+            lines_done++;
             la_reset(&la);
             continue;
         }
@@ -559,17 +605,48 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
             float acc = 0, a, d;
             font_metrics(tb, it->st, &a, &d);
             float lh = it->st->font_size * it->st->line_height;
+            /* clamp: 本行若是允许的最后一行, 拆行预算收紧留出省略号 */
+            float budget = max_w;
+            int ell_line = 0;
+            float ell_w = 0;
+            if (clamp_n > 0 && lines_done + 1 >= clamp_n) {
+                ell_w = measure_run(tb, it->st, "\xE2\x80\xA6", 3);
+                budget = max_w - ell_w;
+                if (budget < 0) budget = 0;
+                ell_line = 1;
+            }
             while (p < e) {
                 size_t cn = utf8_next(s + p, e - p);
                 float cw = measure_run(tb, it->st, s + p, cn);
-                if (acc > 0 && acc + cw > max_w) {
+                if (acc > 0 && acc + cw > budget) {
                     emit_seg(it->owner, seg, p, x, y + cur_y, acc, a, d, lh, max_w, align);
                     cur_y += lh;
+                    lines_done++;
                     seg = p;
                     acc = 0;
+                    if (clamp_n > 0 && lines_done + 1 >= clamp_n && !ell_line) {
+                        ell_w = measure_run(tb, it->st, "\xE2\x80\xA6", 3);
+                        budget = max_w - ell_w;
+                        if (budget < 0) budget = 0;
+                        ell_line = 1;
+                    }
                 }
                 acc += cw;
                 p += cn;
+            }
+            if (ell_line) {
+                /* 行数已到上限: 末段直接落盘并补省略号, 剩余内容全部丢弃 */
+                if (acc > 0)
+                    emit_seg(it->owner, seg, e, x, y + cur_y, acc, a, d, lh, max_w, align);
+                float half = (lh - (a + d)) * 0.5f;
+                if (half < 0) half = 0;
+                float eoff = align_off(align, max_w, acc + ell_w);
+                ell_ensure_text(container);
+                run_push(container, 0, 3, x + eoff + acc, ell_w,
+                         y + cur_y + half + a, y + cur_y, lh);
+                cur_y += lh;
+                lines_done++;
+                break;
             }
             float padl = it->pad_before;
             it->begin = seg; it->end = e; it->w = acc;
@@ -584,8 +661,18 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
         }
 
         if (la.n >= 256) {
+            /* 行片段数达到行累加器上限: 与换行同样处理(clamp 同样适用) */
+            if (clamp_n > 0 && lines_done + 1 >= clamp_n) {
+                la_clip_ellipsis(&la, &iv, tb, max_w, container->arena, container, 1);
+                la_emit(&la, &iv, x, y + cur_y, max_w, align);
+                cur_y += la.lh;
+                lines_done++;
+                la_reset(&la);
+                break;
+            }
             la_emit(&la, &iv, x, y + cur_y, max_w, align);
             cur_y += la.lh;
+            lines_done++;
             la_reset(&la);
             continue;
         }
@@ -600,7 +687,7 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
     if (la.n) {
         /* text-overflow: ellipsis + nowrap: 单行超出时截断并加省略号 */
         if (container->style.text_overflow == 1 && container->style.white_space == 1)
-            la_clip_ellipsis(&la, &iv, tb, max_w, container->arena, container);
+            la_clip_ellipsis(&la, &iv, tb, max_w, container->arena, container, 0);
         la_emit(&la, &iv, x, y + cur_y, max_w, align);
         cur_y += la.lh;
     }
@@ -722,6 +809,13 @@ static int is_inline_level(hn_node *ch) {
 /* 输入控件: 用当前值布局内部文本(run 挂在控件节点自身, 供绘制/命中)。
    placeholder 仅在无值时由绘制阶段弱色绘制, 不参与排版。 */
 static void layout_input(hn_context *c, hn_node *n, float content_w, const hn_text_backend *tb, int measuring) {
+    int ik = hn_node_input_kind(n);
+    if (ik == HN_IN_CHECKBOX || ik == HN_IN_RADIO) {
+        /* 复选/单选没有可排版文本(状态由绘制阶段读取 checked 属性) */
+        n->text = NULL;
+        n->text_len = 0;
+        return;
+    }
     size_t vlen = 0;
     const char *v = hn_node_value(n, &vlen);
     if (!v) { v = ""; vlen = 0; }
@@ -1301,13 +1395,25 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
 
     /* 输入控件: 默认尺寸 */
     if (hn_node_is_input(n)) {
-        if (st->width_u == HN_U_AUTO) { st->width = 180; st->width_u = HN_U_PX; }
-        if (st->height_u == HN_U_AUTO) {
-            st->height = st->font_size * st->line_height + 14;
-            st->height_u = HN_U_PX;
+        int ik = hn_node_input_kind(n);
+        if (ik == HN_IN_CHECKBOX || ik == HN_IN_RADIO) {
+            /* 复选/单选: 固定方寸(随字号), 无文本内边距 —— 之前套用文本框
+               的默认(180 宽 + padding), 视觉上是一块可输入区域而非控件 */
+            float s = st->font_size * 0.9f;
+            if (s < 12) s = 12;
+            if (s > 20) s = 20;
+            if (st->width_u == HN_U_AUTO) { st->width = s; st->width_u = HN_U_PX; }
+            if (st->height_u == HN_U_AUTO) { st->height = s; st->height_u = HN_U_PX; }
+            st->padding[0] = st->padding[1] = st->padding[2] = st->padding[3] = 0;
+        } else {
+            if (st->width_u == HN_U_AUTO) { st->width = 180; st->width_u = HN_U_PX; }
+            if (st->height_u == HN_U_AUTO) {
+                st->height = st->font_size * st->line_height + 14;
+                st->height_u = HN_U_PX;
+            }
+            if (st->padding[1] == 0 && st->padding[3] == 0) { st->padding[1] = 10; st->padding[3] = 10; }
+            if (st->padding[0] == 0 && st->padding[2] == 0) { st->padding[0] = 7; st->padding[2] = 7; }
         }
-        if (st->padding[1] == 0 && st->padding[3] == 0) { st->padding[1] = 10; st->padding[3] = 10; }
-        if (st->padding[0] == 0 && st->padding[2] == 0) { st->padding[0] = 7; st->padding[2] = 7; }
         pt = st->padding[0] + bt; pr = st->padding[1] + br;
         pb = st->padding[2] + bb; pl = st->padding[3] + bl;
     }

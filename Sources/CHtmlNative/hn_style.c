@@ -29,7 +29,10 @@ static const char *UA_CSS =
     "u { text-decoration: underline; }\n"
     "s, strike, del { text-decoration: line-through; }\n"
     "hr { display: block; border: 1 solid #c8c8c8; height: 0; margin: 10 0; }\n"
-    "code, pre, kbd, samp, tt { font-family: monospace; }\n";
+    "code, pre, kbd, samp, tt { font-family: monospace; }\n"
+    /* 禁用态: 引擎级缺省观感(半透明)。伪类 :disabled/:enabled/:checked
+       按属性匹配, 作者可覆盖。 */
+    "input:disabled, textarea:disabled, button:disabled { opacity: 0.45; }\n";
 
 const char *hn_ua_css(void) { return UA_CSS; }
 
@@ -54,6 +57,12 @@ void hn_style_default(hn_style *st) {
     st->scale = 1.0f;
     st->scale_x = st->scale_y = 1.0f;
     st->z_index = 0;
+    /* filter 缺省 = 原色(乘数 1) */
+    st->filter_br = st->filter_ct = st->filter_sat = 1.0f;
+    /* animation-iteration-count 缺省 1。缺这个初值时 kf_iter=0,
+       kf_tick 里 total >= iter 对任何 t>=0 立即成立 —— 非无限关键帧
+       动画**首帧即播完**(直接跳到末帧), 表现为动画完全不播。 */
+    st->kf_iter = 1;
 }
 
 void hn_style_inherit(hn_style *dst, const hn_style *p) {
@@ -64,6 +73,7 @@ void hn_style_inherit(hn_style *dst, const hn_style *p) {
     dst->font_weight = p->font_weight;
     dst->font_italic = p->font_italic;
     dst->letter_spacing = p->letter_spacing;
+    dst->word_spacing = p->word_spacing;
     dst->text_align = p->text_align;
     dst->line_height = p->line_height;
     dst->opacity = p->opacity;
@@ -207,25 +217,175 @@ static int sv_len_nt(sv *v, float font_px, float *out, int *unit) {
 
 /* ---------- 声明应用 ---------- */
 
-/* 缓动名/cubic-bezier() → 枚举 + 参数(与 CSS 命名对齐) */
-static unsigned char parse_ease(sv t, float cb[4]) {
+/* 缓动名/cubic-bezier()/steps() → 枚举 + 参数。识别时写 *out 并返回 1。
+   known 返回值是给 animation 简写用的: 未识别的 token 才轮到当动画名,
+   不然 spring/bounce/elastic/back 会被当成 keyframes 名吞掉。 */
+static int ease_parse(sv t, float cb[4], unsigned char *out) {
     char buf[64];
-    if (t.n == 0 || t.n >= sizeof(buf)) return HN_EASE_SMOOTH;
+    if (t.n == 0 || t.n >= sizeof(buf)) return 0;
     memcpy(buf, t.s, t.n); buf[t.n] = 0;
-    if (!strcmp(buf, "linear")) return HN_EASE_LINEAR;
-    if (!strcmp(buf, "ease")) return HN_EASE_CSS;
-    if (!strcmp(buf, "ease-in")) return HN_EASE_IN;
-    if (!strcmp(buf, "ease-out")) return HN_EASE_OUT;
-    if (!strcmp(buf, "ease-in-out")) return HN_EASE_IN_OUT;
+    if (!strcmp(buf, "linear")) { *out = HN_EASE_LINEAR; return 1; }
+    if (!strcmp(buf, "ease")) { *out = HN_EASE_CSS; return 1; }
+    if (!strcmp(buf, "ease-in")) { *out = HN_EASE_IN; return 1; }
+    if (!strcmp(buf, "ease-out")) { *out = HN_EASE_OUT; return 1; }
+    if (!strcmp(buf, "ease-in-out")) { *out = HN_EASE_IN_OUT; return 1; }
+    /* 弹性族(入场动画最常用的 out 口味; 裸名与 ease-out-* 同义) */
+    if (!strcmp(buf, "spring") || !strcmp(buf, "ease-out-spring")) { *out = HN_EASE_SPRING; return 1; }
+    if (!strcmp(buf, "bounce") || !strcmp(buf, "ease-out-bounce")) { *out = HN_EASE_BOUNCE; return 1; }
+    if (!strcmp(buf, "elastic") || !strcmp(buf, "ease-out-elastic")) { *out = HN_EASE_ELASTIC; return 1; }
+    if (!strcmp(buf, "back") || !strcmp(buf, "ease-out-back")) { *out = HN_EASE_BACK; return 1; }
     if (!strncmp(buf, "cubic-bezier(", 13)) {
         const char *p = buf + 13;
         for (int i = 0; i < 4; i++) {
             while (*p == ' ' || *p == ',') p++;
             cb[i] = (float)strtod(p, (char **)&p);
         }
-        return HN_EASE_CUBIC;
+        *out = HN_EASE_CUBIC;
+        return 1;
     }
-    return HN_EASE_SMOOTH;
+    if (!strncmp(buf, "steps(", 6)) {
+        /* steps(n[, start|end]): cb[0]=n(段数), cb[1]=1 表示 start(段首取值) */
+        const char *p = buf + 6;
+        cb[0] = (float)strtod(p, (char **)&p);
+        cb[1] = 0;
+        for (const char *q = p; q + 4 < buf + strlen(buf); q++) {
+            if (tolower((unsigned char)q[0]) == 's' && tolower((unsigned char)q[1]) == 't' &&
+                tolower((unsigned char)q[2]) == 'a' && tolower((unsigned char)q[3]) == 'r' &&
+                tolower((unsigned char)q[4]) == 't') { cb[1] = 1; break; }
+        }
+        if (cb[0] < 1) cb[0] = 1;
+        *out = HN_EASE_STEPS;
+        return 1;
+    }
+    return 0;
+}
+
+static unsigned char parse_ease(sv t, float cb[4]) {
+    unsigned char e = HN_EASE_SMOOTH;
+    if (!ease_parse(t, cb, &e)) e = HN_EASE_SMOOTH;
+    return e;
+}
+
+/* 单 token 时间值(<n>s / <n>ms, 可带符号) → 毫秒; 不是时间返回 0。
+   用独立返回值区分"0 值时间"与"非时间 token"(animation-delay: 0s 合法)。 */
+static int parse_time_tok(sv t, float *out_ms) {
+    char buf[24];
+    if (t.n == 0 || t.n >= sizeof(buf)) return 0;
+    if (!(isdigit((unsigned char)t.s[0]) || t.s[0] == '-' || t.s[0] == '+' || t.s[0] == '.'))
+        return 0;
+    memcpy(buf, t.s, t.n); buf[t.n] = 0;
+    char *e = NULL;
+    float val = strtof(buf, &e);
+    if (e == buf) return 0;
+    if (!strcmp(e, "ms")) { *out_ms = val; return 1; }
+    if (!strcmp(e, "s")) { *out_ms = val * 1000.0f; return 1; }
+    return 0;
+}
+
+/* calc() 延迟里的一项: 数字或时间(strtof + 单位判别) */
+static int delay_factor(const char **pp, const char *end, float *v, int *is_time) {
+    const char *p = *pp;
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    char *e = NULL;
+    float x = strtof(p, &e);
+    if (e == p) return 0;
+    if (e + 1 < end && e[0] == 'm' && e[1] == 's') { *v = x; *is_time = 1; p = e + 2; }
+    else if (e < end && *e == 's') { *v = x * 1000.0f; *is_time = 1; p = e + 1; }
+    else { *v = x; *is_time = 0; p = e; }
+    *pp = p;
+    return 1;
+}
+
+/* calc(<表达式>) 延迟求值: 顶层按 +/- 分项, 每项 = 因子[* 因子]。
+   只允许 数字×时间(或 时间×数字) —— 时间×时间无意义, 返回 0 让声明被忽略。
+   var(--i) 已在样式计算前展开为字面数字, 这里只见常量。 */
+static int delay_calc(const char *p, const char *end, float *out) {
+    float total = 0;
+    int any = 0, sign = 1;
+    while (p < end) {
+        while (p < end && (*p == ' ' || *p == '\t')) p++;
+        if (p >= end) break;
+        if (*p == '+') { sign = 1; p++; continue; }
+        if (*p == '-') { sign = -1; p++; continue; }
+        float f1, f2, term;
+        int t1 = 0, t2 = 0;
+        if (!delay_factor(&p, end, &f1, &t1)) return 0;
+        term = f1;
+        const char *q = p;
+        while (q < end && (*q == ' ' || *q == '\t')) q++;
+        if (q < end && *q == '*') {
+            p = q + 1;
+            if (!delay_factor(&p, end, &f2, &t2)) return 0;
+            if (t1 && t2) return 0;
+            term = t1 ? f1 * f2 : f2 * f1;
+        }
+        total += sign * term;
+        any = 1;
+        sign = 1;
+    }
+    if (!any) return 0;
+    *out = total;
+    return 1;
+}
+
+/* 延迟值: <time> | calc(<n> * <time> [± ...]) → 毫秒。
+   stagger(交错入场)的算式写法: animation-delay: calc(var(--i) * 0.1s)。 */
+static int parse_delay_ms(sv v, float *out) {
+    float ms;
+    if (parse_time_tok(v, &ms)) { *out = ms; return 1; }
+    const char *s = v.s, *end = v.s + v.n;
+    while (s < end && (*s == ' ' || *s == '\t')) s++;
+    /* 裸数字按 0 处理(delay: 0) —— 等价缺省 */
+    {
+        const char *q = s;
+        float x = strtof(q, (char **)&q);
+        (void)x;
+        if (q == end) { *out = 0; return 1; }
+    }
+    if (end - s >= 6 && !strncasecmp(s, "calc(", 5)) {
+        const char *p = s + 5;
+        int depth = 1;
+        const char *e2 = p;
+        while (e2 < end) {
+            if (*e2 == '(') depth++;
+            else if (*e2 == ')') { if (--depth == 0) break; }
+            e2++;
+        }
+        if (depth != 0) return 0;
+        return delay_calc(p, e2, out);
+    }
+    return 0;
+}
+
+/* 顶层逗号分段(括号深度保护 —— cubic-bezier(.25,.1,.25,1) 不会被切碎) */
+static int split_top_commas(const char *v, sv *segs, int max) {
+    int depth = 0, n = 0;
+    const char *st = v;
+    for (const char *p = v;; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')' && depth > 0) depth--;
+        if (*p == 0 || (*p == ',' && depth == 0)) {
+            const char *e = p;
+            while (e > st && (e[-1] == ' ' || e[-1] == '\t')) e--;
+            while (st < e && (*st == ' ' || *st == '\t')) st++;
+            if (e > st && n < max) { segs[n].s = st; segs[n].n = (size_t)(e - st); n++; }
+            if (!*p) break;
+            st = p + 1;
+        }
+    }
+    return n;
+}
+
+/* transition 属性名 → 槽位; "all" → -2(全局), 不支持(不可动画) → -1 */
+static int tprop_slot(sv t) {
+    if (sv_eq(t, "all")) return -2;
+    if (sv_eq(t, "opacity")) return HN_TPROP_OPACITY;
+    if (sv_eq(t, "background") || sv_eq(t, "background-color")) return HN_TPROP_BG;
+    if (sv_eq(t, "color")) return HN_TPROP_FG;
+    if (sv_eq(t, "transform") || sv_eq(t, "translate") || sv_eq(t, "translate-x") ||
+        sv_eq(t, "translate-y") || sv_eq(t, "scale") || sv_eq(t, "rotate"))
+        return HN_TPROP_TRANSFORM;
+    return -1;
 }
 
 /* 上一次 apply_len4 的 auto 位图(TRBL), 仅 margin 消费 */
@@ -553,17 +713,184 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         if (!next_tok(&v, &t)) return;
         st->overflow = sv_eq(t, "visible") ? 0 : 1;
     } else if (!strcmp(name, "transition")) {
-        /* 取第一个时间值作为时长(如 "0.2s" / "200ms"); 多属性简化为统一时长 */
-        while (next_tok(&v, &t)) {
-            char buf[24];
-            if (t.n == 0 || t.n >= sizeof(buf)) continue;
-            memcpy(buf, t.s, t.n);
-            buf[t.n] = 0;
-            double val = strtod(buf, NULL);
-            if (strstr(buf, "ms")) st->transition_ms = (float)val;
-            else if (strchr(buf, 's')) st->transition_ms = (float)(val * 1000.0);
-            if (st->transition_ms > 0) break;
+        /* transition: [属性] <时长> [<延迟>] [<缓动>] [, 段...]
+           无属性段 = 全局(作用于所有可动画属性, 旧简写行为);
+           有属性段 = 仅该属性独立过渡(未声明的属性不再过渡, 与 CSS 一致)。
+           时间值: 第 1 个 = 时长, 第 2 个 = 延迟(此前第二个时间值会静默
+           覆盖时长 —— 现按 CSS 语义分开)。 */
+        sv segs[8];
+        int nseg = split_top_commas(value, segs, 8);
+        /* 简写整体重置: 后一条 transition 覆盖此前全部过渡配置 */
+        st->transition_ms = 0;
+        st->transition_delay = 0;
+        st->anim_ease = HN_EASE_SMOOTH;
+        memset(st->cb, 0, sizeof(st->cb));
+        st->has_tprop = 0;
+        memset(st->tprop_ms, 0, sizeof(st->tprop_ms));
+        memset(st->tprop_delay, 0, sizeof(st->tprop_delay));
+        memset(st->tprop_ease, 0, sizeof(st->tprop_ease));
+        memset(st->tprop_cb, 0, sizeof(st->tprop_cb));
+        for (int si = 0; si < nseg; si++) {
+            sv cur = segs[si];
+            int slot = -2;               /* 无属性段 → 全局 */
+            float dur = -1, delay = 0;
+            unsigned char ez = HN_EASE_SMOOTH;
+            float ecb[4];
+            memset(ecb, 0, sizeof(ecb));
+            int set_ease = 0;
+            sv t2;
+            while (next_tok(&cur, &t2)) {
+                int sl = tprop_slot(t2);
+                if (sl != -1) { slot = sl; continue; }   /* all/属性名; all 即全局 */
+                float tms;
+                if (parse_time_tok(t2, &tms)) {
+                    if (dur < 0) dur = tms;
+                    else delay = tms;
+                    continue;
+                }
+                if (ease_parse(t2, ecb, &ez)) { set_ease = 1; continue; }
+                /* 未识别 token 忽略(如 none 出现在段中) */
+            }
+            if (slot == -2) {
+                /* 全局段: transition: .3s / transition: .3s ease-in .1s */
+                if (dur >= 0) st->transition_ms = dur;
+                st->transition_delay = delay;
+                st->anim_ease = ez;
+                memcpy(st->cb, ecb, sizeof(st->cb));
+            } else {
+                st->has_tprop = 1;
+                st->tprop_ms[slot] = dur > 0 ? dur : 0;
+                st->tprop_delay[slot] = delay;
+                st->tprop_ease[slot] = ez;
+                memcpy(st->tprop_cb[slot], ecb, sizeof(st->tprop_cb[slot]));
+            }
         }
+    } else if (!strcmp(name, "transition-property")) {
+        /* 逗号列表 → 逐个标记属性槽。槽配置的时长/延迟来自其后(或先前)的
+           transition-duration/-delay 声明; 这里只置位并给缺省时长 0。 */
+        sv segs[8];
+        int nseg = split_top_commas(value, segs, 8);
+        int any = 0;
+        for (int si = 0; si < nseg; si++) {
+            sv t2 = segs[si];
+            /* 值可能是多 token(空格分隔) —— 逐 token 认 */
+            sv cur = t2;
+            sv t3;
+            while (next_tok(&cur, &t3)) {
+                int sl = tprop_slot(t3);
+                if (sl < 0) continue;             /* all/none/不支持 */
+                st->has_tprop = 1;
+                any = 1;
+                st->tprop_ms[sl] = 0;
+                st->tprop_delay[sl] = 0;
+            }
+        }
+        if (any) {
+            memset(st->tprop_ease, 0, sizeof(st->tprop_ease));
+            memset(st->tprop_cb, 0, sizeof(st->tprop_cb));
+        }
+    } else if (!strcmp(name, "transition-duration")) {
+        /* 逗号列表按槽位序(HN_TPROP_OPACITY..TRANSFORM)对位; 单值 = 全部槽。
+           (CSS 的对位是 transition-property 声明序 —— 本引擎以槽位序近似,
+           单值场景与 CSS 等价。) */
+        sv segs[8];
+        int nseg = split_top_commas(value, segs, 8);
+        for (int si = 0; si < nseg; si++) {
+            float tms;
+            if (!parse_time_tok(segs[si], &tms)) continue;
+            if (nseg == 1) {
+                if (st->has_tprop) for (int s = 0; s < HN_TPROP_N; s++) st->tprop_ms[s] = tms;
+                else st->transition_ms = tms;
+            } else if (st->has_tprop && si < HN_TPROP_N) {
+                st->tprop_ms[si] = tms;
+            }
+        }
+    } else if (!strcmp(name, "transition-delay")) {
+        sv segs[8];
+        int nseg = split_top_commas(value, segs, 8);
+        for (int si = 0; si < nseg; si++) {
+            float dms;
+            if (!parse_delay_ms(segs[si], &dms)) continue;
+            if (nseg == 1) {
+                if (st->has_tprop) for (int s = 0; s < HN_TPROP_N; s++) st->tprop_delay[s] = dms;
+                else st->transition_delay = dms;
+            } else if (st->has_tprop && si < HN_TPROP_N) {
+                st->tprop_delay[si] = dms;
+            }
+        }
+    } else if (!strcmp(name, "transition-timing-function")) {
+        sv segs[8];
+        int nseg = split_top_commas(value, segs, 8);
+        if (nseg > 1 && st->has_tprop) {
+            /* 逗号列表按槽位序对位(cubic-bezier/steps 内的逗号已由分段器
+               深度保护, 不会被切碎; 分不出多段即为单值) */
+            for (int si = 0; si < nseg; si++) {
+                sv cur = segs[si];
+                sv t2;
+                if (!next_tok(&cur, &t2)) continue;
+                unsigned char ez;
+                float ecb[4] = {0, 0, 0, 0};
+                if (!ease_parse(t2, ecb, &ez)) continue;
+                if (si < HN_TPROP_N) {
+                    st->tprop_ease[si] = ez;
+                    memcpy(st->tprop_cb[si], ecb, sizeof(st->tprop_cb[si]));
+                }
+            }
+        } else {
+            sv cur = segs[0];
+            sv t2;
+            if (!next_tok(&cur, &t2)) return;
+            st->anim_ease = parse_ease(t2, st->cb);
+            /* 单值 longhand 作用于**全部**属性: 已按属性声明的槽一并覆盖
+               (CSS longhand 语义; 若简写在源序靠后, 简写会整体重置回来)。
+               否则 `transition: opacity 1s` + `transition-timing-function:
+               spring` 会让 per-property 槽静默退回 smoothstep。 */
+            for (int s = 0; s < HN_TPROP_N; s++) {
+                st->tprop_ease[s] = st->anim_ease;
+                memcpy(st->tprop_cb[s], st->cb, sizeof(st->cb));
+            }
+        }
+    } else if (!strcmp(name, "animation-delay")) {
+        float dms;
+        if (parse_delay_ms(v, &dms)) st->anim_delay = dms;
+    } else if (!strcmp(name, "animation") || !strcmp(name, "hn-anim")) {
+        /* animation: <名>? <预设>? <时长> [<延迟>] <缓动>? <方向/循环/填充>…
+           时间值: 第 1 个 = 时长, 第 2 个 = 延迟(CSS 语义; 此前第二个时间值
+           会静默覆盖时长)。缓动名先于"动画名"识别 —— 否则 spring/bounce
+           会被当成 keyframes 名。 */
+        int n_time = 0;
+        while (next_tok(&v, &t)) {
+            char buf[48];
+            if (t.n == 0 || t.n >= sizeof(buf)) continue;
+            memcpy(buf, t.s, t.n); buf[t.n] = 0;
+            float tms;
+            if (parse_time_tok(t, &tms)) {
+                if (n_time == 0) { st->enter_ms = tms; st->kf_ms = tms; }
+                else if (n_time == 1) st->anim_delay = tms;
+                n_time++;
+                continue;
+            }
+            unsigned char ez;
+            float ecb[4] = {0, 0, 0, 0};
+            if (ease_parse(t, ecb, &ez)) { st->anim_ease = ez; memcpy(st->cb, ecb, sizeof(st->cb)); continue; }
+            if (!strcmp(buf, "up")) st->anim_enter = HN_ENTER_UP;
+            else if (!strcmp(buf, "down")) st->anim_enter = HN_ENTER_DOWN;
+            else if (!strcmp(buf, "left")) st->anim_enter = HN_ENTER_LEFT;
+            else if (!strcmp(buf, "fade")) st->anim_enter = HN_ENTER_FADE;
+            else if (!strcmp(buf, "scale")) st->anim_enter = HN_ENTER_SCALE;
+            else if (!strcmp(buf, "none")) { st->anim_enter = HN_ENTER_NONE; st->kf_name = NULL; }
+            else if (!strcmp(buf, "infinite")) st->kf_iter = -1;
+            else if (!strcmp(buf, "reverse")) st->kf_dir = 1;
+            else if (!strcmp(buf, "alternate")) st->kf_dir = 2;
+            else if (!strcmp(buf, "alternate-reverse")) st->kf_dir = 3;
+            else if (!strcmp(buf, "forwards") || !strcmp(buf, "both")) st->kf_fill = 1;
+            else if (buf[0] && !isdigit((unsigned char)buf[0]) && !st->kf_name) {
+                /* 只取**第一个**非数字 token 作为动画名 —— 否则后面的
+                   linear / ease-in-out 会把名字覆盖掉(实测踩过) */
+                st->kf_name = sv_dup(t);
+            }
+        }
+        if (st->anim_enter != HN_ENTER_NONE && st->enter_ms <= 0) st->enter_ms = 260;
     } else if (!strcmp(name, "transform")) {
         /* transform: rotate(45deg) rotateX(10deg) scale(1.2) translate(4px, 8px)
            逐函数解析; 未识别的函数忽略(不报错)。角度单位 deg 由 strtod 自然处理。 */
@@ -677,43 +1004,6 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
     } else if (!strcmp(name, "scale")) {
         int u; float fx;
         if (next_tok(&v, &t) && sv_len(t, st->font_size, &fx, &u)) st->scale = fx;
-    } else if (!strcmp(name, "transition-timing-function")) {
-        if (!next_tok(&v, &t)) return;
-        st->anim_ease = parse_ease(t, st->cb);
-    } else if (!strcmp(name, "animation") || !strcmp(name, "hn-anim")) {
-        /* animation: <预设名> <时长> <缓动>  (预设: up/down/left/fade/scale) */
-        while (next_tok(&v, &t)) {
-            char buf[48];
-            if (t.n == 0 || t.n >= sizeof(buf)) continue;
-            memcpy(buf, t.s, t.n); buf[t.n] = 0;
-            if (!strcmp(buf, "up")) st->anim_enter = HN_ENTER_UP;
-            else if (!strcmp(buf, "down")) st->anim_enter = HN_ENTER_DOWN;
-            else if (!strcmp(buf, "left")) st->anim_enter = HN_ENTER_LEFT;
-            else if (!strcmp(buf, "fade")) st->anim_enter = HN_ENTER_FADE;
-            else if (!strcmp(buf, "scale")) st->anim_enter = HN_ENTER_SCALE;
-            else if (!strcmp(buf, "none")) { st->anim_enter = HN_ENTER_NONE; st->kf_name = NULL; }
-            else if (!strcmp(buf, "infinite")) st->kf_iter = -1;
-            else if (!strcmp(buf, "reverse")) st->kf_dir = 1;
-            else if (!strcmp(buf, "alternate")) st->kf_dir = 2;
-            else if (!strcmp(buf, "alternate-reverse")) st->kf_dir = 3;
-            else if (!strcmp(buf, "forwards") || !strcmp(buf, "both")) st->kf_fill = 1;
-            else {
-                double val = strtod(buf, NULL);
-                if (val > 0) {
-                    /* 时间值: 既作为入场时长, 也作为关键帧动画周期 */
-                    float ms = 0;
-                    if (strstr(buf, "ms")) ms = (float)val;
-                    else if (strchr(buf, 's')) ms = (float)(val * 1000.0);
-                    if (ms > 0) { st->enter_ms = ms; st->kf_ms = ms; }
-                    else st->anim_ease = parse_ease(t, st->cb);
-                } else if (buf[0] && !isdigit((unsigned char)buf[0]) && !st->kf_name) {
-                    /* 只取**第一个**非数字 token 作为动画名 —— 否则后面的
-                       linear / ease-in-out 会把名字覆盖掉(实测踩过) */
-                    st->kf_name = sv_dup(t);
-                }
-            }
-        }
-        if (st->anim_enter != HN_ENTER_NONE && st->enter_ms <= 0) st->enter_ms = 260;
     } else if (!strcmp(name, "position")) {
         if (!next_tok(&v, &t)) return;
         if (sv_eq(t, "relative")) st->position = HN_POS_RELATIVE;
@@ -869,11 +1159,112 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
         if (!next_tok(&v, &t)) return;
         if (sv_eq(t, "normal")) st->letter_spacing = 0;
         else { int u; if (sv_len(t, st->font_size, &f, &u)) st->letter_spacing = (u == HN_U_EM) ? f * st->font_size : f; }
+    } else if (!strcmp(name, "word-spacing")) {
+        if (!next_tok(&v, &t)) return;
+        if (sv_eq(t, "normal")) st->word_spacing = 0;
+        else { int u; if (sv_len(t, st->font_size, &f, &u)) st->word_spacing = (u == HN_U_EM) ? f * st->font_size : f; }
+    } else if (!strcmp(name, "-webkit-line-clamp") || !strcmp(name, "line-clamp")) {
+        /* <integer> | none; 带单位/负数一律视为未声明(0) */
+        if (next_tok(&v, &t)) {
+            if (sv_eq(t, "none")) st->line_clamp = 0;
+            else if (sv_num(t, &f)) st->line_clamp = f >= 1 ? (int)f : 0;
+        }
     } else if (!strcmp(name, "box-sizing")) {
         if (!next_tok(&v, &t)) return;
         st->box_border = sv_eq(t, "border-box") ? 1 : 0;
     } else if (!strcmp(name, "opacity")) {
         if (next_tok(&v, &t) && sv_num(t, &f)) st->opacity = f < 0 ? 0 : (f > 1 ? 1 : f);
+    } else if (!strcmp(name, "filter")) {
+        /* filter: brightness(1.2) contrast(80%) saturate(1.5); none 复位。
+           逐函数取乘数: 数字按绝对倍数, 百分比按 /100(120% ≡ 1.2)。
+           同名函数重复出现按连乘(CSS 滤镜按序复合)。未识别的函数忽略。 */
+        st->filter_br = st->filter_ct = st->filter_sat = 1.0f;
+        while (next_tok(&v, &t)) {
+            char buf[40];
+            if (t.n == 0 || t.n >= sizeof(buf)) continue;
+            memcpy(buf, t.s, t.n); buf[t.n] = 0;
+            if (!strcasecmp(buf, "none")) continue;
+            char *lp = strchr(buf, '(');
+            if (!lp) continue;
+            *lp = 0;
+            float fv = (float)strtod(lp + 1, NULL);
+            if (strchr(lp + 1, '%')) fv /= 100.0f;
+            if (!strcasecmp(buf, "brightness")) st->filter_br *= fv;
+            else if (!strcasecmp(buf, "contrast")) st->filter_ct *= fv;
+            else if (!strcasecmp(buf, "saturate")) st->filter_sat *= fv;
+        }
+    } else if (!strcmp(name, "clip-path") || !strcmp(name, "-webkit-clip-path")) {
+        /* clip-path: none | circle([<len>|<pct>|closest-side]) | inset(t r b l [round R])
+           ellipse()/polygon()/url() 不支持 —— 声明被忽略(不裁剪, 不报错)。
+           函数实参含空格(inset(10px 20px)), 与 linear-gradient 一样扫整条值。 */
+        st->clip_shape = 0;
+        st->clip_a = st->clip_b = st->clip_c = st->clip_d = 0;
+        st->clip_pct = 0;
+        st->clip_round = 0;
+        const char *cp = find_ci_str(value, "circle(");
+        if (cp) {
+            st->clip_shape = 1;
+            const char *arg = cp + 7;
+            while (*arg == ' ') arg++;
+            if (!*arg || *arg == ')' || !strncasecmp(arg, "closest-side", 12)) {
+                /* closest-side(缺省): 半径 = 短边一半, 绘制期解析 */
+                st->clip_a = 0;
+            } else {
+                char *e = NULL;
+                float rv = strtof(arg, &e);
+                if (e != arg) {
+                    if (*e == '%') { st->clip_a = rv; st->clip_pct |= 16; }
+                    else st->clip_a = rv;
+                }
+            }
+            return;
+        }
+        cp = find_ci_str(value, "inset(");
+        if (cp) {
+            st->clip_shape = 2;
+            /* 逐分量解析, 遇 round 停下取圆角 */
+            int nth = 0;
+            const char *p = cp + 6;
+            while (*p && *p != ')') {
+                while (*p == ' ' || *p == ',') p++;
+                if (!*p || *p == ')') break;
+                if (!strncasecmp(p, "round", 5)) {
+                    p += 5;
+                    while (*p == ' ') p++;
+                    char *e = NULL;
+                    float rv = strtof(p, &e);
+                    if (e != p) {
+                        st->clip_round = rv;
+                        if (*e == '%') st->clip_pct |= 32;
+                    }
+                    break;
+                }
+                char *e = NULL;
+                float sv_ = strtof(p, &e);
+                if (e == p) break;
+                /* 消费单位后缀(px/%/pt...): 不消费则下一轮 strtof 撞上
+                   '%'/'p' 直接失败, 多值 inset 只吃到第一个分量 */
+                int is_pct = (*e == '%');
+                while (isalpha((unsigned char)*e) || *e == '%') e++;
+                if (is_pct) st->clip_pct |= (unsigned char)(1 << nth);
+                if (nth < 4) (&st->clip_a)[nth] = sv_;
+                nth++;
+                p = e;
+            }
+            /* TRBL 展开: 1 值四边同, 2 值 TB/RL, 3 值 T/RL/B(值与百分比位同规则) */
+            if (nth == 1) {
+                st->clip_b = st->clip_c = st->clip_d = st->clip_a;
+                if (st->clip_pct & 1) st->clip_pct |= 0xE;
+            } else if (nth == 2) {
+                st->clip_c = st->clip_a; st->clip_d = st->clip_b;
+                if (st->clip_pct & 1) st->clip_pct |= 4;
+                if (st->clip_pct & 2) st->clip_pct |= 8;
+            } else if (nth == 3) {
+                st->clip_d = st->clip_b;
+                if (st->clip_pct & 2) st->clip_pct |= 8;
+            }
+            return;
+        }
     }
     /* 其余属性(font-family/overflow/cursor/...) 有意忽略 */
 }
@@ -967,12 +1358,20 @@ static int compound_matches(const hn_compound *cp, hn_node *n, hn_context *c) {
         if (!has_class(n, cp->cls[i])) return 0;
     if (!attr_matches(cp, n)) return 0;
     if (!nth_type_matches(cp, n)) return 0;
-    /* :not(...) — 实参匹配则整体不匹配。 */
-    if (cp->not_cp && compound_matches(cp->not_cp, n, c)) return 0;
+    /* :not(...) — 任一实参匹配则整体不匹配(链式 :not 各实参都检查)。 */
+    for (int k = 0; k < cp->n_not; k++)
+        if (compound_matches(cp->not_cp[k], n, c)) return 0;
     /* 伪类状态匹配 */
     if (cp->pseudo == 1 && (!c || n != c->hover_node)) return 0;
     if (cp->pseudo == 2 && (!c || n != c->active_node)) return 0;
     if (cp->pseudo == 3 && (!c || n != c->focus_node)) return 0;
+    /* 状态伪类(基于属性, 不需要运行时登记):
+       :disabled / :enabled 按 disabled 属性, :checked 按 checkbox/radio 的
+       checked 属性。hover/active/focus 对 input 无任何豁免 —— 与标准一致,
+       输入控件同样参与伪类匹配。 */
+    if (cp->pseudo == 4 && !hn_node_is_disabled(n)) return 0;
+    if (cp->pseudo == 5 && hn_node_is_disabled(n)) return 0;
+    if (cp->pseudo == 6 && !hn_node_is_checked(n)) return 0;
     /* :nth-child / :first-child / :last-child — 父元素下按元素序(1 起)匹配 */
     if (cp->nth) {
         if (!n->parent) return 0;
