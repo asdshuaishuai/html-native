@@ -338,6 +338,17 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   底色 alpha 曾被硬编码 255、`blend()` 只写 RGB 不写 alpha、
   `sd_rounded` 在 `qx==qy` 时内部距离塌成 0。实测 `examples/transparent.html`
   81.7% 全透明 + 10.6% 抗锯齿过渡 + 7.7% 内容。
+- **兜底 webview 引擎选型(litehtml + QuickJS, 已探针验证)**: Linux 禁用
+  WebKitGTK、又禁止打 Chromium/Node, 兜底需要嵌入**现成的轻量引擎**而非自研。
+  选型落地: **litehtml**(BSD, ~1.6MB, HTML/CSS 排版, 渲染后端由宿主提供 ——
+  cairo 即可喂它) + **QuickJS**(Zlib, ~2.6MB 静态, JS 层), 合计 ~4MB。
+  探针验证全链路真实可跑: `tools/litehtml_probe.cpp`(7 条断言: 背景色精确命中、
+  圆角裁剪三段、字形绘制、命中测试)与 `tools/quickjs_probe.c`(5 条断言: 求值/
+  状态持久/宿主函数桥/事件处理器/异常传导)。
+  两个集成级约束已实测并记录: ①标准 CSS 不认免单位长度, 喂 litehtml 前必须
+  过 HNCSSNormalizer 同款归一化; ②JS 异常必须 `JS_GetException` 消费, 且该
+  quickjs 构建的 `JS_FreeRuntime` 在有 JS 函数定义时会断言 —— runtime 与进程
+  同生命周期即可规避(daemon 本就常驻)。
 - **胶囊持久化(一个文件装下全部)**: `.hnapp` 是单个可携带文件, 参照 Capsule
   "documents that run like apps" 的形态 —— 不再把应用散落在运行时目录里:
   - **文档** html / css
