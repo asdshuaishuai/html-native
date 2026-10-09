@@ -17,6 +17,7 @@
 #include <dlfcn.h>
 
 #include "hn_rt.h"
+#include <quickjs.h>
 
 /* ---------------- 结构 ---------------- */
 
@@ -28,6 +29,8 @@ struct hn_rt {
     hn_node *hover;
     hn_node *focus;
     char id[128];              /* store 隔离键 */
+    void *js_rt;               /* JSRuntime *(QuickJS; lazy init) */
+    void *js_ctx;              /* JSContext * */
     /* 轮询表(hx-trigger="every Ns") */
     struct { hn_node *node; double due, sec; } polls[16];
     int poll_n;
@@ -618,8 +621,99 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     return rt;
 }
 
+/* ---------------- JS 运行时(QuickJS, lazy init) ---------------- */
+
+static void js_rt_free(hn_rt *rt) {
+    if (rt->js_ctx) { JS_FreeContext((JSContext *)rt->js_ctx); rt->js_ctx = NULL; }
+    if (rt->js_rt) { JS_RunGC((JSRuntime *)rt->js_rt); JS_FreeRuntime((JSRuntime *)rt->js_rt); rt->js_rt = NULL; }
+}
+
+static void js_rt_init(hn_rt *rt) {
+    if (rt->js_ctx) return;
+    rt->js_rt = JS_NewRuntime();
+    if (!rt->js_rt) return;
+    rt->js_ctx = JS_NewContext((JSRuntime *)rt->js_rt);
+}
+
+/* hn_set_text(id, text): JS 桥 → 引擎文本更新(与 hn_doc_set_text 同口径) */
+static JSValue js_hn_set_text(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    hn_doc *doc = (hn_doc *)JS_GetContextOpaque(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    const char *text = JS_ToCString(ctx, argv[1]);
+    if (doc && id && text) hn_doc_set_text(doc, id, text);
+    if (id) JS_FreeCString(ctx, id);
+    if (text) JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
+/* hn_set_value(id, value): input 的 value 更新 */
+static JSValue js_hn_set_value(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    hn_doc *doc = (hn_doc *)JS_GetContextOpaque(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    const char *val = JS_ToCString(ctx, argv[1]);
+    if (doc && id && val) {
+        hn_node *n = hn_doc_find_by_id(doc, id);
+        if (n) hn_node_set_value(n, val, strlen(val));
+    }
+    if (id) JS_FreeCString(ctx, id);
+    if (val) JS_FreeCString(ctx, val);
+    return JS_UNDEFINED;
+}
+
+/* JS 运行时表(按 scope_key 隔离; daemon 的不同应用用不同 key) */
+#define JS_MAX_SCOPES 32
+static struct { char key[128]; JSRuntime *rt; JSContext *ctx; } js_scopes[JS_MAX_SCOPES];
+static int js_scope_n = 0;
+
+static JSContext *js_scope_get(const char *key) {
+    for (int i = 0; i < js_scope_n; i++)
+        if (!strcmp(js_scopes[i].key, key)) return js_scopes[i].ctx;
+    if (js_scope_n >= JS_MAX_SCOPES) return NULL;
+    JSRuntime *rt = JS_NewRuntime();
+    if (!rt) return NULL;
+    JSContext *ctx = JS_NewContext(rt);
+    if (!ctx) { JS_FreeRuntime(rt); return NULL; }
+    snprintf(js_scopes[js_scope_n].key, sizeof(js_scopes[0].key), "%s", key);
+    js_scopes[js_scope_n].rt = rt;
+    js_scopes[js_scope_n].ctx = ctx;
+    js_scope_n++;
+    return ctx;
+}
+
+char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
+    JSContext *ctx = js_scope_get(scope_key ? scope_key : "default");
+    if (!ctx) return NULL;
+
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "hnSetText",
+        JS_NewCFunction(ctx, js_hn_set_text, "hnSetText", 2));
+    JS_SetPropertyStr(ctx, global, "hnSetValue",
+        JS_NewCFunction(ctx, js_hn_set_value, "hnSetValue", 2));
+    JS_FreeValue(ctx, global);
+
+    size_t len = strlen(js);
+    JSValue r = JS_Eval(ctx, js, len, "<eval>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) {
+        JSValue e = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, e);
+        char *out = (char *)malloc(strlen(msg ? msg : "exception") + 16);
+        if (out) sprintf(out, "Error: %s", msg ? msg : "?");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, e);
+        return out;
+    }
+    const char *str = JS_ToCString(ctx, r);
+    char *out = str ? strdup(str) : NULL;
+    JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, r);
+    return out;
+}
+
 void hn_rt_close(hn_rt *rt) {
     if (!rt) return;
+    js_rt_free(rt);
     if (rt->ctx) hn_context_destroy(rt->ctx);
     free(rt->bgra);
     free(rt);

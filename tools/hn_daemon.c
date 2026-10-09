@@ -38,6 +38,10 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+
+#include "hn.h"
+#include "hnsoft.h"
+#include "hn_rt.h"
 #include <time.h>
 
 #include "hn.h"
@@ -547,8 +551,19 @@ static void handle_line(const char *line, char *out, size_t cap) {
         return;
     }
     if (!strcmp(op, "eval")) {
-        /* M2: JS 运行时(QuickJS)接入后此 op 可用; M1 先返回明确说明 */
-        resp_json(out, cap, 0, "\"error\":\"eval pending (quickjs integration)\"");
+        char *js = json_str(line, "js");
+        if (!js) { resp_json(out, cap, 0, "\"error\":\"js required\""); return; }
+        hn_doc *doc = hn_context_doc(a->ctx);
+        char *result = hn_rt_eval(js, id, doc);
+        free(js);
+        if (result) {
+            char body[4096];
+            snprintf(body, sizeof(body), "\"value\":\"%s\"", result);
+            free(result);
+            resp_json(out, cap, 1, body);
+        } else {
+            resp_json(out, cap, 1, "\"value\":null");
+        }
         return;
     }
 

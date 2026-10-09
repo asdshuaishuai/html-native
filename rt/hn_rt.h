@@ -90,6 +90,11 @@ int hn_rt_synthetic(hn_rt *rt, const char *kind, const char *target);
 /* 渲染为 PNG 落盘(--shot / daemon shot op) */
 int hn_rt_shot(hn_rt *rt, const char *path);
 
+/* JS 运行时(QuickJS): eval 一段脚本, 返回结果字符串(malloc; 调用方 free)。
+   状态跨调用持久(同一 store_id 的 JS 上下文保留)。
+   不依赖 hn_rt 结构 —— daemon 可以直接调(裸引擎也有 JS 能力)。 */
+char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc);
+
 /* ---------------- sys:// 桥(单源) ---------------- */
 
 /* sys:// → HTML 片段(malloc; free)。非 sys:// 或未知路由返回 NULL。
