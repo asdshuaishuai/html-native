@@ -53,7 +53,7 @@ def main() -> int:
             print(f"media_probe.py: FAIL 缺源文件 {s}")
             return 1
 
-    bin_path = sys.argv[1] if len(sys.argv) > 1 else None
+    bin_path = (sys.argv[1] if len(sys.argv) > 1 else "") or None  # 空串归一为 None
     if bin_path and os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
         with open(bin_path, "rb") as f:
             is_probe = b"media_probe" in f.read()

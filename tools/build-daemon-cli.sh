@@ -21,7 +21,14 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
      Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c \
      Sources/CHtmlNative/hnsoft.c)
-INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform"
+# WASM 缝(media-design §7): rt/hn_rt.c 的 hnWasm* 桥引用 hn_wasm_* 符号,
+# 引擎源必须带上 hn_wasm.c + wasm3 最小 11 源 —— 与主脚本 WASM_SRC 同一份。
+WASM3_SRC=(vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c vendor/wasm3/m3_compile.c
+           vendor/wasm3/m3_core.c vendor/wasm3/m3_env.c vendor/wasm3/m3_exec.c
+           vendor/wasm3/m3_function.c vendor/wasm3/m3_info.c vendor/wasm3/m3_module.c
+           vendor/wasm3/m3_parse.c vendor/wasm3/m3_validate.c)
+ENGINE_SRC+=("${WASM3_SRC[@]}" Sources/CHtmlNative/hn_wasm.c)
+INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3"
 FT_INC=""
 if [ -d /opt/homebrew/include/freetype2 ]; then FT_INC="-I/opt/homebrew/include/freetype2"; fi
 

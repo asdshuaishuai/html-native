@@ -36,12 +36,17 @@ def main() -> int:
         print(f"wasm_probe.py: FAIL vendor/wasm3 源数 {len(wasm3)} != {EXPECT_WASM3}"
               "(vendor 目录与契约 §7 最小集不符)")
         return 1
-    for s in C_SOURCES + [DEMO_WASM]:
+    bin_path = (sys.argv[1] if len(sys.argv) > 1 else "") or None  # 空串归一为 None
+    # 第 2 参数 = demo 模块路径(文件头用法口径); 缺省入库产物。
+    demo_wasm = sys.argv[2] if len(sys.argv) > 2 else DEMO_WASM
+    if demo_wasm != DEMO_WASM:
+        demo_wasm = os.path.abspath(demo_wasm)
+        print(f"wasm_probe.py: demo 模块改用 {demo_wasm}")
+    for s in C_SOURCES + [demo_wasm]:
         if not os.path.isfile(s):
             print(f"wasm_probe.py: FAIL 缺文件 {s}")
             return 1
 
-    bin_path = sys.argv[1] if len(sys.argv) > 1 else None
     if bin_path and os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
         with open(bin_path, "rb") as f:
             is_probe = b"wasm_probe" in f.read()
@@ -73,8 +78,8 @@ def main() -> int:
             print("wasm_probe.py: 编译警告:\n" + r.stderr)
         bin_path = out
 
-    print(f"wasm_probe.py: 运行 {bin_path} {DEMO_WASM}")
-    r = subprocess.run([bin_path, DEMO_WASM])
+    print(f"wasm_probe.py: 运行 {bin_path} {demo_wasm}")
+    r = subprocess.run([bin_path, demo_wasm])
     if r.returncode != 0:
         print(f"wasm_probe.py: FAIL 探针退出码 {r.returncode}(非 0)")
         return 1

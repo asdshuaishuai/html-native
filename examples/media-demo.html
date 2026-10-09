@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="520x820@140,80">
+<meta name="hn-title" content="媒体运行时 · agent 控制台">
+<meta name="hn-theme" content="dark">
+<style>
+html, body { margin: 0; width: 100%; height: 100%; }
+.app { padding: 14 16 16; display: flex; flex-direction: column; gap: 10;
+       height: 100%; box-sizing: border-box; overflow: scroll; }
+
+/* 头部: 脉冲圆点 + 标题 + 徽标(与 agent-stream 同一语言) */
+.head { display: flex; align-items: center; gap: 10; }
+.pulse { width: 10; height: 10; border-radius: 50%;
+         background: linear-gradient(135deg, #4f7cff, #a86bff); }
+.title { font-size: 16; font-weight: 700; }
+.title .thin { font-weight: 400; color: var(--dim); font-size: 12; }
+.badge { margin-left: auto; color: var(--dim); font-size: 10; font-weight: 700;
+         border: 1 solid var(--line); border-radius: 999; padding: 2 8; }
+
+/* 播放区: 深底舞台 + video(替换元素, 几何由属性给定) */
+.stage { background: #0b0e13; border: 1 solid var(--line); border-radius: 12;
+         padding: 12; display: flex; flex-direction: column; align-items: center; }
+video { border-radius: 8; background: #14171e; }
+
+/* 自绘控制条: 引擎没有浏览器控件 UI(media-design §9 明确不做),
+   播放条是页面自己的 div —— 按钮点击走 JS 桥(hnMedia*)驱动引擎状态机 */
+.controls { display: flex; align-items: center; gap: 8; }
+.ctrl { background: var(--card); border: 1 solid var(--line); border-radius: 8;
+        padding: 7 12; font-size: 12; color: var(--ink); }
+.ctrl:hover { border-color: var(--accent); }
+.ctrl.main { background: var(--accent); color: #ffffff; font-weight: 700;
+             box-shadow: 0 3 10 rgba(79, 124, 255, 0.35); }
+.ctrl.main:hover { background: var(--accent-2); }
+.time { margin-left: auto; font-size: 11; color: var(--dim);
+        font-variant-numeric: tabular-nums; }
+.status { font-size: 11; color: var(--dim); }
+.status b { color: #7fdbca; font-weight: 600; }
+
+/* 卡片通用(主题层已给 .card/.cap/.btn, 这里只补布局) */
+.grid { display: flex; gap: 8; }
+.stat { flex: 1; }
+.stat .syshead { display: none; }
+.row { display: flex; align-items: center; gap: 8; }
+.row .num { width: 56; }
+.mini { font-size: 10; color: var(--dim); }
+.foot { color: #49516a; font-size: 10; text-align: center; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ═══ 头部 ═══ -->
+  <div class="head">
+    <div class="pulse"></div>
+    <div class="title">媒体运行时 <span class="thin">· html+css+js 驱动原生窗口</span></div>
+    <span class="badge">media + wasm</span>
+  </div>
+
+  <!-- ═══ 播放区: <video> 是普通元素; 合成宿主画梯度帧, 真机(AVFoundation)
+       解码委托 OS 媒体框架 —— 页面两种宿主下同一份 HTML, 零改动 ═══ -->
+  <div class="stage">
+    <video id="v" src="assets/demo.mp4" autoplay loop muted width="432" height="243"></video>
+  </div>
+
+  <!-- ═══ 自绘控制条: 点击 → JS 桥 → 引擎媒体状态机 ═══ -->
+  <div class="controls">
+    <div class="ctrl" id="c-back">-5s</div>
+    <div class="ctrl main" id="c-toggle">暂停</div>
+    <div class="ctrl" id="c-fwd">+5s</div>
+    <div class="ctrl" id="c-home">回到开头</div>
+    <div class="time" id="c-time">--</div>
+  </div>
+  <div class="status" id="media-state">桥状态: <b>等待驱动</b>(见页尾跑法)</div>
+
+  <!-- ═══ WASM 段: hnWasmLoad(资产路径) → hnWasmCall(纯计算导出) ═══ -->
+  <div class="card">
+    <div class="cap">WASM 计算缝 · wasm3</div>
+    <div class="ops">
+      <div class="op"><span class="t">模块</span><span id="wasm-mod">…</span></div>
+      <div class="op"><span class="t">add</span><span id="wasm-out">…</span></div>
+      <div class="op"><span class="t">addf</span><span id="wasmf-out">…</span></div>
+    </div>
+    <div class="row">
+      <input id="wasm-a" name="a" class="num" value="20">
+      <span class="mini">+</span>
+      <input id="wasm-b" name="b" class="num" value="3">
+      <div class="btn" id="c-wasm">计算</div>
+      <span class="mini" id="wasm-hint">i32 纯函数, 无 WASI</span>
+    </div>
+  </div>
+
+  <!-- ═══ sys:// 桥小部件: 引擎不碰网络, 运行时进程内应答 ═══ -->
+  <div class="grid">
+    <div class="card stat">
+      <div class="cap">CPU</div>
+      <div id="cpu-out" hx-get="sys://cpu" hx-trigger="load every 3s">
+        <div class="sk" style="width: 60%"></div>
+      </div>
+    </div>
+    <div class="card stat">
+      <div class="cap">内存</div>
+      <div id="mem-out" hx-get="sys://memory" hx-trigger="load every 3s">
+        <div class="sk" style="width: 60%"></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="cap">宿主</div>
+    <div id="host-out" hx-get="sys://host" hx-trigger="load every 20s">…</div>
+  </div>
+
+  <div class="foot">一份 HTML · 视频解码/沙箱计算/系统数据 三个后端 · 无浏览器</div>
+</div>
+
+<script>
+  // ── 媒体控制条: 桥函数与引擎 API 同签名(hn_rt.c 注册, 契约 §6)。
+  // 每次操作后回读 hnMediaTime/hnMediaDuration 刷新读数 —— 同步调用,
+  // 不依赖定时器(本运行时无 JS 定时泵)。
+  var vid = 'v';
+  function $(id) { return document.getElementById(id); }
+  function fmt(s) {
+    if (s < 0) return '--';
+    return (Math.round(s * 10) / 10) + 's';
+  }
+  function refreshTime() {
+    var t = hnMediaTime(vid), d = hnMediaDuration(vid);
+    $('c-time').textContent = fmt(t) + ' / ' + fmt(d);
+  }
+  function note(what, ok) {
+    $('media-state').innerHTML = '桥状态: <b>' + what + '</b> → ' + (ok ? '接受' : 'no-op(无媒体宿主)');
+    refreshTime();
+  }
+  var playing = true;   // 页面自己的按钮态(引擎状态机以引擎为准, 这里只管 UI 文案)
+  $('c-toggle').addEventListener('click', function () {
+    if (playing) { hnMediaPause(vid); playing = false; this.textContent = '播放'; note('hnMediaPause', true); }
+    else         { note('hnMediaPlay', hnMediaPlay(vid)); playing = true; this.textContent = '暂停'; }
+  });
+  $('c-back').addEventListener('click', function () {
+    note('hnMediaSeek(t-5)', hnMediaSeek(vid, hnMediaTime(vid) - 5));
+  });
+  $('c-fwd').addEventListener('click', function () {
+    note('hnMediaSeek(t+5)', hnMediaSeek(vid, hnMediaTime(vid) + 5));
+  });
+  $('c-home').addEventListener('click', function () {
+    note('hnMediaSeek(0)', hnMediaSeek(vid, 0));
+  });
+
+  // ── WASM 段: 字符串参数按资产路径读(资产后端, 相对文档目录);
+  // hnWasmCall 按导出签名转换(i32 的 add / f64 的 addf)。
+  var mod = hnWasmLoad('wasm/add.wasm');
+  if (mod >= 1) {
+    $('wasm-mod').textContent = 'wasm/add.wasm → id=' + mod;
+    $('wasm-out').textContent = 'add(2, 3) = ' + hnWasmCall(mod, 'add', 2, 3);
+    $('wasmf-out').textContent = 'addf(1.5, 2.25) = ' + hnWasmCall(mod, 'addf', 1.5, 2.25);
+  } else {
+    $('wasm-mod').textContent = 'wasm/add.wasm 加载失败(-1)';
+  }
+  function wasmRun() {
+    if (mod < 1) return;
+    var a = parseInt($('wasm-a').value || '0', 10) || 0;
+    var b = parseInt($('wasm-b').value || '0', 10) || 0;
+    $('wasm-out').textContent = 'add(' + a + ', ' + b + ') = ' + hnWasmCall(mod, 'add', a, b);
+  }
+  $('c-wasm').addEventListener('click', wasmRun);
+</script>
+</body>
+</html>
+
+<!--
+  这页展示"html+css+js 驱动原生窗口"的整体形态, 四个段各走一条后端:
+    1. 视频    <video> 状态机 + 平台媒体后端(macOS=AVFoundation, 无 FFmpeg;
+               合成宿主 = hncore 的梯度帧假时钟, 确定性)
+    2. 控制条  自绘 div(引擎不做浏览器控件 UI, media-design §9) —
+               按钮调 JS 桥 hnMediaPlay/Pause/Seek → 引擎状态机
+    3. WASM    hnWasmLoad('wasm/add.wasm') + hnWasmCall(wasm3, 纯计算 i32/f64)
+    4. sys://  CPU/内存/宿主 hx-* 声明式轮询(运行时进程内应答, 引擎零网络)
+
+  跑法(确定性验证, 无窗口):
+    dist/hncore-macos-arm64 paint examples/media-demo.html 520 820 \
+      | grep -E "BITMAP|MEDIA"          # 视频段: BITMAP 几何 + MEDIA 状态行
+    HN_CLOCK=416 dist/hncore-macos-arm64 paint examples/media-demo.html 520 820 \
+      | grep MEDIA                      # 假时钟推进 → PLAYING, t≈0.400
+
+  跑法(agent 驱动 JS 桥, 无头):
+    bash tools/build-daemon-cli.sh && dist/hn-daemon &      # cwd 任意
+    dist/hn open demo examples/media-demo.html              # 或 socket op open
+    {"op":"eval","id":"demo","js":"var m=hnWasmLoad('examples/wasm/add.wasm');
+     hnWasmCall(m,'add',20,22)"}                            # → 42
+
+  已知边界(诚实清单):
+    - <script> 的自动求值与"窗口内点击→JS"在当前壳尚未接线(脚本内容已
+      解析进 DOM, 求值入口是 daemon 的 eval op); 媒体宿主注入
+      (hn_rt_set_media)在窗口壳同样待接线 —— 见仓库 openIssues。
+      因此窗口里点控制条目前不动, 状态行如实显示 no-op。
+    - sys://cpu/memory 走 hn_rt 桥(hnapp-* 壳); hnweb-*/daemon 的 sys://
+      只有 store/info 两个路由, 这两处卡面停在骨架屏。
+    - 真机播放需要媒体宿主接线后 + assets/demo.mp4(已入库, 320x180 H.264+AAC 4s)。
+-->
