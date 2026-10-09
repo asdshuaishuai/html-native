@@ -24,6 +24,8 @@ void hn_context_destroy(hn_context *c) {
     if (!c) return;
     hn_context_lottie_clear(c);
     free(c->lot);
+    hn_media_sessions_clear(c);   /* 媒体会话持宿主句柄与帧缓存, 必须先于结构释放 */
+    free(c->med_sessions);
     for (int i = 0; i < c->n_sheets; i++) hn_sheet_free(c->sheets[i]);
     free(c->sheets);
     hn_doc_free(c->doc);
@@ -33,6 +35,9 @@ void hn_context_destroy(hn_context *c) {
 }
 
 void hn_context_set_doc(hn_context *c, hn_doc *doc) {
+    /* 文档替换 = 旧文档的节点指针全部失效, 媒体会话先随旧文档销毁
+       (与 Lottie 缓存的清理纪律一致 —— compact 内部也走这里) */
+    if (c->doc != doc) hn_media_sessions_clear(c);
     c->doc = doc;
     /* 主题是渲染语义: 声明了 hn-theme 就装载基座(所有平台一致) */
     hn_context_apply_theme(c);
@@ -179,10 +184,14 @@ int hn_node_mesh_info(hn_node *n, int *cols, int *rows) {
     return 1;
 }
 
-/* 推进过渡动画并写回样式; 返回 1 表示仍有动画在跑(dt_ms<0 → 仅初始化) */
+/* 推进过渡动画并写回样式; 返回 1 表示仍有动画在跑(dt_ms<0 → 仅初始化)。
+   媒体会话同帧驱动: PLAYING/待起播会话每帧必达宿主 tick(契约 §3),
+   返回值并入 —— 视频在播时帧循环不能停, 否则画面冻结在最后一帧。 */
 int hn_context_anim_tick(hn_context *c, float dt_ms) {
     if (!c->doc || !c->doc->root) return 0;
-    return anim_walk(c, c->doc->root, dt_ms);
+    int media = 0;
+    if (dt_ms >= 0) media = hn_media_tick_ret(c, dt_ms);
+    return anim_walk(c, c->doc->root, dt_ms) || media;
 }
 
 void hn_context_set_hover(hn_context *c, hn_node *n) { c->hover_node = n; }
@@ -1920,6 +1929,7 @@ void hn_context_render(hn_context *c, const char *html_src, size_t len) {
 void hn_context_compact(hn_context *c, const char *html, size_t len) {
     if (!c || !c->doc) return;
     hn_context_lottie_clear(c);          /* 旧文档的路径键已随 arena 释放 */
+    hn_media_sessions_clear(c);          /* 旧文档的节点指针已失效(host.close 全部) */
     hn_arena_destroy(c->doc->arena);
     hn_doc_free(c->doc);
     c->doc = hn_parse_html(html, len);

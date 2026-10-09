@@ -383,6 +383,60 @@ static void paint_image(cairo_t *cr, const hn_cmd *c) {
     cairo_surface_destroy(img);
 }
 
+/* BITMAP: 媒体当前帧(引擎持有的 RGBA8 非预乘缓冲, 生命周期 = 显示列表)。
+   cairo 的 ARGB32 是**预乘 BGRA** 内存布局 —— 先转换一份临时缓冲再包
+   image surface, 走与 IMAGE 同一条 translate→scale→paint 路径; 需要圆角
+   时先按指令圆角裁剪。缓冲为空直接忽略(引擎只在有帧时发 BITMAP)。 */
+static void paint_bitmap(cairo_t *cr, const hn_cmd *c) {
+    if (!c->bitmap || c->bitmap_w <= 0 || c->bitmap_h <= 0 || c->bitmap_stride <= 0) return;
+    int iw = c->bitmap_w, ih = c->bitmap_h;
+    unsigned char *bgra = (unsigned char *)malloc((size_t)iw * ih * 4);
+    if (!bgra) return;
+    for (int y = 0; y < ih; y++) {
+        const unsigned char *src = c->bitmap + (size_t)y * c->bitmap_stride;
+        unsigned char *dst = bgra + (size_t)y * iw * 4;
+        for (int x = 0; x < iw; x++) {
+            unsigned r = src[x * 4 + 0], g = src[x * 4 + 1];
+            unsigned b = src[x * 4 + 2], a = src[x * 4 + 3];
+            /* 非预乘 RGBA → 预乘 BGRA(ARGB32 小端内存序) */
+            dst[x * 4 + 0] = (unsigned char)((b * a + 127) / 255);
+            dst[x * 4 + 1] = (unsigned char)((g * a + 127) / 255);
+            dst[x * 4 + 2] = (unsigned char)((r * a + 127) / 255);
+            dst[x * 4 + 3] = (unsigned char)a;
+        }
+    }
+    cairo_surface_t *img = cairo_image_surface_create_for_data(
+        bgra, CAIRO_FORMAT_ARGB32, iw, ih, iw * 4);
+    if (!img || cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
+        if (img) cairo_surface_destroy(img);
+        free(bgra);
+        return;
+    }
+    cairo_save(cr);
+    if (c->radius > 0.01f) {
+        /* 圆角复用既有裁剪路径(与 CLIP_PUSH 同款画法) */
+        double r = c->radius, x = c->x, y = c->y, w = c->w, h = c->h;
+        cairo_new_path(cr);
+        cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2.0, 0);
+        cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2.0);
+        cairo_arc(cr, x + r, y + h - r, r, M_PI / 2.0, M_PI);
+        cairo_arc(cr, x + r, y + r, r, M_PI, M_PI * 1.5);
+        cairo_close_path(cr);
+        cairo_clip(cr);
+    }
+    cairo_rectangle(cr, c->x, c->y, c->w, c->h);
+    cairo_clip(cr);
+    /* 先 translate 再 scale: 面的原点落在 (x,y), 范围正好铺满 rect(见 paint_image) */
+    cairo_translate(cr, c->x, c->y);
+    cairo_scale(cr, c->w / iw, c->h / ih);
+    cairo_set_source_surface(cr, img, 0, 0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+    cairo_paint(cr);
+    cairo_restore(cr);
+    cairo_surface_destroy(img);
+    free(bgra);
+}
+
 /* ---------------- 网格贴图(Live2D 类) ---------------- */
 
 /* 逐三角形: clip 到三角形 → 解 2x2 仿射把源图 UV 对齐到该三角形 → paint。
@@ -510,6 +564,9 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             break;
         case HN_CMD_IMAGE:
             paint_image(cr, c);
+            break;
+        case HN_CMD_BITMAP:
+            paint_bitmap(cr, c);
             break;
         case HN_CMD_CLIP_PUSH:
             cairo_save(cr);

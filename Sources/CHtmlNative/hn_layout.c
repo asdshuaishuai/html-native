@@ -1393,6 +1393,31 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
         }
     }
 
+    /* video/audio 替换元素尺寸链: 样式 > width/height 属性 > 会话帧固有尺寸 >
+       缺省(契约 §5)。video 缺省 300 x 16:9(HTML 约定宽 300); audio 兜底高 0
+       (不可见, 盒仍在文档流里)。READY 拉到首帧后如未显式定尺寸, 下一次
+       layout 用宿主 meta 尺寸(hn_media_intrinsic 给值 → 自然触发一次重排)。 */
+    if (n->tag && (!strcmp(n->tag, "video") || !strcmp(n->tag, "audio"))) {
+        int audio = (n->tag[0] == 'a');
+        int iw = -1, ih = -1;
+        hn_media_intrinsic(c, n, &iw, &ih);
+        if (st->width_u == HN_U_AUTO) {
+            const char *a = hn_node_attr(n, "width");
+            float aw = a ? (float)atof(a) : -1;
+            st->width = aw > 0 ? aw : (iw > 0 ? (float)iw : 300);
+            st->width_u = HN_U_PX;
+        }
+        if (st->height_u == HN_U_AUTO) {
+            const char *a = hn_node_attr(n, "height");
+            float ah = a ? (float)atof(a) : -1;
+            if (audio)            st->height = ah > 0 ? ah : 0;
+            else if (ah > 0)      st->height = ah;
+            else if (ih > 0)      st->height = (float)ih;
+            else                  st->height = st->width * 9.0f / 16.0f;  /* 缺省 16:9 */
+            st->height_u = HN_U_PX;
+        }
+    }
+
     /* 输入控件: 默认尺寸 */
     if (hn_node_is_input(n)) {
         int ik = hn_node_input_kind(n);

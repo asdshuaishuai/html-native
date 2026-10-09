@@ -280,7 +280,7 @@ paint→raster 顺序固定, hn_internal.h:426-431 的 tmp 区生命周期同理
 | tools/media_probe.c | **探针-真机** | **新**。§8.2 |
 | tools/media_probe.py | **探针-封装** | **新**。§8.2 |
 | tools/build-multiplatform.sh | **构建** | vendor/wasm3 11 文件 + hn_media.c + hn_wasm.c 入列全部 SRC/ENGINE_SRC 数组; -Ivendor/wasm3; media_probe 的本机构建自检项 |
-| Package.swift | **构建-SPM** | hn_wasm.c 与 hn_cairo.c 同款 exclude(可选件不进默认 SPM 构建, Package.swift 头注释已有先例); hn_media.c 纯引擎自动编入 |
+| （无 SPM） | **构建-可选件** | 仓库无 Package.swift(已按全 C99 方针删除, 构建链只有 bash + zig cc): hn_cairo.c/hn_wasm.c 由 build-multiplatform.sh 显式入列, 不需要 exclude 机制; hn_media.c 纯引擎自动编入 |
 | vendor/wasm3/** | **第三方-只读** | vendored 快照(MIT, 连 LICENSE), 见 §7 |
 | examples/wasm/add.c | **验证物料** | **新**。demo 模块源(§7 验证路径) |
 

@@ -86,6 +86,12 @@ static const char *asset_load(void *ctx, const char *path, size_t *len) {
 
 static const hn_asset_backend g_assets_be = { NULL, asset_load };
 
+/* 媒体宿主槽(仿 g_assets_be): 壳经 hn_rt_set_media 注入, hn_rt_open 时
+   装进每个 context。NULL = 媒体禁用(引擎整体降级: 元素照常解析只是不播)。 */
+static const hn_media_host *g_media_be = NULL;
+
+void hn_rt_set_media(const hn_media_host *host) { g_media_be = host; }
+
 /* <link rel=stylesheet> 内联(引擎不做 I/O; 相对 cwd —— 调用方先 chdir 文档目录) */
 static char *load_css_links(const char *html, size_t *out_len) {
     const char *p = html;
@@ -593,6 +599,51 @@ static int rt_render(hn_rt *rt) {
 
 /* ---------------- 公开 API ---------------- */
 
+/* doc → ctx 注册表: hn_rt_eval 的既有签名只拿得到 doc(桥内寻址元素),
+   而媒体桥需要 context(宿主 + 会话表)。hn_rt 创建/换文档时登记,
+   eval 时反查。表满/未登记(如 daemon 自建 context)时媒体桥静默 no-op
+   —— 与"宿主未注入"同一降级口径(契约 §6)。 */
+static struct { hn_doc *doc; hn_context *ctx; } g_doc_ctx[64];
+static int g_doc_ctx_n = 0;
+
+static void doc_ctx_bind(hn_doc *doc, hn_context *ctx) {
+    if (!doc || !ctx) return;
+    for (int i = 0; i < g_doc_ctx_n; i++)
+        if (g_doc_ctx[i].doc == doc) { g_doc_ctx[i].ctx = ctx; return; }
+    if (g_doc_ctx_n < 64) {
+        g_doc_ctx[g_doc_ctx_n].doc = doc;
+        g_doc_ctx[g_doc_ctx_n].ctx = ctx;
+        g_doc_ctx_n++;
+    }
+}
+
+static void doc_ctx_unbind_ctx(hn_context *ctx) {
+    for (int i = 0; i < g_doc_ctx_n; i++) {
+        if (g_doc_ctx[i].ctx == ctx) {
+            g_doc_ctx[i] = g_doc_ctx[g_doc_ctx_n - 1];
+            g_doc_ctx_n--;
+            i--;
+        }
+    }
+}
+
+static void doc_ctx_unbind_doc(hn_doc *doc) {
+    for (int i = 0; i < g_doc_ctx_n; i++) {
+        if (g_doc_ctx[i].doc == doc) {
+            g_doc_ctx[i] = g_doc_ctx[g_doc_ctx_n - 1];
+            g_doc_ctx_n--;
+            i--;
+        }
+    }
+}
+
+static hn_context *doc_ctx_find(hn_doc *doc) {
+    if (!doc) return NULL;
+    for (int i = 0; i < g_doc_ctx_n; i++)
+        if (g_doc_ctx[i].doc == doc) return g_doc_ctx[i].ctx;
+    return NULL;
+}
+
 hn_rt *hn_rt_open(const hn_rt_desc *d) {
     if (!d || !d->html) return NULL;
     hn_rt *rt = (hn_rt *)calloc(1, sizeof(*rt));
@@ -607,6 +658,7 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     rt->ctx = hn_context_create();
     hn_context_set_doc(rt->ctx, doc);
     hn_context_set_assets(rt->ctx, &g_assets_be);
+    if (g_media_be) hn_context_set_media(rt->ctx, g_media_be);
 
     hn_manifest m;
     memset(&m, 0, sizeof(m));
@@ -616,6 +668,7 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     rt->transparent = (m.transparent == 1);
 
     if (d->css && d->css_len) hn_context_add_sheet(rt->ctx, hn_parse_css(d->css, d->css_len));
+    doc_ctx_bind(doc, rt->ctx);
     {
         /* 文档里的 <link rel=stylesheet> 内联(相对 cwd) */
         size_t cl = 0;
@@ -635,6 +688,10 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
  * 出局, hn_rt_eval 按既有"Error: ..."口径如实报告未启用(不静默)。 */
 #ifdef HN_HAVE_QUICKJS
 
+/* 桥函数经 opaque 取用的环境(契约 §6: 从 hn_doc* 扩为 {doc, ctx})。
+   实例挂在 js_scopes 槽位上(生命周期同 JS 上下文), opaque 存其指针。 */
+typedef struct { hn_doc *doc; hn_context *ctx; } js_bridge;
+
 static void js_rt_free(hn_rt *rt) {
     if (rt->js_ctx) { JS_FreeContext((JSContext *)rt->js_ctx); rt->js_ctx = NULL; }
     if (rt->js_rt) { JS_RunGC((JSRuntime *)rt->js_rt); JS_FreeRuntime((JSRuntime *)rt->js_rt); rt->js_rt = NULL; }
@@ -650,10 +707,10 @@ static void js_rt_init(hn_rt *rt) {
 /* hn_set_text(id, text): JS 桥 → 引擎文本更新(与 hn_doc_set_text 同口径) */
 static JSValue js_hn_set_text(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
-    hn_doc *doc = (hn_doc *)JS_GetContextOpaque(ctx);
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
     const char *text = JS_ToCString(ctx, argv[1]);
-    if (doc && id && text) hn_doc_set_text(doc, id, text);
+    if (b && b->doc && id && text) hn_doc_set_text(b->doc, id, text);
     if (id) JS_FreeCString(ctx, id);
     if (text) JS_FreeCString(ctx, text);
     return JS_UNDEFINED;
@@ -662,11 +719,11 @@ static JSValue js_hn_set_text(JSContext *ctx, JSValueConst, int argc, JSValueCon
 /* hn_set_value(id, value): input 的 value 更新 */
 static JSValue js_hn_set_value(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
-    hn_doc *doc = (hn_doc *)JS_GetContextOpaque(ctx);
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
     const char *val = JS_ToCString(ctx, argv[1]);
-    if (doc && id && val) {
-        hn_node *n = hn_doc_find_by_id(doc, id);
+    if (b && b->doc && id && val) {
+        hn_node *n = hn_doc_find_by_id(b->doc, id);
         if (n) hn_node_set_value(n, val, strlen(val));
     }
     if (id) JS_FreeCString(ctx, id);
@@ -674,9 +731,90 @@ static JSValue js_hn_set_value(JSContext *ctx, JSValueConst, int argc, JSValueCo
     return JS_UNDEFINED;
 }
 
-/* JS 运行时表(按 scope_key 隔离; daemon 的不同应用用不同 key) */
+/* ---- 媒体桥(hnMedia*, 契约 §6): 宿主未注入/目标不存在 → 静默 no-op 或
+   缺省值, 不抛异常(与 hnSetText 一致) ---- */
+
+/* 桥内寻址: opaque {doc, ctx} → 媒体会话可用的 context(doc 反查表兜底) */
+static hn_context *js_media_ctx(JSContext *ctx) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    if (!b) return NULL;
+    if (b->ctx) return b->ctx;
+    return doc_ctx_find(b->doc);
+}
+
+static JSValue js_hn_media_play(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_FALSE;
+    hn_context *c = js_media_ctx(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    hn_node *n = (c && id) ? hn_doc_find_by_id(hn_context_doc(c), id) : NULL;
+    int ok = (c && n) ? hn_media_play(c, n) : 0;
+    if (id) JS_FreeCString(ctx, id);
+    return JS_NewBool(ctx, ok);
+}
+
+static JSValue js_hn_media_pause(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    hn_context *c = js_media_ctx(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    hn_node *n = (c && id) ? hn_doc_find_by_id(hn_context_doc(c), id) : NULL;
+    if (c && n) hn_media_pause(c, n);
+    if (id) JS_FreeCString(ctx, id);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_hn_media_seek(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_FALSE;
+    hn_context *c = js_media_ctx(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    double sec = 0;
+    JS_ToFloat64(ctx, &sec, argv[1]);
+    hn_node *n = (c && id) ? hn_doc_find_by_id(hn_context_doc(c), id) : NULL;
+    int ok = (c && n) ? hn_media_seek(c, n, sec) : 0;
+    if (id) JS_FreeCString(ctx, id);
+    return JS_NewBool(ctx, ok);
+}
+
+static JSValue js_hn_media_time(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewFloat64(ctx, 0);
+    hn_context *c = js_media_ctx(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    hn_node *n = (c && id) ? hn_doc_find_by_id(hn_context_doc(c), id) : NULL;
+    double t = (c && n) ? hn_media_time(c, n) : 0;
+    if (id) JS_FreeCString(ctx, id);
+    return JS_NewFloat64(ctx, t);
+}
+
+static JSValue js_hn_media_duration(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewFloat64(ctx, -1);
+    hn_context *c = js_media_ctx(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    hn_node *n = (c && id) ? hn_doc_find_by_id(hn_context_doc(c), id) : NULL;
+    double d = (c && n) ? hn_media_duration(c, n) : -1;
+    if (id) JS_FreeCString(ctx, id);
+    return JS_NewFloat64(ctx, d);
+}
+
+/* hnMediaVolume(id, v): 音量 + 静音联动(契约表: set_volume + set_muted)。
+   v>0 = 解除静音, v<=0 = 静音 —— 音量归零与静音同义。 */
+static JSValue js_hn_media_volume(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    hn_context *c = js_media_ctx(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    double v = 0;
+    JS_ToFloat64(ctx, &v, argv[1]);
+    hn_node *n = (c && id) ? hn_doc_find_by_id(hn_context_doc(c), id) : NULL;
+    if (c && n) {
+        hn_media_set_volume(c, n, (float)v);
+        hn_media_set_muted(c, n, v <= 0.0);
+    }
+    if (id) JS_FreeCString(ctx, id);
+    return JS_UNDEFINED;
+}
+
+/* JS 运行时表(按 scope_key 隔离; daemon 的不同应用用不同 key)。
+   bridge 槽随上下文持有(opaque 指向它), 每次 eval 按 doc/ctx 刷新。 */
 #define JS_MAX_SCOPES 32
-static struct { char key[128]; JSRuntime *rt; JSContext *ctx; } js_scopes[JS_MAX_SCOPES];
+static struct { char key[128]; JSRuntime *rt; JSContext *ctx; js_bridge bridge; } js_scopes[JS_MAX_SCOPES];
 static int js_scope_n = 0;
 
 static JSContext *js_scope_get(const char *key) {
@@ -690,6 +828,8 @@ static JSContext *js_scope_get(const char *key) {
     snprintf(js_scopes[js_scope_n].key, sizeof(js_scopes[0].key), "%s", key);
     js_scopes[js_scope_n].rt = rt;
     js_scopes[js_scope_n].ctx = ctx;
+    memset(&js_scopes[js_scope_n].bridge, 0, sizeof(js_bridge));
+    JS_SetContextOpaque(ctx, &js_scopes[js_scope_n].bridge);
     js_scope_n++;
     return ctx;
 }
@@ -697,14 +837,33 @@ static JSContext *js_scope_get(const char *key) {
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     JSContext *ctx = js_scope_get(scope_key ? scope_key : "default");
     if (!ctx) return NULL;
-    /* 桥函数(hnSetText/hnSetValue)通过 opaque 拿 doc → hn_doc_set_text */
-    JS_SetContextOpaque(ctx, doc);
+    /* 桥环境: opaque = {doc, ctx}(hnSetText/hnSetValue 读 .doc; hnMedia*
+       读 .ctx —— ctx 由 doc 反查表得到, 未登记的 context 媒体桥降级 no-op) */
+    for (int i = 0; i < js_scope_n; i++) {
+        if (js_scopes[i].ctx == ctx) {
+            js_scopes[i].bridge.doc = doc;
+            js_scopes[i].bridge.ctx = doc ? doc_ctx_find(doc) : NULL;
+            break;
+        }
+    }
 
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "hnSetText",
         JS_NewCFunction(ctx, js_hn_set_text, "hnSetText", 2));
     JS_SetPropertyStr(ctx, global, "hnSetValue",
         JS_NewCFunction(ctx, js_hn_set_value, "hnSetValue", 2));
+    JS_SetPropertyStr(ctx, global, "hnMediaPlay",
+        JS_NewCFunction(ctx, js_hn_media_play, "hnMediaPlay", 1));
+    JS_SetPropertyStr(ctx, global, "hnMediaPause",
+        JS_NewCFunction(ctx, js_hn_media_pause, "hnMediaPause", 1));
+    JS_SetPropertyStr(ctx, global, "hnMediaSeek",
+        JS_NewCFunction(ctx, js_hn_media_seek, "hnMediaSeek", 2));
+    JS_SetPropertyStr(ctx, global, "hnMediaTime",
+        JS_NewCFunction(ctx, js_hn_media_time, "hnMediaTime", 1));
+    JS_SetPropertyStr(ctx, global, "hnMediaDuration",
+        JS_NewCFunction(ctx, js_hn_media_duration, "hnMediaDuration", 1));
+    JS_SetPropertyStr(ctx, global, "hnMediaVolume",
+        JS_NewCFunction(ctx, js_hn_media_volume, "hnMediaVolume", 2));
     JS_FreeValue(ctx, global);
 
     size_t len = strlen(js);
@@ -741,7 +900,10 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
 void hn_rt_close(hn_rt *rt) {
     if (!rt) return;
     js_rt_free(rt);
-    if (rt->ctx) hn_context_destroy(rt->ctx);
+    if (rt->ctx) {
+        doc_ctx_unbind_ctx(rt->ctx);   /* 悬空 ctx 不留在反查表里 */
+        hn_context_destroy(rt->ctx);
+    }
     free(rt->bgra);
     free(rt);
 }
@@ -751,7 +913,9 @@ int hn_rt_render(hn_rt *rt, const char *html, size_t len) {
     hn_doc *doc = hn_parse_html(html, len);
     if (!doc) return 0;
     hn_doc_autoid_hx(doc);
+    doc_ctx_unbind_doc(hn_context_doc(rt->ctx));   /* 旧文档的登记一并撤掉 */
     hn_context_set_doc(rt->ctx, doc);
+    doc_ctx_bind(doc, rt->ctx);        /* 新文档重新登记(eval 桥按 doc 反查) */
     rt->poll_built = 0;
     int ok = rt_render(rt);
     if (ok) { run_load_actions(rt); rt_render(rt); }
@@ -944,6 +1108,8 @@ char *hn_rt_text(hn_rt *rt, const char *element_id) {
     out[tn < 4096 ? tn : 4095] = 0;
     return out;
 }
+
+hn_doc *hn_rt_doc(hn_rt *rt) { return rt ? hn_context_doc(rt->ctx) : NULL; }
 
 int hn_rt_cmd_count(hn_rt *rt) {
     if (!rt) return 0;

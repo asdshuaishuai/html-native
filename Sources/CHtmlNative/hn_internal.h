@@ -334,6 +334,27 @@ struct hn_doc {
     int n_inline, cap_inline;
 };
 
+/* ---------- 媒体(<video>/<audio>)会话 ----------
+ * 一个媒体元素一条会话: 状态机(仿 HTMLMediaElement 六态) + 宿主句柄 +
+ * 当前帧缓存。引擎只认 hn_media_host 函数指针表, 不知道任何解码器。 */
+typedef struct hn_media_session {
+    hn_node *node;              /* 归属元素(文档替换时随会话一起销毁) */
+    char    *src;               /* 资源键(malloc 副本; 元素 arena 可能更早失效) */
+    void    *handle;            /* 宿主句柄(NULL = 未 open) */
+    hn_media_state_t state;
+    int      want_play;         /* play()/autoplay 意图: LOADING→READY 后自动起播 */
+    double   cur_time, duration;/* cur_time 每帧同步自宿主 position/frame pts */
+    float    volume;
+    int      muted, loop;
+    /* 帧缓存(引擎 malloc)。双缓冲: 写入 frame_back, 成功后与 frame 交换
+       指针 —— 显示列表持有的指针在下次 repaint 前有效(引擎单线程,
+       paint→raster 顺序固定)。 */
+    unsigned char *frame, *frame_back;
+    int    frame_w, frame_h, frame_stride;
+    double frame_pts;
+    int    has_frame;
+} hn_media_session;
+
 /* 解析到既有 root(整文档用 <html> root, 片段用临时 root) */
 void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len);
 
@@ -408,6 +429,11 @@ struct hn_context {
        文档重渲染时由 hn_context_compact 清空(旧 arena 已随文档失效)。 */
     struct { char *path; struct hn_lottie *lottie; } *lot;
     int n_lot, cap_lot;
+    /* 媒体宿主与会话表(hn_media.c)。宿主指针由运行时持有(NULL = 禁用);
+       会话随文档替换/compact/destroy 全部 close+free —— 与 Lottie 缓存同一
+       清理纪律(节点指针随旧文档 arena 失效)。 */
+    const hn_media_host *media;
+    hn_media_session *med_sessions; int n_med, cap_med;
 };
 
 /* ---------- 共享工具 ---------- */
@@ -447,5 +473,18 @@ void hn_lottie_free(struct hn_lottie *l);
 /* 网格变形(hn_mesh.c): 发射 MESH 指令 */
 void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
                   float bw, float bh, float sx, float sy, float alpha);
+
+/* 媒体(hn_media.c): 推进会话(宿主 tick + 状态机轮询), 返回 1 = 有活跃
+   会话(PLAYING 或待起播) —— hn_context_anim_tick 据此保持帧循环 */
+int  hn_media_tick_ret(hn_context *c, float dt_ms);
+/* 销毁全部会话(host.close + 释放帧缓存与 src)。文档替换/compact/destroy 时调 */
+void hn_media_sessions_clear(hn_context *c);
+/* 布局: 替换元素固有尺寸(READY 会话已拉到帧时为帧尺寸); 未知写 -1。
+   首次触达时建会话(autoplay 则同时 open)。 */
+void hn_media_intrinsic(hn_context *c, hn_node *n, int *w, int *h);
+/* 绘制: 轮询当前帧并更新缓存; 返回 1 且写出缓存指针/尺寸/pts
+   (指针生命周期 = 本次显示列表, 双缓冲保证)。video 专用, audio 恒 0。 */
+int  hn_media_poll_frame(hn_context *c, hn_node *n, const unsigned char **rgba,
+                         int *w, int *h, int *stride, double *pts);
 
 #endif

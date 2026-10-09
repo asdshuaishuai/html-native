@@ -25,6 +25,7 @@ mkdir -p "$OUT"
 SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
      Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
      Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
+     Sources/CHtmlNative/hn_media.c \
      Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
      Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c \
@@ -146,6 +147,7 @@ WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+        Sources/CHtmlNative/hn_media.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
         Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
@@ -166,6 +168,7 @@ LINUX_RT=(tools/hnweb_linux.c
           Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
           Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
           Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+          Sources/CHtmlNative/hn_media.c
           Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
           Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
           Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
@@ -189,6 +192,7 @@ MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+        Sources/CHtmlNative/hn_media.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
         Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
@@ -203,6 +207,7 @@ RT_SRC="rt/hn_rt.c"
 ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
             Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
             Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+            Sources/CHtmlNative/hn_media.c
             Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
             Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
             Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c

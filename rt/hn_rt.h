@@ -80,6 +80,10 @@ char *hn_rt_dom(hn_rt *rt, int max_depth);
 /* 元素文本(malloc; free) */
 char *hn_rt_text(hn_rt *rt, const char *element_id);
 
+/* 当前文档(供宿主/工具直接驱动 hn_rt_eval 的桥 —— eval 按 doc 反查
+   上下文, 媒体桥需要它)。返回值在下次 hn_rt_render 前有效。 */
+hn_doc *hn_rt_doc(hn_rt *rt);
+
 /* 显示列表指令数 */
 int hn_rt_cmd_count(hn_rt *rt);
 
@@ -94,6 +98,12 @@ int hn_rt_shot(hn_rt *rt, const char *path);
    状态跨调用持久(同一 store_id 的 JS 上下文保留)。
    不依赖 hn_rt 结构 —— daemon 可以直接调(裸引擎也有 JS 能力)。 */
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc);
+
+/* ---------------- 媒体宿主(壳注入) ---------------- */
+
+/* 全局媒体宿主槽(仿资产后端 g_assets_be 的单源注入): 壳在 hn_rt_open
+   之前调用, 之后创建的每个 context 都拿到它。NULL = 媒体禁用(缺省)。 */
+void hn_rt_set_media(const hn_media_host *host);
 
 /* ---------------- sys:// 桥(单源) ---------------- */
 

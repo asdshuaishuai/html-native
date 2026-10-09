@@ -734,6 +734,20 @@ static unsigned char *load_image_pixels(const char *path, int *w, int *h) {
     return px;
 }
 
+/* RGBA8(非预乘) → 画布拉伸混合。IMAGE(解码文件)与 BITMAP(媒体当前帧)
+   共用同一条像素路径 —— 两者的差别只在"像素从哪来"(stride 分开给:
+   文件 = iw*4 紧排, 媒体帧 = 引擎会话的 stride)。 */
+static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int ih,
+                       int x0, int y0, int w, int h, float alpha) {
+    for (int yy = 0; yy < h; yy++)
+        for (int xx = 0; xx < w; xx++) {
+            int sx = xx * iw / (w > 0 ? w : 1), sy = yy * ih / (h > 0 ? h : 1);
+            const unsigned char *p = px + (size_t)sy * stride + (size_t)sx * 4;
+            fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, p[3] / 255.0f * alpha };
+            fb_blend(f, x0 + xx, y0 + yy, col);
+        }
+}
+
 static void paint_image(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     int iw = 0, ih = 0;
     unsigned char *px = load_image_pixels(c->text ? c->text : "", &iw, &ih);
@@ -752,14 +766,18 @@ static void paint_image(fb *f, const hn_cmd *c, float scale, float ox, float oy,
     }
     int x0 = (int)((c->x - ox) * scale + ox), y0 = (int)((c->y - oy) * scale + oy);
     int w = (int)(c->w * scale), h = (int)(c->h * scale);
-    for (int yy = 0; yy < h; yy++)
-        for (int xx = 0; xx < w; xx++) {
-            int sx = xx * iw / (w > 0 ? w : 1), sy = yy * ih / (h > 0 ? h : 1);
-            const unsigned char *p = &px[(sy * iw + sx) * 4];
-            fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, p[3] / 255.0f * alpha };
-            fb_blend(f, x0 + xx, y0 + yy, col);
-        }
+    blend_rgba(f, px, iw * 4, iw, ih, x0, y0, w, h, alpha);
     free(px);
+}
+
+/* BITMAP: 媒体当前帧(RGBA8 非预乘, 引擎持有缓存)。位图为空时忽略 ——
+   正常情况下引擎只在有帧时才发 BITMAP, 这里只是防御。 */
+static void paint_bitmap(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
+    if (!c->bitmap || c->bitmap_w <= 0 || c->bitmap_h <= 0 || c->bitmap_stride <= 0) return;
+    int x0 = (int)((c->x - ox) * scale + ox), y0 = (int)((c->y - oy) * scale + oy);
+    int w = (int)(c->w * scale), h = (int)(c->h * scale);
+    blend_rgba(f, c->bitmap, c->bitmap_stride, c->bitmap_w, c->bitmap_h,
+               x0, y0, w, h, alpha);
 }
 
 /* ---------------- 主渲染 ---------------- */
@@ -784,6 +802,9 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, h
             break;
         case HN_CMD_IMAGE:
             paint_image(&f, c, 1.0f, 0, 0, 1.0f);
+            break;
+        case HN_CMD_BITMAP:
+            paint_bitmap(&f, c, 1.0f, 0, 0, 1.0f);
             break;
         case HN_CMD_CLIP_PUSH:
             fb_push_clip(&f, c->x, c->y, c->x + c->w, c->y + c->h, c->radius);

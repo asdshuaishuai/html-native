@@ -641,6 +641,46 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         }
     }
 
+    /* 媒体元素(<video>/<audio>): 每次 repaint 对会话轮询一次当前帧(契约 §5)。
+       有帧 → HN_CMD_BITMAP(几何 = 元素盒, 像素源 = 会话双缓冲缓存);
+       无帧(LOADING/无宿主/open 失败/纯音频) → 深底占位 RECT, 探针可见
+       而非静默空白。audio 永不发 BITMAP。 */
+    if (n->tag && (!strcmp(n->tag, "video") || !strcmp(n->tag, "audio"))) {
+        if (n->tag[0] == 'v') {
+            const unsigned char *bm = NULL;
+            int bmw = 0, bmh = 0, bstride = 0;
+            double bpts = 0;
+            if (hn_media_poll_frame(c, n, &bm, &bmw, &bmh, &bstride, &bpts)) {
+                hn_cmd cmd;
+                memset(&cmd, 0, sizeof(cmd));
+                cmd.kind = HN_CMD_BITMAP;
+                cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by);
+                cmd.w = n->bw * g->scale * g->scale_x;
+                cmd.h = n->bh * g->scale * g->scale_y;
+                cmd.radius = eff_radius(st, cmd.w, cmd.h);
+                cmd.bitmap = bm;
+                cmd.bitmap_stride = bstride;
+                cmd.bitmap_w = bmw;
+                cmd.bitmap_h = bmh;
+                cmd.bitmap_pts = bpts;
+                push_cmd(c, &cmd);
+            } else {
+                hn_cmd cmd;
+                memset(&cmd, 0, sizeof(cmd));
+                cmd.kind = HN_CMD_RECT;
+                cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by);
+                cmd.w = n->bw * g->scale * g->scale_x;
+                cmd.h = n->bh * g->scale * g->scale_y;
+                cmd.radius = eff_radius(st, cmd.w, cmd.h);
+                cmd.fill = fill_color(st, 0x14171EFFu, alpha);   /* 深底 */
+                cmd.stroke = fill_color(st, 0x3A4150FFu, alpha); /* 边框 */
+                cmd.stroke_w = 1.0f;
+                push_cmd(c, &cmd);
+            }
+        }
+        goto clip_done;
+    }
+
     /* 图片元素 */
     if (n->tag && !strcmp(n->tag, "img")) {
         const char *src = hn_node_attr(n, "src");

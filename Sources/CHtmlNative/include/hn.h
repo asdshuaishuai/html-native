@@ -59,7 +59,8 @@ typedef enum hn_cmd_kind {
     HN_CMD_CLIP_POP = 5,
     HN_CMD_QUAD = 6,      /* 任意四边形(3D 投影结果); qx/qy 为四个顶点 */
     HN_CMD_POLYGON = 7,   /* 任意多边形(矢量路径/Lottie 形状层); 顶点数可变 */
-    HN_CMD_MESH = 8       /* 网格变形贴图(Live2D 类: 顶点网格 + UV 采样源图) */
+    HN_CMD_MESH = 8,      /* 网格变形贴图(Live2D 类: 顶点网格 + UV 采样源图) */
+    HN_CMD_BITMAP = 9     /* 内存位图(媒体当前帧), 覆盖 rect */
 
 } hn_cmd_kind;
 
@@ -101,6 +102,13 @@ typedef struct hn_cmd {
     const float *mesh_verts;
     const float *mesh_uv;
     int          mesh_cols, mesh_rows;
+    /* BITMAP: 内存位图(RGBA8 非预乘, 左上原点, 顶上到底下)。
+       指针生命周期 = 本次显示列表有效(引擎媒体会话双缓冲保证下次
+       repaint 前不被覆盖)。bitmap_pts 为该帧显示时间戳(秒), 供宿主
+       探针打印/断言(契约 §5 的 BITMAP 行需要它)。 */
+    const unsigned char *bitmap;
+    int    bitmap_stride, bitmap_w, bitmap_h;
+    double bitmap_pts;
 } hn_cmd;
 
 typedef struct hn_display_list {
@@ -124,6 +132,67 @@ typedef struct hn_asset_backend {
 } hn_asset_backend;
 
 void hn_context_set_assets(hn_context *c, const hn_asset_backend *backend);
+
+/* ---- 音频/视频(<video>/<audio>) ----
+ *
+ * 引擎侧只是"状态机 + 布局盒 + 当前帧位图"(仿 HTMLMediaElement 六态);
+ * 解码/出声委托平台, 经 hn_media_host 回调表注入 —— 引擎不认识解码器,
+ * 不包含任何平台头文件(与图片/资产后端同一依赖倒置)。
+ * <video> 与 <audio> 走同一会话表、同一宿主回调; 纯音频只是"没有帧"的会话。
+ *
+ * 明确不做(docs/media-design.md §9): <source> 子元素、字幕/track、DRM、
+ * 流媒体(http(s) 一律 open 失败)、FFmpeg、浏览器控件 UI、poster、
+ * playbackRate、WebAudio。声明属性: src(相对文档目录) loop muted autoplay
+ * volume="0.5"。
+ */
+typedef enum {
+    HN_MEDIA_IDLE = 0,    /* 无会话/未打开 */
+    HN_MEDIA_LOADING,     /* 已 open, 元数据未就绪 */
+    HN_MEDIA_READY,       /* 可起播(未播) */
+    HN_MEDIA_PLAYING,
+    HN_MEDIA_PAUSED,
+    HN_MEDIA_ENDED        /* 播完且非循环; play() 重新起播 */
+} hn_media_state_t;       /* 契约名为 hn_media_state —— 与同名 API 在 C 的
+                             同一命名空间冲突, typedef 加 _t 后缀 */
+
+typedef struct hn_media_host {
+    void *ctx;
+    /* 打开资源; 返回宿主句柄(引擎不解释), 失败 NULL + err 一行原因。 */
+    void *(*open)(void *ctx, const char *url, char *err, size_t err_cap);
+    void  (*close)(void *ctx, void *m);   /* 幂等; NULL 安全 */
+    /* 帧循环提示(dt 毫秒)。无钟宿主(合成宿主)用它自行累计假时钟;
+       真实宿主(AVPlayer)忽略。PLAYING 会话每帧必达。 */
+    void  (*tick)(void *ctx, void *m, float dt_ms);
+    int   (*play)(void *ctx, void *m);                    /* 1 = 已接受 */
+    void  (*pause)(void *ctx, void *m);
+    int   (*seek)(void *ctx, void *m, double sec);        /* 1 = 接受 */
+    void  (*set_volume)(void *ctx, void *m, float vol);   /* 0..1(越界钳制) */
+    void  (*set_muted)(void *ctx, void *m, int muted);
+    int   (*duration)(void *ctx, void *m, double *sec);   /* 0 = 未知(写 -1) */
+    int   (*position)(void *ctx, void *m, double *sec);
+    int   (*state)(void *ctx, void *m, int *ready, int *ended);
+    /* 拉当前视频帧(RGBA8 非预乘, 左上原点): 1=新帧 0=无新帧(内容未变)
+       -1=无视频轨或失败(cap 不足时 w/h 写所需尺寸, 调用方重分配后重试)。
+       pts_sec 写该帧显示时间戳(秒)。 */
+    int   (*frame)(void *ctx, void *m, unsigned char *rgba, size_t cap,
+                   int *w, int *h, double *pts_sec);
+} hn_media_host;
+
+/* 注入媒体宿主(运行时持有表内存; NULL = 媒体禁用 —— 元素照常解析,
+   只是不播, 布局走缺省尺寸, 绘制走占位)。 */
+void hn_context_set_media(hn_context *c, const hn_media_host *host);
+
+/* 元素寻址的媒体控制(JS 桥与探针共用)。n 非 video/audio 或无 src 时
+   为 no-op; 宿主未注入时 play 返回 0、其余返回缺省值。 */
+void   hn_media_tick(hn_context *c, float dt_ms);   /* hn_context_anim_tick 内部驱动 */
+int    hn_media_play(hn_context *c, hn_node *n);    /* IDLE→open; 1 = 进入/保持播放 */
+int    hn_media_pause(hn_context *c, hn_node *n);
+int    hn_media_seek(hn_context *c, hn_node *n, double sec);  /* 钳制 [0, duration] */
+double hn_media_time(hn_context *c, hn_node *n);               /* 无会话返回 0 */
+double hn_media_duration(hn_context *c, hn_node *n);           /* 未知返回 -1 */
+void   hn_media_set_volume(hn_context *c, hn_node *n, float v);/* 钳制 0..1 */
+void   hn_media_set_muted(hn_context *c, hn_node *n, int muted);
+int    hn_media_state(hn_context *c, hn_node *n);              /* HN_MEDIA_* */
 
 /* ---- Lottie(bodymovin)矢量动画 ----
  *
