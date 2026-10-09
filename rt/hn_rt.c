@@ -685,6 +685,8 @@ static JSContext *js_scope_get(const char *key) {
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     JSContext *ctx = js_scope_get(scope_key ? scope_key : "default");
     if (!ctx) return NULL;
+    /* 桥函数(hnSetText/hnSetValue)通过 opaque 拿 doc → hn_doc_set_text */
+    JS_SetContextOpaque(ctx, doc);
 
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "hnSetText",

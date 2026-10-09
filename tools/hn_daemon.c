@@ -110,6 +110,8 @@ typedef struct {
     int w, h;
     int headless;
     int alive;
+    char *html;          /* 原始 HTML(persist 用) */
+    size_t html_len;
 } dapp;
 
 static dapp g_apps[HN_DAEMON_MAX_APPS];
@@ -138,6 +140,7 @@ static dapp *app_create(const char *id, int headless) {
 
 static void app_destroy(dapp *a) {
     if (a->ctx) hn_context_destroy(a->ctx);
+    free(a->html);
     a->ctx = NULL;
     a->alive = 0;
 }
@@ -379,6 +382,22 @@ static void resp_json(char *out, size_t cap, int ok, const char *body) {
              body && body[0] ? "," : "", body ? body : "");
 }
 
+static char *read_all(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) { fclose(f); return NULL; }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = 0;
+    *len = got;
+    return buf;
+}
+
 static void handle_line(const char *line, char *out, size_t cap) {
     char op[64] = { 0 };
     const char *opp = json_find(line, "op");
@@ -415,6 +434,8 @@ static void handle_line(const char *line, char *out, size_t cap) {
             return;
         }
         a->w = (int)w; a->h = (int)h;
+        a->html = strdup(html);
+        a->html_len = strlen(html);
         hn_doc *doc = hn_parse_html(html, strlen(html));
         if (!doc) {
             app_destroy(a);
@@ -467,6 +488,9 @@ static void handle_line(const char *line, char *out, size_t cap) {
         hn_doc_autoid_hx(nd);
         hn_context_set_doc(a->ctx, nd);
         hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
+        free(a->html);
+        a->html = strdup(html);
+        a->html_len = strlen(html);
         free(html);
         free(id);
         resp_json(out, cap, 1, "");
@@ -550,11 +574,107 @@ static void handle_line(const char *line, char *out, size_t cap) {
         resp_json(out, cap, rc == 0, rc == 0 ? "" : "\"error\":\"shot failed\"");
         return;
     }
-    if (!strcmp(op, "eval")) {
+    if (!strcmp(op, "anim")) {
+        if (!a) { resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
+        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
+        const hn_display_list *dl = hn_context_display_list(a->ctx);
+        int anim_count = 0;
+        if (dl) {
+            /* 遍历显示列表, 统计有过渡/动画标记的指令 */
+            for (int i = 0; i < dl->count; i++) {
+                if (dl->cmds[i].kind == 1 /* RECT */ && dl->cmds[i].gradient) anim_count++;
+            }
+        }
+        /* 引擎的动画时钟在 tick — 告知调用方动画系统在跑 */
+        snprintf(out, cap, "{\"ok\":true,\"anim_active\":%s,\"cmds\":%d}",
+                 hn_context_anim_tick(a->ctx, 16.0f) ? "true" : "false", dl ? dl->count : 0);
+        (void)anim_count;
+        return;
+    }
+    if (!strcmp(op, "applets")) {
+        /* 轻应用槽位枚举(简化: 返回当前所有 headless 应用的 id) */
+        char body[2048];
+        size_t n = 0;
+        n += (size_t)snprintf(body + n, cap - n, "\"apps\":[");
+        int first = 1;
+        for (int i = 0; i < g_app_n; i++) {
+            if (!g_apps[i].alive) continue;
+            n += (size_t)snprintf(body + n, cap - n, "%s{\"id\":\"%s\"}",
+                                  first ? "" : ",", g_apps[i].id);
+            first = 0;
+        }
+        n += (size_t)snprintf(body + n, cap - n, "]");
+        resp_json(out, cap, 1, body);
+        return;
+    }
+    if (!strcmp(op, "persist")) {
+        if (!a) { resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
+        char *p = json_str(line, "path");
+        char path_buf[1024];
+        if (!p) {
+            snprintf(path_buf, sizeof(path_buf), "%s/.html-native/apps/%s.hnapp",
+                     getenv("HOME") ? getenv("HOME") : ".", a->id);
+            p = path_buf;
+        }
+        /* 持久化: 把当前 HTML + CSS 写进 JSON 胶囊 */
+        hn_doc *doc = hn_context_doc(a->ctx);
+        FILE *f = fopen(p, "wb");
+        if (!f) { resp_json(out, cap, 0, "\"error\":\"cannot write\""); return; }
+        /* 用 --shot 生成 PNG + JSON 元数据打包(简化为 HTML+meta) */
+        const hn_display_list *dl = hn_context_display_list(a->ctx);
+        fprintf(f, "{\"format\":\"hnapp\",\"version\":1,\"id\":\"%s\",\"w\":%d,\"h\":%d,\"html\":\"",
+                a->id, a->w, a->h);
+        {   /* JSON 字符串转义: 只需处理 \ 和 " 和控制字符 */
+            size_t ci;
+            for (ci = 0; ci < a->html_len; ci++) {
+                unsigned char ch = (unsigned char)a->html[ci];
+                if (ch == '"' || ch == 0x5C) fputc(0x5C, f);  /* " or \ */
+                if (ch == '\n') fprintf(f, "\\n");
+                else if (ch == '\t') fprintf(f, "\\t");
+                else if (ch != '\r') fputc(ch, f);
+            }
+        }
+        fprintf(f, "\"}");
+        fclose(f);
+        char body[512];
+        snprintf(body, sizeof(body), "\"path\":\"%s\"", p);
+        resp_json(out, cap, 1, body);
+        return;
+    }
+    if (!strcmp(op, "restore")) {
+        char *p = json_str(line, "path");
+        if (!p) { resp_json(out, cap, 0, "\"error\":\"path required\""); return; }
+        size_t n = 0;
+        char *d = read_all(p, &n);
+        free(p);
+        if (!d) { resp_json(out, cap, 0, "\"error\":\"file not found\""); return; }
+        /* 解析胶囊 JSON: 提取 id/html */
+        char *rid = json_str(d, "id");
+        char *rhtml = json_str(d, "html");
+        free(d);
+        if (!rid || !rhtml) { free(rid); free(rhtml); resp_json(out, cap, 0, "\"error\":\"bad capsule\""); return; }
+        dapp *ra = app_create(rid, 1);
+        if (ra) {
+            ra->w = 480; ra->h = 700;
+            hn_doc *nd = hn_parse_html(rhtml, strlen(rhtml));
+            if (nd) {
+                hn_doc_autoid_hx(nd);
+                hn_context_set_doc(ra->ctx, nd);
+                hn_context_layout(ra->ctx, (float)ra->w, (float)ra->h, &g_tb);
+            }
+        }
+        free(rid); free(rhtml);
+        resp_json(out, cap, ra != NULL, ra ? "" : "\"error\":\"restore failed\"");
+        return;
+    }
+    if (!strcmp(op, "eval"))
+        if (!strcmp(op, "eval")) {
         char *js = json_str(line, "js");
         if (!js) { resp_json(out, cap, 0, "\"error\":\"js required\""); return; }
         hn_doc *doc = hn_context_doc(a->ctx);
+        if (!doc) fprintf(stderr, "[eval] doc=NULL\n");
         char *result = hn_rt_eval(js, id, doc);
+        fprintf(stderr, "[eval] result=%s\n", result ? result : "(null)");
         free(js);
         if (result) {
             char body[4096];
@@ -564,6 +684,9 @@ static void handle_line(const char *line, char *out, size_t cap) {
         } else {
             resp_json(out, cap, 1, "\"value\":null");
         }
+        /* eval 里的 hnSetText/hnSetValue 改了 DOM, 布局重排后 text_content
+           才能反映 —— 不重排的话 text op 读到的是旧值。 */
+        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
         return;
     }
 
