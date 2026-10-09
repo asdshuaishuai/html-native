@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <dlfcn.h>
 
 #include "hn_rt.h"
 
@@ -221,6 +222,96 @@ int hn_rt_store_set(const char *store_id, const char *key, const char *val) {
     return ok;
 }
 
+static int qparam(const char *q, const char *key, char *out, size_t cap);
+static void esc_html(const char *s, char *out, size_t cap);
+static double sys_cpu_load(void);
+static long sys_mem_used_mb(void);
+static long sys_mem_total_mb(void);
+static long sys_disk_free_gb(void);
+static double sys_uptime_s(void);
+static void sys_host(char *, size_t);
+static int clip_set(const char *);
+static int clip_get(char *, size_t);
+static int sys_open_url(const char *);
+
+char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *store_id) {
+    if (!url || strncmp(url, "sys://", 6)) return NULL;
+    const char *route = url + 6;
+    const char *q = strchr(route, '?');
+    char key[256] = { 0 }, val[1024] = { 0 };
+    char *out = (char *)malloc(4096);
+    if (!out) return NULL;
+    if (!strncmp(route, "store/get", 9)) {
+        if (qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key))) {
+            char v[1024] = { 0 };
+            int got = hn_rt_store_get(store_id, key, v, sizeof(v));
+            char ev[2200];
+            esc_html(got ? v : "", ev, sizeof(ev));
+            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
+        } else snprintf(out, 4096, "<span>missing key</span>");
+    } else if (!strncmp(route, "store/set", 9)) {
+        int hk = qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key));
+        int hv = qparam(q, "value", val, sizeof(val)) || qparam(form_body, "value", val, sizeof(val));
+        if (hk && hv) {
+            hn_rt_store_set(store_id, key, val);
+            char ev[2200];
+            esc_html(val, ev, sizeof(ev));
+            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
+        } else snprintf(out, 4096, "<span>missing key/value</span>");
+    } else if (!strncmp(route, "store/count", 11)) {
+        snprintf(out, 4096, "<span>1</span>");
+    } else if (!strncmp(route, "cpu", 3)) {
+        double load = sys_cpu_load();
+        snprintf(out, 4096,
+                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%.0f%%</div>"
+                 "<div style=\"font-size:11;color:#6b7386\">CPU load average</div>", load < 0 ? 0 : load);
+    } else if (!strncmp(route, "memory", 6) || !strncmp(route, "mem", 3)) {
+        long used = sys_mem_used_mb(), total = sys_mem_total_mb();
+        int pct = total > 0 ? (int)(used * 100 / total) : 0;
+        snprintf(out, 4096,
+                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%ld MB</div>"
+                 "<div style=\"font-size:11;color:#6b7386\">%ld MB total (%d%%)</div>",
+                 used, total, pct);
+    } else if (!strncmp(route, "disk", 4)) {
+        snprintf(out, 4096,
+                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%ld GB</div>"
+                 "<div style=\"font-size:11;color:#6b7386\">disk free</div>", sys_disk_free_gb());
+    } else if (!strncmp(route, "uptime", 6)) {
+        snprintf(out, 4096,
+                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%.0f s</div>"
+                 "<div style=\"font-size:11;color:#6b7386\">uptime</div>", sys_uptime_s());
+    } else if (!strncmp(route, "host", 4)) {
+        char host[256];
+        sys_host(host, sizeof(host));
+        snprintf(out, 4096,
+                 "<div style=\"font-size:16;font-weight:600;color:#e8eaf0\">%s</div>", host);
+    } else if (!strncmp(route, "clipboard/get", 13)) {
+        char text[4096] = { 0 };
+        clip_get(text, sizeof(text));
+        char ev[4200];
+        esc_html(text, ev, sizeof(ev));
+        snprintf(out, 4096, "<div id=\"clip\">%s</div>", ev);
+    } else if (!strncmp(route, "clipboard/set", 13)) {
+        char v[4096] = { 0 };
+        int ok = (qparam(q, "value", v, sizeof(v)) || qparam(form_body, "value", v, sizeof(v))) && clip_set(v);
+        snprintf(out, 4096, ok ? "<span>copied</span>" : "<span>clip unavailable</span>");
+    } else if (!strncmp(route, "open", 4)) {
+        char target[2048] = { 0 };
+        if (qparam(q, "url", target, sizeof(target)) || qparam(form_body, "url", target, sizeof(target)))
+            sys_open_url(target);
+        snprintf(out, 4096, "<span></span>");
+    } else if (!strncmp(route, "notify", 6)) {
+        char text[2048] = { 0 };
+        qparam(q, "text", text, sizeof(text));
+        fprintf(stderr, "[notify] %s\n", text);
+        snprintf(out, 4096, "<span></span>");
+    } else {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
 static int qparam(const char *q, const char *key, char *out, size_t cap) {
     if (!q) return 0;
     size_t kl = strlen(key);
@@ -252,44 +343,172 @@ static void esc_html(const char *s, char *out, size_t cap) {
     out[i] = 0;
 }
 
-char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *store_id) {
-    if (!url || strncmp(url, "sys://", 6)) return NULL;
-    const char *route = url + 6;
-    const char *q = strchr(route, '?');
-    char key[256] = { 0 }, val[1024] = { 0 };
-    char *out = (char *)malloc(4096);
-    if (!out) return NULL;
-    if (!strncmp(route, "store/get", 9)) {
-        if (qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key))) {
-            char v[1024] = { 0 };
-            int got = hn_rt_store_get(store_id, key, v, sizeof(v));
-            char ev[2200];
-            esc_html(got ? v : "", ev, sizeof(ev));
-            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
-        } else snprintf(out, 4096, "<span>missing key</span>");
-    } else if (!strncmp(route, "store/set", 9)) {
-        int hk = qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key));
-        int hv = qparam(q, "value", val, sizeof(val)) || qparam(form_body, "value", val, sizeof(val));
-        if (hk && hv) {
-            hn_rt_store_set(store_id, key, val);
-            char ev[2200];
-            esc_html(val, ev, sizeof(ev));
-            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
-        } else snprintf(out, 4096, "<span>missing key/value</span>");
-    } else if (!strncmp(route, "store/count", 11)) {
-        snprintf(out, 4096, "<span>1</span>");
-    } else if (!strncmp(route, "info", 4)) {
-        snprintf(out, 4096,
-                 "<div style=\"font-size:13;color:#e8eaf0\">html-native (C99)</div>"
-                 "<div style=\"font-size:11;color:#6b7386\">engine + hnsoft, no webview</div>");
-    } else {
-        free(out);
-        return NULL;
-    }
-    return out;
+/* ---------------- sys:// 系统桥补齐(POSIX 可移植) ----------------
+ * 缺口: agent 的智能 UI 需要"打通系统层级数据" —— CPU/内存/磁盘/电池/
+ * uptime/host/剪贴板/通知/打开。这些此前在 Swift SystemBridge 里, 全层
+ * 删除后要在 C 侧重建。macOS 侧走 POSIX sysctl + AppKit NSPasteboard/
+ * NSWorkspace(dlopen); Linux 侧走 /proc + xclip。两平台同一语义。 */
+
+#ifdef __APPLE__
+#include <sys/types.h>
+#include <sys/statvfs.h>
+
+/* sysctlbyname 不用 sys/sysctl.h(header 在 _POSIX_C_SOURCE 下拉入 BSD 类型 u_int
+   而 -std=c99 + _POSIX_C_SOURCE 200809L 不定义它 → 编译失败)。 */
+extern int sysctlbyname(const char *, void *, size_t *, const void *, size_t);
+#endif
+#include <time.h>
+
+static unsigned long g_boot_hint;   /* uptime 用(进程启动时的 monotonic) */
+
+/* 剪贴板/openURL 的 ObjC 调用: 每次经 dlsym(不依赖链接了哪个 hnp_*.c)。
+   Apple 平台 AppKit 已由 hnp_init 装载; 非 Apple 直接返回 0。 */
+#ifdef __APPLE__
+#include <dlfcn.h>
+static void *hn_objc_msgSend;   /* lazy: 首次调用时 dlsym */
+static void *hn_objc_sel(const char *name) {
+    return dlsym((void *)0, name);
+}
+static const char *hn_cls(const char *name) { return name; }  /* 占位: objc_getClass 由 dlsym */
+#endif
+
+static double sys_uptime_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec;
 }
 
-/* ---------------- htmx 执行 ---------------- */
+static double sys_cpu_load(void) {
+#ifdef __APPLE__
+    long loads[3];
+    if (sysctlbyname("vm.loadavg", loads, &(size_t){sizeof(loads)}, NULL, 0) != 0) return -1;
+    return (double)loads[2] / 256.0 * 100.0;
+#else
+    FILE *f = fopen("/proc/loadavg", "r");
+    if (!f) return -1;
+    double l;
+    int r = fscanf(f, "%lf", &l);
+    fclose(f);
+    return r == 1 ? l * 100.0 : -1.0;
+#endif
+}
+
+static long sys_mem_used_mb(void) {
+#ifdef __APPLE__
+    uint64_t total = 0, free_pgs = 0, inactive = 0;
+    size_t sz = sizeof(total);
+    sysctlbyname("hw.memsize", &total, &sz, NULL, 0);
+    sz = sizeof(free_pgs);
+    sysctlbyname("vm.page_free_count", &free_pgs, &sz, NULL, 0);
+    sz = sizeof(inactive);
+    sysctlbyname("vm.page_inactive_count", &inactive, &sz, NULL, 0);
+    long pg = 4096;
+    sz = sizeof(pg);
+    sysctlbyname("vm.pagesize", &pg, &sz, NULL, 0);
+    return (long)((total - (free_pgs + inactive) * (uint64_t)pg) / 1048576);
+#else
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    long total = 0, avail = 0; char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, "MemTotal:", 9)) sscanf(line + 9, "%ld", &total);
+        else if (!strncmp(line, "MemAvailable:", 13)) sscanf(line + 13, "%ld", &avail);
+    }
+    fclose(f);
+    return total > 0 ? (total - avail) / 1024 : -1;
+#endif
+}
+
+static long sys_mem_total_mb(void) {
+#ifdef __APPLE__
+    uint64_t v = 0; size_t sz = sizeof(v);
+    sysctlbyname("hw.memsize", &v, &sz, NULL, 0);
+    return (long)(v / 1048576);
+#else
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    long v = 0; char line[256];
+    while (fgets(line, sizeof(line), f))
+        if (!strncmp(line, "MemTotal:", 9)) { sscanf(line + 9, "%ld", &v); break; }
+    fclose(f);
+    return v / 1024;
+#endif
+}
+
+static long sys_disk_free_gb(void) {
+    struct statvfs st;
+    if (statvfs("/", &st) != 0) return -1;
+    return (long)((double)st.f_bavail * st.f_frsize / 1073741824.0);
+}
+
+static void sys_host(char *out, size_t cap) {
+#ifdef __APPLE__
+    char buf[256]; size_t sz = sizeof(buf) - 1;
+    if (sysctlbyname("kern.hostname", buf, &sz, NULL, 0) == 0) { buf[sz] = 0; snprintf(out, cap, "%s", buf); return; }
+#else
+    FILE *f = fopen("/etc/hostname", "r");
+    if (f) {
+        if (fgets(out, (int)cap, f)) {
+            char *nl = strchr(out, '\n');
+            if (nl) *nl = 0;
+            fclose(f);
+            return;
+        }
+        fclose(f);
+    }
+#endif
+    snprintf(out, cap, "unknown");
+}
+
+/* 剪贴板/打开 URL: macOS 走 AppKit(dlsym); Linux 下一阶段(xclip/xdg-open)。 */
+#ifdef __APPLE__
+#include <dlfcn.h>
+static int clip_set(const char *text) {
+    void *(*gc)(const char *) = (void *(*)(const char *))dlsym((void *)0, "objc_getClass");
+    void *(*sl)(const char *) = (void *(*)(const char *))dlsym((void *)0, "sel_registerName");
+    void *(*send)(void*, void*, ...) = (void *(*)(void*, void*, ...))dlsym((void *)0, "objc_msgSend");
+    if (!gc || !sl || !send) return 0;
+    void *pb = send(gc("NSPasteboard"), sl("generalPasteboard"));
+    if (!pb) return 0;
+    ((void (*)(void*,void*))send)(pb, sl("clearContents"));
+    void *nscls = gc("NSString");
+    void *str = ((void*(*)(void*,void*,const char*))send)(nscls, sl("stringWithUTF8String:"), text);
+    void *type_str = ((void*(*)(void*,void*,const char*))send)(nscls, sl("stringWithUTF8String:"), "public.utf8-plain-text");
+    ((void*(*)(void*,void*,void*,void*))send)(pb, sl("setString:forType:"), str, type_str);
+    return 1;
+}
+static int clip_get(char *out, size_t cap) {
+    void *(*gc)(const char *) = (void *(*)(const char *))dlsym((void *)0, "objc_getClass");
+    void *(*sl)(const char *) = (void *(*)(const char *))dlsym((void *)0, "sel_registerName");
+    void *(*send)(void*, void*, ...) = (void *(*)(void*, void*, ...))dlsym((void *)0, "objc_msgSend");
+    if (!gc || !sl || !send) return 0;
+    void *pb = send(gc("NSPasteboard"), sl("generalPasteboard"));
+    if (!pb) return 0;
+    void *type = ((void*(*)(void*,void*,const char*))send)(gc("NSString"), sl("stringWithUTF8String:"), "public.utf8-plain-text");
+    void *str = ((void*(*)(void*,void*,void*))send)(pb, sl("stringForType:"), type);
+    if (!str) return 0;
+    const char *c = ((const char *(*)(void*,void*))send)(str, sl("UTF8String"));
+    if (!c) return 0;
+    snprintf(out, cap, "%s", c);
+    return 1;
+}
+static int sys_open_url(const char *url) {
+    void *(*gc)(const char *) = (void *(*)(const char *))dlsym((void *)0, "objc_getClass");
+    void *(*sl)(const char *) = (void *(*)(const char *))dlsym((void *)0, "sel_registerName");
+    void *(*send)(void*, void*, ...) = (void *(*)(void*, void*, ...))dlsym((void *)0, "objc_msgSend");
+    if (!gc || !sl || !send) return 0;
+    void *ws = send(gc("NSWorkspace"), sl("sharedWorkspace"));
+    if (!ws) return 0;
+    void *str = ((void*(*)(void*,void*,const char*))send)(gc("NSString"), sl("stringWithUTF8String:"), url);
+    ((void (*)(void*,void*,void*))send)(ws, sl("openURL:"), str);
+    return 1;
+}
+#else
+static int clip_set(const char *text) { (void)text; return 0; }
+static int clip_get(char *out, size_t cap) { (void)out; (void)cap; return 0; }
+static int sys_open_url(const char *url) { (void)url; return 0; }
+#endif
+
 
 static hn_node *hx_carrier(hn_node *n) {
     if (!n) return NULL;
