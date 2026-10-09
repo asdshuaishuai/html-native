@@ -441,6 +441,35 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   走**同一条布局绘制管线** —— 与 HTML 写的完全等价; daemon 的 `eval` op
   即由此求值。runtime 与进程同生命周期(daemon 本就常驻, 规避 GC 断言)。
   无 `<script>` 且无 eval 时零开销(不创建 JS 上下文)
+- **媒体元素(`<video>`/`<audio>`, 解码委托平台)**: 元素解析照常, 语义是仿
+  HTMLMediaElement 的**六态状态机**(IDLE/LOADING/READY/PLAYING/PAUSED/ENDED),
+  声明属性即语义(`src`/`autoplay`/`loop`/`muted`/`volume`, seek 钳制到
+  [0, duration])。**引擎不认识解码器**: 解码/出声委托平台媒体框架 —— macOS 走
+  **AVFoundation**(运行期 dlopen + objc_msgSend, 与引擎零 SDK 依赖同一手法),
+  **非 FFmpeg 路线**(不打包、不链接、不 dlopen); 其他平台 ABI 留位, 无宿主时
+  元素照常解析只是不播。平台差异收敛在 `hn_media_host` 回调表(与图片后端同一
+  依赖倒置), `currentTime` 唯一真源是宿主 `position()`。绘制新增
+  `HN_CMD_BITMAP` 指令(hnsoft 与 cairo 双后端), `<audio>` 永不发位图。控制
+  入口两层: C 端 `hn_media_play/pause/seek/…`(元素寻址)与 QuickJS 桥
+  `hnMediaPlay/Pause/Seek/Time/Duration/Volume`(daemon `eval` op 即可驱动)。
+  测试双轨: hncore **合成宿主**(梯度帧+假时钟, 确定性)供
+  `media_element_probe.py` 40 断言全绿; 真机 AVFoundation 由 `media_probe.py`
+  实测(播放推进/seek 落位/pause 恒定/纯音频无帧/系统样例抽真帧,
+  18 ok 0 fail)。真机播放进窗口还差壳层媒体宿主接线(见"已知简化与路线图")。
+- **WASM 运行时(wasm3, 纯计算导出)**: 内嵌 **wasm3**(MIT, vendor 快照最小
+  11 源 + LICENSE, `-std=c99` 零警告零外部依赖, 三平台无条件编入)。引擎封装
+  `hn_wasm_load/call/free` + 实例表 `hn_wasm_install/by_id/unload`(id 1..32);
+  定位是**纯计算导出函数**(值按 int32 进出, 引擎按模块导出签名转换
+  i32/f32/f64), 不做 WASI、不用 WASM 解码媒体。QuickJS 桥
+  `hnWasmLoad(bytesOrPath)` → id、`hnWasmCall(id, fn, ...args)` → 结果
+  (失败 NaN, 不抛异常)。demo 模块 `examples/wasm/add.c`(zig cc
+  wasm32-freestanding, `add.wasm` 已入库); `wasm_probe.py` 19 断言(装载/
+  调用/签名转换/错误路径)全绿。
+- **媒体/WASM 端到端示例**: `examples/media-demo.html` —— `<video>` 播放区
+  (自绘控制条, 按钮走 JS 桥驱动引擎状态机)+ `hnWasmLoad`/`hnWasmCall` 计算
+  卡 + `sys://` 系统卡, 四段各走一条后端; 样片 `examples/assets/demo.mp4`
+  (320x180 H.264+AAC 4s)入库。无头验证: `hncore paint` 输出 `BITMAP/MEDIA`
+  行, daemon `eval` op 驱动 JS 桥。
 - **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 即获得"自动跟随底部"语义
   (运行时提供, 页面零脚本): 内容增长时平滑追上, 用户上翻时让出滚动条;
   `hn-stream-loop="14"` 环形缓冲只保留最近 N 条 —— 内容可无限追加而内存与视觉收敛。
@@ -508,9 +537,12 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 - 片段热更新走 arena, 旧节点不回收; class/id 选择器统一小写
 - 近期: select、grid 布局、多屏/多表面组合、`hn new`/`hn dev` 脚手架与
   mtime 热重载、daemon 接管开窗 op(目前开窗在平台壳)
-- **进行中**: 音频/视频(`<video>`/`<audio>`, 解码委托平台媒体框架 ——
-  macOS 走 AVFoundation, 非 FFmpeg 路线)与 WASM 运行时缝(wasm3 +
-  `hnWasmLoad`/`hnWasmCall`), 契约见 `docs/media-design.md`
+- **媒体/WASM 收尾**: 引擎侧已落地(契约见 `docs/media-design.md`, 逐项实现
+  状态标注在该文末) —— `<video>`/`<audio>` 六态状态机 + hncore 合成宿主 +
+  `hnMedia*`/`hnWasm*` JS 桥、wasm3 内嵌 + `hnWasmLoad`/`hnWasmCall`、
+  三套探针全绿与 `examples/media-demo.html`。剩窗口壳收口: 媒体宿主接线
+  (`hnp_media_*` 直包 → `hn_rt_set_media` → `hnapp-*` 真机播放)与窗口内
+  `<script>` 自动求值(现入口是 daemon `eval` op)
 - 弹窗原生交互: `hn-drag`(元素即拖拽手柄)、`hn-dismiss`(点击弹窗外自动关闭)
 - 中期: Windows 壳已有 `tools/hnwin.c`(Win32 + hnsoft, 纯 C99);
   **原生 Linux 运行时已落地**(`tools/hnweb_linux.c`: M1 窗口/渲染 +

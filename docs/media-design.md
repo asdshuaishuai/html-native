@@ -494,3 +494,54 @@ HN_CMD_BITMAP 几何与元素盒一致。**全平台可跑**(hncore 是零依赖
     `-Wl,--export=<fn>` + `--no-standard-libraries`。
 11. wasm3 新 master(2026-09)比旧文档多了 m3_deterministic/snapshot/validate/
     xxh64 四文件 —— 以本文 §7 的 11 文件清单为准(逐文件链接实测过)。
+
+---
+
+## 11. 实现状态(2026-10-10, 媒体/WASM 轮收口)
+
+> 分阶段提交: `83f5a04`(引擎媒体元素状态机 + 合成宿主 + JS 桥) →
+> `0baf711`(WASM 运行时: wasm3 内嵌 + 桥 + demo 模块) → `013b082`
+> (media-demo 演示页 + 探针收口)。平台后端 `platform/hnp_media_macos.c`
+> 更早入库(`2cdb635`)。
+
+### 已落地(本次实跑验证)
+
+- **§2**: `hnp_media_*` ABI + `platform/hnp_media_macos.c`(AVFoundation
+  运行期 dlopen)。
+- **§3**: 六态状态机/会话表/`hn_media_host`/`hn_media_*` 元素寻址 API
+  (`include/hn.h:185-195`; 状态枚举实名 `hn_media_state_t`, 让位给同名
+  API 函数)。
+- **§5**: 绘制 `HN_CMD_BITMAP=9`, **hnsoft 与 hn_cairo 双后端**(cairo 是
+  §4 契约表之外的追加); 布局回退链 `hn_layout.c:1396-1419` —— video 缺省
+  **300×16:9**(契约写 300x150, 实现取 HTML 宽约定 + 16:9 高), audio 高 0。
+- **§6**: JS 桥全量 `hnMediaPlay/Pause/Seek/Time/Duration/Volume` +
+  `hnWasmLoad/hnWasmCall`(`rt/hn_rt.c:911-928`), 经 daemon `eval` op 可用。
+- **§7**: wasm3 vendor 恰 11 源 + LICENSE; `hn_wasm.c` 封装。**两处超出
+  契约**: `hn_wasm_call` 按导出签名转换 i32/f32/f64(契约 v1 仅 i32);
+  `examples/wasm/add.wasm` 产物入库(契约只要 add.c)。
+- **§8**: 探针 2026-10-10 实跑全绿 —— `media_element_probe.py` **40/40**
+  (hncore 合成宿主, 确定性)、`wasm_probe.py` **19/19**、`media_probe.py`
+  **18 ok / 0 fail / 0 skip**(macOS arm64 真机: 播放推进/seek 落位/pause
+  恒定/纯音频 frame=-1/系统样例抽真帧)。
+- **§10**: 备忘逐条按实现执行(RTLD_DEFAULT / finishLaunching 前置 /
+  有界泵 / 420v plane 转换 / play→seek→settle→pause / ended 按 position
+  推导)。
+
+### 未落地/偏差(下一个实现代理从这里接)
+
+1. **§4 `app/hn_app.c` 宿主装配未落地**: `hn_rt_set_media` 槽位已就位
+   (`rt/hn_rt.c:94`, open 时注入在 `rt/hn_rt.c:662`), 但**没有任何壳**
+   把 `hnp_media_*` 直包成 `hn_media_host` 注入(app/ 与 daemon 源码
+   grep 无 hnp_media 引用)。生产可用的宿主目前只有 hncore/daemon 的
+   **合成宿主**(`hncore.c:405/555`) —— 真机播放待窗口壳接线。
+2. **§8.2 fixture 目录 `tools/fixtures/media/` 未入库**: `media_probe.c`
+   改为运行期合成 1s 440Hz WAV + 从 `/System/Library` 系统样例 .mov 抽
+   真视频帧(Tier 2 覆盖面不减, 见上 18/0/0)。
+3. **WASM 段拆为独立探针** `tools/wasm_probe.c/.py`(§7 末尾原计划进
+   media_probe 第三段), 另增契约未列的 `media_element_probe.py`(合成宿主
+   确定性断言)。
+4. 相邻边界(非本契约遗漏, `examples/media-demo.html` 页脚"已知边界"已
+   如实记录): 窗口壳 `<script>` 自动求值与"窗口内点击→JS"未接线 ——
+   JS 桥入口目前是 daemon `eval` op, 窗口里点控制条暂为 no-op。
+5. Linux/Windows 真媒体后端 = §9 明确"不做", 非缺口; `supported()=0`
+   缺省已落地(`hnp_headless.c:87` / `hnp_linux.c:360`)。
