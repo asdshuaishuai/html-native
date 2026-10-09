@@ -310,6 +310,9 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **3D 变换**(`rotateX/Y/Z` + 透视投影 + `translateZ` 深度缩放)。
   **`translateZ()` 与 `rotate3d(x,y,z,angle)` 已实现投影**(深度位移按透视
   缩放、任意轴按 Rodrigues 公式旋转后与 X/Y/Z 复合)。
+  **`perspective` 视距与消失点**(元素自身声明视距, 否则取父级的 ——
+  消失点跟随**声明者**的 `perspective-origin`, 缺省父盒中心 50% 50%;
+  曾错标成子盒自身中心, 探针以 translateZ(±200) 的角点收放钉死口径)。
   **选择器引擎强化**:**属性选择器**(`[a]` `[a=v]` `[a^=]` `[a$=]` `[a*=]` `[a~=]`)、
   **`:not()`**(否定一层简单复合, 实参按标准计入特异性)、
   **`:nth-of-type()` / `:first-of-type` / `:last-of-type`**(只数同标签兄弟 ——
@@ -318,6 +321,15 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **`text-shadow`**(三个绘制后端都支持; macOS 走 CoreGraphics setShadow 真高斯模糊,
   cairo 走降采样放大近似, hnsoft 偏移无模糊)。
   这一批的共同点是**之前声明了不生效也不报错** —— 探针先行把它们全部翻了出来。
+  **文字特效**:`word-spacing`(每个"词间隔"附加宽度, 继承; 折叠模式作用于
+  被压成的那一枚空格, pre/pre-wrap 作用于串内每个空白)、
+  **`line-clamp` / `-webkit-line-clamp`**(最多显示的行盒数, 超出以省略号收尾
+  —— 此前 ellipsis 只能配 nowrap 做单行截断, 多行卡片摘要无法表达)。
+  **滤镜与裁剪**:**`filter: brightness() contrast() saturate()`**(绘制期
+  对填充色调色, `120%` 与 `1.2` 等价, `none` 复位; 复合声明按
+  saturate → contrast → brightness 次序)、
+  **`clip-path: circle() / inset()`**(circle 支持 `closest-side` 与百分比半径;
+  inset 四边可各带 px/%, `round R` 圆角; ellipse/polygon 不支持, 声明被忽略)。
   **排版精细化**:`margin:0 auto` 居中 / flex `margin-left:auto` 推右(标准优先级压 justify)、
   `min/max-width/height` 约束、**完整 margin 简写正确展开 TRBL**(修复历史越界 bug)、
   `font-family(monospace/serif 系统设计, code 等默认等宽)**、默认行高 1.45、
@@ -439,7 +451,16 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   **`animation: up|down|left|fade|scale <时长>` 入场预设**(新内容平滑浮现而非硬闪) +
   **`translate` / `scale` 几何动画**(位移并入滚动偏移、缩放按盒中心换算, 
   子元素盒与文字一起变换) + **缓动可配**(`linear / ease / ease-in / ease-out / 
-  ease-in-out / cubic-bezier(a,b,c,d)`, 贝塞尔用牛顿迭代反解, 与 CSS 同法)。
+  ease-in-out / cubic-bezier(a,b,c,d)`, 贝塞尔用牛顿迭代反解, 与 CSS 同法;
+  **弹性族闭式解**(无逐帧积分状态, 与引擎"按 t 求值"同口径): `spring`
+  衰减振荡 / `ease-out-bounce` 落地弹跳 / `ease-out-elastic` 橡皮筋 /
+  `ease-out-back` 回拉越过, 以及 **`steps(n[, start|end])`** 分段;
+  简写里缓动名先于动画名识别, 否则 `spring` 会被当成 keyframes 名吞掉)。
+  **按属性独立过渡**(`transition: opacity .3s, transform .5s` 顶层逗号分段、
+  槽位对位; longhand `transition-property/duration/delay/timing-function`
+  齐备, 未单独声明的属性槽不过渡 —— 与 CSS 一致, 无属性段时退回旧简写行为) +
+  **`transition-delay` / `animation-delay`**(负进度实现: 延迟未耗尽停在起始态,
+  负值直接从中途开始; stagger 用 `animation-delay: calc(var(--i) * 0.1s)`)。
   全部由引擎插值, 页面只声明; 帧循环与 vsync 对齐
 - **原生 JavaScript(JavaScriptCore)**: `<script>` 内的 JS 走**系统自带的 
   JavaScriptCore**(非 WebKit, 引擎仍是纯 C 与其隔离)。作为 HTML 
@@ -473,7 +494,17 @@ HNEngine.shared.open(id: "panel", html: html, surface: .popup)
   点击/`Tab` 聚焦(在控件间轮换)、原生键盘编辑(退格/删除/UTF-8 插入)、
   `:focus` 伪类、`formEncoded()` 表单 URL 编码;
   **textarea 多行**(值按行布局, caret 跟随所在行)、
-  **input 回车提交**(自身 → 祖先 → 最近容器子树内第一个 hx-post/get 载体)
+  **input 回车提交**(自身 → 祖先 → 最近容器子树内第一个 hx-post/get 载体);
+  **控件 type 语义**(`type=text/password/checkbox/radio` + textarea 各归其位
+  —— 此前 checkbox/radio 会被当成可编辑文本: password 绘制掩码但值保持原文,
+  checkbox/radio 绘制方框对勾/圆点、不可输入, 观感缺省强调色填充、作者
+  background/border 优先; `:focus` 缺省视觉为强调色 2px 外扩描边, 与主题
+  作者的 `:focus` 规则并存不冲突)、
+  **状态伪类**(`:disabled`/`:enabled` 按 disabled 属性、`:checked` 按
+  checkbox/radio 的 checked 属性, 值 "false"/"0" 视为未选/启用;
+  禁用控件拒绝聚焦)、
+  **表单提交**(`name=value` 收集 + `application/x-www-form-urlencoded` 编码;
+  checkbox/radio 仅在选中时提交, 值取 value 属性、缺省 `"on"`; disabled 不参与)
 - **系统集成**: `hx-get="sys://…"` 由本地桥直接应答(零网络):
   `info`(全量卡) / `cpu`(双采样占用) / `memory` / `disk` / `battery` /
   `uptime` / `host`, 返回自带样式的 HTML 片段, 换入即用。

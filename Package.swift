@@ -3,11 +3,14 @@ import PackageDescription
 
 // 纯 C99 包清单: c49cfbd 已把 Swift 全层(HtmlNative/HnDaemon/Hn/HnMcp/
 // HnShot/RenderTest/DemoApp + 旧 Package.swift)移除, 引擎是唯一渲染路径。
-// 这份清单只为 `swift build` 这类 SPM 入口存在 —— 目标只有 C99 引擎本体,
-// 不含任何 Swift 源码。
+// 目标只有 C99: 引擎本体 + RenderTest(离屏验收, 同为 C99, 依赖引擎出位图)。
 let package = Package(
     name: "html-native",
     platforms: [.macOS(.v12)],
+    products: [
+        // 离屏验收入口: swift run RenderTest(内置用例断言 + 任意文件出 PNG)
+        .executable(name: "RenderTest", targets: ["RenderTest"]),
+    ],
     targets: [
         // C99 核心: HTML/CSS 解析 → 级联 → 布局 → 绘制指令。
         // hn_cairo.c 刻意 exclude: 它是**可选** cairo 绘制后端(由
@@ -17,5 +20,7 @@ let package = Package(
         .target(name: "CHtmlNative", exclude: ["hn_cairo.c", "hn_cairo.h"],
                 cSettings: [.unsafeFlags(["-I/opt/homebrew/include/freetype2"])],
                 linkerSettings: [.unsafeFlags(["-L/opt/homebrew/lib", "-lfreetype"])]),
+        // C99 离屏验收: 与生产同一条管线(hnsoft 出位图), 不断引入第二套实现。
+        .executableTarget(name: "RenderTest", dependencies: ["CHtmlNative"]),
     ]
 )

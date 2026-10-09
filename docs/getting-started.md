@@ -230,7 +230,7 @@ hn-shot examples/showcase.html examples/showcase.css out.png 920 620
 hn-shot app.html app.png 480 620 --live            # css 可省略; --live 执行 sys:// 拉取
 hn-shot … hover.png 920 620 --hover nav-team     # 注入悬停态
 hn-shot … scroll.png 920 620 --scroll frames,220 # 注入滚动
-.build/debug/RenderTest                            # 415 项回归断言
+swift run RenderTest                               # C99 离屏验收(断言 + 任意文件出 PNG)
 ```
 
 HnShot 用真实视图自绘(@2x),所见即窗口所得,不需要屏幕录制权限。
@@ -246,4 +246,4 @@ HnShot 用真实视图自绘(@2x),所见即窗口所得,不需要屏幕录制权
   Linux 亦可经 cairo 后端无头运行。
 
 遇到问题先跑 `RenderTest`(全绿说明引擎层健康),
-再用 `hn-shot` 单独渲染你的文件定位是内容还是引擎的问题。
+再单独渲染你的文件定位是内容还是引擎的问题。
