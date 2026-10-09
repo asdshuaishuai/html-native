@@ -9,9 +9,8 @@
 #   macOS   arm64 / x86_64
 #   Linux   x86_64 / aarch64 (musl 静态: 无 glibc 版本依赖)
 #   Windows x86_64 (mingw, 静态链接)
-# 运行时产物: dist/hnweb-*(tools/hnweb.h 门面的平台实现)
+# 运行时产物: dist/hnweb-*(三平台 C99 薄壳, 共享 C99 引擎一条管线)
 #   hnweb-linux-x86_64 / hnweb-linux-aarch64  X11 运行期 dlopen, 零编译期依赖
-#   hnweb-windows-x86_64                      Win32(hnwin.c 收编为门面实现)
 #   hnweb-macos-arm64                         纯 C99 壳(dlopen AppKit + objc_msgSend)
 set -euo pipefail
 
@@ -141,7 +140,7 @@ build "hncore-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
 
 # Windows 运行时: Win32 窗口 + hnsoft 软件光栅 + sys:// 系统桥(C99 单一路径)。
 # 需要链接 win32 系统库(user32/gdi32/ole32/oleaut32/shell32)。
-# hnwebview.c(WebView2 兜底)已删除 —— 本项目只走 C99 引擎一条渲染路径。
+# hnwebview.c(WebView2 兜底)与 litehtml/QuickJS 探针已删除 —— 只走 C99 一条路径。
 # 接进来之后交叉编译立刻暴露它们。
 WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
@@ -158,7 +157,7 @@ build "hnwin-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
 echo
 
 # Linux 内置 webview 运行时: X11 窗口(运行期 dlopen("libX11.so.6"), 编译期
-# 零依赖) + hnsoft 软件光栅。平台壳只实现 tools/hnweb.h 这一个门面。
+# 零依赖) + hnsoft 软件光栅。纯 C99, 零 ObjC/Swift/webview 内核。
 # 源与 WIN_RT 同一套引擎核心, 但**不含 hncore.c**: 那是 CLI 的 main
 # (hncore.c:248), 而壳自带 --probe/--shot 的 main(镜像 hnwin.c:669),
 # 两份 main 链接即重复定义; sysbridge.c 是 Windows 专属(#include <windows.h>)。
@@ -192,24 +191,6 @@ MAC_RT=(tools/hnweb_macos.c
         Sources/CHtmlNative/hnsoft.c)
 build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 
-# Windows 门面运行时: tools/hnweb.h 门面的 Windows 平台实现(hnwin.c 的收编版)。
-# 源 = tools/hnweb_win.c + 与 hnweb-linux 目标同一套引擎核心(含 hnsoft.c);
-# **不含 hncore.c**(CLI 的 main, 同 hnweb-linux 的理由: 壳自带 --probe/--shot
-# 的 main, 两份 main 链接即重复定义); **也不含 sysbridge.c / hnwebview.c** ——
-# 那是 hnwin-windows-x86_64 目标的 CLI 运行时套件, 门面二进制的 hx 传输先以
-# 桩位收口(tools/hnweb_win.c 的 sys_fragment, 与 hnweb_linux.c 同一口径)。
-# 系统库照 hnwin 目标的 WIN_LIBS(user32 窗口/消息, gdi32 位图; ole* 是
-# WIN_LIBS 整组沿用, COM 兜底仅 hnwebview.c 路径用到)。
-WINWEB_RT=(tools/hnweb_win.c
-           Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
-           Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
-           Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
-           Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
-           Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-           Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
-           Sources/CHtmlNative/hnsoft.c)
-build "hnweb-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
-      "$WIN_LIBS" "${WINWEB_RT[@]}"
 echo
 
 # ---------------- 自检 ----------------
