@@ -183,14 +183,10 @@ typedef struct {
 static app_t g_app;
 static const char *g_html_path;
 static hn_node *g_focus;      /* 当前焦点 input(回车提交用) */
-static int g_use_webkit;      /* hn-renderer=webkit: 走 WebView2 兜底 */
 static const char *g_store_id = "default";
 
-/* WebView2 兜底 + sys:// 系统桥(公共模块) */
-int  hnwebview_open(HWND parent, const char *html, const char *css,
-                    const char *store_id);
-void hnwebview_resize(void);
-void hnwebview_close(void);
+/* sys:// 系统桥(公共模块)。WebView2 兜底已移除 —— 本项目只走 C99 引擎
+   一条渲染路径, 不再嵌入任何 webview 内核。 */
 char *sys_fragment(const char *url, const char *form_body, const char *store_id);
 
 /* 布局期文本后端: FreeType 真实测量(不注入则引擎走等宽估算, CJK
@@ -276,26 +272,6 @@ static void app_present(HWND hwnd) {
 
 /* hn-renderer 声明: content=webkit 时走系统 WebView2 兜底。
    页面显式声明, 绝不静默切换 —— 与 README 的双渲染器契约一致。 */
-static int wants_webkit(const char *html) {
-    for (const char *p = html; (p = strstr(p, "hn-renderer")) != NULL; p++) {
-        const char *tag_end = strchr(p, '>');
-        if (!tag_end) break;
-        const char *c = strstr(p, "content");
-        if (c && c < tag_end) {
-            const char *q = strchr(c, '"');
-            if (!q) q = strchr(c, '\'');
-            if (q && q < tag_end) {
-                char qc = *q++;
-                const char *e2 = strchr(q, qc);
-                if (e2 && e2 <= tag_end && (size_t)(e2 - q) == 6 &&
-                    !_strnicmp(q, "webkit", 6))
-                    return 1;
-            }
-        }
-    }
-    return 0;
-}
-
 /* ---- hx-* 执行(htmx 语义): 点击/回车/load/轮询共用 ----
    transport 进程内(sys:// 直接应答), 引擎不碰网络。语义与
    macOS 运行时一致: hx-get/post + hx-target + hx-swap + 表单参数。 */
@@ -433,7 +409,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_SIZE: {
         int w = LOWORD(lp), h = HIWORD(lp);
-        if (g_use_webkit) { hnwebview_resize(); return 0; }
         if (w > 0 && h > 0 && (w != g_app.w || h != g_app.h)) {
             g_app.w = w; g_app.h = h;
             if (app_render(w, h)) {
@@ -526,7 +501,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (snap && *snap) snap_window(hwnd, snap);
         }
         /* hx 轮询(every Ns); webkit 路径由注入脚本自理 */
-        if (!g_use_webkit) poll_tick();
+        poll_tick();
         /* 过渡动画推进; 返回 1 表示仍在跑 —— 继续帧循环 */
         if (hn_context_anim_tick(g_app.ctx, 16.0f)) {
             free(g_app.px);
@@ -538,7 +513,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: {
         /* 回车提交: input 上按 Enter → 自身 → 祖先 → 最近容器第一个
            hx-post/get 载体(与 native 引擎语义一致) */
-        if (wp == VK_RETURN && g_focus && !g_use_webkit) {
+        if (wp == VK_RETURN && g_focus) {
             hn_node *carrier = hn_node_form_carrier(g_focus);
             if (carrier) {
                 const char *url = hn_node_attr(carrier, "hx-post") ? hn_node_attr(carrier, "hx-post")
@@ -550,7 +525,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
-        if (g_use_webkit) hnwebview_close();
         PostQuitMessage(0);
         return 0;
     }
@@ -744,7 +718,6 @@ int main(int argc, char **argv) {
     g_tb.metrics = tb_metrics;
 
     /* 渲染器声明: hn-renderer=webkit 显式兜底(绝不静默切换) */
-    g_use_webkit = wants_webkit(html);
 
     if (probe) {
         int rc = probe_mode(ctx, W, H);
@@ -788,40 +761,31 @@ int main(int argc, char **argv) {
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
-    /* 首帧: 渲染器双分支 —— webkit 兜底挂 WebView2, native 走 hnsoft */
-    if (g_use_webkit) {
-        if (!hnwebview_open(hwnd, html, css, g_store_id)) {
-            fprintf(stderr, "hnwin: WebView2 兜底启动失败\n");
-            return 1;
-        }
-    } else {
-        if (!app_render(W, H)) { fprintf(stderr, "hnwin: 首帧渲染失败\n"); return 1; }
-        if (!man.transparent) {
-            HDC hdc = GetDC(hwnd);
-            BITMAPINFO bi;
-            memset(&bi, 0, sizeof(bi));
-            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bi.bmiHeader.biWidth = W;
-            bi.bmiHeader.biHeight = -H;
-            bi.bmiHeader.biPlanes = 1;
-            bi.bmiHeader.biBitCount = 32;
-            bi.bmiHeader.biCompression = BI_RGB;
-            g_app.dib = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, (void **)&g_app.dib_bits, NULL, 0);
-            ReleaseDC(hwnd, hdc);
-        }
-        app_present(hwnd);
-        run_load_actions(); /* hx-trigger="load" 立即执行一次 */
+    /* 首帧: 单一渲染路径(C99 引擎 → hnsoft → DIB)。不再有 webview 分支。 */
+    if (!app_render(W, H)) { fprintf(stderr, "hnwin: 首帧渲染失败\n"); return 1; }
+    if (!man.transparent) {
+        HDC hdc = GetDC(hwnd);
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof(bi));
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = W;
+        bi.bmiHeader.biHeight = -H;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        g_app.dib = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, (void **)&g_app.dib_bits, NULL, 0);
+        ReleaseDC(hwnd, hdc);
     }
+    app_present(hwnd);
+    run_load_actions(); /* hx-trigger="load" 立即执行一次 */
 
     /* console 输出 UTF-8(命中 id 可能是中文), 否则终端按本地代码页乱码 */
     SetConsoleOutputCP(CP_UTF8);
     printf("[hnwin] 窗口已开: %s (%dx%d)%s%s\n",
            man.title && man.title[0] ? man.title : "hnwin", W, H,
-           g_use_webkit ? " [webkit 兜底]" : "",
            man.transparent ? " 透明背板" : "");
-    if (!g_use_webkit)
-        printf("[hnwin] 文本: %s\n", hnsoft_font_loaded()
-               ? "FreeType 已加载(微软雅黑)" : "无字体(等宽估算, 位图不含字形)");
+    printf("[hnwin] 文本: %s\n", hnsoft_font_loaded()
+           ? "FreeType 已加载(微软雅黑)" : "无字体(等宽估算, 位图不含字形)");
     fflush(stdout);
     free(title_w);
 

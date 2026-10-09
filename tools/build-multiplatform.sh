@@ -12,6 +12,7 @@
 # 运行时产物: dist/hnweb-*(tools/hnweb.h 门面的平台实现)
 #   hnweb-linux-x86_64 / hnweb-linux-aarch64  X11 运行期 dlopen, 零编译期依赖
 #   hnweb-windows-x86_64                      Win32(hnwin.c 收编为门面实现)
+#   hnweb-macos-arm64                         纯 C99 壳(dlopen AppKit + objc_msgSend)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -138,12 +139,11 @@ echo
 echo "Windows (mingw 静态, HN_NO_TEXT):"
 build "hncore-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
 
-# Windows 运行时: Win32 窗口 + hnsoft 软件光栅 + sys:// 系统桥 + WebView2 兜底。
+# Windows 运行时: Win32 窗口 + hnsoft 软件光栅 + sys:// 系统桥(C99 单一路径)。
 # 需要链接 win32 系统库(user32/gdi32/ole32/oleaut32/shell32)。
-# 这三个文件(hnwin.c / sysbridge.c / hnwebview.c)此前**不在任何构建入口里** ——
-# 提交了却从未被编译, 所以 hnwebview.c 的 COM vtable 类型错误能一直留着。
+# hnwebview.c(WebView2 兜底)已删除 —— 本项目只走 C99 引擎一条渲染路径。
 # 接进来之后交叉编译立刻暴露它们。
-WIN_RT=(tools/hnwin.c tools/sysbridge.c tools/hnwebview.c
+WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
@@ -175,6 +175,22 @@ build "hnweb-linux-x86_64"  "x86_64-linux-musl"  "" "-DHN_NO_TEXT" \
       "" "${LINUX_RT[@]}"
 build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
       "" "${LINUX_RT[@]}"
+
+# macOS 运行时: 纯 C99 窗口壳(dlopen + objc_msgSend, 零 ObjC/Swift/.m 文件)。
+# 与 hnwin(Windows) / hnweb_linux 同一条管线, 换的只是窗口/事件/像素搬运层。
+# 无需链接任何 framework: AppKit/CoreGraphics/objc 全部经 dlopen+dlsym 使用
+# (这也正是"零平台依赖"的字面含义 —— 连链接期都不需要它们)。
+# 源不含 hncore.c(那是 CLI 的 main; 壳自带 main, 两份即重复定义 ——
+# 与 hnweb-linux 目标同一理由)。
+MAC_RT=(tools/hnweb_macos.c
+        Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+        Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
+        Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+        Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
+        Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
+        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+        Sources/CHtmlNative/hnsoft.c)
+build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 
 # Windows 门面运行时: tools/hnweb.h 门面的 Windows 平台实现(hnwin.c 的收编版)。
 # 源 = tools/hnweb_win.c + 与 hnweb-linux 目标同一套引擎核心(含 hnsoft.c);
