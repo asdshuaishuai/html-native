@@ -1,0 +1,609 @@
+/* hn_rt.c — 公共运行时层实现(单源, 三平台共享)
+ *
+ * 全部逻辑曾散落在 hnweb_macos.c / hnweb_linux.c / hnwin.c / hn_daemon.c
+ * 各自的一份(实测重复: read_all×3, hx_perform×3, sys_fragment×2, store×2)。
+ * 这里收敛为一份; 平台壳只留 hn_platform.h 的实现 + ~150 行主循环。
+ *
+ * 依赖: 引擎(Sources/CHtmlNative) + hnsoft(软件光栅)。
+ * 不依赖任何平台 API —— 平台无关是这一层的存在理由。
+ */
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#include "hn_rt.h"
+
+/* ---------------- 结构 ---------------- */
+
+struct hn_rt {
+    hn_context *ctx;
+    int w, h;
+    int transparent;
+    unsigned char *bgra;        /* 预乘 BGRA(平台 blit 的直接输入) */
+    hn_node *hover;
+    hn_node *focus;
+    char id[128];              /* store 隔离键 */
+    /* 轮询表(hx-trigger="every Ns") */
+    struct { hn_node *node; double due, sec; } polls[16];
+    int poll_n;
+    int poll_built;
+};
+
+/* ---------------- 文件读取 / 资产后端 ---------------- */
+
+typedef struct { char *path; char *data; size_t len; } asset_ent;
+static asset_ent g_assets[64];
+static int g_asset_n;
+
+static char *read_all(const char *path, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) { fclose(f); return NULL; }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = 0;
+    *len = got;
+    return buf;
+}
+
+static const char *asset_load(void *ctx, const char *path, size_t *len) {
+    (void)ctx;
+    for (int i = 0; i < g_asset_n; i++)
+        if (!strcmp(g_assets[i].path, path)) { *len = g_assets[i].len; return g_assets[i].data; }
+    size_t n = 0;
+    char *d = read_all(path, &n);
+    if (!d) return NULL;
+    if (g_asset_n < 64) {
+        g_assets[g_asset_n].path = strdup(path);
+        g_assets[g_asset_n].data = d;
+        g_assets[g_asset_n].len = n;
+        g_asset_n++;
+    }
+    *len = n;
+    return d;
+}
+
+static const hn_asset_backend g_assets_be = { NULL, asset_load };
+
+/* <link rel=stylesheet> 内联(引擎不做 I/O; 相对 cwd —— 调用方先 chdir 文档目录) */
+static char *load_css_links(const char *html, size_t *out_len) {
+    const char *p = html;
+    char *out = NULL;
+    size_t cap = 0, used = 0;
+    while ((p = strstr(p, "<link")) != NULL) {
+        const char *rel = strstr(p, "stylesheet");
+        const char *href = strstr(p, "href=");
+        const char *tag_end = strchr(p, '>');
+        if (rel && href && tag_end && href < tag_end) {
+            char q = href[5];
+            if (q == '"' || q == '\'') {
+                const char *v = href + 6;
+                const char *ve = strchr(v, q);
+                if (ve && ve < tag_end) {
+                    size_t vl = (size_t)(ve - v);
+                    char path[1024];
+                    if (vl + 1 < sizeof(path)) {
+                        memcpy(path, v, vl);
+                        path[vl] = 0;
+                        size_t cl = 0;
+                        char *css = read_all(path, &cl);
+                        if (css) {
+                            size_t need = used + cl + 2;
+                            if (need > cap) { cap = need * 2 + 256; out = (char *)realloc(out, cap); }
+                            if (out) { memcpy(out + used, css, cl); used += cl; out[used++] = '\n'; }
+                            free(css);
+                        }
+                    }
+                }
+            }
+        }
+        p = tag_end ? tag_end : p + 5;
+    }
+    if (out) out[used] = 0;
+    *out_len = used;
+    return out;
+}
+
+/* ---------------- 文本后端(FreeType; 无则引擎等宽估算) ---------------- */
+
+static float tb_measure(void *ctx, const hn_font_desc *font, const char *utf8, size_t len) {
+    (void)ctx;
+    return hnsoft_measure(font, utf8, len);
+}
+static void tb_metrics(void *ctx, const hn_font_desc *font,
+                       float *ascent, float *descent, float *leading) {
+    (void)ctx;
+    hnsoft_metrics(font, ascent, descent, leading);
+}
+static hn_text_backend g_tb = { NULL, tb_measure, tb_metrics };
+
+/* ---------------- sys:// 桥(单源) ---------------- */
+
+static char *store_path(const char *store_id) {
+    const char *home = getenv("HOME");
+    if (!home) return NULL;
+    char *p = (char *)malloc(strlen(home) + strlen(store_id) + 64);
+    if (!p) return NULL;
+    sprintf(p, "%s/.html-native/store/%s.json", home, store_id);
+    return p;
+}
+
+int hn_rt_store_get(const char *store_id, const char *key, char *out, size_t cap) {
+    char *sp = store_path(store_id);
+    if (!sp) return 0;
+    size_t n = 0;
+    char *d = read_all(sp, &n);
+    free(sp);
+    if (!d) return 0;
+    char pat[256];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(d, pat);
+    int found = 0;
+    if (p && (p = strchr(p + strlen(pat), ':')) != NULL) {
+        p++;
+        while (*p == ' ') p++;
+        if (*p == '"') {
+            p++;
+            size_t i = 0;
+            while (*p && *p != '"' && i + 1 < cap) out[i++] = *p++;
+            out[i] = 0;
+            found = 1;
+        }
+    }
+    free(d);
+    return found;
+}
+
+int hn_rt_store_set(const char *store_id, const char *key, const char *val) {
+    char *sp = store_path(store_id);
+    if (!sp) return 0;
+    char *obj = NULL;
+    size_t obj_n = 0, cap = 4096;
+    obj = (char *)malloc(cap);
+    if (!obj) { free(sp); return 0; }
+    obj[0] = 0;
+    int have_key = 0;
+    size_t n = 0;
+    char *d = read_all(sp, &n);
+    if (d) {
+        const char *p = d;
+        while (*p) {
+            while (*p && (*p == ' ' || *p == '{' || *p == ',' || *p == '\n')) p++;
+            if (*p != '"') break;
+            const char *ks = ++p;
+            while (*p && *p != '"') p++;
+            size_t kl = (size_t)(p - ks);
+            if (*p) p++;
+            while (*p && *p != ':') p++;
+            if (*p) p++;
+            while (*p == ' ') p++;
+            if (*p != '"') break;
+            const char *vs = ++p;
+            while (*p && *p != '"') p++;
+            size_t vl = (size_t)(p - vs);
+            if (*p) p++;
+            int is_t = (kl == strlen(key) && !strncmp(ks, key, kl));
+            const char *wv = is_t ? val : vs;
+            size_t wl = is_t ? strlen(val) : vl;
+            while (obj_n + kl + wl + 8 >= cap) { cap *= 2; obj = (char *)realloc(obj, cap); }
+            if (!obj) { free(d); free(sp); return 0; }
+            if (obj_n) obj[obj_n++] = ',';
+            obj_n += (size_t)snprintf(obj + obj_n, cap - obj_n, "\"%.*s\":\"%.*s\"",
+                                      (int)kl, ks, (int)wl, wv);
+            if (is_t) have_key = 1;
+        }
+        free(d);
+    }
+    if (!have_key) {
+        while (obj_n + strlen(key) + strlen(val) + 8 >= cap) { cap *= 2; obj = (char *)realloc(obj, cap); }
+        if (!obj) { free(sp); return 0; }
+        if (obj_n) obj[obj_n++] = ',';
+        obj_n += (size_t)snprintf(obj + obj_n, cap - obj_n, "\"%s\":\"%s\"", key, val);
+    }
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", sp);
+    char *sl = strrchr(dir, '/');
+    if (sl) { *sl = 0; mkdir(dir, 0755); }
+    FILE *f = fopen(sp, "wb");
+    int ok = 0;
+    if (f) { fprintf(f, "{%s}", obj); fclose(f); ok = 1; }
+    free(obj);
+    free(sp);
+    return ok;
+}
+
+static int qparam(const char *q, const char *key, char *out, size_t cap) {
+    if (!q) return 0;
+    size_t kl = strlen(key);
+    const char *p = q;
+    while (*p) {
+        while (*p == '&' || *p == '?') p++;
+        if (!strncmp(p, key, kl) && p[kl] == '=') {
+            const char *v = p + kl + 1;
+            size_t i = 0;
+            while (*v && *v != '&' && i + 1 < cap) out[i++] = *v++;
+            out[i] = 0;
+            return 1;
+        }
+        while (*p && *p != '&') p++;
+    }
+    return 0;
+}
+
+static void esc_html(const char *s, char *out, size_t cap) {
+    size_t i = 0;
+    for (; *s && i + 7 < cap; s++) {
+        switch (*s) {
+        case '<': memcpy(out + i, "&lt;", 4); i += 4; break;
+        case '>': memcpy(out + i, "&gt;", 4); i += 4; break;
+        case '&': memcpy(out + i, "&amp;", 5); i += 5; break;
+        default: out[i++] = *s;
+        }
+    }
+    out[i] = 0;
+}
+
+char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *store_id) {
+    if (!url || strncmp(url, "sys://", 6)) return NULL;
+    const char *route = url + 6;
+    const char *q = strchr(route, '?');
+    char key[256] = { 0 }, val[1024] = { 0 };
+    char *out = (char *)malloc(4096);
+    if (!out) return NULL;
+    if (!strncmp(route, "store/get", 9)) {
+        if (qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key))) {
+            char v[1024] = { 0 };
+            int got = hn_rt_store_get(store_id, key, v, sizeof(v));
+            char ev[2200];
+            esc_html(got ? v : "", ev, sizeof(ev));
+            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
+        } else snprintf(out, 4096, "<span>missing key</span>");
+    } else if (!strncmp(route, "store/set", 9)) {
+        int hk = qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key));
+        int hv = qparam(q, "value", val, sizeof(val)) || qparam(form_body, "value", val, sizeof(val));
+        if (hk && hv) {
+            hn_rt_store_set(store_id, key, val);
+            char ev[2200];
+            esc_html(val, ev, sizeof(ev));
+            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
+        } else snprintf(out, 4096, "<span>missing key/value</span>");
+    } else if (!strncmp(route, "store/count", 11)) {
+        snprintf(out, 4096, "<span>1</span>");
+    } else if (!strncmp(route, "info", 4)) {
+        snprintf(out, 4096,
+                 "<div style=\"font-size:13;color:#e8eaf0\">html-native (C99)</div>"
+                 "<div style=\"font-size:11;color:#6b7386\">engine + hnsoft, no webview</div>");
+    } else {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+/* ---------------- htmx 执行 ---------------- */
+
+static hn_node *hx_carrier(hn_node *n) {
+    if (!n) return NULL;
+    if (hn_node_attr(n, "hx-get") || hn_node_attr(n, "hx-post")) return n;
+    hn_node *a = hn_node_ancestor_with_attr(n, "hx-get");
+    hn_node *b = hn_node_ancestor_with_attr(n, "hx-post");
+    return a ? a : b;
+}
+
+static int hx_perform(hn_rt *rt, hn_node *carrier) {
+    const char *post = hn_node_attr(carrier, "hx-post");
+    const char *get = hn_node_attr(carrier, "hx-get");
+    const char *url = post ? post : get;
+    if (!url) return 0;
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    char form[4096];
+    form[0] = 0;
+    hn_doc_form_encode(doc, form, sizeof(form));
+    char *frag = hn_rt_sys_fragment(url, form, rt->id);
+    if (!frag) return 0;
+    const char *tid = hn_node_attr(carrier, "hx-target");
+    if (!tid || !tid[0] || !strcmp(tid, "this")) tid = hn_node_attr(carrier, "id");
+    if (!tid || !tid[0]) { free(frag); return 0; }
+    const char *sm = hn_node_attr(carrier, "hx-swap");
+    hn_swap_mode m = HN_SWAP_INNER;
+    if (sm) {
+        if (!strcmp(sm, "outerHTML")) m = HN_SWAP_OUTER;
+        else if (!strcmp(sm, "append") || !strcmp(sm, "beforeend")) m = HN_SWAP_APPEND;
+        else if (!strcmp(sm, "prepend") || !strcmp(sm, "afterbegin")) m = HN_SWAP_PREPEND;
+    }
+    int ok = hn_doc_swap(doc, tid, m, frag, strlen(frag));
+    free(frag);
+    if (ok) hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+    return ok;
+}
+
+/* 启动动作: hx-trigger 含 "load" 的元素立即执行一次 */
+static void run_load_actions(hn_rt *rt) {
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    for (int i = 0;; i++) {
+        const char *id = NULL;
+        if (!hn_doc_load_at(doc, i, &id)) break;
+        hn_node *n = hn_doc_find_by_id(doc, id);
+        if (n) hx_perform(rt, n);
+    }
+    rt->poll_built = 0;   /* 内容变了, 轮询表重建 */
+}
+
+/* ---------------- 渲染 ---------------- */
+
+static int rt_render(hn_rt *rt) {
+    hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+    const hn_display_list *dl = hn_context_display_list(rt->ctx);
+    if (!dl) return 0;
+    hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
+    unsigned char *rgba = hnsoft_render(dl, rt->w, rt->h, bg);
+    if (!rgba) return 0;
+    int n = rt->w * rt->h;
+    free(rt->bgra);
+    rt->bgra = (unsigned char *)malloc((size_t)n * 4);
+    if (!rt->bgra) { free(rgba); return 0; }
+    /* RGBA 非预乘 → BGRA 预乘(三平台 blit 的统一约定) */
+    for (int i = 0; i < n; i++) {
+        unsigned char r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
+        if (a != 255) { r = (unsigned char)((r * a) / 255); g = (unsigned char)((g * a) / 255); b = (unsigned char)((b * a) / 255); }
+        rt->bgra[i * 4] = b; rt->bgra[i * 4 + 1] = g; rt->bgra[i * 4 + 2] = r; rt->bgra[i * 4 + 3] = a;
+    }
+    free(rgba);
+    return 1;
+}
+
+/* ---------------- 公开 API ---------------- */
+
+hn_rt *hn_rt_open(const hn_rt_desc *d) {
+    if (!d || !d->html) return NULL;
+    hn_rt *rt = (hn_rt *)calloc(1, sizeof(*rt));
+    if (!rt) return NULL;
+    snprintf(rt->id, sizeof(rt->id), "%s", d->id ? d->id : "default");
+    rt->w = d->w > 0 ? d->w : 480;
+    rt->h = d->h > 0 ? d->h : 700;
+
+    hn_doc *doc = hn_parse_html(d->html, d->html_len);
+    if (!doc) { free(rt); return NULL; }
+    hn_doc_autoid_hx(doc);
+    rt->ctx = hn_context_create();
+    hn_context_set_doc(rt->ctx, doc);
+    hn_context_set_assets(rt->ctx, &g_assets_be);
+
+    hn_manifest m;
+    memset(&m, 0, sizeof(m));
+    hn_doc_manifest(doc, &m);
+    if (m.w > 0) rt->w = m.w;
+    if (m.h > 0) rt->h = m.h;
+    rt->transparent = (m.transparent == 1);
+
+    if (d->css && d->css_len) hn_context_add_sheet(rt->ctx, hn_parse_css(d->css, d->css_len));
+    {
+        /* 文档里的 <link rel=stylesheet> 内联(相对 cwd) */
+        size_t cl = 0;
+        char *css = load_css_links(d->html, &cl);
+        if (css && cl) hn_context_add_sheet(rt->ctx, hn_parse_css(css, cl));
+        free(css);
+    }
+    if (!rt_render(rt)) { hn_rt_close(rt); return NULL; }
+    run_load_actions(rt);
+    rt_render(rt);
+    return rt;
+}
+
+void hn_rt_close(hn_rt *rt) {
+    if (!rt) return;
+    if (rt->ctx) hn_context_destroy(rt->ctx);
+    free(rt->bgra);
+    free(rt);
+}
+
+int hn_rt_render(hn_rt *rt, const char *html, size_t len) {
+    if (!rt || !html) return 0;
+    hn_doc *doc = hn_parse_html(html, len);
+    if (!doc) return 0;
+    hn_doc_autoid_hx(doc);
+    hn_context_set_doc(rt->ctx, doc);
+    rt->poll_built = 0;
+    int ok = rt_render(rt);
+    if (ok) { run_load_actions(rt); rt_render(rt); }
+    return ok;
+}
+
+int hn_rt_reflow(hn_rt *rt) { return rt ? rt_render(rt) : 0; }
+
+const unsigned char *hn_rt_pixels(hn_rt *rt) { return rt ? rt->bgra : NULL; }
+int hn_rt_width(hn_rt *rt) { return rt ? rt->w : 0; }
+int hn_rt_height(hn_rt *rt) { return rt ? rt->h : 0; }
+
+static double now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
+    if (!rt) return -1;
+    if (repaint) *repaint = 0;
+    int anim = hn_context_anim_tick(rt->ctx, dt_ms);
+    if (anim) { rt_render(rt); if (repaint) *repaint = 1; }
+
+    /* 轮询表(懒建: 内容变化后重建) */
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    if (!rt->poll_built) {
+        rt->poll_n = 0;
+        double now = now_s();
+        for (int i = 0;; i++) {
+            const char *id = NULL;
+            int ms = 0;
+            if (!hn_doc_poll_at(doc, i, &id, &ms)) break;
+            if (rt->poll_n >= 16) break;
+            hn_node *n = hn_doc_find_by_id(doc, id);
+            if (n) {
+                double sec = ms > 0 ? ms / 1000.0 : 1.0;
+                if (sec < 0.05) sec = 0.05;
+                rt->polls[rt->poll_n].node = n;
+                rt->polls[rt->poll_n].due = now + sec;
+                rt->polls[rt->poll_n].sec = sec;
+                rt->poll_n++;
+            }
+        }
+        rt->poll_built = 1;
+    }
+    double now = now_s();
+    double next = -1;
+    for (int i = 0; i < rt->poll_n; i++) {
+        if (now >= rt->polls[i].due) {
+            if (hx_perform(rt, rt->polls[i].node)) { rt_render(rt); if (repaint) *repaint = 1; }
+            rt->polls[i].due = now + rt->polls[i].sec;
+        }
+        double wait = rt->polls[i].due - now;
+        if (next < 0 || wait < next) next = wait;
+    }
+    if (anim) return 16;                        /* 动画在跑: 16ms 一帧 */
+    if (next > 0) return (int)(next * 1000.0);  /* 下一个轮询 */
+    return anim ? 16 : -1;                      /* 无事可睡 */
+}
+
+int hn_rt_pointer_move(hn_rt *rt, float x, float y) {
+    if (!rt) return 0;
+    hn_node *n = hn_context_hit_node(rt->ctx, x, y);
+    if (n == rt->hover) return 0;
+    rt->hover = n;
+    hn_context_set_hover(rt->ctx, n);
+    return rt_render(rt);
+}
+
+int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
+    if (!rt || !down || button != 0) return 0;
+    const char *id = hn_context_hit_test(rt->ctx, x, y);
+    hn_node *n = hn_context_hit_node(rt->ctx, x, y);
+    printf("[click] (%.0f,%.0f) -> <%s id=%s>\n", x, y,
+           n ? hn_node_tag(n) : "?", id ? id : "(none)");
+    rt->focus = n ? hn_node_ancestor_input(n) : NULL;
+    if (rt->focus) hn_context_set_focus(rt->ctx, rt->focus);
+    hn_node *carrier = hx_carrier(n);
+    if (carrier) {
+        const char *url = hn_node_attr(carrier, "hx-post") ? hn_node_attr(carrier, "hx-post")
+                                                          : hn_node_attr(carrier, "hx-get");
+        printf("[hx] %s\n", url ? url : "?");
+        fflush(stdout);
+        if (hx_perform(rt, carrier)) return rt_render(rt);
+    }
+    return 0;
+}
+
+int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {
+    (void)dx;
+    if (!rt) return 0;
+    hn_node *n = hn_context_hit_node(rt->ctx, x, y);
+    if (n && hn_node_scroll_by(n, 0, -dy * 18.0f)) return rt_render(rt);
+    return 0;
+}
+
+int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8) {
+    if (!rt || !down) return 0;
+    hn_node *target = rt->focus ? rt->focus : hn_doc_root(hn_context_doc(rt->ctx));
+    if (key == 2 /*RETURN*/) {
+        hn_node *carrier = hx_carrier(target);
+        if (carrier && hx_perform(rt, carrier)) return rt_render(rt);
+    }
+    (void)utf8;
+    return 0;
+}
+
+char *hn_rt_dom(hn_rt *rt, int max_depth) {
+    if (!rt) return NULL;
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    hn_node *root = hn_doc_root(doc);
+    if (!root) return NULL;
+    size_t cap = 8192, n = 0;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    /* 深度优先缩进树 */
+    typedef struct { hn_node *n; int d; } st_t;
+    st_t stack[256];
+    int sp = 0;
+    stack[sp].n = root; stack[sp].d = 0; sp++;
+    while (sp > 0) {
+        st_t cur = stack[--sp];
+        if (hn_node_tag(cur.n)) {
+            const char *tag = hn_node_tag(cur.n);
+            const char *id = hn_node_attr(cur.n, "id");
+            const char *cls = hn_node_attr(cur.n, "class");
+            if (cur.d <= max_depth) {
+                while (n + 256 >= cap) { cap *= 2; out = (char *)realloc(out, cap); if (!out) return NULL; }
+                n += (size_t)snprintf(out + n, cap - n, "%*s<%s%s%s%s>\n",
+                                      cur.d * 2, "", tag ? tag : "?",
+                                      id ? " id=" : "", id ? id : "",
+                                      cls ? " class=" : "");
+                if (cls) {
+                    /* class 值可能含空格, 追加 */
+                    size_t l = strlen(out);
+                    n = l + (size_t)snprintf(out + l, cap - l, "\"%s\"", cls);
+                }
+            }
+            for (hn_node *c = hn_node_first_child(cur.n); c; c = hn_node_next_sibling(c))
+                if (sp < 256) { stack[sp].n = c; stack[sp].d = cur.d + 1; sp++; }
+        }
+    }
+    out[n] = 0;
+    return out;
+}
+
+char *hn_rt_text(hn_rt *rt, const char *element_id) {
+    if (!rt || !element_id) return NULL;
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    hn_node *n = hn_doc_find_by_id(doc, element_id);
+    if (!n) return NULL;
+    char *out = (char *)malloc(4096);
+    if (!out) return NULL;
+    size_t tn = hn_node_text_content(n, out, 4096);
+    out[tn < 4096 ? tn : 4095] = 0;
+    return out;
+}
+
+int hn_rt_cmd_count(hn_rt *rt) {
+    if (!rt) return 0;
+    const hn_display_list *dl = hn_context_display_list(rt->ctx);
+    return dl ? dl->count : 0;
+}
+
+int hn_rt_synthetic(hn_rt *rt, const char *kind, const char *target) {
+    if (!rt || !kind) return 0;
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    hn_node *n = target ? hn_doc_find_by_id(doc, target) : hn_doc_root(doc);
+    if (!n) return 0;
+    if (!strcmp(kind, "click")) {
+        hn_node *carrier = hx_carrier(n);
+        if (carrier && hx_perform(rt, carrier)) { rt_render(rt); return 1; }
+    }
+    return 0;
+}
+
+int hn_rt_shot(hn_rt *rt, const char *path) {
+    if (!rt || !path) return 0;
+    rt_render(rt);
+    const hn_display_list *dl = hn_context_display_list(rt->ctx);
+    if (!dl) return 0;
+    unsigned char *rgba = hnsoft_render(dl, rt->w, rt->h, rt->transparent ? 0x00000000u : 0x0B0E13FFu);
+    if (!rgba) return 0;
+    size_t pn = 0;
+    unsigned char *png = hnsoft_encode_png(rgba, rt->w, rt->h, &pn);
+    free(rgba);
+    if (!png) return 0;
+    FILE *f = fopen(path, "wb");
+    if (!f) { free(png); return 0; }
+    fwrite(png, 1, pn, f);
+    fclose(f);
+    free(png);
+    return 1;
+}

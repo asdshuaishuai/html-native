@@ -191,6 +191,44 @@ MAC_RT=(tools/hnweb_macos.c
         Sources/CHtmlNative/hnsoft.c)
 build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 
+
+# ---------------- 新分层架构(引擎 → hn_rt → 平台 API) ----------------
+# app/hn_app.c 是唯一主循环; 链接不同平台实现 = 该平台的应用。
+# headless 在本机可跑(CI/agent 无显示环境), macOS 同样可跑。
+RT_SRC="rt/hn_rt.c"
+ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+            Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
+            Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
+            Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
+            Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
+            Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+            Sources/CHtmlNative/hnsoft.c)
+RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform $FT_INC"
+
+printf '  %-22s ' "hnapp-headless"
+if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_VERSION="\"$VERSION\"" \
+        app/hn_app.c $RT_SRC platform/hnp_headless.c "${ENGINE_SRC[@]}" \
+        -L/opt/homebrew/lib -lfreetype -lm -o "$OUT/hnapp-macos-headless" 2>/tmp/hn_build_err.txt; then
+    printf '✓  hnapp-macos-headless (%s KB) 无 GUI\n' "$(($(wc -c < "$OUT/hnapp-macos-headless") / 1024))"
+else
+    printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
+fi
+printf '  %-22s ' "hnapp-macos-arm64"
+if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_VERSION="\"$VERSION\"" \
+        app/hn_app.c $RT_SRC platform/hnp_macos.c "${ENGINE_SRC[@]}" \
+        -L/opt/homebrew/lib -lfreetype -lm -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
+    printf '✓  hnapp-macos-arm64 (%s KB) 真窗口\n' "$(($(wc -c < "$OUT/hnapp-macos-arm64") / 1024))"
+else
+    printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
+fi
+printf '  %-22s ' "hnapp-linux-x86_64"
+if "$ZIG" cc -target x86_64-linux-musl -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_NO_TEXT -DHN_VERSION="\"$VERSION\"" \
+        app/hn_app.c $RT_SRC platform/hnp_linux.c "${ENGINE_SRC[@]}" \
+        -lm -ldl -o "$OUT/hnapp-linux-x86_64" 2>/tmp/hn_build_err.txt; then
+    printf '✓  hnapp-linux-x86_64 (%s KB) dlopen X11\n' "$(($(wc -c < "$OUT/hnapp-linux-x86_64") / 1024))"
+else
+    printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
+fi
 echo
 
 # ---------------- 自检 ----------------
