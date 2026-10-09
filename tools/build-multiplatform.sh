@@ -22,6 +22,16 @@ VERSION="${VERSION:-0.1.0}"
 cd "$ROOT"
 mkdir -p "$OUT"
 
+# WASM 缝(docs/media-design.md §7): wasm3 最小 11 源(vendor 快照, MIT, 只读)
+# + 引擎封装 hn_wasm.c。纯 C99 零外部依赖 → 三平台无条件入列, 无条件编译。
+# 不入列的: m3_api_libc/wasi/uvwasi/meta_wasi/tracer(不做 WASI)、
+# m3_snapshot/m3_deterministic/m3_xxh64(实测可去; m3_info/m3_module 不可去)。
+WASM3_SRC=(vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c vendor/wasm3/m3_compile.c
+           vendor/wasm3/m3_core.c vendor/wasm3/m3_env.c vendor/wasm3/m3_exec.c
+           vendor/wasm3/m3_function.c vendor/wasm3/m3_info.c vendor/wasm3/m3_module.c
+           vendor/wasm3/m3_parse.c vendor/wasm3/m3_validate.c)
+WASM_SRC=("${WASM3_SRC[@]}" Sources/CHtmlNative/hn_wasm.c)
+
 SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
      Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
      Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
@@ -30,6 +40,7 @@ SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
      Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c \
      Sources/CHtmlNative/hnsoft.c)
+SRC+=("${WASM_SRC[@]}")
 
 # cairo 绘制后端的额外源。与 hnsoft **同签名**(hncairo_render vs hnsoft_render),
 # 所以换后端只需换链接目标, 调用方一行不改 —— 这正是"一个绘制框架喂所有平台"
@@ -45,7 +56,7 @@ CAIRO_SRC=(Sources/CHtmlNative/hn_cairo.c)
 FT_INC=""
 if [ -d /opt/homebrew/include/freetype2 ]; then FT_INC="-I/opt/homebrew/include/freetype2"; fi
 CFLAGS=(-std=c99 -O2 -Wall -ffp-contract=off -I Sources/CHtmlNative/include
-        -I Sources/CHtmlNative $FT_INC -DHN_VERSION="\"$VERSION\"")
+        -I Sources/CHtmlNative -I vendor/wasm3 $FT_INC -DHN_VERSION="\"$VERSION\"")
 
 # tag: <os>-<arch>
 build() {
@@ -152,6 +163,7 @@ WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
         Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
         Sources/CHtmlNative/hnsoft.c)
+WIN_RT+=("${WASM_SRC[@]}")
 
 WIN_LIBS="-luser32 -lgdi32 -lole32 -loleaut32 -lshell32"
 build "hnwin-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
@@ -173,6 +185,7 @@ LINUX_RT=(tools/hnweb_linux.c
           Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
           Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
           Sources/CHtmlNative/hnsoft.c)
+LINUX_RT+=("${WASM_SRC[@]}")
 build "hnweb-linux-x86_64"  "x86_64-linux-musl"  "" "-DHN_NO_TEXT" \
       "" "${LINUX_RT[@]}"
 build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
@@ -197,6 +210,7 @@ MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
         Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
         Sources/CHtmlNative/hnsoft.c)
+MAC_RT+=("${WASM_SRC[@]}")
 build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 
 
@@ -212,7 +226,8 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
             Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
             Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
             Sources/CHtmlNative/hnsoft.c)
-RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform $FT_INC"
+ENGINE_SRC+=("${WASM_SRC[@]}")
+RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3 $FT_INC"
 
 # QuickJS(hn_rt 的 JS 引擎): 构建期可选 —— 本机探测到才定义 HN_HAVE_QUICKJS。
 # homebrew 的 quickjs 是 keg-only: 头文件在 <opt>/include/quickjs/ 子目录,

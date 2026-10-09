@@ -194,6 +194,32 @@ void   hn_media_set_volume(hn_context *c, hn_node *n, float v);/* 钳制 0..1 */
 void   hn_media_set_muted(hn_context *c, hn_node *n, int muted);
 int    hn_media_state(hn_context *c, hn_node *n);              /* HN_MEDIA_* */
 
+/* ---- WASM(纯计算导出函数; docs/media-design.md §7) ----
+ *
+ * wasm3(vendor/wasm3, MIT 快照)封装: 解析 .wasm 字节 → 实例, 按名调用
+ * 导出函数。v1 只收纯计算: i32/f32/f64 参数与返回(值一律按 int32 进出,
+ * 引擎按模块导出签名转换); 不做 WASI、不做内存导出操作、不做表/间接调用。
+ * 与宿主同进程同步调用(m3_Call), 无线程。
+ */
+typedef struct hn_wasm hn_wasm;
+/* 解析+装载; 失败 NULL(错误一行 stderr)。字节由调用方持有, load 内部
+   复制一份(wasm3 模块在整个生命周期引用原始字节, 见 wasm3.h 的
+   ParseModule 注释 —— "data must be persistent during the lifetime")。 */
+hn_wasm *hn_wasm_load(const unsigned char *bytes, size_t n);
+/* 调用导出函数; args/out 均按 int32 进出(签名声明为 f32/f64/i64 时
+   引擎就地转换)。实参个数必须等于签名形参个数。找不到函数/签名不符/
+   陷阱/多返回值返回 0(结果不定), 成功返回 1。无返回值的导出把 *out 写 0。 */
+int  hn_wasm_call(hn_wasm *w, const char *fn,
+                  const int32_t *args, int n_args, int32_t *out);
+void hn_wasm_free(hn_wasm *w);
+
+/* 实例表(id→hn_wasm*): JS 桥寻址用(hnWasmLoad→id, hnWasmCall(id,..))。
+   表由 hn_wasm.c 持有, 容量 32; id = 表下标+1(1..32)。install 复用
+   hn_wasm_load(失败 -1); unload 幂等; by_id 对非法 id/空槽返回 NULL。 */
+int      hn_wasm_install(const unsigned char *bytes, size_t n);
+hn_wasm *hn_wasm_by_id(int id);
+void     hn_wasm_unload(int id);
+
 /* ---- Lottie(bodymovin)矢量动画 ----
  *
  * <img src="a.json" hn-lottie> 或任意元素 hn-lottie="a.json" 时,

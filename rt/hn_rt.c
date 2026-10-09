@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <dlfcn.h>
+#include <math.h>   /* NAN(hnWasmCall 失败返回值, 经 quickjs.h 的 JS_NAN) */
 /* statvfs 的声明: Linux/musl 头文件不自依赖, 必须显式包含 statvfs.h,
    否则 hnapp 的 musl 交叉报 incomplete type。macOS 侧走既有传递包含路径
    即可(实测 zig 精简 Darwin 头显式包含 mount.h 反而 u_int 裸奔报错)。 */
@@ -811,6 +812,64 @@ static JSValue js_hn_media_volume(JSContext *ctx, JSValueConst, int argc, JSValu
     return JS_UNDEFINED;
 }
 
+/* ---- WASM 桥(hnWasm*, 契约 §6/§7): 模块表在引擎侧(hn_wasm.c),
+   id = 表下标+1。失败返回 -1 / NaN, 不抛异常(与 hnMedia* 一致) ---- */
+
+/* hnWasmLoad(bytesOrPath) → id(≥1; 失败 -1)。bytes = ArrayBuffer/Uint8Array;
+   字符串按资产路径经资产后端读(引擎不做 I/O, 复用 hn_rt 的资产表)。
+   hn_wasm_load 内部复制字节, JS 侧缓冲生命周期无关。 */
+static JSValue js_hn_wasm_load(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewInt32(ctx, -1);
+    const unsigned char *bytes = NULL;
+    size_t n = 0;
+    if (JS_IsString(argv[0])) {
+        const char *path = JS_ToCString(ctx, argv[0]);
+        if (path) {
+            bytes = (const unsigned char *)asset_load(NULL, path, &n);
+            JS_FreeCString(ctx, path);
+        }
+    } else {
+        /* TypedArray(Uint8Array)→ 取后备 ArrayBuffer 的字节区间;
+           本身就是 ArrayBuffer 时直接取。都不是 → 清掉残留异常, 返回 -1。 */
+        size_t off = 0, view_len = 0, bpe = 0;
+        JSValue tab = JS_GetTypedArrayBuffer(ctx, argv[0], &off, &view_len, &bpe);
+        if (!JS_IsException(tab)) {
+            size_t total = 0;
+            uint8_t *buf = JS_GetArrayBuffer(ctx, &total, tab);
+            if (buf && view_len <= total && off <= total - view_len) {
+                bytes = buf + off;
+                n = view_len;
+            }
+            JS_FreeValue(ctx, tab);
+        } else {
+            JS_FreeValue(ctx, JS_GetException(ctx));   /* 桥不抛异常 */
+            bytes = JS_GetArrayBuffer(ctx, &n, argv[0]);
+        }
+    }
+    if (!bytes) {
+        JS_FreeValue(ctx, JS_GetException(ctx));       /* JS_GetArrayBuffer 的失败残留 */
+        return JS_NewInt32(ctx, -1);
+    }
+    return JS_NewInt32(ctx, hn_wasm_install(bytes, n));
+}
+
+/* hnWasmCall(id, fn, ...args) → i32 结果; 失败 NaN(契约 §6: args 按 Number→i32) */
+static JSValue js_hn_wasm_call(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 2 || argc - 2 > 64) return JS_NAN;
+    int32_t id = 0;
+    JS_ToInt32(ctx, &id, argv[0]);
+    const char *fn = JS_ToCString(ctx, argv[1]);
+    hn_wasm *w = fn ? hn_wasm_by_id(id) : NULL;
+    int32_t vals[64];
+    int na = 0;
+    for (int i = 2; i < argc; i++, na++)
+        JS_ToInt32(ctx, &vals[na], argv[i]);
+    int32_t out = 0;
+    int ok = (w && fn) ? hn_wasm_call(w, fn, vals, na, &out) : 0;
+    if (fn) JS_FreeCString(ctx, fn);
+    return ok ? JS_NewInt32(ctx, out) : JS_NAN;
+}
+
 /* JS 运行时表(按 scope_key 隔离; daemon 的不同应用用不同 key)。
    bridge 槽随上下文持有(opaque 指向它), 每次 eval 按 doc/ctx 刷新。 */
 #define JS_MAX_SCOPES 32
@@ -864,6 +923,10 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_media_duration, "hnMediaDuration", 1));
     JS_SetPropertyStr(ctx, global, "hnMediaVolume",
         JS_NewCFunction(ctx, js_hn_media_volume, "hnMediaVolume", 2));
+    JS_SetPropertyStr(ctx, global, "hnWasmLoad",
+        JS_NewCFunction(ctx, js_hn_wasm_load, "hnWasmLoad", 1));
+    JS_SetPropertyStr(ctx, global, "hnWasmCall",
+        JS_NewCFunction(ctx, js_hn_wasm_call, "hnWasmCall", 2));
     JS_FreeValue(ctx, global);
 
     size_t len = strlen(js);
