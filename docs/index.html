@@ -392,11 +392,11 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         </p>
       </div>
       <div class="card">
-        <h3>双渲染器</h3>
+        <h3>单一渲染路径</h3>
         <p>
-          默认自研引擎原生渲染；遇到 <code>grid</code>/<code>absolute</code>/<code>canvas</code>
-          等未实现构造，可声明 <code>hn-renderer=webkit</code> 交给系统内核兜底。
-          <strong>绝不静默切换</strong>，两条路径共用全部应用语义。
+          只有自研 C99 引擎这一条渲染路径 —— 没有 WebKit 兜底、没有 Swift。
+          <code>grid</code>/<code>canvas</code> 等能力边界如实写在 README,
+          音频/视频与 WASM 运行时缝正在落地（见 <code>docs/media-design.md</code>）。
         </p>
       </div>
     </div>
@@ -442,14 +442,14 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
 
     <div class="grid2">
       <div class="card">
-        <h3>1 · 构建与脚手架</h3>
-        <pre><span class="c"># 一次性构建（需 Xcode 命令行工具）</span>
-<span class="g">$</span> swift build
-<span class="g">$</span> alias hn=.build/debug/Hn
+        <h3>1 · 构建与运行</h3>
+        <pre><span class="c"># 一次性构建（只需 zig cc，无 Xcode 工程）</span>
+<span class="g">$</span> ZIG=zig bash tools/build-multiplatform.sh
+<span class="g">$</span> bash tools/build-daemon-cli.sh  <span class="c"># 产出 dist/hn-daemon + dist/hn</span>
 
-<span class="c"># 生成最小应用骨架</span>
-<span class="g">$</span> hn new myapp &amp;&amp; cd myapp
-<span class="g">$</span> hn dev app.html --css app.css</pre>
+<span class="c"># 打开你的第一个原生窗口</span>
+<span class="g">$</span> dist/hn-daemon &amp;
+<span class="g">$</span> dist/hn open myapp app.html --css app.css</pre>
       </div>
       <div class="card">
         <h3>2 · 改文件，窗口就变了</h3>

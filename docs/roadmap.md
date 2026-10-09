@@ -3,6 +3,9 @@
 > 版本: 1.0 · 日期: 2026-09-17（§1 数字为当日快照, 之后 absolute 定位/z-index/逐侧边框/
 > ellipsis/white-space/`:not()` 等已落地, 见 1.2 表内 ✅）· 状态: 规划中
 >
+> 注: §1 的 "Swift 运行时" 已在其后全量删除(c49cfbd 全量 C99) —— 现为
+> 引擎 + rt/hn_rt.c + platform/hnp_*.c 三层, 全部 C99, 见 README 代码地图。
+>
 > 本文档是 html-native 从当前原型(v0.1)演进到生产可用框架的
 > 深度规划。包含差距分析、竞品对标、分阶段路线图与架构演进。
 
@@ -15,10 +18,10 @@
 | 层 | 代码量 | 能力 |
 |---|---|---|
 | C99 引擎 | 6800+ 行 | HTML 解析 · CSS 级联 · flex/行内布局 · 绘制指令(8 种) · 动画插值 · Lottie 求值 · 网格变形 · PNG 解码 · 结构自检 |
-| macOS 运行时 | ~4100 行 Swift | CoreGraphics 落屏 · 图层合成(网格变形) · 窗口/弹窗/图层物化 · FreeType · JavaScriptCore · sys:// 桥 · hx-* · 流式视图 |
-| Linux 运行时 | ~2000 行 C | **M1+M2 已落地**: M1 窗口/渲染/expose/resize/点击命中/`--probe` 自检 + M2 **事件派发管道**(点击/键盘/滚轮/hover → 目标解析 → 带 id 冒泡 → hx-trigger 消费, 与 macOS 运行时同构)与**动画帧循环**(dt 推进过渡/@keyframes/Lottie/网格变形时钟, 空闲零唤醒)（`tools/hnweb_linux.c`, dlopen X11 + hnsoft, musl 静态交叉编译; Windows 侧 `tools/hnweb_win.c` 收编 hnwin 走同一 `tools/hnweb.h` 门面。仍缺: sys:// 桥、XIM 键入、交叉口径文本） |
+| ~~macOS 运行时(Swift)~~ 已删 | — | CoreGraphics 落屏 · 图层合成 · NSWindow/NSPanel 物化 · JavaScriptCore 已由现 C99 层接管: `tools/hnweb_macos.c` + `platform/hnp_macos.c`(dlopen AppKit/CoreGraphics, 纯 C99) · FreeType · QuickJS · sys:// 桥 · hx-* · 流式视图 |
+| Linux 运行时 | ~2000 行 C | **M1+M2 已落地**: M1 窗口/渲染/expose/resize/点击命中/`--probe` 自检 + M2 **事件派发管道**(点击/键盘/滚轮/hover → 目标解析 → 带 id 冒泡 → hx-trigger 消费, 与 macOS 运行时同构)与**动画帧循环**(dt 推进过渡/@keyframes/Lottie/网格变形时钟, 空闲零唤醒)（`tools/hnweb_linux.c`, dlopen X11 + hnsoft, musl 静态交叉编译; Windows 侧 `tools/hnwin.c`(Win32, 纯 C99)。仍缺: sys:// 桥、XIM 键入、交叉口径文本） |
 | 软件光栅器 | ~1400 行 C | SDF 圆角矩形 · 线性渐变 · 多边形扫描线 · 网格纹理映射 · **PNG 解码(自带 inflate)** · FreeType 文本 · PNG 编码 |
-| JS 运行时 | ~400 行 Swift | JavaScriptCore · DOM 桥 · 事件派发 |
+| ~~JS 运行时(Swift)~~ 已删 | — | JavaScriptCore 已由 `rt/hn_rt.c`(C99)接管: 内嵌 QuickJS · hnSetText/hnSetValue 桥 · daemon eval op |
 | 测试 | 1700+ 行 | 202 项断言 |
 | 示例 | 14 个 | 仪表盘 / 网页写法 / 轨迹面板 / 消息卡 / 输入控件 / Lottie / 透明背板 |
 
@@ -33,7 +36,7 @@
 | ~~`top/right/bottom/left`~~ ✅ | 已实现: 配合 position 使用 | — |
 | **增量渲染** | 每次变化触发全量重排——大文档不可用 | 引擎(C) |
 | ~~**真实事件系统**~~ ✅ | 已完成(v0.2): 统一派发管道 + 冒泡 + preventDefault + 键盘/焦点/输入 | — |
-| **组件模型** | 无可复用/可组合的组件、无生命周期钩子 | 运行时(Swift) + JS |
+| **组件模型** | 无可复用/可组合的组件、无生命周期钩子 | 引擎(C) + JS |
 | ~~**网络层**~~ ✅ | 已完成(v0.2): hn.fetch Promise + 主机白名单 + 错误传播 | — |
 | **表单** | 表单编码 + 回车提交已实现；仍无 form 元素 / validation | 引擎(C) + 运行时 |
 | ~~`text-overflow: ellipsis`~~ ✅ | 已实现 | — |

@@ -23,12 +23,12 @@ AI agent 可以生成这些 HTML 直接推给引擎成窗;人类也可以直接�
 
 ```bash
 cd html-native
-swift build                 # 一次性构建(需要 Xcode 命令行工具)
-alias hn=.build/debug/Hn    # 建议把 Hn 链到 PATH
+ZIG=zig bash tools/build-multiplatform.sh   # 一次性构建(只需 zig cc, 无 Xcode 工程)
+bash tools/build-daemon-cli.sh              # 产出 dist/hn-daemon(宿主) + dist/hn(CLI)
 
-hn new myapp                # 生成最小应用骨架
-cd myapp
-hn dev app.html --css app.css
+dist/hn-daemon &                            # 常驻宿主
+mkdir myapp && cd myapp                     # 应用即文件: 手写两个文件即可
+dist/hn open myapp app.html --css app.css
 ```
 
 窗口已经出现了。现在做三件事,感受开发循环:
@@ -45,14 +45,13 @@ hn dev app.html --css app.css
 
 ## 应用解剖
 
-脚手架生成的文件:
+一个最小应用就是两个文件(`hn new` 脚手架在路线图上):
 
 ```
 myapp/
   app.html     界面 + 清单(meta 声明表面/尺寸/标题)
   app.css      样式(CSS 变量做主题)
-  head.html    被 <include> 的片段(演示零构建组件)
-  README.md    该应用自己的说明
+  head.html    可选: 被 <include> 的片段(演示零构建组件)
 ```
 
 `app.html` 骨架:
@@ -93,7 +92,7 @@ myapp/
 - `hx-trigger`:`click`(默认)/ `load`(载入即发)/ `every Ns`(轮询)。
 - GET 请求自动把页面上 input 的值拼进 query;POST 放 body。
 - `hx-target` 指向元素 id,响应片段原位换入(`hx-swap` 语义为 outerHTML)。
-- 自定义后端:运行时可注入任意 transport(进程内闭包或 URLSession),
+- 自定义后端:运行时可注入任意 transport(进程内回调或 `sys://` 桥),
   所以 `hx-*` 不绑定 HTTP——`sys://` 就是纯本地应答。
 
 ## 系统能力速查(sys://)
@@ -159,26 +158,14 @@ head 里声明主题, 引擎注入一整套设计令牌基底(暗/亮):色彩系
 
 参考 `examples/webpage.html` —— 一份零迁就的"网页式"文件。
 
-## 需要时, 让系统 WebKit 兜底
+## 能力边界(无 WebKit 兜底)
 
-引擎实现了日常所需的大部分 CSS, 但有些构造还没做(`grid`、
-`canvas`/`svg`/`video`)。这类页面可以显式声明走系统 WebKit:
-
-```html
-<meta name="hn-renderer" content="webkit">
-```
-
-- 默认是 `native`(自研引擎原生渲染), **必须显式声明**才切到兜底 ——
-  否则同一份文件在不同环境下长得不一样。
-- 两条路径**窗口行为完全一致**: 秒开、`--ttl` 自动销毁、`hn update` 热更新、
-  `hn dev` 保存即刷新、`hn persist` 离线保存、`sys://` 系统数据、`hx-*` 交互、
-  `hn-theme` 主题、本地 KV —— 全都不用改。
-- 免单位写法(`padding: 16`)在兜底路径会自动补成 `padding: 16px`,
-  所以同一份 CSS 两边都好看。
-- 兜底路径自动注入 `charset=utf-8` 与中文系统字体栈(苹方), 中文不会变宋体、
-  也不会乱码; 你的 `code/pre` 自动用等宽字体栈。
-
-参考 `examples/webkit-fallback.html`。
+引擎不走系统 WebKit —— 渲染只有自研 C99 这一条路。CSS 是实用子集:
+`grid`、`canvas`/`svg` 还未实现(3D 变换/网格变形 MESH 指令已覆盖一部分
+立体与形变需求)。**正在进行中**: 音频/视频(`<video>`/`<audio>`, 解码委托
+平台媒体框架, 非 FFmpeg 路线)与 WASM 运行时缝(wasm3),
+契约见 [docs/media-design.md](media-design.md)。
+完整能力清单见 [README](../README.md)「支持的子集」。
 
 ## 组件复用(include)
 
@@ -189,28 +176,25 @@ head 里声明主题, 引擎注入一整套设计令牌基底(暗/亮):色彩系
 <include src="parts/row.html">   <!-- 可嵌套(上限 6 层,自动检测循环) -->
 ```
 
-展开发生在引擎装载前(IncludeExpander),所以片段里可以有 `<style>`、
+展开发生在引擎装载前(预处理层),所以片段里可以有 `<style>`、
 清单 meta、任意结构。共享一套 UI?做一个目录放片段,到处 include。
 
 ## 应用生命周期
 
 ```bash
 hn open myapp app.html --css app.css    # 生成(表面由 meta 决定)
-hn list                                # 在运行的应用
-hn update myapp app.html               # 热更新(窗口/状态保持)
-hn persist myapp                       # 持久化 → ~/.html-native/apps/myapp.hnapp
-hn restore myapp.hnapp                 # 离线恢复(传 .hnapp 文件路径)
-hn close myapp                         # 销毁
-
-hn open msg.html --ttl 8               # 消息卡:8 秒后自动热销毁
-hn syscard                             # 常驻系统信息卡(2s 自刷新)
+hn list                                 # 在运行的应用
+hn update myapp app.html                # 热更新(文档生命周期保持)
+hn shot myapp out.png                   # 渲染 PNG
+hn close myapp                          # 销毁
 ```
 
-消息卡专属属性:`hn-drag`(该元素成为拖拽手柄)、
-`hn-dismiss`(点击弹窗外即关闭)。
+持久化与轻应用槽位走宿主 socket op(`{"op":"persist",…}` /
+`{"op":"restore",…}` / `{"op":"applets"}`), CLI 尚未包这一层 ——
+任何 socket 客户端都能直接调。
 
-所有命令走常驻宿主(`~/.html-native/hn.sock`,JSON-lines 协议),
-首次调用自动拉起,之后每个应用都是宿主里的轻量对象。
+所有命令走常驻宿主(`~/.html-native/hn-daemon.sock`, JSON-lines 协议):
+先 `dist/hn-daemon &` 起宿主, 之后每个应用都是宿主里的轻量对象。
 
 ## 输入控件
 
@@ -226,24 +210,29 @@ Tab 在控件间轮换、原生键盘编辑(含中文输入与光标移动)、�
 ## 调试与验收
 
 ```bash
-hn-shot examples/showcase.html examples/showcase.css out.png 920 620
-hn-shot app.html app.png 480 620 --live            # css 可省略; --live 执行 sys:// 拉取
-hn-shot … hover.png 920 620 --hover nav-team     # 注入悬停态
-hn-shot … scroll.png 920 620 --scroll frames,220 # 注入滚动
-swift run RenderTest                               # C99 离屏验收(断言 + 任意文件出 PNG)
-```
+dist/hnapp-macos-arm64 app.html --shot out.png 480 620   # 壳渲染落盘
+dist/hncore-macos-arm64 render app.html out.png 460 560  # 引擎 CLI(hnsoft 后端)
+dist/hn shot myapp out.png                               # daemon 无头渲染
 
-HnShot 用真实视图自绘(@2x),所见即窗口所得,不需要屏幕录制权限。
+# C99 离屏验收(61 断言; 位图即窗口所见, 光栅器就是生产用的 hnsoft)
+cc -O2 -I Sources/CHtmlNative/include -I Sources/CHtmlNative \
+   -I /opt/homebrew/include/freetype2 tools/render_probe.c \
+   Sources/CHtmlNative/hn_{arena,html,css,style,layout,paint,context,theme}.c \
+   Sources/CHtmlNative/hn_{json,lottie,mesh,png}.c \
+   Sources/CHtmlNative/hnsoft.c -L/opt/homebrew/lib -lfreetype -lm \
+   -o /tmp/render_probe && /tmp/render_probe
+```
 
 ## 边界(诚实清单)
 
-- 无 JavaScript——交互全部声明式(hx-*)或由宿主注入的 transport 承担。
+- JavaScript 走内嵌 QuickJS(可选): `<script>` 求值 + `hnSetText`/`hnSetValue`
+  桥; 交互主体仍是声明式 hx-*。
 - CSS 是实用子集,不是全量(无 grid 等;`nth-child` 已支持,其余在路线图上)。
-- 图片支持 `<img>`;字体用系统字体栈。
-- 目前 Swift 原生运行时是 macOS;跨平台 C 运行时已落地 —— Windows 为
-  `tools/hnweb_win.c`(hnwin 收编版), Linux 为 `tools/hnweb_linux.c`(X11,
-  M2: 事件派发管道 + 动画帧循环), 两者实现同一份 `tools/hnweb.h` 门面;
-  Linux 亦可经 cairo 后端无头运行。
+- 图片支持 `<img>`;字体走 FreeType + 系统字体栈。
+- 平台壳全部纯 C99: macOS `hnp_macos.c`/`hnweb_macos.c`(运行期 dlopen
+  AppKit), Linux `hnp_linux.c`/`hnweb_linux.c`(dlopen X11),
+  Windows `tools/hnwin.c`(Win32); 无头走 `hnp_headless.c`/daemon。
+  没有 Swift、没有 WebKit、没有 .m 文件。
 
-遇到问题先跑 `RenderTest`(全绿说明引擎层健康),
+遇到问题先跑 `render_probe`(全绿说明引擎层健康),
 再单独渲染你的文件定位是内容还是引擎的问题。

@@ -4,7 +4,8 @@
 /* hn_cairo.h — cairo 绘制后端(跨平台, 一个实现喂所有平台)
  *
  * 为什么要有它: 此前绘制层有**两份独立实现** —— macOS 走 CoreGraphics
- * (HNPainter.swift), Windows/无头走 hnsoft.c 手写软件光栅。同一个显示列表
+ * (曾在 Swift 运行时里, 已随 c49cfbd 全量删除), Windows/无头走 hnsoft.c
+ * 手写软件光栅。同一个显示列表
  * 被翻译两遍, 于是两边的圆角、渐变、阴影、裁剪精度各自漂移; 每加一个平台
  * 就再写第三遍。Windows 就是这个代价的标本。
  *

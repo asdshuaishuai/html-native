@@ -53,19 +53,20 @@ setInterval(tick, 1000);
 
 <!--
   跑法:
-    swift build && D=.build/debug
-    $D/Hn open clock examples/applet.html            # 打开 → 槽位 clock 建立
-    $D/Hn applet list                                # 看到位置/尺寸/开着
-    # 把卡片拖到别处, 然后:
-    $D/Hn close clock
-    $D/Hn open clock examples/applet.html            # 回到你拖到的位置, 计数 +1
+    bash tools/build-daemon-cli.sh && dist/hn-daemon &
+    dist/hn open clock examples/applet.html     # 打开 → 槽位 clock 建立
+    # 槽位查询走 socket op: {"op":"applets"}     # 位置/尺寸/是否开着
+    # 把卡片摆到别处, 然后:
+    dist/hn close clock
+    dist/hn open clock examples/applet.html     # 回到你摆的位置, 计数 +1
 
-  打成一个可携带的胶囊(文档 + 数据 + 几何 + agent 指令):
-    $D/Hn persist clock ~/Desktop/clock.hnapp \
-        --instructions "时钟轻应用。计数存在 store 的 opens 键; 位置由槽位 clock 记忆。"
+  打成一个可携带的胶囊(文档 + 数据 + 几何 + agent 指令),
+  走 socket op(CLI 尚未包这一层):
+    {"op":"persist","id":"clock","path":"~/Desktop/clock.hnapp",
+     "instructions":"时钟轻应用。计数存在 store 的 opens 键; 位置由槽位 clock 记忆。"}
     # 换台机器 / 发给别人:
-    $D/Hn restore ~/Desktop/clock.hnapp
+    {"op":"restore","path":"~/Desktop/clock.hnapp"}
 
-    $D/Hn open clock examples/applet.html --ttl 20   # 20 秒后自毁; 槽位仍在
-    $D/Hn applet remove clock                        # 忘记槽位 → 回到屏幕居中
+  applet remove(忘记槽位 → 回到屏幕居中)走 {"op":"applet-remove","name":"clock"}。
+  --ttl 到期自毁在壳层路线图上。
 -->
