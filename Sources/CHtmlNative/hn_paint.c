@@ -728,6 +728,232 @@ static void push_cmd(hn_context *c, hn_cmd *cmd) {
     c->cmds[c->n_cmds++] = *cmd;
 }
 
+/* ---------------- <canvas>: 2D 账本重放 ----------------
+ * 绘制 canvas 元素 = 自身盒背景 → CLIP_PUSH 元素盒 → 逐条把账本 op 翻译成
+ * 显示列表指令 → CLIP_POP。账本 op 的坐标是画布属性坐标系(width/height
+ * 属性, JS 侧 CTM 已在记录前应用), 这里按 盒/属性 的比例映射到元素盒 ——
+ * 属性尺寸 = 盒尺寸时(最常见)是 1:1 平移。账本属于元素生命周期
+ * (hn_canvas.c), 样式重算/重放不影响它; clearRect = 清账本。 */
+
+/* 折线描边: 每段展开成垂直四边形(QUAD)。开放折线不闭合 —— 引擎的
+   POLYGON 描边总是闭合路径, 用 QUAD 逐段展开才能表达 canvas 的开放路径。 */
+static void canvas_stroke_polyline(hn_context *c, const float *pts, int n_pts,
+                                   hn_color col, float hw, float ox, float oy,
+                                   float kx, float ky, float alpha) {
+    if (hw <= 0.05f || (col & 0xFFu) == 0) return;
+    hn_color fc = mul_alpha(col, alpha);
+    for (int i = 0; i + 1 < n_pts; i++) {
+        float x1 = ox + pts[i * 2] * kx,         y1 = oy + pts[i * 2 + 1] * ky;
+        float x2 = ox + pts[(i + 1) * 2] * kx,   y2 = oy + pts[(i + 1) * 2 + 1] * ky;
+        float ex = x2 - x1, ey = y2 - y1;
+        float len = sqrtf(ex * ex + ey * ey);
+        if (len < 1e-5f) continue;
+        float nx = -ey / len * hw, ny = ex / len * hw;
+        hn_cmd q;
+        memset(&q, 0, sizeof(q));
+        q.kind = HN_CMD_QUAD;
+        q.qx[0] = x1 + nx; q.qy[0] = y1 + ny;
+        q.qx[1] = x2 + nx; q.qy[1] = y2 + ny;
+        q.qx[2] = x2 - nx; q.qy[2] = y2 - ny;
+        q.qx[3] = x1 - nx; q.qy[3] = y1 - ny;
+        q.fill = fc;
+        push_cmd(c, &q);
+    }
+}
+
+/* 圆头端点/圆滑交点: 顶点处补一枚 16 边形圆片(廉价矢量渲染器的标准做法) */
+static void canvas_cap_dot(hn_context *c, float cx, float cy, float r,
+                           hn_color col, float alpha) {
+    if (r <= 0.05f) return;
+    const int SEG = 16;
+    float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * SEG * 2);
+    if (!poly) return;
+    for (int i = 0; i < SEG; i++) {
+        float a = (float)i * 6.2831853f / SEG;
+        poly[i * 2] = cx + cosf(a) * r;
+        poly[i * 2 + 1] = cy + sinf(a) * r;
+    }
+    hn_cmd p;
+    memset(&p, 0, sizeof(p));
+    p.kind = HN_CMD_POLYGON;
+    p.poly = poly;
+    p.poly_n = SEG;
+    p.fill = mul_alpha(col, alpha);
+    push_cmd(c, &p);
+}
+
+static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
+                         float alpha, float sx, float sy, const paint_guard *g) {
+    /* 元素盒背景(canvas 是替换元素: 盒背景仍按样式画, 账本内容叠在其上) */
+    int has_fill = (st->background & 0xFFu) || st->has_gradient;
+    int has_border = st->border_w > 0 && (st->border_color & 0xFFu);
+    float box_w = n->bw * g->scale * g->scale_x;
+    float box_h = n->bh * g->scale * g->scale_y;
+    if (has_fill || has_border) {
+        hn_cmd bg;
+        memset(&bg, 0, sizeof(bg));
+        bg.kind = HN_CMD_RECT;
+        bg.x = tfx(g, sx, n->bx, n->by);
+        bg.y = tfy(g, sy, n->bx, n->by);
+        bg.w = box_w;
+        bg.h = box_h;
+        bg.radius = eff_radius(st, bg.w, bg.h);
+        bg.fill = fill_color(st, st->background, alpha);
+        bg.stroke = fill_color(st, st->border_color, alpha);
+        bg.stroke_w = st->border_w;
+        if (st->has_gradient) {
+            bg.gradient = 1;
+            bg.grad_from = fill_color(st, st->grad_from, alpha);
+            bg.grad_to = fill_color(st, st->grad_to, alpha);
+            bg.grad_angle = st->grad_angle;
+        }
+        push_cmd(c, &bg);
+    }
+
+    const char *id = hn_node_attr(n, "id");
+    hn_canvas_ledger *l = id ? hn_canvas_ledger_find(c, id) : NULL;
+    if (!l || l->n_ops == 0) return;   /* 无账本 = 空白画布(与浏览器一致) */
+
+    /* 画布属性坐标 → 元素盒: 属性 width/height 定义坐标空间, 缺省 300x150 */
+    const char *aw = hn_node_attr(n, "width");
+    const char *ah = hn_node_attr(n, "height");
+    float cw = aw && *aw ? (float)atof(aw) : 300.0f;
+    float ch = ah && *ah ? (float)atof(ah) : 150.0f;
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+    float kx = box_w / cw, ky = box_h / ch;
+    float ox = tfx(g, sx, n->bx, n->by);
+    float oy = tfy(g, sy, n->bx, n->by);
+    /* 线宽/字号等"长度"按两轴均档(非等比缩放时各向误差最小) */
+    float ks = (kx + ky) * 0.5f;
+
+    hn_cmd cp;
+    memset(&cp, 0, sizeof(cp));
+    cp.kind = HN_CMD_CLIP_PUSH;
+    cp.x = ox;
+    cp.y = oy;
+    cp.w = box_w;
+    cp.h = box_h;
+    cp.radius = eff_radius(st, box_w, box_h);
+    push_cmd(c, &cp);
+
+    for (int i = 0; i < l->n_ops; i++) {
+        const hn_canvas_op *o = &l->ops[i];
+        hn_cmd cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        switch (o->kind) {
+        case HN_CV_FILL_RECT:
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            cmd.fill = mul_alpha(o->color, alpha);
+            if ((cmd.fill & 0xFFu) == 0 || cmd.w <= 0 || cmd.h <= 0) continue;
+            push_cmd(c, &cmd);
+            break;
+        case HN_CV_STROKE_PATH: {
+            float hw = o->stroke_w * ks * 0.5f;
+            canvas_stroke_polyline(c, o->pts, o->n_pts, o->color, hw,
+                                   ox, oy, kx, ky, alpha);
+            if (o->cap_round) {
+                for (int p2 = 0; p2 < o->n_pts; p2++)
+                    canvas_cap_dot(c, ox + o->pts[p2 * 2] * kx,
+                                   oy + o->pts[p2 * 2 + 1] * ky, hw,
+                                   o->color, alpha);
+            }
+            break;
+        }
+        case HN_CV_FILL_PATH: {
+            if (o->n_pts < 3 || (o->color & 0xFFu) == 0) break;
+            float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
+            if (!poly) break;
+            for (int p2 = 0; p2 < o->n_pts; p2++) {
+                poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
+                poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
+            }
+            cmd.kind = HN_CMD_POLYGON;
+            cmd.poly = poly;
+            cmd.poly_n = o->n_pts;
+            cmd.fill = mul_alpha(o->color, alpha);
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_GRAD_RECT: {
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            cmd.fill = mul_alpha(o->color, alpha);
+            cmd.gradient = 1;
+            cmd.grad_from = mul_alpha(o->color, alpha);
+            cmd.grad_to = mul_alpha(o->color2, alpha);
+            /* canvas 渐变轴 (x0,y0)→(x1,y1) → 引擎的 CSS 角度口径
+               (0deg=向上, 方向 = (sinθ, -cosθ)): θ = atan2(dx, -dy) */
+            float gdx = (o->gx1 - o->gx0) * kx, gdy = (o->gy1 - o->gy0) * ky;
+            cmd.grad_angle = atan2f(gdx, -gdy) * (180.0f / 3.14159265f);
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_CLIP_PUSH:
+            cmd.kind = HN_CMD_CLIP_PUSH;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            push_cmd(c, &cmd);
+            break;
+        case HN_CV_CLIP_POP:
+            cmd.kind = HN_CMD_CLIP_POP;
+            push_cmd(c, &cmd);
+            break;
+        case HN_CV_TEXT: {
+            if ((o->color & 0xFFu) == 0 || !o->str) break;
+            /* 文本串复制进 tmp 区(生命周期 = 显示列表) */
+            size_t sl = strlen(o->str);
+            char *ts = (char *)hn_arena_alloc(c->tmp, sl + 1);
+            if (!ts) break;
+            memcpy(ts, o->str, sl + 1);
+            cmd.kind = HN_CMD_TEXT;
+            cmd.text = ts;
+            cmd.text_len = sl;
+            cmd.tx = ox + o->x * kx;
+            cmd.baseline = oy + o->y * ky;
+            cmd.font.size_px = o->font_px * ky;
+            cmd.font.weight = st->font_weight;
+            cmd.font.italic = st->font_italic;
+            cmd.font.letter_spacing = st->letter_spacing;
+            cmd.font.family = st->font_family;
+            cmd.fill = mul_alpha(o->color, alpha);
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_IMAGE: {
+            if (!o->str || !o->str[0]) break;
+            size_t sl = strlen(o->str);
+            char *ts = (char *)hn_arena_alloc(c->tmp, sl + 1);
+            if (!ts) break;
+            memcpy(ts, o->str, sl + 1);
+            cmd.kind = HN_CMD_IMAGE;
+            cmd.text = ts;
+            cmd.text_len = sl;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            push_cmd(c, &cmd);
+            break;
+        }
+        }
+    }
+
+    hn_cmd cpo;
+    memset(&cpo, 0, sizeof(cpo));
+    cpo.kind = HN_CMD_CLIP_POP;
+    push_cmd(c, &cpo);
+}
+
 /* 防御性保护: DOM 结构异常(纵向超深嵌套 / 横向兄弟链成环)时只截断绘制,
    绝不让渲染器崩溃或死循环。正常文档远达不到这些上限。
    两个维度都要防: 只看深度防不了兄弟链成环(那是同层无限循环)。 */
@@ -1011,6 +1237,12 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             cmd.text_len = strlen(src);
             push_cmd(c, &cmd);
         }
+        goto clip_done;
+    }
+
+    /* <canvas>: 2D 账本重放(替换元素 — 不画子节点, fallback 内容不显示) */
+    if (n->tag && !strcmp(n->tag, "canvas")) {
+        paint_canvas(c, n, st, alpha, sx, sy, g);
         goto clip_done;
     }
 

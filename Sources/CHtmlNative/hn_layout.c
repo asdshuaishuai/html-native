@@ -1418,6 +1418,24 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
         }
     }
 
+    /* <canvas> 替换元素尺寸链: 样式 > width/height 属性 > 缺省 300x150。
+       属性即绘图坐标空间的尺寸(HTML 约定缺省 300 x 150) —— 绘制期重放
+       账本 op 时按 盒/属性 的比例映射(见 hn_paint paint_canvas)。 */
+    if (n->tag && !strcmp(n->tag, "canvas")) {
+        if (st->width_u == HN_U_AUTO) {
+            const char *a = hn_node_attr(n, "width");
+            float aw = a ? (float)atof(a) : -1;
+            st->width = aw > 0 ? aw : 300;
+            st->width_u = HN_U_PX;
+        }
+        if (st->height_u == HN_U_AUTO) {
+            const char *a = hn_node_attr(n, "height");
+            float ah = a ? (float)atof(a) : -1;
+            st->height = ah > 0 ? ah : 150;
+            st->height_u = HN_U_PX;
+        }
+    }
+
     /* 输入控件: 默认尺寸 */
     if (hn_node_is_input(n)) {
         int ik = hn_node_input_kind(n);

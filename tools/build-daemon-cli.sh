@@ -19,7 +19,7 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
      Sources/CHtmlNative/hn_media.c \
      Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
-     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c \
+     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c \
      Sources/CHtmlNative/hnsoft.c)
 # WASM 缝(media-design §7): rt/hn_rt.c 的 hnWasm* 桥引用 hn_wasm_* 符号,
 # 引擎源必须带上 hn_wasm.c + wasm3 最小 11 源 —— 与主脚本 WASM_SRC 同一份。

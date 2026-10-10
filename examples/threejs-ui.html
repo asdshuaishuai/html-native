@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x880">
+<meta name="hn-title" content="threejs-ui · QUAD 3D 数据大屏">
+<style>
+  /* ── three.js 风格 UI × html-native QUAD 透视投影 ──
+     检验页: 用引擎现有能力(CSS 3D 变换 + QUAD 投影)逼近典型 three.js
+     驱动的数据可视化大屏观感。支持度矩阵见 docs/threejs-support.md。
+     本页只用已实测的引擎口径:
+       · perspective 声明在舞台父级或元素自身; preserve-3d 父子矩阵复合;
+       · 3D 元素可直接做 flex 子项 / absolute / 普通块流(同一绘制路径);
+       · 渐变 QUAD / 边框 / 文字直接上 3D 面片; 字形不透视畸变(引擎简化);
+       · 不在同一元素混用 2D scale 与 3D 变换(自身面片不含自身 scale);
+       · @keyframes 只采样 opacity / translate-x / translate-y / scale /
+         rotate 单数值 —— 本页动画只用 rotate 字段(HN_CLOCK 取帧);
+       · 3D 面片上的子级两条实测口径(绕开法见各节):
+           - preserve-3d 旋转面片(地板)上的 absolute 子级必须自带 transform
+             (哪怕 translateZ(0.02px))才走"自身 3D 矩阵"路径 —— 无自身
+             transform 的子级按父内坐标套父矩阵, 会整体脱出面片;
+           - 带 translateZ 投影的面片(卡片环前卡)里, 子级反过来**不能**
+             再带自身 transform(会脱锚) —— 表盘 tick 因此不带 rotate,
+             只用 margin-top 排弧。
+     无逐深度排序: 遮挡由文档序决定, 立方体六面与卡片环按"远 → 近"排列;
+     动画绕 Z(in-plane)旋转不改变各面深度 —— 文档序对所有时刻都成立。 */
+
+  body { background:#070a12; color:#e8eefc; font-size:13; padding:12 18;
+         font-family: sans-serif; }
+
+  /* ── 0 · 顶栏 ── */
+  .top { display:flex; align-items:center; }
+  .ttl { font-size:20; font-weight:700; letter-spacing:2; }
+  .tsub { font-size:10.5; color:#7d8aa5; letter-spacing:1; margin-top:2; }
+  .chips { display:flex; margin-left:auto; }
+  .chip { font-size:9.5; color:#6fd6ff; letter-spacing:1; padding:4 9;
+          border:1 solid rgba(111,214,255,.45); border-radius:11;
+          background:rgba(17,34,58,.85); margin-left:8; }
+
+  .sec { font-size:11; color:#5f8fbf; letter-spacing:2; margin:14 0 6 0;
+         border-bottom:1 solid rgba(95,143,191,.22); padding-bottom:3; }
+
+  /* ── 1 · 顶部数据条: translateZ 深度排布的三块悬浮牌(近大远小) ──
+     每块牌自身声明 perspective, 只带 translateZ(不带 2D scale) ——
+     k = d/(d−z): Z+90 放大 / Z−80 缩小, 即"近大远小"。 */
+  .deck { display:flex; margin-top:16; }
+  .fcard { width:246; height:100; perspective:720; border-radius:12;
+           padding:10 14; box-sizing:border-box;
+           border:1 solid rgba(115,190,255,.55);
+           box-shadow:0 12 28 rgba(0,0,0,.5); }
+  .fc1 { transform:translateZ(-80px);
+         background:linear-gradient(165deg,#101a30,#0a1120); }
+  .fc2 { transform:translateZ(10px);
+         background:linear-gradient(165deg,#152844,#0c1526);
+         border-color:rgba(129,205,255,.75); }
+  .fc3 { transform:translateZ(90px);
+         background:linear-gradient(165deg,#1b3a5e,#0e2038);
+         border-color:rgba(150,220,255,.9); }
+  .fh { display:flex; }
+  .fl { font-size:9.5; color:#7fb8e8; letter-spacing:1.5; }
+  .fz { font-size:9; color:#54677f; margin-left:auto; }
+  .fv { font-size:25; font-weight:700; margin-top:8; }
+  .fs { font-size:9.5; color:#7d8aa5; margin-top:4; }
+  .fc1 .fv { color:#9fb6d8; } .fc2 .fv { color:#7fe0ff; } .fc3 .fv { color:#ffb454; }
+
+  /* ── 2 · 透视舞台全景(左): rotateX 倾斜网格地板 + 站立全息面板 ──
+     地板: 普通块流元素, rotateX(56°) 以底边为轴向后倒; preserve-3d 把
+     叠完的矩阵传给格线子级 —— 格线各带 translateZ(0.02px) 走自身 3D
+     路径(见页首口径), 随地板一起投影。面板: absolute 路径(relative
+     height:0 包装层), 各自带 perspective + rotateY 站立。 */
+  .duo { display:flex; }
+  .colL { width:520; } .colR { width:320; margin-left:24; }
+  .stage { position:relative; height:296; }
+  .hfloor { display:block; width:500; height:190; margin:100 auto 0;
+            transform: rotateX(56deg); transform-origin: 50% 100%;
+            perspective: 880; transform-style: preserve-3d;
+            background:linear-gradient(180deg,#18294a,#0d1730);
+            border:1.5 solid rgba(94,220,255,.6);
+            box-shadow:0 18 40 rgba(0,0,0,.45); }
+  .glh { position:absolute; height:1; background:rgba(94,220,255,.5);
+         transform:translateZ(0.02px); }
+  .glv { position:absolute; width:1; background:rgba(94,220,255,.42);
+         transform:translateZ(0.02px); }
+  .holoRow { position:relative; height:0; }
+  .holo { position:absolute; width:158; height:114; top:-150;
+          perspective:640; border-radius:8; padding:8 10; box-sizing:border-box;
+          border:1 solid rgba(120,220,255,.65);
+          background:linear-gradient(175deg,rgba(22,44,78,.95),rgba(9,15,30,.95));
+          box-shadow:0 14 30 rgba(0,0,0,.55); }
+  .h1 { left:6;   transform:rotateY(15deg); }
+  .h2 { left:180; transform:rotateY(-12deg) translateZ(26px);
+        border-color:rgba(160,235,255,.85); }
+  .h3 { left:354; transform:rotateY(24deg); }
+  .pl { font-size:9; letter-spacing:1.5; color:#6fd6ff; }
+  .pv { font-size:23; font-weight:700; color:#eaf6ff; margin-top:6; }
+  .pd { font-size:9.5; margin-top:4; }
+  .h1 .pd { color:#3ecf7a; } .h2 .pd { color:#ffb454; } .h3 .pd { color:#3ecf7a; }
+
+  /* ── 3 · 中央立方体标识(右): 6 面 preserve-3d ──
+     容器 rotateX(-22°) rotateY(34°) 复合矩阵传给六面; 动画只采样
+     rotate 字段(绕视平面法线), 不改变各面深度 → 文档序恒成立。
+     六面渐变 + 边框 + 字母(文字上 3D 面片)。 */
+  @keyframes cubespin { from { rotate: 0; } to { rotate: 360; } }
+  .cwrap { position:relative; height:296; }
+  .cube { position:relative; width:120; height:120; margin:66 auto 0;
+          perspective:700; transform-style:preserve-3d;
+          transform:rotateX(-22deg) rotateY(34deg);
+          animation: cubespin 6000ms linear infinite; }
+  .face { position:absolute; left:0; top:0; width:120; height:120;
+          border:1.5 solid rgba(190,235,255,.55); color:#f4f9ff;
+          font-size:30; font-weight:700; line-height:116px; text-align:center; }
+  .f-back  { transform:rotateY(180deg) translateZ(60px);
+             background:linear-gradient(160deg,#2fbf9f,#0f5c4a); }
+  .f-right { transform:rotateY(90deg)  translateZ(60px);
+             background:linear-gradient(160deg,#3ecf7a,#145c33); }
+  .f-bot   { transform:rotateX(-90deg) translateZ(60px);
+             background:linear-gradient(160deg,#e6685c,#7a271f); }
+  .f-left  { transform:rotateY(-90deg) translateZ(60px);
+             background:linear-gradient(160deg,#ffa64d,#8f4a12); }
+  .f-top   { transform:rotateX(90deg)  translateZ(60px);
+             background:linear-gradient(160deg,#b07dff,#4a1f8f); }
+  .f-front { transform:translateZ(60px);
+             background:linear-gradient(160deg,#5b82e6,#1d3a8f); }
+  .cubebase { width:170; height:18; margin:30 auto 0; border-radius:9;
+              background:linear-gradient(90deg,rgba(83,209,255,.06),rgba(83,209,255,.4));
+              border:1 solid rgba(83,209,255,.35); }
+
+  /* ── 4 · 环形仪表: 六卡 rotateY 60° 步进 + translateZ(190px) 半径 ──
+     环容器 rotateX(-12°) rotateY(-16°) 倾斜; 文档序按有效方位角远 → 近
+     (164°→136°→104°→76°→44°→16°)。前卡(NODE-01)内嵌弧形 tick 表盘:
+     12 根普通流 tick 用 margin-top 排在圆弧上 —— 卡面带 translateZ 投影,
+     子级不能再带自身 transform(见页首口径), 切向倾斜只好省略。 */
+  .rstage { position:relative; height:212; }
+  .ring { position:relative; width:400; height:200; margin:4 auto 0;
+          perspective:820; transform-style:preserve-3d;
+          transform:rotateX(-12deg) rotateY(-16deg); }
+  .rc { position:absolute; left:138; top:46; width:124; height:108;
+        border-radius:10; padding:7 9; box-sizing:border-box;
+        border:1 solid rgba(160,220,255,.55); color:#eaf4ff;
+        background:linear-gradient(150deg,#16233f,#0c1424);
+        box-shadow:0 10 24 rgba(0,0,0,.5); }
+  .rl { font-size:9; letter-spacing:1; color:#8fb8dd; }
+  .rv { font-size:19; font-weight:700; margin-top:14; }
+  .rc1 { transform:rotateY(0deg)   translateZ(190px);
+         background:linear-gradient(150deg,#1d3f66,#10233f);
+         border-color:rgba(150,225,255,.9); }
+  .rc2 { transform:rotateY(60deg)  translateZ(190px); }
+  .rc3 { transform:rotateY(120deg) translateZ(190px);
+         background:linear-gradient(150deg,#1c4a38,#0d2419); }
+  .rc4 { transform:rotateY(180deg) translateZ(190px);
+         background:linear-gradient(150deg,#3d2a52,#1a1226); }
+  .rc5 { transform:rotateY(240deg) translateZ(190px);
+         background:linear-gradient(150deg,#4d3a1e,#241a0c); }
+  .rc6 { transform:rotateY(300deg) translateZ(190px);
+         background:linear-gradient(150deg,#4d2430,#240f14); }
+  .rc2 .rv { color:#b07dff; } .rc3 .rv { color:#3ecf7a; }
+  .rc4 .rv { color:#9fb6d8; } .rc5 .rv { color:#ffb454; } .rc6 .rv { color:#e6685c; }
+
+  /* 弧形 tick 表盘(普通流): R=50 圆心在 (54.5, 58), tick 顶 = 58 − √(R²−dx²) */
+  .gauge { display:flex; height:62; }
+  .gt { width:2; height:10; border-radius:1; margin-left:7;
+        background:rgba(110,140,180,.35); }
+  .gt.first { margin-left:4; }
+  .gt.on { background:linear-gradient(180deg,#7fe0ff,#2b7fd4); }
+  .dn { text-align:center; font-size:13; font-weight:700; line-height:20px;
+        color:#9fe8ff; }
+
+  .cap { font-size:9.5; color:#64748f; margin-top:4; }
+  .foot { font-size:9.5; color:#4c5a72; margin-top:10; letter-spacing:.5; }
+</style>
+</head><body>
+
+  <div class="top">
+    <div>
+      <div class="ttl">DEEPSTUDIO · HOLO DECK</div>
+      <div class="tsub">three.js-style dashboard · html-native QUAD perspective raster</div>
+    </div>
+    <div class="chips">
+      <div class="chip">QUAD·3D</div>
+      <div class="chip">PRESERVE-3D</div>
+      <div class="chip">HN_CLOCK</div>
+    </div>
+  </div>
+
+  <div class="sec">01 · ORBITAL DECK — 顶部数据条(translateZ 深度, 近大远小)</div>
+  <div class="deck">
+    <div class="fcard fc1">
+      <div class="fh"><div class="fl">EDGE NODE</div><div class="fz">Z -80</div></div>
+      <div class="fv">128 ms</div>
+      <div class="fs">relay latency · ap-north-2</div>
+    </div>
+    <div class="fcard fc2">
+      <div class="fh"><div class="fl">THROUGHPUT</div><div class="fz">Z +10</div></div>
+      <div class="fv">4.2 Gb/s</div>
+      <div class="fs">ingress · 15 min avg</div>
+    </div>
+    <div class="fcard fc3">
+      <div class="fh"><div class="fl">CORE LOAD</div><div class="fz">Z +90</div></div>
+      <div class="fv">72.4%</div>
+      <div class="fs">16 vCPU · cluster A</div>
+    </div>
+  </div>
+
+  <div class="sec">02 · HOLO STAGE — 透视舞台全景 ｜ 03 · CORE CUBE — 中央立方体(keyframes 动画)</div>
+  <div class="duo">
+    <div class="colL">
+      <div class="stage">
+        <div class="hfloor">
+          <div class="glh" style="left:0; width:500; top:38"></div>
+          <div class="glh" style="left:0; width:500; top:76"></div>
+          <div class="glh" style="left:0; width:500; top:114"></div>
+          <div class="glh" style="left:0; width:500; top:152"></div>
+          <div class="glv" style="top:0; height:190; left:100"></div>
+          <div class="glv" style="top:0; height:190; left:200"></div>
+          <div class="glv" style="top:0; height:190; left:300"></div>
+          <div class="glv" style="top:0; height:190; left:400"></div>
+        </div>
+        <div class="holoRow">
+          <div class="holo h1">
+            <div class="pl">TELEMETRY</div>
+            <div class="pv">38.2k</div>
+            <div class="pd">+4.6% / 24h</div>
+          </div>
+          <div class="holo h2">
+            <div class="pl">CORE LOAD</div>
+            <div class="pv">72.4%</div>
+            <div class="pd">+1.2% / 1h</div>
+          </div>
+          <div class="holo h3">
+            <div class="pl">UPLINK</div>
+            <div class="pv">4.2 Gb</div>
+            <div class="pd">+9.0% / 24h</div>
+          </div>
+        </div>
+      </div>
+      <div class="cap">rotateX(56°) 网格地板(渐变+边框, preserve-3d 格线随投影) + 站立全息面板(absolute 路径, 逐卡 rotateY)</div>
+    </div>
+    <div class="colR">
+      <div class="cwrap">
+        <div class="cube">
+          <div class="face f-back">3D</div>
+          <div class="face f-right">UI</div>
+          <div class="face f-bot">C99</div>
+          <div class="face f-left">FX</div>
+          <div class="face f-top">HN</div>
+          <div class="face f-front">DS</div>
+        </div>
+        <div class="cubebase"></div>
+      </div>
+      <div class="cap">6 面 preserve-3d · rotateX(-22°) rotateY(34°) · @keyframes rotate 0→360° / 6s infinite(动画绕视平面法线, 不改变面的深度序)</div>
+    </div>
+  </div>
+
+  <div class="sec">04 · GAUGE RING — 环形仪表(六卡 60° 步进 + 半径 190px, 前卡圆弧进度)</div>
+  <div class="rstage">
+    <div class="ring">
+      <div class="rc rc4"><div class="rl">NODE-04 TEMP</div><div class="rv">54°C</div></div>
+      <div class="rc rc5"><div class="rl">NODE-05 SYNC</div><div class="rv">OK</div></div>
+      <div class="rc rc3"><div class="rl">NODE-03 DISK</div><div class="rv">41%</div></div>
+      <div class="rc rc6"><div class="rl">NODE-06 ERR</div><div class="rv">0.02%</div></div>
+      <div class="rc rc2"><div class="rl">NODE-02 MEM</div><div class="rv">6.1 GB</div></div>
+      <div class="rc rc1">
+        <div class="rl">NODE-01 LOAD</div>
+        <div class="gauge">
+          <div class="gt on first" style="margin-top:51"></div>
+          <div class="gt on" style="margin-top:29"></div>
+          <div class="gt on" style="margin-top:19"></div>
+          <div class="gt on" style="margin-top:13"></div>
+          <div class="gt on" style="margin-top:10"></div>
+          <div class="gt on" style="margin-top:8"></div>
+          <div class="gt on" style="margin-top:8"></div>
+          <div class="gt on" style="margin-top:10"></div>
+          <div class="gt on" style="margin-top:13"></div>
+          <div class="gt"    style="margin-top:19"></div>
+          <div class="gt"    style="margin-top:29"></div>
+          <div class="gt"    style="margin-top:51"></div>
+        </div>
+        <div class="dn">75%</div>
+      </div>
+    </div>
+  </div>
+  <div class="cap">环容器 rotateX(-12°) rotateY(-16°) · 有效方位角 164°→136°→104°→76°→44°→16°(文档序远→近) · 前卡 12 根普通流 tick 沿 R=50 圆弧排布(margin-top 定位, 不带自身 transform), 亮 9/12 = 75% 圆弧进度近似</div>
+
+  <div class="foot">html-native · CSS 3D 变换 + QUAD 透视投影(非 WebGL: 无光照/阴影/模型系统) · 动画帧由 HN_CLOCK 取样 · 支持度矩阵见 docs/threejs-support.md</div>
+
+</body></html>

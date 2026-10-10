@@ -428,7 +428,19 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   文字/盒尺寸按锚点处局部线尺度取档, 面片内近大远小; deco 线与 li
   标记随同一变换), flex/absolute/inline-block 子树与普通块流同一绘制
   路径。可做卡片翻转、3D 倾斜面板、真立方体、卡片环 ——
-  见 `examples/threejs-lab.html`; 口径由 `tools/quad3d_probe.c` 钉死
+  见 `examples/threejs-lab.html`(口径由 `tools/quad3d_probe.c` 钉死)与
+  `examples/threejs-ui.html`(three.js 风格 3D 数据大屏:透视舞台/网格地板/
+  全息面板/六面立方体/环形仪表, 支持度矩阵见 `docs/threejs-support.md`)
+- **Canvas 2D(`<canvas>` + QuickJS)**: `<canvas>` 替换元素 + `hnGet2D(id)`
+  返回标准形态的 2D context —— fillStyle/strokeStyle(`#hex/rgb()/rgba()`+
+  线性渐变)、save/restore、CTM(translate/scale/rotate/setTransform)、
+  完整路径命令(moveTo/lineTo/arc/closePath, fill/stroke/clip)、
+  fillRect/strokeRect/clearRect、fillText/strokeText、drawImage。
+  **状态机在 JS 层**(与 CanvasKit htmlcanvas 同构的语义参照), 坐标经 CTM
+  变换后以已解析原语落账本, 绘制期翻译成同一条显示列表(RECT 渐变/POLYGON/
+  QUAD/TEXT/IMAGE/CLIP)—— 无 Skia、无 WebGL。画智能 UI 仪表盘/折线图/
+  圆弧仪表开箱即用, 见 `examples/canvas-demo.html`
+  (口径由 `tools/canvas_probe.c` 61 断言钉死)
 - **Lottie 矢量动画**: `<img src="a.json" hn-lottie>` 直接播 Lottie/bodymovin
   文件 —— 引擎解析 JSON、按时间轴求值, 产出**多边形绘制指令(POLYGON)**,
   所以不必为每个平台写一遍播放器, 也不需要 WebView。支持形状层

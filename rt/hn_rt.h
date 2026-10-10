@@ -84,6 +84,10 @@ char *hn_rt_text(hn_rt *rt, const char *element_id);
    上下文, 媒体桥需要它)。返回值在下次 hn_rt_render 前有效。 */
 hn_doc *hn_rt_doc(hn_rt *rt);
 
+/* 引擎上下文(探针/宿主内省用: hn_context_display_list / hn_canvas_count
+   等引擎 API 的入口)。所有权仍归 hn_rt —— 只读访问, 勿销毁。 */
+hn_context *hn_rt_context(hn_rt *rt);
+
 /* 显示列表指令数 */
 int hn_rt_cmd_count(hn_rt *rt);
 

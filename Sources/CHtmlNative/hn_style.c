@@ -14,7 +14,7 @@
 static const char *UA_CSS =
     "head, title, base, link, meta, style, script, noscript { display: none; }\n"
     "b, strong, i, em, span, a, code, small, u, s, sub, sup, label, br, em { display: inline; }\n"
-    "input, button, textarea, img, video, audio, select { display: inline-block; }\n"
+    "input, button, textarea, img, video, audio, select, canvas { display: inline-block; }\n"
     "b, strong { font-weight: 700; } i, em { font-style: italic; }\n"
     "h1 { font-size: 32; font-weight: 700; margin: 21 0 7; }\n"
     "h2 { font-size: 24; font-weight: 700; margin: 20 0 6; }\n"

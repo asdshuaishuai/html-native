@@ -855,7 +855,11 @@ static void paint_bitmap(fb *f, const hn_cmd *c, float scale, float ox, float oy
 /* ---------------- 主渲染 ---------------- */
 
 unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, hn_color bg) {
-    if (!dl || !dl->cmds || width <= 0 || height <= 0) return NULL;
+    /* cmds == NULL 且 count == 0 是**合法的空显示列表**(文档没有任何可见
+       指令, 如只有空白 canvas 的页面): 仍要产出底色位图 —— 否则"首帧为空"
+       的文档会被运行时判成渲染失败, <script> 驱动的页面(canvas 2D 账本)
+       根本活不到脚本执行。 */
+    if (!dl || width <= 0 || height <= 0) return NULL;
     fb f;
     fb_init(&f, width, height, bg);
 

@@ -38,7 +38,7 @@ SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
      Sources/CHtmlNative/hn_media.c \
      Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
-     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c \
+     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c \
      Sources/CHtmlNative/hnsoft.c)
 SRC+=("${WASM_SRC[@]}")
 
@@ -161,7 +161,7 @@ WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_media.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
         Sources/CHtmlNative/hnsoft.c)
 WIN_RT+=("${WASM_SRC[@]}")
 
@@ -183,7 +183,7 @@ LINUX_RT=(tools/hnweb_linux.c
           Sources/CHtmlNative/hn_media.c
           Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
           Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-          Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+          Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
           Sources/CHtmlNative/hnsoft.c)
 LINUX_RT+=("${WASM_SRC[@]}")
 build "hnweb-linux-x86_64"  "x86_64-linux-musl"  "" "-DHN_NO_TEXT" \
@@ -208,7 +208,7 @@ MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
         Sources/CHtmlNative/hn_media.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
         Sources/CHtmlNative/hnsoft.c)
 MAC_RT+=("${WASM_SRC[@]}")
 build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
@@ -224,7 +224,7 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
             Sources/CHtmlNative/hn_media.c
             Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
             Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-            Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
+            Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
             Sources/CHtmlNative/hnsoft.c)
 ENGINE_SRC+=("${WASM_SRC[@]}")
 RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3 $FT_INC"

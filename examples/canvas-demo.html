@@ -1,0 +1,135 @@
+<!-- canvas-demo — <canvas> 2D API 演示: "智能 UI 仪表盘"静态画面
+     ============================================================
+     全部画面由脚本经 Canvas 2D API 绘制(状态机在 JS glue, 原语落引擎账本):
+     深色底 → 网格线(stroke 折线) → 渐变面积(createLinearGradient + fillRect)
+     → 指标折线(moveTo/lineTo/arc 圆点 + stroke) → 半圆仪表(arc 120° 段)
+     → 文字标签(fillText)。确定性: 无随机数/无时钟, 同一文档渲染结果逐像素一致。
+
+     渲染(离屏截图, 命令真实可跑; 输出路径相对**文档目录** —— hnapp 会
+     chdir 到文档目录解析资产, 与 <link>/图片同一口径):
+       dist/hnapp-macos-arm64 examples/canvas-demo.html --shot ../screenshots/canvas-demo.png 640 480
+
+     说明: 引擎没有 DOM 桥, document.getElementById 是 glue 提供的 canvas
+     替代入口(也可直接 hnGet2D('dash'))。hnapp 装载文档时自动执行内联
+     <script>(与浏览器"解析即执行"对齐), 因此离线 --shot 全链路可用。
+-->
+<html>
+<head>
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="640x480">
+<meta name="hn-title" content="canvas 2D · 智能仪表盘">
+<style>
+html, body { margin: 0; background: #0b0e13; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="dash" width="640" height="480"></canvas>
+<script>
+var ctx = document.getElementById('dash').getContext('2d');
+var W = 640, H = 480;
+
+/* ---- 深色底 ---- */
+ctx.fillStyle = '#0b0e13';
+ctx.fillRect(0, 0, W, H);
+
+/* 面板卡片底(两块) */
+ctx.fillStyle = '#11151f';
+ctx.fillRect(24, 52, 380, 300);          /* 折线图面板 */
+ctx.fillRect(424, 52, 192, 300);         /* 仪表盘面板 */
+ctx.fillStyle = '#11151f';
+ctx.fillRect(24, 372, 592, 84);          /* 底部状态条 */
+
+/* ---- 网格线(折线 stroke: 每条线一个子路径) ---- */
+ctx.strokeStyle = 'rgba(96,112,150,0.30)';
+ctx.lineWidth = 1;
+ctx.beginPath();
+for (var gx = 44; gx <= 384; gx += 34) { ctx.moveTo(gx, 92); ctx.lineTo(gx, 332); }
+for (var gy = 92; gy <= 332; gy += 34) { ctx.moveTo(44, gy); ctx.lineTo(384, gy); }
+ctx.stroke();
+
+/* ---- 渐变面积(createLinearGradient: 首末 stop 两端色) ---- */
+var area = ctx.createLinearGradient(0, 140, 0, 332);
+area.addColorStop(0, 'rgba(79,124,255,0.50)');
+area.addColorStop(1, 'rgba(79,124,255,0.04)');
+ctx.fillStyle = area;
+ctx.fillRect(44, 140, 340, 192);
+
+/* ---- 指标折线(折线化路径 + 圆头) ---- */
+var pts = [
+  [ 44, 300], [ 78, 282], [112, 288], [146, 258], [180, 264],
+  [214, 232], [248, 240], [282, 205], [316, 182], [350, 168], [384, 148]
+];
+ctx.strokeStyle = '#7fdbca';
+ctx.lineWidth = 2.5;
+ctx.lineCap = 'round';
+ctx.beginPath();
+ctx.moveTo(pts[0][0], pts[0][1]);
+for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+ctx.stroke();
+/* 数据点(圆弧折线化: arc 全圆 24 段) */
+ctx.fillStyle = '#a8e6d5';
+for (var i = 0; i < pts.length; i++) {
+  ctx.beginPath();
+  ctx.arc(pts[i][0], pts[i][1], 3, 0, Math.PI * 2, false);
+  ctx.fill();
+}
+/* 当前值高亮点 */
+ctx.beginPath();
+ctx.arc(384, 148, 6, 0, Math.PI * 2, false);
+ctx.fillStyle = '#ffffff';
+ctx.fill();
+
+/* ---- 半圆仪表(arc 部分72°段 + 底弧) ---- */
+ctx.lineCap = 'butt';
+ctx.lineWidth = 12;
+ctx.strokeStyle = '#232c42';
+ctx.beginPath();
+ctx.arc(520, 250, 62, Math.PI, Math.PI * 2, false);   /* 底弧(半圆) */
+ctx.stroke();
+ctx.strokeStyle = '#ffb454';
+ctx.beginPath();
+ctx.arc(520, 250, 62, Math.PI, Math.PI * 1.72, false); /* 值弧: 72% */
+ctx.stroke();
+ctx.strokeStyle = '#4f7cff';
+ctx.lineWidth = 12;
+ctx.beginPath();
+ctx.arc(520, 250, 40, Math.PI, Math.PI * 1.5, false);  /* 内环: 另一指标 */
+ctx.stroke();
+
+/* ---- 底部状态条(三枚指示块) ---- */
+ctx.fillStyle = '#2ecc71';
+ctx.fillRect(40, 400, 12, 12);
+ctx.fillStyle = '#f1c40f';
+ctx.fillRect(230, 400, 12, 12);
+ctx.fillStyle = '#e74c3c';
+ctx.fillRect(420, 400, 12, 12);
+
+/* ---- 文字标签(y = 基线) ---- */
+ctx.fillStyle = '#e8eaf0';
+ctx.font = '20px sans-serif';
+ctx.fillText('智能 UI 仪表盘', 24, 34);
+ctx.font = '12px sans-serif';
+ctx.fillStyle = '#8b94ad';
+ctx.fillText('吞吐量 · 实时链路', 44, 116);
+ctx.fillStyle = '#7fdbca';
+ctx.font = '17px sans-serif';
+ctx.fillText('1,284 req/s', 286, 128);
+ctx.fillStyle = '#e8eaf0';
+ctx.font = '22px sans-serif';
+ctx.fillText('72%', 486, 246);
+ctx.font = '12px sans-serif';
+ctx.fillStyle = '#8b94ad';
+ctx.fillText('负载率', 496, 296);
+ctx.fillStyle = '#e8eaf0';
+ctx.fillText('53%', 496, 320);
+ctx.font = '12px sans-serif';
+ctx.fillStyle = '#9aa3b5';
+ctx.fillText('正常 · 节点 A/B/C', 60, 411);
+ctx.fillText('降级 · 队列重试', 250, 411);
+ctx.fillText('拥堵 · 区域 3', 440, 411);
+ctx.fillStyle = '#5b6478';
+ctx.fillText('html-native · canvas 2D(账本重放)', 24, 470);
+</script>
+</body>
+</html>

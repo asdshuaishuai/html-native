@@ -407,6 +407,55 @@ struct hn_sheet {
 /* 查找 @keyframes 定义(跨所有已加载样式表) */
 hn_keyframes *hn_sheet_find_kf(hn_sheet *sh, const char *name);
 
+/* ---------- <canvas> 2D 账本(hn_canvas.c 记录, hn_paint.c 翻译) ----------
+ * QuickJS 桥把每个 2D context 绘制调用解析成"已解析的原语 op"(坐标已经
+ * JS 侧 CTM 变换、颜色已是 RGBA), 按元素 id 记入账本; 绘制该元素时
+ * hn_paint 把账本重放成显示列表指令。账本属于元素生命周期: 只有
+ * clearRect(op=clear)/文档替换(元素销毁)清空 —— 样式重算与重放不动它。
+ * 定长上限 + 溢出标志: 账本满后新 op 被丢弃(不崩溃, 标志可内省)。 */
+typedef enum {
+    HN_CV_FILL_RECT = 1,   /* frect: 矩形填充(x,y,w,h + color) */
+    HN_CV_STROKE_PATH,     /* spath: 开放折线描边(pts + color + stroke_w +
+                              cap_round); 每段展开成 QUAD, 端/交点补圆 */
+    HN_CV_FILL_PATH,       /* fpath: 闭合多边形填充(pts, 隐式闭合) */
+    HN_CV_GRAD_RECT,       /* grect: 矩形线性渐变(轴两端 gx0,gy0→gx1,gy1,
+                              两端色 color→color2) */
+    HN_CV_CLIP_PUSH,       /* clip: 矩形裁剪入栈(x,y,w,h) */
+    HN_CV_CLIP_POP,        /* cpop: 裁剪出栈(JS save/restore 栈配平) */
+    HN_CV_TEXT,            /* text: str 在 (x, y) 基线处, 字号 font_px + color */
+    HN_CV_IMAGE            /* image: src 图片画到 (x,y,w,h) */
+} hn_canvas_op_kind;
+
+typedef struct hn_canvas_op {
+    hn_canvas_op_kind kind;
+    float x, y, w, h;
+    hn_color color;        /* 填充/描边/渐变 from 端/文字色(0xRRGGBBAA) */
+    hn_color color2;       /* 渐变 to 端 */
+    float stroke_w;        /* 描边宽(px, 画布局部坐标) */
+    int   cap_round;       /* 1 = 圆头/圆交点 */
+    float *pts;            /* 折线/多边形顶点(x,y 交替; malloc, clear/销毁释放) */
+    int    n_pts;
+    float gx0, gy0, gx1, gy1;   /* 渐变轴两端点 */
+    char  *str;            /* text 文本 / image 路径(malloc 副本) */
+    float font_px;
+} hn_canvas_op;
+
+typedef struct hn_canvas_ledger {
+    char *id;              /* canvas 元素 id(malloc 副本; JS 桥的寻址键) */
+    hn_canvas_op *ops;
+    int n_ops, cap_ops;
+    int overflow;          /* 1 = 曾达上限, 之后的 op 被丢弃 */
+} hn_canvas_ledger;
+
+/* 每块画布账本的 op 上限(给足; 满则丢弃并置溢出标志) */
+#define HN_CANVAS_MAX_OPS 4096
+
+/* 查找(不创建)/查找或创建 账本 */
+hn_canvas_ledger *hn_canvas_ledger_find(hn_context *c, const char *id);
+hn_canvas_ledger *hn_canvas_ledger_get(hn_context *c, const char *id);
+/* 释放全部账本(文档替换 = 元素销毁 / context 销毁时调) */
+void hn_canvas_dispose(hn_context *c);
+
 /* ---------- context ---------- */
 struct hn_context {
     hn_doc   *doc;
@@ -439,6 +488,8 @@ struct hn_context {
        清理纪律(节点指针随旧文档 arena 失效)。 */
     const hn_media_host *media;
     hn_media_session *med_sessions; int n_med, cap_med;
+    /* <canvas> op 账本表(hn_canvas.c 持有; 按 canvas id 寻址) */
+    hn_canvas_ledger *canvases; int n_canvases, cap_canvases;
 };
 
 /* ---------- 共享工具 ---------- */

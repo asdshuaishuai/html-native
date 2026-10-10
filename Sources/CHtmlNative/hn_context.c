@@ -26,6 +26,7 @@ void hn_context_destroy(hn_context *c) {
     free(c->lot);
     hn_media_sessions_clear(c);   /* 媒体会话持宿主句柄与帧缓存, 必须先于结构释放 */
     free(c->med_sessions);
+    hn_canvas_dispose(c);         /* <canvas> op 账本持堆顶点/字符串, 随上下文销毁 */
     for (int i = 0; i < c->n_sheets; i++) hn_sheet_free(c->sheets[i]);
     free(c->sheets);
     hn_doc_free(c->doc);
@@ -36,8 +37,13 @@ void hn_context_destroy(hn_context *c) {
 
 void hn_context_set_doc(hn_context *c, hn_doc *doc) {
     /* 文档替换 = 旧文档的节点指针全部失效, 媒体会话先随旧文档销毁
-       (与 Lottie 缓存的清理纪律一致 —— compact 内部也走这里) */
-    if (c->doc != doc) hn_media_sessions_clear(c);
+       (与 Lottie 缓存的清理纪律一致 —— compact 内部也走这里)。
+       <canvas> 账本同口径: 账本属于 canvas **元素**生命周期, 元素随
+       文档销毁 = 账本清空; 样式重算/重放不经过这里, 不丢账。 */
+    if (c->doc != doc) {
+        hn_media_sessions_clear(c);
+        hn_canvas_dispose(c);
+    }
     c->doc = doc;
     /* 主题是渲染语义: 声明了 hn-theme 就装载基座(所有平台一致) */
     hn_context_apply_theme(c);
@@ -1930,6 +1936,7 @@ void hn_context_compact(hn_context *c, const char *html, size_t len) {
     if (!c || !c->doc) return;
     hn_context_lottie_clear(c);          /* 旧文档的路径键已随 arena 释放 */
     hn_media_sessions_clear(c);          /* 旧文档的节点指针已失效(host.close 全部) */
+    hn_canvas_dispose(c);                /* 旧文档的 canvas 元素已销毁 = 账本清空 */
     hn_arena_destroy(c->doc->arena);
     hn_doc_free(c->doc);
     c->doc = hn_parse_html(html, len);

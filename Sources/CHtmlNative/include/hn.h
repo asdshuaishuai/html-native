@@ -600,6 +600,24 @@ void hn_context_render(hn_context *c, const char *html_src, size_t len);
 typedef struct hn_png_decoder hn_png_decoder;
 unsigned char *hn_png_decode(const unsigned char *data, size_t n, int *w, int *h);
 
+/* ---- <canvas> 2D 账本(JS 桥 → 引擎) ----
+ * <canvas> 的 2D 上下文在 JS 层(QuickJS glue)维护状态机(fillStyle/
+ * save/restore 栈/当前路径/CTM), 每个绘制调用被解析成"已解析的原语 op"
+ * (坐标已 CTM 变换、颜色已 RGBA), 序列化成 JSON 经 hnCanvas2D 桥进引擎,
+ * 按元素 id 记入账本; 绘制该元素时引擎把账本重放成显示列表指令。
+ * 账本属于元素生命周期: clearRect / 文档替换(元素销毁)时清空,
+ * 样式重算与重放不影响它。上限 4096 op, 满则丢弃并置溢出标志。 */
+/* 记录一条 op(op_json 为 hnCanvas2D 协议的 JSON 文本, 内含 "cv" 画布 id;
+   引擎内部解析)。成功返回记录后的账本 op 数, 失败(坏 JSON/未知 op/无
+   context)返回 -1; clear op 返回清掉的条数。 */
+int hn_canvas_record(hn_context *c, const char *op_json, size_t len);
+/* 清空该画布账本(clearRect 语义); 返回清掉的 op 数, 画布不存在返回 -1 */
+int  hn_canvas_clear(hn_context *c, const char *canvas_id);
+/* 账本当前 op 数(内省/探针); 画布不存在返回 -1 */
+int  hn_canvas_count(hn_context *c, const char *canvas_id);
+/* 账本是否曾溢出(达上限后 op 被丢弃); 画布不存在返回 -1 */
+int  hn_canvas_overflow(hn_context *c, const char *canvas_id);
+
 #ifdef __cplusplus
 }
 #endif

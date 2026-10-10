@@ -251,6 +251,8 @@ static void sys_host(char *, size_t);
 static int clip_set(const char *);
 static int clip_get(char *, size_t);
 static int sys_open_url(const char *);
+/* 文档内联 <script> 执行(QuickJS 有实现; 无 JS 引擎时是 no-op stub) */
+static void run_doc_scripts(hn_rt *rt);
 
 char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *store_id) {
     if (!url || strncmp(url, "sys://", 6)) return NULL;
@@ -678,6 +680,7 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
         free(css);
     }
     if (!rt_render(rt)) { hn_rt_close(rt); return NULL; }
+    run_doc_scripts(rt);   /* 文档内联 <script>: canvas 2D 等纯 JS 页面的驱动 */
     run_load_actions(rt);
     rt_render(rt);
     return rt;
@@ -870,10 +873,264 @@ static JSValue js_hn_wasm_call(JSContext *ctx, JSValueConst, int argc, JSValueCo
     return ok ? JS_NewInt32(ctx, out) : JS_NAN;
 }
 
+/* ---- <canvas> 2D 桥(hnCanvas2D) ----
+ * glue(见下方 CANVAS_GLUE_JS)在 JS 层维护状态机(fillStyle/save/restore
+ * 栈/当前路径/CTM/渐变对象 —— 与 canvaskit htmlcanvas/canvas2dcontext.js 的
+ * JS 层设计同构), 每个绘制调用在 JS 里解析成"已解析的原语 op"(坐标已经
+ * CTM 变换、颜色已 RGBA), JSON 序列化后调本桥 → 引擎 hn_canvas_record
+ * 落账(协议见 Sources/CHtmlNative/hn_canvas.c 头注)。
+ * 返回记录后的账本 op 数(失败 -1; clear 返回清掉的条数)。 */
+static JSValue js_hn_canvas_2d(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 1 || !JS_IsString(argv[0])) return JS_NewInt32(ctx, -1);
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_context *c = b ? (b->ctx ? b->ctx : doc_ctx_find(b->doc)) : NULL;
+    if (!c) return JS_NewInt32(ctx, -1);
+    size_t len = 0;
+    const char *json = JS_ToCStringLen(ctx, &len, argv[0]);
+    if (!json) return JS_NewInt32(ctx, -1);
+    int n = hn_canvas_record(c, json, len);
+    JS_FreeCString(ctx, json);
+    return JS_NewInt32(ctx, n);
+}
+
+/* ---------------- <canvas> 2D glue(JS 层状态机) ----------------
+ * 标准 2D context 的方法面全部在此实现, 汇到 hnCanvas2D:
+ *   fillRect/strokeRect/beginPath/moveTo/lineTo/arc/closePath/fill/stroke/
+ *   clip/save/restore/translate/scale/rotate/setTransform/transform/
+ *   resetTransform/fillText/strokeText/createLinearGradient/clearRect/
+ *   drawImage + fillStyle/strokeStyle/lineWidth/lineCap/font 属性。
+ * 简化口径(注释即契约):
+ *   - arc 以 Math.cos/sin 折线化, 15° 一段(与账本 op 的折线模型一致);
+ *   - clearRect = 清账本(引擎没有离屏位图, "账本即画面"; 全画布清除
+ *     是主要用法, 局部清除退化为全清);
+ *   - clip() 取当前路径包围盒(矩形裁剪);
+ *   - 渐变对象只取首末两个 stop(协议 grect 是两端色模型);
+ *   - fill()/stroke() 遇渐变回退为首末 stop 的中点纯色(保形状优先);
+ *   - 线宽/字号随 CTM 按sqrt(|det|) 均匀近似(折线模型的既定简化);
+ *   - 文字 y = 基线(canvas textBaseline 缺省 alphabetic)。
+ * 入口: hnGet2D(id) 直接返回 context; 宿主没有 document 时补一个仅支持
+ * canvas 的最小 getElementById(形如标准用法的替代入口)。 */
+static const char *CANVAS_GLUE_JS =
+"(function(g){"
+"  if (typeof g.hnGet2D === 'function') return;"
+"  function clamp255(v){v=+v;return v<0?0:(v>255?255:v);}"
+"  var NAMED={black:[0,0,0],silver:[192,192,192],gray:[128,128,128],grey:[128,128,128],"
+"    white:[255,255,255],red:[255,0,0],green:[0,128,0],blue:[0,0,255],yellow:[255,255,0],"
+"    orange:[255,165,0],purple:[128,0,128],fuchsia:[255,0,255],cyan:[0,255,255],"
+"    magenta:[255,0,255],lime:[0,255,0],maroon:[128,0,0],navy:[0,0,128],olive:[128,128,0],"
+"    teal:[0,128,128],aqua:[0,255,255],gold:[255,215,0],pink:[255,192,203],"
+"    transparent:[0,0,0,0]};"
+"  function parseColor(v){"
+"    var c=[0,0,0,255];"
+"    if (v && v.__hngrad) return c;"
+"    if (typeof v!=='string') return c;"
+"    var s=v.trim();"
+"    if (s.charAt(0)==='#'){"
+"      var h=s.slice(1);"
+"      if (h.length===3||h.length===4) h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2]+(h.length===4?h[3]+h[3]:'');"
+"      if (h.length>=6){"
+"        c[0]=parseInt(h.slice(0,2),16)||0;"
+"        c[1]=parseInt(h.slice(2,4),16)||0;"
+"        c[2]=parseInt(h.slice(4,6),16)||0;"
+"        if (h.length>=8) c[3]=parseInt(h.slice(6,8),16)||0;"
+"      }"
+"      return c;"
+"    }"
+"    if (s.slice(0,4)==='rgba'&&s.charAt(4)==='('){"
+"      var p=s.slice(5,s.lastIndexOf(')')).split(',');"
+"      c[0]=clamp255(parseFloat(p[0]));c[1]=clamp255(parseFloat(p[1]));c[2]=clamp255(parseFloat(p[2]));"
+"      c[3]=Math.round((p.length>3?parseFloat(p[3]):1)*255);"
+"      return c;"
+"    }"
+"    if (s.slice(0,4)==='rgb('&&s.charAt(3)==='('){"
+"      var q=s.slice(4,s.lastIndexOf(')')).split(',');"
+"      c[0]=clamp255(parseFloat(q[0]));c[1]=clamp255(parseFloat(q[1]));c[2]=clamp255(parseFloat(q[2]));"
+"      return c;"
+"    }"
+"    var n=NAMED[s.toLowerCase()];"
+"    if (n) return [n[0],n[1],n[2], n.length>3?n[3]:255];"
+"    return c;"
+"  }"
+"  function rgba(c){"
+"    return ((clamp255(Math.round(c[0]))<<24)|(clamp255(Math.round(c[1]))<<16)|"
+"            (clamp255(Math.round(c[2]))<<8)|clamp255(Math.round(c[3])))>>>0;"
+"  }"
+"  var cache={};"
+"  function hnGet2D(id){"
+"    id=String(id);"
+"    if (cache[id]) return cache[id];"
+"    var z=make2D(id);"
+"    cache[id]=z;"
+"    return z;"
+"  }"
+"  g.hnGet2D=hnGet2D;"
+"  if (!g.document) {"
+"    g.document={getElementById:function(id){"
+"      return {getContext:function(kind){return (kind==='2d'||kind==='2D')?hnGet2D(id):null;}};"
+"    }};"
+"  }"
+"  function make2D(cvId){"
+"    function send(o){o.cv=cvId;try{hnCanvas2D(JSON.stringify(o));}catch(e){}}"
+"    function stopsOf(gd){return gd.stops.slice().sort(function(p,q){return p.t-q.t;});}"
+"    function solidOf(style){"
+"      if (style && style.__hngrad){"
+"        var s=stopsOf(style);"
+"        var a=s.length?s[0].c:[0,0,0,255];"
+"        var b=s.length?s[s.length-1].c:a;"
+"        return [(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2,(a[3]+b[3])/2];"
+"      }"
+"      return parseColor(style);"
+"    }"
+"    var st={fill:[0,0,0,255],stroke:[0,0,0,255],fillSrc:'#000000',strokeSrc:'#000000',"
+"            lw:1,cap:'butt',fontPx:10,fontSrc:'10px sans-serif',m:[1,0,0,1,0,0],clips:0};"
+"    var stack=[],subs=[],cur=null;"
+"    function xf(x,y){var m=st.m;return [m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];}"
+"    function mul(n){var m=st.m;"
+"      st.m=[m[0]*n[0]+m[2]*n[1], m[1]*n[0]+m[3]*n[1],"
+"            m[0]*n[2]+m[2]*n[3], m[1]*n[2]+m[3]*n[3],"
+"            m[0]*n[4]+m[2]*n[5]+m[4], m[1]*n[4]+m[3]*n[5]+m[5]];}"
+"    function detScale(){var m=st.m;return Math.sqrt(Math.abs(m[0]*m[3]-m[1]*m[2]))||1;}"
+"    function ensure(){if(!cur){cur=[];subs.push({p:cur,closed:false});}}"
+"    function cloneState(s){return {fill:s.fill.slice(),stroke:s.stroke.slice(),"
+"      fillSrc:s.fillSrc,strokeSrc:s.strokeSrc,lw:s.lw,cap:s.cap,fontPx:s.fontPx,"
+"      fontSrc:s.fontSrc,m:s.m.slice(),clips:s.clips};}"
+"    function textOp(s,x,y,style){"
+"      var q=xf(x,y);"
+"      send({op:'text',s:String(s),x:q[0],y:q[1],px:st.fontPx*detScale(),col:rgba(solidOf(style))});"
+"    }"
+"    function rectPts(x,y,w,h){return [x,y, x+w,y, x+w,y+h, x,y+h];}"
+"    function fillRectImpl(x,y,w,h){"
+"      var m=st.m,grad=(st.fill===null);"
+"      if (m[1]!==0||m[2]!==0){"
+"        var p=rectPts(x,y,w,h),t=[];"
+"        for (var i=0;i<8;i+=2){var q=xf(p[i],p[i+1]);t.push(q[0],q[1]);}"
+"        send({op:'fpath',pts:t,col:rgba(solidOf(st.fillSrc))});"
+"        return;"
+"      }"
+"      var o=xf(x,y),tw=m[0]*w,th=m[3]*h;"
+"      if (tw<0){o[0]+=tw;tw=-tw;}"
+"      if (th<0){o[1]+=th;th=-th;}"
+"      if (grad){"
+"        var g=st.fillSrc,s=stopsOf(g);"
+"        var c0=s.length?s[0].c:[0,0,0,255];"
+"        var c1=s.length?s[s.length-1].c:c0;"
+"        var p0=xf(g.x0,g.y0),p1=xf(g.x1,g.y1);"
+"        send({op:'grect',x:o[0],y:o[1],w:tw,h:th,"
+"             x0:p0[0],y0:p0[1],c0:rgba(c0),x1:p1[0],y1:p1[1],c1:rgba(c1)});"
+"        return;"
+"      }"
+"      send({op:'frect',x:o[0],y:o[1],w:tw,h:th,col:rgba(st.fill)});"
+"    }"
+"    var api={};"
+"    Object.defineProperty(api,'fillStyle',{"
+"      get:function(){return st.fillSrc;},"
+"      set:function(v){st.fillSrc=v;st.fill=(v&&v.__hngrad)?null:parseColor(v);}});"
+"    Object.defineProperty(api,'strokeStyle',{"
+"      get:function(){return st.strokeSrc;},"
+"      set:function(v){st.strokeSrc=v;st.stroke=(v&&v.__hngrad)?null:parseColor(v);}});"
+"    Object.defineProperty(api,'lineWidth',{"
+"      get:function(){return st.lw;},set:function(v){st.lw=(+v)>0?+v:1;}});"
+"    Object.defineProperty(api,'lineCap',{"
+"      get:function(){return st.cap;},set:function(v){st.cap=String(v);}});"
+"    Object.defineProperty(api,'font',{"
+"      get:function(){return st.fontSrc;},"
+"      set:function(v){st.fontSrc=String(v);"
+"        var m=/([0-9.]+)\\s*px/.exec(st.fontSrc);"
+"        if (m) st.fontPx=parseFloat(m[1]);}});"
+"    api.save=function(){stack.push(cloneState(st));};"
+"    api.restore=function(){"
+"      if (!stack.length) return;"
+"      var s=stack.pop();"
+"      while (st.clips>s.clips){send({op:'cpop'});st.clips--;}"
+"      st.fill=s.fill;st.stroke=s.stroke;st.fillSrc=s.fillSrc;st.strokeSrc=s.strokeSrc;"
+"      st.lw=s.lw;st.cap=s.cap;st.fontPx=s.fontPx;st.fontSrc=s.fontSrc;st.m=s.m;"
+"    };"
+"    api.translate=function(x,y){mul([1,0,0,1,x,y]);};"
+"    api.scale=function(x,y){mul([x,0,0,y,0,0]);};"
+"    api.rotate=function(a){var c=Math.cos(a),s=Math.sin(a);mul([c,s,-s,c,0,0]);};"
+"    api.transform=function(a,b,c,d,e,f){mul([a,b,c,d,e,f]);};"
+"    api.setTransform=function(a,b,c,d,e,f){st.m=[a,b,c,d,e,f];};"
+"    api.resetTransform=function(){st.m=[1,0,0,1,0,0];};"
+"    api.beginPath=function(){subs=[];cur=null;};"
+"    api.closePath=function(){"
+"      if (cur&&cur.length>=4){cur.push(cur[0],cur[1]);subs[subs.length-1].closed=true;}"
+"    };"
+"    api.moveTo=function(x,y){cur=[x,y];subs.push({p:cur,closed:false});};"
+"    api.lineTo=function(x,y){ensure();cur.push(x,y);};"
+"    api.arc=function(x,y,r,a0,a1,ccw){"
+"      if (!(r>0)) return;"
+"      var TAU=Math.PI*2,sweep=a1-a0;"
+"      if (ccw){while(sweep>0)sweep-=TAU;if(sweep===0)sweep=-TAU;}"
+"      else{while(sweep<0)sweep+=TAU;if(sweep===0)return;}"
+"      var n=Math.max(2,Math.ceil(Math.abs(sweep)/(Math.PI/12)));"
+"      var sx=x+r*Math.cos(a0),sy=y+r*Math.sin(a0);"
+"      if (cur&&cur.length>=2){cur.push(sx,sy);}"
+"      else{cur=[sx,sy];subs.push({p:cur,closed:false});}"
+"      for (var i=1;i<=n;i++){"
+"        var a=a0+sweep*i/n;"
+"        cur.push(x+r*Math.cos(a),y+r*Math.sin(a));"
+"      }"
+"    };"
+"    api.fill=function(){"
+"      var col=rgba(solidOf(st.fillSrc));"
+"      for (var i=0;i<subs.length;i++)"
+"        if (subs[i].p.length>=6) send({op:'fpath',pts:subs[i].p.slice(),col:col});"
+"    };"
+"    api.stroke=function(){"
+"      var col=rgba(solidOf(st.strokeSrc));"
+"      var w=st.lw*detScale(),cap=(st.cap==='round');"
+"      for (var i=0;i<subs.length;i++){"
+"        var p=subs[i].p;"
+"        if (p.length<4) continue;"
+"        send({op:'spath',pts:p.slice(),col:col,w:w,cap:cap});"
+"      }"
+"    };"
+"    api.clip=function(){"
+"      var minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9,any=false;"
+"      for (var i=0;i<subs.length;i++)"
+"        for (var j=0;j+1<subs[i].p.length;j+=2){"
+"          var q=xf(subs[i].p[j],subs[i].p[j+1]);"
+"          if (q[0]<minx)minx=q[0];if(q[0]>maxx)maxx=q[0];"
+"          if (q[1]<miny)miny=q[1];if(q[1]>maxy)maxy=q[1];"
+"          any=true;"
+"        }"
+"      if (!any) return;"
+"      send({op:'clip',x:minx,y:miny,w:maxx-minx,h:maxy-miny});"
+"      st.clips++;"
+"    };"
+"    api.fillRect=function(x,y,w,h){fillRectImpl(x,y,w,h);};"
+"    api.strokeRect=function(x,y,w,h){"
+"      var p=rectPts(x,y,w,h),t=[];"
+"      for (var i=0;i<8;i+=2){var q=xf(p[i],p[i+1]);t.push(q[0],q[1]);}"
+"      t.push(t[0],t[1]);"
+"      send({op:'spath',pts:t,col:rgba(solidOf(st.strokeSrc)),w:st.lw*detScale(),"
+"           cap:(st.cap==='round')});"
+"    };"
+"    api.fillText=function(s,x,y){textOp(s,x,y,st.fillSrc);};"
+"    api.strokeText=function(s,x,y){textOp(s,x,y,st.strokeSrc);};"
+"    api.createLinearGradient=function(x0,y0,x1,y1){"
+"      return {__hngrad:true,x0:x0,y0:y0,x1:x1,y1:y1,stops:[],"
+"        addColorStop:function(t,color){this.stops.push({t:t,c:parseColor(color)});}};"
+"    };"
+"    api.clearRect=function(){"
+"      send({op:'clear'});"
+"    };"
+"    api.drawImage=function(img,x,y,w,h){"
+"      var src=(typeof img==='string')?img:(img&&img.src?img.src:'');"
+"      if (!src) return;"
+"      var q=xf(x,y),m=st.m;"
+"      var dw=(w===undefined)?100:w,dh=(h===undefined)?100:h;"
+"      send({op:'image',src:src,x:q[0],y:q[1],w:dw*m[0],h:dh*m[3]});"
+"    };"
+"    return api;"
+"  }"
+"})(globalThis);";
+
 /* JS 运行时表(按 scope_key 隔离; daemon 的不同应用用不同 key)。
-   bridge 槽随上下文持有(opaque 指向它), 每次 eval 按 doc/ctx 刷新。 */
+   bridge 槽随上下文持有(opaque 指向它), 每次 eval 按 doc/ctx 刷新;
+   glue_done = canvas 2D glue 已装入(每 scope 只装一次)。 */
 #define JS_MAX_SCOPES 32
-static struct { char key[128]; JSRuntime *rt; JSContext *ctx; js_bridge bridge; } js_scopes[JS_MAX_SCOPES];
+static struct { char key[128]; JSRuntime *rt; JSContext *ctx; js_bridge bridge; int glue_done; } js_scopes[JS_MAX_SCOPES];
 static int js_scope_n = 0;
 
 static JSContext *js_scope_get(const char *key) {
@@ -888,6 +1145,7 @@ static JSContext *js_scope_get(const char *key) {
     js_scopes[js_scope_n].rt = rt;
     js_scopes[js_scope_n].ctx = ctx;
     memset(&js_scopes[js_scope_n].bridge, 0, sizeof(js_bridge));
+    js_scopes[js_scope_n].glue_done = 0;
     JS_SetContextOpaque(ctx, &js_scopes[js_scope_n].bridge);
     js_scope_n++;
     return ctx;
@@ -896,12 +1154,14 @@ static JSContext *js_scope_get(const char *key) {
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     JSContext *ctx = js_scope_get(scope_key ? scope_key : "default");
     if (!ctx) return NULL;
-    /* 桥环境: opaque = {doc, ctx}(hnSetText/hnSetValue 读 .doc; hnMedia*
-       读 .ctx —— ctx 由 doc 反查表得到, 未登记的 context 媒体桥降级 no-op) */
+    /* 桥环境: opaque = {doc, ctx}(hnSetText/hnSetValue 读 .doc; hnMedia*/
+    /* 读 .ctx —— ctx 由 doc 反查表得到, 未登记的 context 媒体桥降级 no-op) */
+    int glue_loaded = 0;
     for (int i = 0; i < js_scope_n; i++) {
         if (js_scopes[i].ctx == ctx) {
             js_scopes[i].bridge.doc = doc;
             js_scopes[i].bridge.ctx = doc ? doc_ctx_find(doc) : NULL;
+            glue_loaded = js_scopes[i].glue_done;
             break;
         }
     }
@@ -927,7 +1187,23 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_wasm_load, "hnWasmLoad", 1));
     JS_SetPropertyStr(ctx, global, "hnWasmCall",
         JS_NewCFunction(ctx, js_hn_wasm_call, "hnWasmCall", 2));
+    JS_SetPropertyStr(ctx, global, "hnCanvas2D",
+        JS_NewCFunction(ctx, js_hn_canvas_2d, "hnCanvas2D", 1));
     JS_FreeValue(ctx, global);
+
+    /* canvas 2D glue(hnGet2D + 状态机): 每 scope 只装一次(幂等定义,
+       重复 eval 也安全, 这里省掉重复解析成本) */
+    if (!glue_loaded) {
+        JSValue gr = JS_Eval(ctx, CANVAS_GLUE_JS, strlen(CANVAS_GLUE_JS),
+                             "<canvas-glue>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(gr)) {
+            JSValue e = JS_GetException(ctx);   /* glue 坏了不拖垮 eval: 吞异常 */
+            JS_FreeValue(ctx, e);
+        }
+        JS_FreeValue(ctx, gr);
+        for (int i = 0; i < js_scope_n; i++)
+            if (js_scopes[i].ctx == ctx) { js_scopes[i].glue_done = 1; break; }
+    }
 
     size_t len = strlen(js);
     JSValue r = JS_Eval(ctx, js, len, "<eval>", JS_EVAL_TYPE_GLOBAL);
@@ -947,9 +1223,59 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     return out;
 }
 
+/* ---------------- 文档内联 <script> 自动执行 ----------------
+ * 整文档装载(hn_rt_open / hn_rt_render 热替换)后按文档序执行 <script>
+ * 的文本 —— 与浏览器"解析即执行"对齐, 让 canvas 2D 这类纯 JS 驱动的
+ * 页面无需外部 eval 驱动即可离线渲染(--shot / headless 全链路可用)。
+ * hx 片段交换不重跑既有脚本(片段是数据, 不是新文档)。
+ * 只用 hn.h 的公开遍历 API(first_child/next_sibling/tag/text —— rt 层
+ * 不接触引擎内部结构); 脚本指针先快照后执行: eval 内的 DOM 改写不会
+ * 移动 arena 内存, 指针稳定。 */
+static void run_doc_scripts(hn_rt *rt) {
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    if (!doc) return;
+    hn_node *root = hn_doc_root(doc);
+    if (!root) return;
+    const char *texts[32];
+    size_t lens[32];
+    hn_node *stack[128];
+    int sp = 0, n = 0;
+    stack[sp++] = root;
+    while (sp > 0 && n < 32) {
+        hn_node *cur = stack[--sp];
+        const char *tag = hn_node_tag(cur);
+        if (tag && !strcmp(tag, "script")) {
+            for (hn_node *ch = hn_node_first_child(cur); ch && n < 32;
+                 ch = hn_node_next_sibling(ch)) {
+                size_t len = 0;
+                const char *t = hn_node_text(ch, &len);
+                if (t && len) { texts[n] = t; lens[n] = len; n++; }
+            }
+        }
+        /* 子节点逆序入栈 → 出栈为文档序(先序遍历) */
+        hn_node *kids[64];
+        int nk = 0;
+        for (hn_node *ch = hn_node_first_child(cur); ch && nk < 64;
+             ch = hn_node_next_sibling(ch))
+            kids[nk++] = ch;
+        for (int k = nk - 1; k >= 0 && sp < 128; k--)
+            stack[sp++] = kids[k];
+    }
+    for (int i = 0; i < n; i++) {
+        char *r = hn_rt_eval(texts[i], rt->id, doc);
+        if (r && !strncmp(r, "Error:", 6))
+            fprintf(stderr, "[script] %s\n", r);   /* 脚本异常可见而非静默 */
+        free(r);
+    }
+}
+
 #else
 /* 无 QuickJS 构建: js_rt_free 空实现(hn_rt_close 的调用点无需知道差别) */
 static void js_rt_free(hn_rt *rt) { (void)rt; }
+
+/* 文档内联 <script> 执行同样依赖 QuickJS: 无 JS 引擎时不跑(eval 口径
+   会如实报告"QuickJS 未编入本产物", 这里保持同一降级纪律)。 */
+static void run_doc_scripts(hn_rt *rt) { (void)rt; }
 
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     (void)js; (void)scope_key; (void)doc;
@@ -981,7 +1307,7 @@ int hn_rt_render(hn_rt *rt, const char *html, size_t len) {
     doc_ctx_bind(doc, rt->ctx);        /* 新文档重新登记(eval 桥按 doc 反查) */
     rt->poll_built = 0;
     int ok = rt_render(rt);
-    if (ok) { run_load_actions(rt); rt_render(rt); }
+    if (ok) { run_doc_scripts(rt); run_load_actions(rt); rt_render(rt); }
     return ok;
 }
 
@@ -1173,6 +1499,8 @@ char *hn_rt_text(hn_rt *rt, const char *element_id) {
 }
 
 hn_doc *hn_rt_doc(hn_rt *rt) { return rt ? hn_context_doc(rt->ctx) : NULL; }
+
+hn_context *hn_rt_context(hn_rt *rt) { return rt ? rt->ctx : NULL; }
 
 int hn_rt_cmd_count(hn_rt *rt) {
     if (!rt) return 0;

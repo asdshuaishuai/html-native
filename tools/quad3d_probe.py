@@ -36,7 +36,7 @@ SOURCES = [PROBE] + [
     for f in ("hn_arena.c", "hn_html.c", "hn_css.c", "hn_style.c",
               "hn_layout.c", "hn_paint.c", "hn_context.c", "hn_theme.c",
               "hn_json.c", "hn_lottie.c", "hn_mesh.c", "hn_media.c",
-              "hn_png.c", "hnsoft.c")
+              "hn_png.c", "hn_canvas.c", "hnsoft.c")
 ]
 
 # cairo 变体(用例 G): 本机 pkg-config 找得到 cairo 才多编一份
