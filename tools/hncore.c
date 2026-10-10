@@ -694,6 +694,12 @@ int main(int argc, char **argv) {
         if (argc > 4) { W = (float)atof(argv[4]); }
         if (argc > 5) { H = (float)atof(argv[5]); }
         hn_context_layout(ctx, W, H, &tb);
+        /* relayout 会把 keyframes/过渡的采样值从级联重算冲掉 —— 渲染前
+           零步进重新采样一次(HN_CLOCK 推进的 kf_clock 不变, 只重放采样),
+           再重建显示列表。真窗口是"每帧 tick 后直接 paint"没这个坑,
+           离屏渲染必须补这一步, 否则 HN_CLOCK 取到的永远是第 0 帧。 */
+        hn_context_anim_tick(ctx, 0);
+        hn_context_repaint(ctx);
         const hn_display_list *dl = hn_context_display_list(ctx);
         if (!dl) { fprintf(stderr, "hncore: 无绘制指令\n"); rc = 1; }
         else {
@@ -734,6 +740,12 @@ int main(int argc, char **argv) {
         if (argc > 5) { H = (float)atof(argv[5]); }
         hn_text_backend tb = { NULL, hncairo_measure_cb, hncairo_metrics_cb };
         hn_context_layout(ctx, W, H, &tb);
+        /* relayout 会把 keyframes/过渡的采样值从级联重算冲掉 —— 渲染前
+           零步进重新采样一次(HN_CLOCK 推进的 kf_clock 不变, 只重放采样),
+           再重建显示列表。真窗口是"每帧 tick 后直接 paint"没这个坑,
+           离屏渲染必须补这一步, 否则 HN_CLOCK 取到的永远是第 0 帧。 */
+        hn_context_anim_tick(ctx, 0);
+        hn_context_repaint(ctx);
         const hn_display_list *dl = hn_context_display_list(ctx);
         if (!dl) { fprintf(stderr, "hncore: 无绘制指令\n"); rc = 1; }
         else {

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x950">
+<meta name="hn-title" content="canvas-lab · 引擎特效压测">
+<style>
+  body { background:#0b0e13; color:#e8ecf4; font-size:14; padding:18; }
+  h1 { font-size:20; margin:0 0 4 0; }
+  h2 { font-size:13; color:#7f8ba3; margin:18 0 8 0; letter-spacing:1; }
+  .hint { font-size:11; color:#5b6580; }
+  .row { display:flex; gap:14; }
+
+  img { display:block; }
+  /* ── 1. 网格变形(纹理波动): canvas 贴图变形的引擎等价物 ── */
+  .flag { width:380; height:190; border-radius:8; }
+
+  /* ── 2. clip-path 裁剪 ── */
+  .avatar { width:110; height:110; border-radius:0; clip-path: circle(50%); }
+  .inset  { width:110; height:110; background:linear-gradient(135deg,#4f7cff,#9b59ff);
+            clip-path: inset(10px 10px 10px 10px round 18px); }
+
+  /* ── 3. filter 调色 ── */
+  .strip { width:120; height:70; border-radius:10;
+           background:linear-gradient(90deg,#ff6b6b,#4f7cff,#2ecc71); }
+  .f1 { filter: brightness(0.5); }
+  .f2 { filter: contrast(1.8); }
+  .f3 { filter: saturate(2.2); }
+
+  /* ── 4. 玻璃卡片(渐变+阴影+圆角+多层合成) ── */
+  .glass { width:260; height:120; border-radius:16;
+           background:linear-gradient(160deg, rgba(79,124,255,.35), rgba(155,89,255,.12));
+           border:1 solid rgba(255,255,255,.18);
+           box-shadow:0 12 32 rgba(0,0,0,.45);
+           padding:14; }
+  .glow { font-size:22; font-weight:700; color:#cfe0ff;
+          text-shadow:0 0 12 rgba(79,124,255,.9); }
+
+  /* ── 5. @keyframes 中间态(HN_CLOCK 取帧) ── */
+  .ball { width:36; height:36; border-radius:50%;
+          background:linear-gradient(135deg, #ffd479, #ff8a3d);
+          animation: jump 1s ease-out infinite alternate; }
+  /* keyframes 只采样五字段: opacity / translate-x / translate-y / scale / rotate
+     (单数值声明; transform 简写与两值 translate 不进时间轴) */
+  @keyframes jump { from { translate-y: 0; } to { translate-y: -64; } }
+  .ball2 { animation-delay:-0.5s; }   /* 反相: 同一时刻一高一低 */
+  .spin { width:44; height:44; border-radius:50%;
+          border:4 solid rgba(255,255,255,.12); border-top-color:#4f7cff;
+          animation: rot 1.2s linear infinite; }
+  @keyframes rot { from { rotate: 0; } to { rotate: 360; } }
+
+  .cap { font-size:11; color:#7f8ba3; }
+</style>
+</head><body>
+  <h1>canvas-lab — 引擎的"canvas 类"特效面</h1>
+  <div class="cap">纹理变形 · clip-path · filter 调色 · 多层合成 · keyframes 取帧(HN_CLOCK=600ms)</div>
+
+  <h2>1 · MESH 网格变形(贴图波动, canvas 贴图的等价物)</h2>
+  <img class="flag" src="examples/assets/chart.png" hn-mesh="14x8" hn-mesh-sway="12" hn-mesh-speed="1.6" hn-mesh-anchor="left">
+
+  <h2>2 · clip-path(circle / inset round)</h2>
+  <div class="row">
+    <img class="avatar" src="examples/assets/avatar-a.png">
+    <div class="inset"></div>
+    <div class="cap">左: circle(50%) 头像裁圆<br>右: inset 四边 10px + 圆角 18</div>
+  </div>
+
+  <h2>3 · filter: brightness / contrast / saturate</h2>
+  <div class="row">
+    <div class="strip"></div>
+    <div class="strip f1"></div>
+    <div class="strip f2"></div>
+    <div class="strip f3"></div>
+  </div>
+  <div class="cap">原图 · brightness(0.5) · contrast(1.8) · saturate(2.2)</div>
+
+  <h2>4 · 多层合成(渐变卡 + 真阴影 + 文字辉光)</h2>
+  <div class="glass">
+    <div class="glow">Glass Card</div>
+    <div class="cap" style="margin-top:6">linear-gradient + border + box-shadow + text-shadow</div>
+  </div>
+
+  <h2>5 · @keyframes 中间态(同一时钟两个球应一高一低)</h2>
+  <div class="row" style="height:120">
+    <div class="ball" style="margin-top:70"></div>
+    <div class="ball ball2" style="margin-top:70"></div>
+    <div class="spin"></div>
+    <div class="cap">jump(0ms) · jump(-0.5s 反相) · rotate 600ms 处</div>
+  </div>
+</body></html>

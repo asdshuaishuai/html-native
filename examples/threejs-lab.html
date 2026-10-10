@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x880">
+<meta name="hn-title" content="threejs-lab · 3D 场景压测">
+<style>
+  body { background:#0b0e13; color:#e8ecf4; font-size:14; padding:18; }
+  h1 { font-size:20; margin:0 0 4 0; }
+  h2 { font-size:13; color:#7f8ba3; margin:18 0 8 0; letter-spacing:1; }
+  .cap { font-size:11; color:#7f8ba3; }
+
+  /* 引擎 3D 实测口径(本页即为结论):
+     1) QUAD 透视投影按**单元素**计算; 元素自带 perspective 属性时对自己的
+        transform 生效(与 examples/transform3d.html 同一口径)。
+     2) perspective 只对直接子级继承一层; 孙级的 translateZ 无视距会退化 ——
+        多层 3D 场景(preserve-3d)不支持, 场景=各元素独立投影再合成。
+     3) 3D 变换元素内的文字暂不绘制(只有 QUAD 形状), 标签放在变换元素外。 */
+
+  /* 实测: 3D 变换元素必须在**普通块流**里才绘制(flex/inline-block/absolute
+     里的 3D 元素会被静默丢弃; translateZ 例外)。横向排布用 inline-block
+     格子包块级变换卡 —— 与 transform3d.html 同一口径。 */
+  /* 壳(flex 项, 无变换)负责横向排布; 变换卡在壳内保持块流 */
+  .cell { display:block; margin-right:16; }
+  .hrow { display:flex; gap:16; align-items:center; }
+
+  /* ── 1. 旋转对比排 ── */
+  /* 3D 元素用**平色**底(QUAD 路径只填平色, 渐变元素的投影会变全透明)、
+     不带边框(边框按未变换矩形绘制, 会画歪) */
+  .k { display:block; width:112; height:74; border-radius:10;
+       background:#3d5fbf; perspective: 500; }
+  .k1 { transform: rotateY(18deg); background:#4f7cff; }
+  .k2 { transform: rotateY(38deg); background:#2c4a99; }
+  .k3 { transform: rotateX(28deg); background:#2ecc71; }
+  .k4 { transform: rotateX(18deg) rotateY(26deg); background:#9b59ff; }
+  .k5 { transform: rotate3d(1,1,0,38deg); background:#ff8a3d; }
+
+  /* ── 2. translateZ 深度: 同尺寸三卡, 近大远小 ── */
+  .z { display:block; width:90; height:60; border-radius:8;
+       background:#2c4a99; perspective: 500; }
+  .z0 { transform: translateZ(0); }
+  .z1 { transform: translateZ(90px); background:#2e8f57; }
+  .z2 { transform: translateZ(180px); background:#d1a54a; }
+
+  /* ── 3. 等距柱状图: rotateX 投影地板 + 普通立柱合成 ── */
+  .scene { position:relative; height:240; }
+  .floor { display:block; width:380; height:180; margin-left:30;
+           transform: rotateX(58deg); perspective: 800;
+           transform-origin: 50% 100%;
+           background:#24304d; }
+  .bar { position:absolute; border-radius:4 4 0 0;
+         background:linear-gradient(180deg,#4f7cff,#2c4a99); }
+  .b1 { left:70;  bottom:26; width:44; height:64; }
+  .b2 { left:140; bottom:26; width:44; height:118; background:linear-gradient(180deg,#2ecc71,#1d7a46); }
+  .b3 { left:210; bottom:26; width:44; height:92; }
+  .b4 { left:280; bottom:26; width:44; height:140; background:linear-gradient(180deg,#ff8a3d,#b3531c); }
+
+  /* ── 4. 卡片扇: transform-origin 底部 + 逐卡 rotateY ── */
+  .fanrow { height:140; }
+  .fan { display:block; width:88; height:120; border-radius:10;
+         background:#3d5fbf; perspective: 700; transform-origin: 50% 100%; }
+  .f1 { transform: rotateY(32deg); background:#2c4a99; }
+  .f2 { transform: rotateY(16deg); background:#4468c9; }
+  .f3 { transform: rotateY(0deg); background:#5b82e6; }
+  .f4 { transform: rotateY(-16deg); background:#4468c9; }
+  .f5 { transform: rotateY(-32deg); background:#2c4a99; }
+</style>
+</head><body>
+  <h1>threejs-lab — 引擎的 3D 场景面(QUAD 透视投影)</h1>
+  <div class="cap">口径: 单元素投影 + perspective 一层继承; 场景=各元素独立投影合成(无 preserve-3d 层级栈)</div>
+
+  <h2>1 · 旋转对比: rotateY / rotateX / 复合 / rotate3d 任意轴</h2>
+  <div class="hrow">
+    <div class="cell"><div class="k k1"></div></div><div class="cell"><div class="k k2"></div></div><div class="cell"><div class="k k3"></div></div><div class="cell"><div class="k k4"></div></div><div class="cell"><div class="k k5"></div></div>
+  </div>
+  <div class="cap">Y18 · Y38 · X28 · X18+Y26 · rotate3d(1,1,0,38°)</div>
+
+  <h2>2 · translateZ 深度(同尺寸, 近大远小)</h2>
+  <div class="hrow" style="margin-top:20">
+    <div class="cell"><div class="z z2"></div></div><div class="cell"><div class="z z1"></div></div><div class="cell"><div class="z z0"></div></div>
+  </div>
+  <div class="cap">Z180(最大) · Z90 · Z0(最小) —— translateZ 按视距缩放</div>
+
+  <h2>3 · 等距柱状图(rotateX 投影地板 + 立柱合成)</h2>
+  <div class="scene">
+    <div class="floor"></div>
+    <div style="position:relative; height:0">
+      <div class="bar b1" style="position:absolute"></div><div class="bar b2" style="position:absolute"></div>
+      <div class="bar b3" style="position:absolute"></div><div class="bar b4" style="position:absolute"></div>
+    </div>
+  </div>
+
+  <h2>4 · 卡片扇(transform-origin 底部中点, ±32° 逐卡 rotateY)</h2>
+  <div class="fanrow hrow">
+    <div class="cell" style="margin-right:2"><div class="fan f1"></div></div><div class="cell" style="margin-right:2"><div class="fan f2"></div></div><div class="cell" style="margin-right:2"><div class="fan f3"></div></div><div class="cell" style="margin-right:2"><div class="fan f4"></div></div><div class="cell"><div class="fan f5"></div></div>
+  </div>
+</body></html>
