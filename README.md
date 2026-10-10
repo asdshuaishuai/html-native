@@ -287,9 +287,18 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   **3D 变换**(`rotateX/Y/Z` + 透视投影 + `translateZ` 深度缩放)。
   **`translateZ()` 与 `rotate3d(x,y,z,angle)` 已实现投影**(深度位移按透视
   缩放、任意轴按 Rodrigues 公式旋转后与 X/Y/Z 复合)。
-  **`perspective` 视距与消失点**(元素自身声明视距, 否则取父级的 ——
-  消失点跟随**声明者**的 `perspective-origin`, 缺省父盒中心 50% 50%;
+  **`perspective` 视距与消失点**(元素自身声明视距, 否则取最近的祖先声明 ——
+  消失点跟随**声明者**的 `perspective-origin`, 缺省声明者盒中心 50% 50%;
   曾错标成子盒自身中心, 探针以 translateZ(±200) 的角点收放钉死口径)。
+  **`transform-style: preserve-3d` 层级矩阵栈**(父子 transform 逐级复合成
+  4×4 矩阵, "容器旋转 × 子面 rotateY/X + translateZ"的真立方体/卡片环直接
+  可写; flat(缺省)元素复位矩阵, 并把父面片的投影以 2D 仿射摊平给子级 ——
+  与 CSS 扁平化同语义)、
+  **QUAD 面片的渐变/边框/文字**(渐变画在元素平面上随面片一起投影;
+  边框按投影四边形出四条梯形, 不再按未变换矩形画歪; 子树文字落在面片的
+  摊平仿射上, 字号随 sqrt|det| 缩放 —— 字形轴对齐, 不做逐像素透视畸变)、
+  **flex/absolute/inline-block 子树的 3D**(与普通块流同一绘制路径,
+  不再静默丢弃 —— 3D 卡可直接做 flex 子项)。
   **选择器引擎强化**:**属性选择器**(`[a]` `[a=v]` `[a^=]` `[a$=]` `[a*=]` `[a~=]`)、
   **`:not()`**(否定一层简单复合, 实参按标准计入特异性)、
   **`:nth-of-type()` / `:first-of-type` / `:last-of-type`**(只数同标签兄弟 ——
@@ -393,9 +402,14 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 - **关键帧动画(@keyframes)**: 多段动画定义 + `animation: <名> <时长> <缓动> 
   infinite alternate` 简写; 时间轴逐帧采样, 支持 iteration/方向/fill。
   适合"持续旋转/呼吸/脉冲/颜色循环"等无法用二态 transition 表达的效果
-- **3D 变换**: `transform: rotate/rotateX/rotateY + perspective`;
-  绕三轴旋转矩阵 + 透视投影(近大远小) → 四边形光栅化(新绘制指令 QUAD,
-  CoreGraphics 与软件光栅双后端实现)。可做卡片翻转、3D 倾斜面板
+- **3D 变换**: `transform: rotate/rotateX/rotateY/rotate3d + translateZ +
+  perspective + transform-style: preserve-3d`; 4×4 层级矩阵栈 + 透视投影
+  (近大远小) → 投影四边形光栅化(绘制指令 QUAD, hnsoft 与 cairo 双后端
+  同语义)。preserve-3d 父子矩阵逐级复合(真立方体/卡片环两级变换),
+  QUAD 面片带渐变/边框/文字(渐变随面片投影、边框按投影四边形出梯形、
+  子树文字随摊平仿射落位), flex/absolute/inline-block 子树与普通块流
+  同一绘制路径。可做卡片翻转、3D 倾斜面板、真立方体、卡片环 ——
+  见 `examples/threejs-lab.html`; 口径由 `tools/quad3d_probe.c` 钉死
 - **Lottie 矢量动画**: `<img src="a.json" hn-lottie>` 直接播 Lottie/bodymovin
   文件 —— 引擎解析 JSON、按时间轴求值, 产出**多边形绘制指令(POLYGON)**,
   所以不必为每个平台写一遍播放器, 也不需要 WebView。支持形状层

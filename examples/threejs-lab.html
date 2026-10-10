@@ -5,93 +5,179 @@
 <meta name="hn-window" content="920x880">
 <meta name="hn-title" content="threejs-lab · 3D 场景压测">
 <style>
-  body { background:#0b0e13; color:#e8ecf4; font-size:14; padding:18; }
-  h1 { font-size:20; margin:0 0 4 0; }
-  h2 { font-size:13; color:#7f8ba3; margin:18 0 8 0; letter-spacing:1; }
-  .cap { font-size:11; color:#7f8ba3; }
+  body { background:#0b0e13; color:#e8ecf4; font-size:14; padding:14 18; }
+  h1 { font-size:19; margin:0 0 3 0; }
+  h2 { font-size:13; color:#7f8ba3; margin:12 0 6 0; letter-spacing:1; }
+  .cap { font-size:11; color:#7f8ba3; margin-top:3; }
 
-  /* 引擎 3D 实测口径(本页即为结论):
-     1) QUAD 透视投影按**单元素**计算; 元素自带 perspective 属性时对自己的
-        transform 生效(与 examples/transform3d.html 同一口径)。
-     2) perspective 只对直接子级继承一层; 孙级的 translateZ 无视距会退化 ——
-        多层 3D 场景(preserve-3d)不支持, 场景=各元素独立投影再合成。
-     3) 3D 变换元素内的文字暂不绘制(只有 QUAD 形状), 标签放在变换元素外。 */
+  /* ── 引擎 3D 口径(三条旧边界已修复, 本页即为验收) ──
+     1) preserve-3d 层级矩阵栈: transform-style: preserve-3d 的元素把
+        "自己叠完的"复合 4x4 矩阵传给子级, 父子 transform 逐级复合 ——
+        下面的真立方体与卡片环就是两级复合: 容器 rotateX·rotateY ×
+        各子面 rotateY/X + translateZ(半径)。flat(缺省)元素复位矩阵,
+        把父面片的投影以 2D 仿射摊平给子级(与 CSS 扁平化同语义)。
+     2) QUAD 面片带渐变/边框/文字: 渐变画在元素平面上、随面片一起被
+        投影(等效 CSS 先画再变换); 边框按投影四边形出四条梯形(不再按
+        未变换矩形画歪); 子树文字落在面片的摊平仿射上, 字号随 sqrt|det|
+        缩放 —— 字形本身轴对齐, 不做逐像素透视畸变(简化口径, 如实写明)。
+     3) flex 直接子项 / position:absolute / inline-block 原子盒里的 3D
+        元素与普通块流同一绘制路径(不再静默丢弃): 本页 3D 卡直接做 flex
+        子项, 立方体六面与卡片环全部 absolute —— 没有一层"块流壳"规避。
+     仍属简化(如实写明): 无逐深度排序, 遮挡关系由文档序决定 —— 立方体
+     六面与卡片环按"远 → 近"排列; perspective 声明者的盒中心即消失点。 */
 
-  /* 实测: 3D 变换元素必须在**普通块流**里才绘制(flex/inline-block/absolute
-     里的 3D 元素会被静默丢弃; translateZ 例外)。横向排布用 inline-block
-     格子包块级变换卡 —— 与 transform3d.html 同一口径。 */
-  /* 壳(flex 项, 无变换)负责横向排布; 变换卡在壳内保持块流 */
-  .cell { display:block; margin-right:16; }
-  .hrow { display:flex; gap:16; align-items:center; }
+  /* 3D 元素直接做 flex 子项(修复 #3 的活样例, 无 .cell 壳) */
+  .hrow { display:flex; gap:12; align-items:center; }
 
-  /* ── 1. 旋转对比排 ── */
-  /* 3D 元素用**平色**底(QUAD 路径只填平色, 渐变元素的投影会变全透明)、
-     不带边框(边框按未变换矩形绘制, 会画歪) */
-  .k { display:block; width:112; height:74; border-radius:10;
-       background:#3d5fbf; perspective: 500; }
-  .k1 { transform: rotateY(18deg); background:#4f7cff; }
-  .k2 { transform: rotateY(38deg); background:#2c4a99; }
-  .k3 { transform: rotateX(28deg); background:#2ecc71; }
-  .k4 { transform: rotateX(18deg) rotateY(26deg); background:#9b59ff; }
-  .k5 { transform: rotate3d(1,1,0,38deg); background:#ff8a3d; }
+  /* ── 1. 旋转对比 + translateZ 深度 ──
+     渐变/边框/文字直接上 3D 元素(旧口径: QUAD 只填平色 —— 渐变投影后
+     全透明; 边框按未变换矩形绘制会画歪; 文字不绘制)。 */
+  .k { width:96; height:60; line-height:58px; perspective: 520;
+       background:linear-gradient(150deg,#5b82e6,#2c4a99);
+       border:1.5 solid #6fa8ff; color:#eaf1ff; font-size:12;
+       text-align:center; }
+  .k1 { transform: rotateY(20deg); }
+  .k2 { transform: rotateY(40deg); }
+  .k3 { transform: rotateX(28deg); background:linear-gradient(150deg,#3ecf7a,#1d7a46); border-color:#5fe3a0; }
+  .k4 { transform: rotateX(18deg) rotateY(26deg); background:linear-gradient(150deg,#b07dff,#6a2fbf); border-color:#c9a2ff; }
+  .k5 { transform: rotate3d(1,1,0,38deg); background:linear-gradient(150deg,#ffa64d,#b3531c); border-color:#ffc38a; }
 
-  /* ── 2. translateZ 深度: 同尺寸三卡, 近大远小 ── */
-  .z { display:block; width:90; height:60; border-radius:8;
-       background:#2c4a99; perspective: 500; }
+  .z { width:80; height:56; line-height:54px; perspective: 560;
+       background:linear-gradient(160deg,#4f7cff,#23366b);
+       border:1 solid #6fa8ff; color:#eaf1ff; font-size:12; text-align:center; }
   .z0 { transform: translateZ(0); }
-  .z1 { transform: translateZ(90px); background:#2e8f57; }
-  .z2 { transform: translateZ(180px); background:#d1a54a; }
+  .z1 { transform: translateZ(50px);  background:linear-gradient(160deg,#3ecf7a,#145c33); }
+  .z2 { transform: translateZ(100px); background:linear-gradient(160deg,#ffd166,#8f6a1d); }
 
-  /* ── 3. 等距柱状图: rotateX 投影地板 + 普通立柱合成 ── */
-  .scene { position:relative; height:240; }
-  .floor { display:block; width:380; height:180; margin-left:30;
+  /* ── 2. 真立方体: 父级 perspective + preserve-3d ──
+     立方体容器声明视距与 preserve-3d, 自身 rotateX·rotateY 复合后把
+     矩阵传给六面; 各面 absolute 叠在同一盒位, rotateY/X + translateZ(43px)
+     推到各自方位。六面带渐变 + 边框 + 文字, 文字随面片摊平仿射落位。
+     文档序 = 绘制序(无逐深度排序): 背面三面先画, 可见面(前/左/顶)后画
+     盖住它们 —— 凸体投影下背面被可见面完全覆盖。 */
+  .cstage { position:relative; height:182; }
+  .cube { position:relative; width:86; height:86; margin:34 auto 0;
+          perspective: 640; transform-style: preserve-3d;
+          transform: rotateX(-24deg) rotateY(34deg); }
+  .face { position:absolute; left:0; top:0; width:86; height:86;
+          border:1.5 solid rgba(255,255,255,.55); color:#f2f6ff;
+          font-size:13; line-height:83px; text-align:center; }
+  .f-back  { transform: rotateY(180deg) translateZ(43px); background:linear-gradient(160deg,#2fbf9f,#0f5c4a); }
+  .f-right { transform: rotateY(90deg)  translateZ(43px); background:linear-gradient(160deg,#3ecf7a,#145c33); }
+  .f-bot   { transform: rotateX(-90deg) translateZ(43px); background:linear-gradient(160deg,#e6685c,#7a271f); }
+  .f-left  { transform: rotateY(-90deg) translateZ(43px); background:linear-gradient(160deg,#ffa64d,#8f4a12); }
+  .f-top   { transform: rotateX(90deg)  translateZ(43px); background:linear-gradient(160deg,#b07dff,#4a1f8f); }
+  .f-front { transform: translateZ(43px);                 background:linear-gradient(160deg,#5b82e6,#1d3a8f); }
+
+  /* ── 3. 卡片环: 六卡 rotateY 步进 60° + translateZ(78px) 半径 ──
+     环容器(perspective + preserve-3d + rotateX/Y 倾斜)给出复合矩阵,
+     六卡 absolute 定位在同一盒位后按方位角步进推出半径。
+     文档序远 → 近(方位角 156°→276°→96°→216°→36°→-24°), 无逐深度排序
+     时由页面作者排绘制序。 */
+  .rstage { position:relative; height:152; }
+  .ring { position:relative; width:170; height:96; margin:24 auto 0;
+          perspective: 760; transform-style: preserve-3d;
+          transform: rotateX(-16deg) rotateY(-24deg); }
+  .rc { position:absolute; left:52; top:25; width:66; height:46;
+        border-radius:8; border:1 solid rgba(255,255,255,.5); color:#f2f6ff;
+        font-size:13; line-height:43px; text-align:center;
+        background:linear-gradient(140deg,#4f7cff,#23366b); }
+  .rc4 { transform: rotateY(156deg) translateZ(78px); background:linear-gradient(140deg,#e6685c,#5c1712); }
+  .rc5 { transform: rotateY(216deg) translateZ(78px); background:linear-gradient(140deg,#8a6fb8,#332054); }
+  .rc3 { transform: rotateY(96deg)  translateZ(78px); background:linear-gradient(140deg,#3ecf7a,#145c33); }
+  .rc6 { transform: rotateY(276deg) translateZ(78px); background:linear-gradient(140deg,#ffd166,#6b4e0e); }
+  .rc2 { transform: rotateY(36deg)  translateZ(78px); background:linear-gradient(140deg,#ffa64d,#8f4a12); }
+  .rc1 { transform: rotateY(-24deg) translateZ(78px); background:linear-gradient(140deg,#5b82e6,#1d3a8f); }
+
+  /* ── 4/5. 等距柱状图 + 卡片扇(双栏; 扇卡直接做 flex 子项) ── */
+  .duo { display:flex; gap:28; }
+  .col { width:428; }
+  .scene { position:relative; height:168; }
+  .floor { display:block; width:340; height:150; margin-left:24;
            transform: rotateX(58deg); perspective: 800;
            transform-origin: 50% 100%;
-           background:#24304d; }
+           background:linear-gradient(180deg,#2c3a5e,#1b2440);
+           border:1 solid #44598c; }
   .bar { position:absolute; border-radius:4 4 0 0;
          background:linear-gradient(180deg,#4f7cff,#2c4a99); }
-  .b1 { left:70;  bottom:26; width:44; height:64; }
-  .b2 { left:140; bottom:26; width:44; height:118; background:linear-gradient(180deg,#2ecc71,#1d7a46); }
-  .b3 { left:210; bottom:26; width:44; height:92; }
-  .b4 { left:280; bottom:26; width:44; height:140; background:linear-gradient(180deg,#ff8a3d,#b3531c); }
-
-  /* ── 4. 卡片扇: transform-origin 底部 + 逐卡 rotateY ── */
-  .fanrow { height:140; }
-  .fan { display:block; width:88; height:120; border-radius:10;
-         background:#3d5fbf; perspective: 700; transform-origin: 50% 100%; }
-  .f1 { transform: rotateY(32deg); background:#2c4a99; }
-  .f2 { transform: rotateY(16deg); background:#4468c9; }
-  .f3 { transform: rotateY(0deg); background:#5b82e6; }
-  .f4 { transform: rotateY(-16deg); background:#4468c9; }
-  .f5 { transform: rotateY(-32deg); background:#2c4a99; }
+  .b1 { left:56;  bottom:20; width:40; height:54; }
+  .b2 { left:118; bottom:20; width:40; height:100; background:linear-gradient(180deg,#3ecf7a,#1d7a46); }
+  .b3 { left:180; bottom:20; width:40; height:78; }
+  .b4 { left:242; bottom:20; width:40; height:120; background:linear-gradient(180deg,#ffa64d,#b3531c); }
+  .fanrow { height:104; }
+  .fan { width:82; height:100; line-height:98px; perspective: 700; transform-origin: 50% 100%;
+         background:linear-gradient(160deg,#5b82e6,#2c4a99);
+         border:1 solid #6fa8ff; color:#eaf1ff; font-size:12; text-align:center; }
+  .f1 { transform: rotateY(32deg);  background:linear-gradient(160deg,#3a5cb8,#1d3a8f); }
+  .f2 { transform: rotateY(16deg);  background:linear-gradient(160deg,#4f7cff,#274a9e); }
+  .f3 { transform: rotateY(0deg);   background:linear-gradient(160deg,#6d94ff,#3a5cb8); }
+  .f4 { transform: rotateY(-16deg); background:linear-gradient(160deg,#4f7cff,#274a9e); }
+  .f5 { transform: rotateY(-32deg); background:linear-gradient(160deg,#3a5cb8,#1d3a8f); }
 </style>
 </head><body>
   <h1>threejs-lab — 引擎的 3D 场景面(QUAD 透视投影)</h1>
-  <div class="cap">口径: 单元素投影 + perspective 一层继承; 场景=各元素独立投影合成(无 preserve-3d 层级栈)</div>
+  <div class="cap">口径: preserve-3d 层级矩阵栈 · QUAD 渐变/边框/文字 · flex/absolute/inline-block 子树 3D(三条旧边界已修复, 探针 tools/quad3d_probe.c 守护)</div>
 
-  <h2>1 · 旋转对比: rotateY / rotateX / 复合 / rotate3d 任意轴</h2>
+  <h2>1 · 旋转对比 + translateZ 深度(渐变/边框/文字直接上 3D 元素)</h2>
   <div class="hrow">
-    <div class="cell"><div class="k k1"></div></div><div class="cell"><div class="k k2"></div></div><div class="cell"><div class="k k3"></div></div><div class="cell"><div class="k k4"></div></div><div class="cell"><div class="k k5"></div></div>
+    <div class="k k1">Y20°</div>
+    <div class="k k2">Y40°</div>
+    <div class="k k3">X28°</div>
+    <div class="k k4">X18·Y26</div>
+    <div class="k k5">3d 38°</div>
+    <div class="z z2" style="margin-left:26">Z100</div>
+    <div class="z z1">Z50</div>
+    <div class="z z0">Z0</div>
   </div>
-  <div class="cap">Y18 · Y38 · X28 · X18+Y26 · rotate3d(1,1,0,38°)</div>
+  <div class="cap">Y20 · Y40 · X28 · X18+Y26 · rotate3d(1,1,0,38°) ｜ translateZ 近大远小(Z100 最大 · Z0 最小)</div>
 
-  <h2>2 · translateZ 深度(同尺寸, 近大远小)</h2>
-  <div class="hrow" style="margin-top:20">
-    <div class="cell"><div class="z z2"></div></div><div class="cell"><div class="z z1"></div></div><div class="cell"><div class="z z0"></div></div>
-  </div>
-  <div class="cap">Z180(最大) · Z90 · Z0(最小) —— translateZ 按视距缩放</div>
-
-  <h2>3 · 等距柱状图(rotateX 投影地板 + 立柱合成)</h2>
-  <div class="scene">
-    <div class="floor"></div>
-    <div style="position:relative; height:0">
-      <div class="bar b1" style="position:absolute"></div><div class="bar b2" style="position:absolute"></div>
-      <div class="bar b3" style="position:absolute"></div><div class="bar b4" style="position:absolute"></div>
+  <h2>2 · 真立方体: 父级 perspective + preserve-3d, 六面 rotateY/X + translateZ(43px)</h2>
+  <div class="cstage">
+    <div class="cube">
+      <div class="face f-back" >后</div>
+      <div class="face f-right">右</div>
+      <div class="face f-bot"  >底</div>
+      <div class="face f-left" >左</div>
+      <div class="face f-top"  >顶</div>
+      <div class="face f-front">前</div>
     </div>
   </div>
+  <div class="cap">容器 rotateX(-24°)·rotateY(34°) 复合矩阵传给六面 · 文档序远→近(背面先画, 前/左/顶盖住) · 面上渐变+边框+文字</div>
 
-  <h2>4 · 卡片扇(transform-origin 底部中点, ±32° 逐卡 rotateY)</h2>
-  <div class="fanrow hrow">
-    <div class="cell" style="margin-right:2"><div class="fan f1"></div></div><div class="cell" style="margin-right:2"><div class="fan f2"></div></div><div class="cell" style="margin-right:2"><div class="fan f3"></div></div><div class="cell" style="margin-right:2"><div class="fan f4"></div></div><div class="cell"><div class="fan f5"></div></div>
+  <h2>3 · 卡片环: 六卡 rotateY 步进 60° + translateZ(78px) 半径</h2>
+  <div class="rstage">
+    <div class="ring">
+      <div class="rc rc4">04</div>
+      <div class="rc rc5">05</div>
+      <div class="rc rc3">03</div>
+      <div class="rc rc6">06</div>
+      <div class="rc rc2">02</div>
+      <div class="rc rc1">01</div>
+    </div>
+  </div>
+  <div class="cap">环容器 rotateX(-16°)·rotateY(-24°) 倾斜 + preserve-3d · 文档序按方位角远→近(01 最前最后画)</div>
+
+  <h2>4 · 等距柱状图 ｜ 5 · 卡片扇(flex 子项直排, 无块流壳)</h2>
+  <div class="duo">
+    <div class="col">
+      <div class="scene">
+        <div class="floor"></div>
+        <div style="position:relative; height:0">
+          <div class="bar b1"></div><div class="bar b2"></div>
+          <div class="bar b3"></div><div class="bar b4"></div>
+        </div>
+      </div>
+      <div class="cap">rotateX(58°) 投影地板(渐变+边框) + 普通立柱合成</div>
+    </div>
+    <div class="col">
+      <div class="fanrow hrow">
+        <div class="fan f1">32°</div>
+        <div class="fan f2">16°</div>
+        <div class="fan f3">0°</div>
+        <div class="fan f4">-16°</div>
+        <div class="fan f5">-32°</div>
+      </div>
+      <div class="cap">transform-origin 底部中点, 逐卡 rotateY · flex 直接子项</div>
+    </div>
   </div>
 </body></html>
