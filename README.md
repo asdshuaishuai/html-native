@@ -267,7 +267,9 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   (级联按视口宽度过滤, 窗口缩放即刻重排); 属性: display(block/flex/none/inline/inline-block)、flex 系
   (direction/justify/align/gap/grow/**shrink**/`flex:n`⇒basis0/basis)、
   盒模型(margin/padding/border/radius/box-sizing)、**transition 过渡**、
-  **linear-gradient 渐变**、
+  **linear-gradient 渐变**(轴长按 CSS 口径: 渐变线长 |W·sinθ|+|H·cosθ|,
+  端点恰落在 0/1 —— hnsoft 与 cairo 同式; 旧口径多除一个 2, 两端只到
+  25%/75%)、
   **box-shadow 阴影**、**overflow(裁剪+滚动)**、**cursor**、颜色背景、
   字体(size/weight/style/line-height/letter-spacing)、text-align、
   opacity; 颜色 **#hex(3/4/6/8 位)/rgb(a)/**`hsl(a)`/transparent/36+ 命名色
@@ -281,7 +283,9 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   **明确不支持**: 文本层/表达式/特效/遮罩与轨道遮罩(蒙版形状不生效,
   仅图层 `td` 有效)/merge paths/时间重映射。
   **变换引擎**:**非等比缩放**(`scale(x,y)` / `scaleX()` / `scaleY()` ——
-  之前只取第一个参数, `scale(2,1)` 被当成等比 2, 图形纵向也被拉高一倍)、
+  之前只取第一个参数, `scale(2,1)` 被当成等比 2, 图形纵向也被拉高一倍;
+  `scale(2)` 等比形式只装等比一路, 与 `scale(2,2)` 同值 —— 旧实现两路
+  相乘曾得 4 倍)、
   **`transform-origin`**(px 与 %; 之前完全没有, 所有 rotate/scale 都以盒中心
   为原点, 想绕左上角转只能靠 translate 硬凑而且角度是错的)、
   **3D 变换**(`rotateX/Y/Z` + 透视投影 + `translateZ` 深度缩放)。
@@ -292,11 +296,22 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   曾错标成子盒自身中心, 探针以 translateZ(±200) 的角点收放钉死口径)。
   **`transform-style: preserve-3d` 层级矩阵栈**(父子 transform 逐级复合成
   4×4 矩阵, "容器旋转 × 子面 rotateY/X + translateZ"的真立方体/卡片环直接
-  可写; flat(缺省)元素复位矩阵, 并把父面片的投影以 2D 仿射摊平给子级 ——
-  与 CSS 扁平化同语义)、
-  **QUAD 面片的渐变/边框/文字**(渐变画在元素平面上随面片一起投影;
-  边框按投影四边形出四条梯形, 不再按未变换矩形画歪; 子树文字落在面片的
-  摊平仿射上, 字号随 sqrt|det| 缩放 —— 字形轴对齐, 不做逐像素透视畸变)、
+  可写; 父级 2D scale/rotate 同样折叠进子级 3D 坐标系 —— scale(2) 祖先下
+  子面片投影随之放大, 不再视而不见)、
+  **flat 摊平升级单应**(flat(缺省)元素复位矩阵, 并把父面片的投影以
+  **单应**摊平给子级: 盒四角 ↔ 投影四角解 8×8 线性方程组, 透视四边形
+  8 自由度仿射表达不了第 4 角 —— 旧三点仿射拟合在远边误差达数十 px;
+  退化(四角共线)时回退三点仿射)、
+  **QUAD 面片的像素渐变/边框/文字**(渐变画在元素平面上随面片一起投影:
+  hnsoft 逐像素按双三角仿射采样、cairo 单路径 + 单 pattern 一次填充 ——
+  拆双三角各自 clip 会沿对角缝漏底色(实测 ±40/255 振荡), 单次填充天然
+  无缝; 两后端与 RECT 共用同一条 CSS 轴长口径。边框按投影四边形出四条
+  梯形, 不再按未变换矩形画歪; 子树文字/盒尺寸以**锚点处局部线尺度**
+  取档 —— 同一张转动面片内近大远小(透视字号), 缺省档 sqrt|det|;
+  字形本身轴对齐, 不做逐像素透视畸变)、
+  **deco/li 随变换**(text-decoration 线与列表标记坐标经同一变换、
+  宽厚/尺寸随缩放档 —— 此前标记直用布局坐标, scale(2) 祖先下与已变换
+  的正文脱节)、
   **flex/absolute/inline-block 子树的 3D**(与普通块流同一绘制路径,
   不再静默丢弃 —— 3D 卡可直接做 flex 子项)。
   **选择器引擎强化**:**属性选择器**(`[a]` `[a=v]` `[a^=]` `[a$=]` `[a*=]` `[a~=]`)、
@@ -406,9 +421,13 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   perspective + transform-style: preserve-3d`; 4×4 层级矩阵栈 + 透视投影
   (近大远小) → 投影四边形光栅化(绘制指令 QUAD, hnsoft 与 cairo 双后端
   同语义)。preserve-3d 父子矩阵逐级复合(真立方体/卡片环两级变换),
-  QUAD 面片带渐变/边框/文字(渐变随面片投影、边框按投影四边形出梯形、
-  子树文字随摊平仿射落位), flex/absolute/inline-block 子树与普通块流
-  同一绘制路径。可做卡片翻转、3D 倾斜面板、真立方体、卡片环 ——
+  父级 2D scale/rotate 折叠进子级 3D 坐标系; flat 摊平按**单应**精确
+  落位(不再三点仿射近似第 4 角)。QUAD 面片带**像素渐变**/边框/文字
+  (渐变随面片投影 —— hnsoft 双三角仿射逐像素采样、cairo 单路径无缝
+  填充; 轴长与 RECT 同一条 CSS 口径; 边框按投影四边形出梯形; 子树
+  文字/盒尺寸按锚点处局部线尺度取档, 面片内近大远小; deco 线与 li
+  标记随同一变换), flex/absolute/inline-block 子树与普通块流同一绘制
+  路径。可做卡片翻转、3D 倾斜面板、真立方体、卡片环 ——
   见 `examples/threejs-lab.html`; 口径由 `tools/quad3d_probe.c` 钉死
 - **Lottie 矢量动画**: `<img src="a.json" hn-lottie>` 直接播 Lottie/bodymovin
   文件 —— 引擎解析 JSON、按时间轴求值, 产出**多边形绘制指令(POLYGON)**,

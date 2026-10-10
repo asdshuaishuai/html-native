@@ -15,11 +15,15 @@
         "自己叠完的"复合 4x4 矩阵传给子级, 父子 transform 逐级复合 ——
         下面的真立方体与卡片环就是两级复合: 容器 rotateX·rotateY ×
         各子面 rotateY/X + translateZ(半径)。flat(缺省)元素复位矩阵,
-        把父面片的投影以 2D 仿射摊平给子级(与 CSS 扁平化同语义)。
-     2) QUAD 面片带渐变/边框/文字: 渐变画在元素平面上、随面片一起被
-        投影(等效 CSS 先画再变换); 边框按投影四边形出四条梯形(不再按
-        未变换矩形画歪); 子树文字落在面片的摊平仿射上, 字号随 sqrt|det|
-        缩放 —— 字形本身轴对齐, 不做逐像素透视畸变(简化口径, 如实写明)。
+        摊平口径见第 2 条。
+     2) QUAD 面片带像素渐变/边框/文字: 渐变画在元素平面上、随面片一起被
+        投影(等效 CSS 先画再变换; hnsoft 逐像素按双三角仿射采样, cairo
+        单路径一次填充无缝, 两后端与 RECT 同一条 CSS 轴长口径 —— 第 1 节
+        五卡用深蓝→亮橙大反差渐变, 肉眼可直接辨); 边框按投影四边形出四条
+        梯形(不再按未变换矩形画歪); flat 面片摊平升级**单应**(盒四角↔
+        投影四角精确对应, 退化才回退三点仿射), 子树文字/盒尺寸按**锚点处
+        局部线尺度**取档 —— 同一面片内近大远小(透视字号, 见可见面角落的
+        8px 小字); 字形本身轴对齐, 不做逐像素透视畸变(简化口径, 如实写明)。
      3) flex 直接子项 / position:absolute / inline-block 原子盒里的 3D
         元素与普通块流同一绘制路径(不再静默丢弃): 本页 3D 卡直接做 flex
         子项, 立方体六面与卡片环全部 absolute —— 没有一层"块流壳"规避。
@@ -29,18 +33,22 @@
   /* 3D 元素直接做 flex 子项(修复 #3 的活样例, 无 .cell 壳) */
   .hrow { display:flex; gap:12; align-items:center; }
 
-  /* ── 1. 旋转对比 + translateZ 深度 ──
+  /* ── 1. 旋转对比 + translateZ 深度 + 像素渐变展示 ──
      渐变/边框/文字直接上 3D 元素(旧口径: QUAD 只填平色 —— 渐变投影后
-     全透明; 边框按未变换矩形绘制会画歪; 文字不绘制)。 */
+     全透明; 边框按未变换矩形绘制会画歪; 文字不绘制)。
+     五张旋转卡用**同一深蓝→亮橙大反差渐变**: 软件光栅的 QUAD 渐变
+     (双三角仿射逐像素)在不同投影角下肉眼可辨 —— 转动越狠, 色带沿面片
+     压缩越明显。 */
   .k { width:96; height:60; line-height:58px; perspective: 520;
-       background:linear-gradient(150deg,#5b82e6,#2c4a99);
-       border:1.5 solid #6fa8ff; color:#eaf1ff; font-size:12;
+       background:linear-gradient(150deg,#101c3f,#ffa128);
+       border:1.5 solid rgba(255,255,255,.8); color:#fff;
+       text-shadow:0 1 0 rgba(0,0,0,.7); font-size:12;
        text-align:center; }
   .k1 { transform: rotateY(20deg); }
   .k2 { transform: rotateY(40deg); }
-  .k3 { transform: rotateX(28deg); background:linear-gradient(150deg,#3ecf7a,#1d7a46); border-color:#5fe3a0; }
-  .k4 { transform: rotateX(18deg) rotateY(26deg); background:linear-gradient(150deg,#b07dff,#6a2fbf); border-color:#c9a2ff; }
-  .k5 { transform: rotate3d(1,1,0,38deg); background:linear-gradient(150deg,#ffa64d,#b3531c); border-color:#ffc38a; }
+  .k3 { transform: rotateX(28deg); }
+  .k4 { transform: rotateX(18deg) rotateY(26deg); }
+  .k5 { transform: rotate3d(1,1,0,38deg); }
 
   .z { width:80; height:56; line-height:54px; perspective: 560;
        background:linear-gradient(160deg,#4f7cff,#23366b);
@@ -52,7 +60,15 @@
   /* ── 2. 真立方体: 父级 perspective + preserve-3d ──
      立方体容器声明视距与 preserve-3d, 自身 rotateX·rotateY 复合后把
      矩阵传给六面; 各面 absolute 叠在同一盒位, rotateY/X + translateZ(43px)
-     推到各自方位。六面带渐变 + 边框 + 文字, 文字随面片摊平仿射落位。
+     推到各自方位。六面带渐变 + 边框 + 文字。
+     角落 .ffar 小字(8px)是 .cube 的**直接子级**: 与所属面同尺寸同盒位
+     同 transform(整面覆盖), 用 padding+text-align 把字钉在可见面的
+     **远端角** —— 字号按锚点处局部线尺度取档, 同一面片内近大远小,
+     直接验证透视字号。
+     (不塞进面内做 absolute 子级: absolute 嵌 absolute 的子树会被布局
+     两次, 文字 run 多出一份落在未平移坐标上; 也不用 transform 里的
+     translate(x,y) 做面内偏移 —— 3D + translate 组合下 QUAD 平移一次、
+     文字锚点平移两次, 会脱出面片。都是引擎既有口径, 演示页绕开。)
      文档序 = 绘制序(无逐深度排序): 背面三面先画, 可见面(前/左/顶)后画
      盖住它们 —— 凸体投影下背面被可见面完全覆盖。 */
   .cstage { position:relative; height:182; }
@@ -62,6 +78,11 @@
   .face { position:absolute; left:0; top:0; width:86; height:86;
           border:1.5 solid rgba(255,255,255,.55); color:#f2f6ff;
           font-size:13; line-height:83px; text-align:center; }
+  .ffar { position:absolute; left:0; top:0; width:86; height:86;
+          box-sizing:border-box; font-size:8; line-height:1.2;
+          color:rgba(255,255,255,.85); }
+  .ffar.tr { text-align:right; padding:3 3 0 0; }
+  .ffar.tl { text-align:left;  padding:3 0 0 3; }
   .f-back  { transform: rotateY(180deg) translateZ(43px); background:linear-gradient(160deg,#2fbf9f,#0f5c4a); }
   .f-right { transform: rotateY(90deg)  translateZ(43px); background:linear-gradient(160deg,#3ecf7a,#145c33); }
   .f-bot   { transform: rotateX(-90deg) translateZ(43px); background:linear-gradient(160deg,#e6685c,#7a271f); }
@@ -129,7 +150,7 @@
     <div class="z z1">Z50</div>
     <div class="z z0">Z0</div>
   </div>
-  <div class="cap">Y20 · Y40 · X28 · X18+Y26 · rotate3d(1,1,0,38°) ｜ translateZ 近大远小(Z100 最大 · Z0 最小)</div>
+  <div class="cap">五卡同一深蓝→亮橙大反差渐变, QUAD 像素渐变随投影角扫过(转动越狠色带压缩越明显) ｜ translateZ 近大远小(Z100 最大 · Z0 最小)</div>
 
   <h2>2 · 真立方体: 父级 perspective + preserve-3d, 六面 rotateY/X + translateZ(43px)</h2>
   <div class="cstage">
@@ -138,11 +159,14 @@
       <div class="face f-right">右</div>
       <div class="face f-bot"  >底</div>
       <div class="face f-left" >左</div>
+      <div class="ffar tl" style="transform:rotateY(-90deg) translateZ(43px)">远端8px</div>
       <div class="face f-top"  >顶</div>
+      <div class="ffar tr" style="transform:rotateX(90deg) translateZ(43px); padding-top:6">远端8px</div>
       <div class="face f-front">前</div>
+      <div class="ffar tr" style="transform:translateZ(43px)">远端8px</div>
     </div>
   </div>
-  <div class="cap">容器 rotateX(-24°)·rotateY(34°) 复合矩阵传给六面 · 文档序远→近(背面先画, 前/左/顶盖住) · 面上渐变+边框+文字</div>
+  <div class="cap">容器 rotateX(-24°)·rotateY(34°) 复合矩阵传给六面 · 文档序远→近(背面先画, 前/左/顶盖住) · 面上渐变+边框+文字 · 角落 8px 小字钉在可见面远端角, 字号按锚点局部尺度取档(透视字号: 面片内近大远小)</div>
 
   <h2>3 · 卡片环: 六卡 rotateY 步进 60° + translateZ(78px) 半径</h2>
   <div class="rstage">
