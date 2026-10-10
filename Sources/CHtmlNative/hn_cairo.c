@@ -512,6 +512,57 @@ static void paint_mesh(cairo_t *cr, const hn_cmd *c) {
     cairo_surface_destroy(img);
 }
 
+/* ---------------- QUAD 渐变(面片上的 linear pattern) ---------------- */
+
+/* 与 hnsoft 的面片渐变同一语义: 渐变轴建在**投影前的元素盒**上(cmd 的
+   x/y/w/h, 由 hn_paint 装入), 随面片一起被投影 —— 等效 CSS 的"渐变先画
+   在元素上, 再整体 3D 变换"。轴本身用 make_gradient(RECT 同一条通路)。
+   一般透视四边形不是仿射像: 四边形拆两条三角形(对角线 0-2), 每条解
+   "局部盒 → 该三角形"的仿射, 把 pattern 矩阵设为其逆(user→pattern,
+   见文件头注 2 —— 传正方向不报错, 只会静默画出错的贴图), clip 后 paint。
+   两三角形在对角线处连续、有折角 —— 与 hnsoft 的重心插值/MESH 网格同一
+   既定简化口径。 */
+static void paint_quad_gradient(cairo_t *cr, const hn_cmd *c) {
+    double lx[4] = { c->x, c->x + c->w, c->x + c->w, c->x };
+    double ly[4] = { c->y, c->y, c->y + c->h, c->y + c->h };
+    static const int tri[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
+    for (int t = 0; t < 2; t++) {
+        int i0 = tri[t][0], i1 = tri[t][1], i2 = tri[t][2];
+        /* 解 2x2: screen - s0 = A · (local - l0)(与 paint_mesh 同款求逆式) */
+        double ex1 = lx[i1] - lx[i0], ey1 = ly[i1] - ly[i0];
+        double ex2 = lx[i2] - lx[i0], ey2 = ly[i2] - ly[i0];
+        double det = ex1 * ey2 - ey1 * ex2;
+        if (fabs(det) < 1e-9) continue;        /* 退化的半边面片 */
+        double fx1 = (double)c->qx[i1] - c->qx[i0], fy1 = (double)c->qy[i1] - c->qy[i0];
+        double fx2 = (double)c->qx[i2] - c->qx[i0], fy2 = (double)c->qy[i2] - c->qy[i0];
+        double inv = 1.0 / det;
+        double a11 = (fx1 * ey2 - fx2 * ey1) * inv;
+        double a12 = (fx2 * ex1 - fx1 * ex2) * inv;
+        double a21 = (fy1 * ey2 - fy2 * ey1) * inv;
+        double a22 = (fy2 * ex1 - fy1 * ex2) * inv;
+
+        cairo_save(cr);
+        cairo_new_path(cr);
+        cairo_move_to(cr, c->qx[i0], c->qy[i0]);
+        cairo_line_to(cr, c->qx[i1], c->qy[i1]);
+        cairo_line_to(cr, c->qx[i2], c->qy[i2]);
+        cairo_close_path(cr);
+        cairo_clip(cr);
+
+        cairo_pattern_t *g = make_gradient(c);
+        cairo_matrix_t m;
+        cairo_matrix_init(&m, a11, a21, a12, a22, 0, 0);
+        m.x0 = (double)c->qx[i0] - (a11 * lx[i0] + a12 * ly[i0]);
+        m.y0 = (double)c->qy[i0] - (a21 * lx[i0] + a22 * ly[i0]);
+        cairo_matrix_invert(&m);               /* user→pattern(见上) */
+        cairo_pattern_set_matrix(g, &m);
+        cairo_set_source(cr, g);
+        cairo_paint(cr);
+        cairo_pattern_destroy(g);
+        cairo_restore(cr);
+    }
+}
+
 /* ---------------- 主入口 ---------------- */
 
 unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
@@ -578,6 +629,14 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             cairo_restore(cr);
             break;
         case HN_CMD_QUAD: {
+            /* 渐变面片: 两三角形 × 仿射映射的 linear pattern(见上);
+               平色面片: 路径填充(原口径) */
+            if (c->gradient) {
+                paint_quad_gradient(cr, c);
+                break;
+            }
+            fcolor f = unpack(c->fill);
+            if (f.a <= 0.001f) break;
             cairo_save(cr);
             cairo_new_path(cr);
             cairo_move_to(cr, c->qx[0], c->qy[0]);
@@ -585,11 +644,8 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             cairo_line_to(cr, c->qx[2], c->qy[2]);
             cairo_line_to(cr, c->qx[3], c->qy[3]);
             cairo_close_path(cr);
-            fcolor f = unpack(c->fill);
-            if (f.a > 0.001f) {
-                cairo_set_source_rgba(cr, f.r, f.g, f.b, f.a);
-                cairo_fill(cr);
-            }
+            cairo_set_source_rgba(cr, f.r, f.g, f.b, f.a);
+            cairo_fill(cr);
             cairo_restore(cr);
             break;
         }

@@ -158,21 +158,37 @@ static float sd_rounded(float px, float py, float x, float y, float w, float h, 
 
 /* ---------------- 渐变 ---------------- */
 
-static fcolor grad_at(const hn_cmd *c, float px, float py) {
-    fcolor from = unpack(c->grad_from), to = unpack(c->grad_to);
-    /* CSS 角度: 0deg=向上, 顺时针。渐变轴沿该方向穿过盒中心。 */
+/* CSS 渐变参数: 点在渐变轴上的位置(0 = from 端, 1 = to 端)。
+   CSS 角度: 0deg=向上, 顺时针; 轴沿该方向穿过盒中心。
+   RECT 采样屏幕点, QUAD 采样**投影前的元素盒**角点 —— 同一条公式。 */
+static float grad_axis_t(const hn_cmd *c, float px, float py) {
     float rad = c->grad_angle * 3.14159265f / 180.0f;
     float dx = sinf(rad), dy = -cosf(rad);
     float cx = c->x + c->w * 0.5f, cy = c->y + c->h * 0.5f;
     float half = fabsf(c->w * dx) + fabsf(c->h * dy);
     float t = ((px - cx) * dx + (py - cy) * dy) / (half > 0 ? half * 2 : 1) + 0.5f;
     if (t < 0) t = 0; else if (t > 1) t = 1;
+    return t;
+}
+
+static fcolor grad_at(const hn_cmd *c, float px, float py) {
+    fcolor from = unpack(c->grad_from), to = unpack(c->grad_to);
+    float t = grad_axis_t(c, px, py);
     fcolor r;
     r.r = from.r + (to.r - from.r) * t;
     r.g = from.g + (to.g - from.g) * t;
     r.b = from.b + (to.b - from.b) * t;
     r.a = from.a + (to.a - from.a) * t;
     return r;
+}
+
+/* 面片渐变: 渐变画在**投影前的元素平面**上(cmd 的 x/y/w/h 装的正是投影前
+   的元素盒, 见 hn_paint), 随面片一起被投影 —— 等效 CSS 的"渐变先画在
+   元素上, 再整体 3D 变换"。角点 k 的渐变参数用 RECT 同一条 grad_axis_t
+   在局部盒坐标求出(角度/轴长口径与 RECT 逐式一致)。 */
+static float quad_grad_corner_t(const hn_cmd *c, int k) {
+    static const float fx[4] = { 0, 1, 1, 0 }, fy[4] = { 0, 0, 1, 1 };
+    return grad_axis_t(c, c->x + fx[k] * c->w, c->y + fy[k] * c->h);
 }
 
 /* ---------------- 矩形(填充/渐变/描边) ---------------- */
@@ -251,11 +267,38 @@ static void paint_shadow(fb *f, const hn_cmd *c, float scale, float ox, float oy
 /* ---------------- 四边形(3D 投影面片) ---------------- */
 
 /* 扫描线填充: 对每行求与四边形各边的交点, 取最小/最大 x 之间填充。
-   边缘按 0.5px 覆盖率抗锯齿(与圆角矩形一致的策略)。 */
+   边缘按 0.5px 覆盖率抗锯齿(与圆角矩形一致的策略)。
+   渐变: 四边形拆两条三角形(对角线 0-2), 每条按 MESH 仿射纹理映射同款
+   的重心权重插值渐变参数 t(颜色 = from→to 按 t 插值)。一般透视四边形
+   不是仿射像, 两三角形在对角线处连续但有折角 —— 与 MESH 网格同一既定
+   简化口径, 换来的是渐变轴随面片一起被投影(见 quad_grad_corner_t)。 */
 static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
     fcolor col = unpack(c->fill);
     col.a *= alpha;
-    if (col.a <= 0.01f) return;
+    fcolor gfrom, gto;
+    int grad = c->gradient != 0;
+    if (grad) {
+        /* 渐变元素的 background 解析为 0(渐变即底色) → fill 常是全透明,
+           门禁看两端色而不是 fill(否则渐变面片被当成透明整块跳过) */
+        gfrom = unpack(c->grad_from);
+        gto = unpack(c->grad_to);
+        gfrom.a *= alpha; gto.a *= alpha;
+        if (col.a <= 0.01f && gfrom.a <= 0.01f && gto.a <= 0.01f) return;
+    } else if (col.a <= 0.01f) {
+        return;
+    }
+    /* 角点渐变参数 + 两条三角形的重心分母(MESH 同款公式), 退化三角形跳过 */
+    static const int TRI[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
+    float t4[4] = { 0, 0, 0, 0 };
+    float den[2] = { 0, 0 };
+    if (grad) {
+        for (int k = 0; k < 4; k++) t4[k] = quad_grad_corner_t(c, k);
+        for (int t = 0; t < 2; t++) {
+            int a = TRI[t][0], b = TRI[t][1], d = TRI[t][2];
+            den[t] = (c->qy[b] - c->qy[d]) * (c->qx[a] - c->qx[d])
+                   + (c->qx[d] - c->qx[b]) * (c->qy[a] - c->qy[d]);
+        }
+    }
     /* 包围盒 */
     float minx = c->qx[0], maxx = c->qx[0], miny = c->qy[0], maxy = c->qy[0];
     for (int i = 1; i < 4; i++) {
@@ -292,7 +335,33 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
             if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
             else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;   /* 边缘半覆盖 */
             if (cov <= 0) continue;
-            fcolor cc = col; cc.a *= cov;
+            fcolor cc;
+            if (grad) {
+                /* 含该像素的三角形内按重心权重插值 t(权重公式与 paint_mesh
+                   逐式一致); 对角线两侧插值连续, 取先命中的一条 */
+                float t = t4[0];
+                for (int ti = 0; ti < 2; ti++) {
+                    if (fabsf(den[ti]) < 1e-6f) continue;
+                    int a = TRI[ti][0], b = TRI[ti][1], d = TRI[ti][2];
+                    float x0c = c->qx[a], y0c = c->qy[a];
+                    float x1c = c->qx[b], y1c = c->qy[b];
+                    float x2c = c->qx[d], y2c = c->qy[d];
+                    float w0 = ((y1c - y2c) * (fx - x2c) + (x2c - x1c) * (fy - y2c)) / den[ti];
+                    float w1 = ((y2c - y0c) * (fx - x2c) + (x0c - x2c) * (fy - y2c)) / den[ti];
+                    float w2 = 1.0f - w0 - w1;
+                    if (w0 < -0.001f || w1 < -0.001f || w2 < -0.001f) continue;
+                    t = w0 * t4[a] + w1 * t4[b] + w2 * t4[d];
+                    break;
+                }
+                if (t < 0) t = 0; else if (t > 1) t = 1;
+                cc.r = gfrom.r + (gto.r - gfrom.r) * t;
+                cc.g = gfrom.g + (gto.g - gfrom.g) * t;
+                cc.b = gfrom.b + (gto.b - gfrom.b) * t;
+                cc.a = gfrom.a + (gto.a - gfrom.a) * t;
+            } else {
+                cc = col;
+            }
+            cc.a *= cov;
             fb_blend(f, px, py, cc);
         }
     }

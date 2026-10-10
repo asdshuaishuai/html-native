@@ -84,6 +84,8 @@ typedef struct {
     int   nodes;
     float scale;   /* 累积等比缩放(默认 1) */
     float scale_x, scale_y;  /* 累积**非等比**分量(默认 1) */
+    float text_scale;        /* 文字等比缩放(默认 1): 2D 链累积 × 摊平仿射的
+                                均匀等效(sqrt|det|) —— 字号随面片一起缩放 */
     float ox, oy;  /* 缩放原点(绝对坐标) */
     float m3d[4][4];      /* 祖先链复合 3D 矩阵(缺省单位阵) */
     float persp_d;        /* 最近的 perspective 视距(px; 0 = 无/正交) */
@@ -290,6 +292,13 @@ static void install_flatten(paint_guard *g, float bx, float by, float bw, float 
     g->ayx = e1y; g->ayy = e2y; g->aty = qy[0] - e1y * bx - e2y * by;
     g->scale = 1.0f; g->scale_x = 1.0f; g->scale_y = 1.0f;
     g->ox = 0.0f; g->oy = 0.0f;
+    /* 子树文字随面片缩放: 仿射的均匀等效 = sqrt|det|(det = 两棱叉积,
+       即投影四边形与元素盒的面积比)。**简化口径(如实写明)**: 只有锚点
+       位置与等比缩放是对的 —— 字形本身仍按轴对齐位图绘制, 不做逐像素
+       透视畸变(一般透视四边形需要逐字形纹理映射, 对 UI 卡片不值得;
+       preserve-3d 更深层文字本就按摊平仿射近似, 同一量级)。 */
+    float det = e1x * e2y - e2x * e1y;
+    g->text_scale = sqrtf(fabsf(det));
 }
 
 static void push_cmd(hn_context *c, hn_cmd *cmd);
@@ -322,14 +331,16 @@ static float eff_radius(const hn_style *st, float w, float h) {
     return m * st->radius / 100.0f;
 }
 
-/* 文本装饰线: underline / line-through / overline(随文本基线定位) */
+/* 文本装饰线: underline / line-through / overline(随文本基线定位)。
+   x/baseline 由调用方先过摊平仿射(与正文 TEXT 同一口径), ts 为文字
+   等比缩放 —— 偏移与线厚跟着缩, 否则 3D 面片上的下划线会脱离文字。 */
 static void push_deco(hn_context *c, const hn_style *st, float x, float baseline,
-                      float w, float alpha, float sx, float sy) {
+                      float w, float alpha, float sx, float sy, float ts) {
     if (!st->text_deco || w <= 0) return;
     float ys[3]; int ny = 0;
-    if (st->text_deco & 1) ys[ny++] = baseline + st->font_size * 0.14f;
-    if (st->text_deco & 2) ys[ny++] = baseline - st->font_size * 0.30f;
-    if (st->text_deco & 4) ys[ny++] = baseline - st->font_size * 0.92f;
+    if (st->text_deco & 1) ys[ny++] = baseline + st->font_size * 0.14f * ts;
+    if (st->text_deco & 2) ys[ny++] = baseline - st->font_size * 0.30f * ts;
+    if (st->text_deco & 4) ys[ny++] = baseline - st->font_size * 0.92f * ts;
     hn_color col = fill_color(st, st->color, alpha);
     for (int i = 0; i < ny; i++) {
         hn_cmd cmd;
@@ -338,7 +349,7 @@ static void push_deco(hn_context *c, const hn_style *st, float x, float baseline
         cmd.x = x - sx;
         cmd.y = ys[i] - sy;
         cmd.w = w;
-        cmd.h = st->font_size > 14 ? 1.5f : 1.0f;
+        cmd.h = (st->font_size > 14 ? 1.5f : 1.0f) * ts;
         cmd.fill = col;
         push_cmd(c, &cmd);
     }
@@ -433,6 +444,62 @@ static void push_quad_seg(hn_context *c, float x0, float y0, float x1, float y1,
     push_cmd(c, &q);
 }
 
+/* 某一边的有效边框(宽/色): border_w4/c4 的 0 = 继承统一声明,
+   宽 -1 = 显式关闭该边, 色 1 = 继承(与 hn_style 的解析口径一致)。 */
+static void border_side_spec(const hn_style *st, int side,
+                             float *bw, hn_color *bc) {
+    *bw = st->border_w4[side] ? (st->border_w4[side] > 0 ? st->border_w4[side] : 0)
+                              : st->border_w;
+    *bc = st->border_c4[side] ? (st->border_c4[side] > 1 ? st->border_c4[side]
+                                                         : st->border_color)
+                              : st->border_color;
+}
+
+/* 3D 面片的边框: 外四角沿相邻两条边方向各内缩边宽得内四角, 每条边发一条
+   梯形 QUAD。此前 3D 元素的边框仍按未变换矩形画(RECT 表达不了投影),
+   面片一转边框就落在面片之外。内缩是"沿边走 w"的口径: 直角处带宽恰为
+   w, 一般四边形锐角处略窄(sin θ 因子); 圆角半径不参与(梯形边为直线)。
+   最短边钳制内缩量, 防细长面片上两侧内缩相遇把内四角翻转。 */
+static void push_quad_border(hn_context *c, const hn_style *st,
+                             const float qx[4], const float qy[4], float alpha) {
+    float ws[4], ix[4], iy[4];
+    hn_color cs[4];
+    float emin = 1e30f;
+    for (int k = 0; k < 4; k++) {
+        int j = (k + 1) & 3;
+        float dx = qx[j] - qx[k], dy = qy[j] - qy[k];
+        float len = sqrtf(dx * dx + dy * dy);
+        if (len < emin) emin = len;
+    }
+    float wcap = emin * 0.45f;
+    for (int s = 0; s < 4; s++) {
+        border_side_spec(st, s, &ws[s], &cs[s]);
+        if (ws[s] > wcap) ws[s] = wcap;
+    }
+    for (int k = 0; k < 4; k++) {
+        int p = (k + 3) & 3, nx = (k + 1) & 3;
+        float ux = qx[nx] - qx[k], uy = qy[nx] - qy[k];
+        float vx = qx[p] - qx[k], vy = qy[p] - qy[k];
+        float ul = sqrtf(ux * ux + uy * uy), vl = sqrtf(vx * vx + vy * vy);
+        if (ul < 0.0001f || vl < 0.0001f) { ix[k] = qx[k]; iy[k] = qy[k]; continue; }
+        ix[k] = qx[k] + ux / ul * ws[k] + vx / vl * ws[p];
+        iy[k] = qy[k] + uy / ul * ws[k] + vy / vl * ws[p];
+    }
+    for (int s = 0; s < 4; s++) {
+        int j = (s + 1) & 3;
+        if (ws[s] <= 0 || (cs[s] & 0xFFu) == 0) continue;
+        hn_cmd e;
+        memset(&e, 0, sizeof(e));
+        e.kind = HN_CMD_QUAD;
+        e.qx[0] = qx[s]; e.qy[0] = qy[s];
+        e.qx[1] = qx[j]; e.qy[1] = qy[j];
+        e.qx[2] = ix[j]; e.qy[2] = iy[j];
+        e.qx[3] = ix[s]; e.qy[3] = iy[s];
+        e.fill = fill_color(st, cs[s], alpha);
+        push_cmd(c, &e);
+    }
+}
+
 /* checkbox / radio 的控件绘制: 方框/圆圈 + 选中标记。
    观感链: 作者/主题样式优先(background/border/color), 缺省用引擎观感
    (选中 = 强调色填充 + 白色对勾 / 圆点; 未选中 = 灰描边空心)。 */
@@ -507,8 +574,10 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
         cmd.text_len = r->end - r->begin;
         cmd.tx = tfx(g, sx, r->x, r->baseline);
         cmd.baseline = tfy(g, sy, r->x, r->baseline);
-        if (g->scale != 1.0f) cmd.font.size_px = st->font_size * g->scale;
-        cmd.font.size_px = st->font_size;
+        /* 字号随等比缩放(2D 链累积, 或摊平仿射的均匀等效 —— 见
+           install_flatten)。锚点已走仿射; 字形本身按轴对齐位图绘制,
+           不做透视畸变(简化口径, 注释如实写在 install_flatten)。 */
+        cmd.font.size_px = st->font_size * g->text_scale;
         cmd.font.weight = st->font_weight;
         cmd.font.italic = st->font_italic;
         cmd.font.letter_spacing = st->letter_spacing;
@@ -523,7 +592,9 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
             cmd.shadow_oy = st->text_shadow_oy;
         }
         push_cmd(c, &cmd);
-        push_deco(c, st, r->x, r->baseline, r->width, alpha, sx, sy);
+        /* 装饰线与正文同一仿射(先变换再传 0 偏移), 宽/厚随 text_scale */
+        push_deco(c, st, tfx(g, sx, r->x, r->baseline), tfy(g, sy, r->x, r->baseline),
+                  r->width * g->text_scale, alpha, 0.0f, 0.0f, g->text_scale);
     }
 }
 
@@ -552,6 +623,7 @@ static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
     paint_guard g;
     memset(&g, 0, sizeof(g));
     g.scale = 1.0f; g.scale_x = 1.0f; g.scale_y = 1.0f;   /* 累积缩放缺省 1 */
+    g.text_scale = 1.0f;       /* 文字等比缩放缺省 1(3D 摊平时改写, 见下) */
     mat_identity(g.m3d);       /* 3D 复合矩阵缺省单位阵(正交, 无祖先变换) */
     g.axx = 1.0f; g.ayy = 1.0f;   /* 摊平仿射缺省单位阵 */
     paint_walk_g(c, n, pst, alpha, sx, sy, &g);
@@ -616,6 +688,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     float saved_sx = sx, saved_sy = sy;
     float saved_scale = g->scale, saved_ox = g->ox, saved_oy = g->oy;
     float saved_scale_x = g->scale_x, saved_scale_y = g->scale_y;
+    float saved_text_scale = g->text_scale;
     /* 3D 层级状态: 出口恢复(兄弟节点不受本元素影响) */
     float saved_m3d[4][4], saved_axx = g->axx, saved_axy = g->axy, saved_atx = g->atx;
     float saved_ayx = g->ayx, saved_ayy = g->ayy, saved_aty = g->aty;
@@ -653,7 +726,10 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         g->ox = n->bx + n->bw * 0.5f;
         g->oy = n->by + n->bh * 0.5f;
     }
-    if (st->scale != 1.0f && st->scale > 0.01f) g->scale = saved_scale * st->scale;
+    if (st->scale != 1.0f && st->scale > 0.01f) {
+        g->scale = saved_scale * st->scale;
+        g->text_scale = saved_text_scale * st->scale;   /* 字号跟着等比缩放 */
+    }
     if (st->scale_x != 1.0f) g->scale_x = saved_scale_x * st->scale_x;
     if (st->scale_y != 1.0f) g->scale_y = saved_scale_y * st->scale_y;
 
@@ -905,8 +981,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 cmd.text_len = r->end - r->begin;
                 cmd.tx = tfx(g, sx, r->x, r->baseline);
                 cmd.baseline = tfy(g, sy, r->x, r->baseline);
-                if (g->scale != 1.0f) cmd.font.size_px = st->font_size * g->scale;
-                cmd.font.size_px = st->font_size;
+                /* 与 paint_runs 同口径: 字号随等比缩放(含摊平仿射的均匀等效) */
+                cmd.font.size_px = st->font_size * g->text_scale;
                 cmd.font.weight = st->font_weight;
                 cmd.font.italic = st->font_italic;
                 cmd.font.letter_spacing = st->letter_spacing;
@@ -998,10 +1074,22 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         goto clip_done;
     }
 
-    /* 逐侧边框: 若任一侧有独立声明, 用四条矩形绘制(替代统一边框) */
+    /* ---- 3D 投影(矩阵口径) ----
+       自身带 3D 变换, 或处于 preserve-3d 祖先的复合矩阵中(继承矩阵非单位)
+       时, 本盒按投影四边形绘制(矩形无法表达透视形变); 否则矩形快路径。
+       out_total = 继承矩阵·局部矩阵, preserve-3d 时原样传给子级。
+       投影要赶在逐侧边框之前算 —— 3D 面片的边框不能按未变换矩形画。 */
+    float qx[4], qy[4];
+    float mtotal[4][4];
+    int proj3d = project_3d(st, g->m3d, n->bx, n->by, n->bw, n->bh,
+                            persp, sx, sy, pcx, pcy, qx, qy, mtotal);
+
+    /* 逐侧边框: 若任一侧有独立声明, 用四条矩形绘制(替代统一边框)。
+       3D 面片不走这里 —— 未变换矩形会画到面片之外, 边框由
+       push_quad_border 按投影四边形出四条梯形(见下)。 */
     int per_side = st->border_w4[0] || st->border_w4[1] || st->border_w4[2] || st->border_w4[3]
                    || st->border_c4[0] || st->border_c4[1] || st->border_c4[2] || st->border_c4[3];
-    if (per_side) {
+    if (per_side && !proj3d) {
         /* 背景仍按盒绘制(不含边框), 然后四边分别填充 */
         int f = (st->background & 0xFFu) || st->has_gradient;
         if (f) {
@@ -1021,12 +1109,10 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             push_cmd(c, &bg);
         }
         for (int side = 0; side < 4; side++) {
-            /* -1 表示显式 0(不画); 0 表示继承统一 border_w */
-            float bw = st->border_w4[side] ? (st->border_w4[side] > 0 ? st->border_w4[side] : 0)
-                                           : st->border_w;
-            hn_color bc = st->border_c4[side] ? (st->border_c4[side] > 1 ? st->border_c4[side]
-                                                                            : st->border_color)
-                                              : st->border_color;
+            /* -1 表示显式 0(不画); 0 表示继承统一 border_w(口径见 border_side_spec) */
+            float bw;
+            hn_color bc;
+            border_side_spec(st, side, &bw, &bc);
             if (bw <= 0 || (bc & 0xFFu) == 0) continue;
             hn_cmd e;
             memset(&e, 0, sizeof(e));
@@ -1046,22 +1132,18 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     }
     int has_fill = (st->background & 0xFFu) || st->has_gradient;
     int has_border = st->border_w > 0 && (st->border_color & 0xFFu);
-    /* ---- 3D 投影(矩阵口径) ----
-       自身带 3D 变换, 或处于 preserve-3d 祖先的复合矩阵中(继承矩阵非单位)
-       时, 本盒按投影四边形绘制(矩形无法表达透视形变); 否则矩形快路径。
-       out_total = 继承矩阵·局部矩阵, preserve-3d 时原样传给子级。 */
-    float qx[4], qy[4];
-    float mtotal[4][4];
-    int proj3d = project_3d(st, g->m3d, n->bx, n->by, n->bw, n->bh,
-                            persp, sx, sy, pcx, pcy, qx, qy, mtotal);
-    if (has_fill || has_border) {
-        hn_cmd cmd;
-        memset(&cmd, 0, sizeof(cmd));
-        if (proj3d) {
+    if (proj3d) {
+        if (has_fill) {
+            hn_cmd cmd;
+            memset(&cmd, 0, sizeof(cmd));
             /* 投影四边形填充。渐变字段与 RECT 同款 —— 之前只填平色,
-               linear-gradient 底色的 3D 元素(background 解析为 0)投影后全透明。 */
+               linear-gradient 底色的 3D 元素(background 解析为 0)投影后全透明。
+               x/y/w/h 另装**投影前的元素盒**(减滚动): 渲染端据此解渐变轴,
+               轴随面片一起被投影(等效 CSS: 渐变画在元素平面上再 3D 变换)。 */
             cmd.kind = HN_CMD_QUAD;
             for (int k = 0; k < 4; k++) { cmd.qx[k] = qx[k]; cmd.qy[k] = qy[k]; }
+            cmd.x = n->bx - sx; cmd.y = n->by - sy;
+            cmd.w = n->bw; cmd.h = n->bh;
             cmd.fill = fill_color(st, st->background, alpha);
             if (st->has_gradient) {
                 cmd.gradient = 1;
@@ -1071,7 +1153,12 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             }
             push_cmd(c, &cmd);
             /* 不再跳过子节点: 子树照常递归, 文字随摊平仿射落到面片上。 */
-        } else {
+        }
+        if (has_border || per_side)
+            push_quad_border(c, st, qx, qy, alpha);   /* 四条梯形(逐侧宽/色) */
+    } else if (has_fill || has_border) {
+        hn_cmd cmd;
+        memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_RECT;
         cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
         cmd.radius = eff_radius(st, cmd.w, cmd.h);
@@ -1092,7 +1179,6 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             cmd.shadow_oy = st->sh_oy;
         }
         push_cmd(c, &cmd);
-        }
     }
 
     /* ---- 子树的 3D 状态(preserve-3d 复合 / flat 扁平化) ----
@@ -1149,6 +1235,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     /* 恢复本层之前的变换状态(兄弟节点不受影响) */
     sx = saved_sx; sy = saved_sy;
     g->scale = saved_scale; g->scale_x = saved_scale_x; g->scale_y = saved_scale_y;
+    g->text_scale = saved_text_scale;
     g->ox = saved_ox; g->oy = saved_oy;
     memcpy(g->m3d, saved_m3d, sizeof(saved_m3d));
     g->persp_d = saved_pd; g->persp_cx = saved_pcx; g->persp_cy = saved_pcy;
