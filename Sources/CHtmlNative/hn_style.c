@@ -963,6 +963,11 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
                 st->origin_y = 0.5f; st->origin_pct_y = 1;   /* 单值时 y 默认 50% */
             }
         }
+    } else if (!strcmp(name, "transform-style")) {
+        /* transform-style: preserve-3d | flat。缺省 flat(字段 memset 为 0)。
+           之前完全没有 —— 立方体/3D 场景声明了不生效也不报错。 */
+        if (next_tok(&v, &t) && sv_eq(t, "preserve-3d")) st->transform_style = 1;
+        else st->transform_style = 0;   /* flat / 其他值回落缺省 */
     } else if (!strcmp(name, "scale-x")) {
         int u; float f2;
         if (sv_len_nt(&v, st->font_size, &f2, &u)) st->scale_x = f2;

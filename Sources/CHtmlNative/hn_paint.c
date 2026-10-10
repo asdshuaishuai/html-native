@@ -69,116 +69,227 @@ static hn_color anim_color(const float v[4]) {
 }
 
 /* 绘制期变换状态: 位移已并入 sx/sy; scale 需要几何换算。
-   缩放原点取元素盒中心 —— 与 CSS transform-origin: center 一致。 */
+   缩放原点取元素盒中心 —— 与 CSS transform-origin: center 一致。
+   ---- 3D 层级(preserve-3d) ----
+   m3d: 祖先链累积的复合 3D 矩阵(列向量口径, 仿射部分, 不含透视);
+        flat 元素把它重置为单位阵(子级 3D 从零开始), preserve-3d 元素
+        把"自己叠完的"传下去。persp_d/pcx/pcy: 最近的 perspective 声明
+        (视距 + 声明者盒中心 = 消失点), 未声明时 0 = 正交。
+   ---- flat 摊平仿射 ----
+   axx..aty: 2D 仿射(axx axy / ayx ayy 为线性部分, atx aty 为平移),
+   把"被投影祖先"的平面坐标映到屏幕 —— 父卡转动后子内容随面片摊平
+   (与 CSS 扁平化语义一致)。缺省 = 单位阵, 此时 tfx/tfy 与旧口径逐位一致。 */
 typedef struct {
     int   depth;
     int   nodes;
     float scale;   /* 累积等比缩放(默认 1) */
     float scale_x, scale_y;  /* 累积**非等比**分量(默认 1) */
     float ox, oy;  /* 缩放原点(绝对坐标) */
+    float m3d[4][4];      /* 祖先链复合 3D 矩阵(缺省单位阵) */
+    float persp_d;        /* 最近的 perspective 视距(px; 0 = 无/正交) */
+    float persp_cx, persp_cy;   /* 视距声明者盒中心(消失点) */
+    float axx, axy, atx;  /* 摊平仿射: u = axx*x + axy*y + atx */
+    float ayx, ayy, aty;  /*             v = ayx*x + ayy*y + aty */
 } paint_guard;
+
+/* ---- 4x4 矩阵(preserve-3d 层级栈的最小算术) ----
+   行主序存储, 列向量口径: p' = M·p。所有运算按固定书写顺序展开
+   (先 i 后 j, 乘积按 0..3 累加), 不依赖 FMA —— 跨架构确定性由
+   构建门禁的 -ffp-contract=off 兜底(见 tools/build-multiplatform.sh)。 */
+
+static void mat_identity(float m[4][4]) {
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            m[i][j] = (i == j) ? 1.0f : 0.0f;
+}
+
+static int mat_is_identity(const float m[4][4]) {
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            float want = (i == j) ? 1.0f : 0.0f;
+            if (m[i][j] != want) return 0;
+        }
+    return 1;
+}
+
+/* o = a·b(先作用 b, 再作用 a)。o 不得与 a/b 同址(经 r 中转)。 */
+static void mat_mul(float o[4][4], const float a[4][4], const float b[4][4]) {
+    float r[4][4];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            r[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j]
+                    + a[i][2] * b[2][j] + a[i][3] * b[3][j];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            o[i][j] = r[i][j];
+}
+
+/* 左乘平移阵(o = T·m): 平移在**变换后**坐标系里生效(先 m 后 T)。 */
+static void mat_translate(float o[4][4], const float m[4][4],
+                          float tx, float ty, float tz) {
+    float t[4][4];
+    mat_identity(t);
+    t[0][3] = tx; t[1][3] = ty; t[2][3] = tz;
+    mat_mul(o, t, m);
+}
+
+/* 左乘旋转阵。axis: 0=X 1=Y 2=Z, 角度 rad。行、列排布与既有逐角点
+   旋转公式一致(y' = y·cos − z·sin 等), 只是改为矩阵形式可复合。 */
+static void mat_rotate(float o[4][4], const float m[4][4], int axis, float rad) {
+    float r[4][4], c = cosf(rad), s = sinf(rad);
+    mat_identity(r);
+    if (axis == 0) {
+        r[1][1] = c; r[1][2] = -s;
+        r[2][1] = s; r[2][2] = c;
+    } else if (axis == 1) {
+        r[0][0] = c;  r[0][2] = s;
+        r[2][0] = -s; r[2][2] = c;
+    } else {
+        r[0][0] = c; r[0][1] = -s;
+        r[1][0] = s; r[1][1] = c;
+    }
+    mat_mul(o, r, m);
+}
+
+/* 仿射阵作用一个点: (x,y,0,1) → (u,v,z,w)。z 供透视除用;
+   本引擎的 3D 矩阵只由平移/旋转构成(透视在投影处单独除), w 恒为 1。 */
+static void mat_point(const float m[4][4], float x, float y,
+                      float *pu, float *pv, float *pz) {
+    *pu = m[0][0] * x + m[0][1] * y + m[0][3];
+    *pv = m[1][0] * x + m[1][1] * y + m[1][3];
+    *pz = m[2][0] * x + m[2][1] * y + m[2][3];
+}
 
 /* ---- 3D 变换 ---- */
 
-/* 把盒子四角经 3D 旋转 + 透视投影得到屏幕坐标。
-   旋转原点 = transform-origin(缺省 50% 50% 即盒中心)。
-   透视投影中心 = (pcx, pcy) —— 与旋转原点分开传: CSS 里 perspective
-   声明在父级时, 消失点是**父盒中心**(perspective-origin 缺省 50% 50%),
-   不是子元素的 transform-origin。此前二者共用一个点, 子元素偏离父中心时
-   透视方向错误(往自己的 origin 收缩而不是往父盒中心消失)。
-   返回 1 表示存在实际 3D 倾斜(需要按四边形绘制), 0 表示无需变换。 */
-static int project_3d(const hn_style *st, float bx, float by, float bw, float bh,
-                      float persp, float sx, float sy,
-                      float pcx, float pcy,
-                      float ox[4], float oy[4]) {
-    /* 只有"完全没有 3D 变换"时才走矩形快路径。translateZ 与 rotate3d 同样
-       会破坏轴对齐性(透视缩放 / 任意轴旋转), 漏掉它们就等于声明了没反应。 */
+/* 元素的局部 3D 矩阵(不含父级):
+   L = T(origin) · Rz · Ry · Rx · R3d · T_z(translateZ) · T(-origin)
+   origin 为**绝对坐标**(bx+偏移) —— 与既有逐角点口径一致(先减 origin
+   旋转再加回); 旋转顺序与旧实现相同(rotate3d 的 Rodrigues 结果先作用,
+   再 X → Y → Z; translateZ 为纯深度位移, 先于全部旋转 —— 即 CSS 里
+   把 translateZ 写在函数列末尾的语义)。origin 缺省 = 盒中心。
+   返回 1 = 元素带 3D 变换(rotate/rotateX/Y/Z/rotate3d/translateZ 任一非零)。 */
+static int st_local_3d(const hn_style *st, float bx, float by,
+                       float bw, float bh, float m[4][4]) {
     if (st->rotate_x == 0 && st->rotate_y == 0 && st->rotate == 0
         && !st->has_r3d && st->translate_z == 0) return 0;
     const float D2R = 3.14159265358979f / 180.0f;
-    /* transform-origin: 之前这里写死盒中心, 声明了 origin 也无效 ——
-       绕左上角转(铰链/表盘)只能靠 translate 硬凑, 而且凑出来的角度是错的。 */
+    /* transform-origin: 缺省盒中心; % 在此处按盒尺寸解出 */
     float cx = bx + (st->has_origin
                      ? (st->origin_pct_x ? st->origin_x * bw : st->origin_x)
                      : bw * 0.5f);
     float cy = by + (st->has_origin
                      ? (st->origin_pct_y ? st->origin_y * bh : st->origin_y)
                      : bh * 0.5f);
-    float rx = st->rotate_x * D2R, ry = st->rotate_y * D2R, rz = st->rotate * D2R;
-    float cxr = cosf(rx), sxr = sinf(rx);
-    float cyr = cosf(ry), syr = sinf(ry);
-    float czr = cosf(rz), szr = sinf(rz);
-    /* rotate3d(x,y,z,angle): 绕任意轴旋转(Rodrigues 公式)。先于 X/Y/Z 轴旋转
-       施加 —— 与 CSS 的函数复合顺序一致(先写的先作用)。
-       轴已在解析期归一化, 这里只做 sin/cos。 */
-    float c3 = cosf(st->r3d_deg * D2R), s3 = sinf(st->r3d_deg * D2R);
-    float ax = st->r3d_x, ay = st->r3d_y, az = st->r3d_z;
-    float t3 = 1.0f - c3;
-    /*  Rodrigues 的 3x3(行主序):
-        R = t3*A⊗A + c3*I + s3*[A]×  */
-    float r00 = t3*ax*ax + c3,     r01 = t3*ax*ay - s3*az, r02 = t3*ax*az + s3*ay;
-    float r10 = t3*ax*ay + s3*az,  r11 = t3*ay*ay + c3,    r12 = t3*ay*az - s3*ax;
-    float r20 = t3*ax*az - s3*ay,  r21 = t3*ay*az + s3*ax, r22 = t3*az*az + c3;
-    float dist = persp > 0 ? persp : 0;      /* 0 = 正交投影 */
-    /* 四角取**盒左上为基准**, 再减 origin 得到相对原点的局部坐标。
-       早先这里存的是"相对盒中心"的坐标, 而 origin 支持加进来之后
-       cx/cy 可能不是盒中心 —— 于是盒子自身相对原点的偏移被丢掉,
-       表现为"绕左上角转"实际绕的是"变换后图形的中心"。
-       origin 缺省(盒中心)时两者等价, 所以只有显式声明 origin 才暴露。 */
+    mat_identity(m);
+    mat_translate(m, m, -cx, -cy, 0);                       /* T(-origin) */
+    if (st->translate_z != 0) mat_translate(m, m, 0, 0, st->translate_z);
+    if (st->has_r3d) {
+        /* rotate3d(x,y,z,angle): 绕任意轴旋转(Rodrigues 公式), 轴已归一化。
+           R = (1-c)·A⊗A + c·I + s·[A]× —— 与既有逐角点实现同一组系数。 */
+        float c3 = cosf(st->r3d_deg * D2R), s3 = sinf(st->r3d_deg * D2R);
+        float ax = st->r3d_x, ay = st->r3d_y, az = st->r3d_z;
+        float t3 = 1.0f - c3;
+        float r[4][4];
+        mat_identity(r);
+        r[0][0] = t3*ax*ax + c3;      r[0][1] = t3*ax*ay - s3*az; r[0][2] = t3*ax*az + s3*ay;
+        r[1][0] = t3*ax*ay + s3*az;   r[1][1] = t3*ay*ay + c3;    r[1][2] = t3*ay*az - s3*ax;
+        r[2][0] = t3*ax*az - s3*ay;   r[2][1] = t3*ay*az + s3*ax; r[2][2] = t3*az*az + c3;
+        mat_mul(m, r, m);
+    }
+    if (st->rotate_x != 0) mat_rotate(m, m, 0, st->rotate_x * D2R);
+    if (st->rotate_y != 0) mat_rotate(m, m, 1, st->rotate_y * D2R);
+    if (st->rotate != 0)   mat_rotate(m, m, 2, st->rotate   * D2R);
+    mat_translate(m, m, cx, cy, 0);                         /* T(origin) */
+    return 1;
+}
+
+/* 复合矩阵 + 透视 → 屏幕四角。视距 persp ≤ 0 为正交(不除);
+   透视时 w = 1 − z/d, 收缩系数 k = d/(d−z) 与既有单元素口径逐式相同
+   (含 [0.05,20] 钳制 —— 面片越过视平面时压到近处, 不爆坐标)。 */
+static void project_corners(const float m[4][4], float bx, float by,
+                            float bw, float bh,
+                            float persp, float sx, float sy,
+                            float pcx, float pcy,
+                            float ox[4], float oy[4]) {
     float lx[4] = { 0, bw, bw, 0 };
     float ly[4] = { 0, 0, bh, bh };
-    int tilted = 0;
+    float dist = persp > 0 ? persp : 0;      /* 0 = 正交投影 */
     for (int i = 0; i < 4; i++) {
-        float x = bx + lx[i] - cx, y = by + ly[i] - cy;
-        /* translateZ: 沿 Z 的深度位移。>0 靠近观察者, 透视下图形变大 ——
-           这就是"声明了 translateZ 却毫无变化"缺的那一步。 */
-        float z = st->translate_z;
-        /* 任意轴旋转先施加 */
-        if (st->has_r3d) {
-            float nx = r00*x + r01*y + r02*z;
-            float ny = r10*x + r11*y + r12*z;
-            float nz = r20*x + r21*y + r22*z;
-            x = nx; y = ny; z = nz;
-        }
-        /* 绕 X */
-        float y1 = y * cxr - z * sxr, z1 = y * sxr + z * cxr;
-        /* 绕 Y */
-        float x2 = x * cyr + z1 * syr, z2 = -x * syr + z1 * cyr;
-        /* 绕 Z */
-        float x3 = x2 * czr - y1 * szr, y3 = x2 * szr + y1 * czr;
-        float px = cx + x3, py = cy + y3;
+        float u, v, z;
+        mat_point(m, bx + lx[i], by + ly[i], &u, &v, &z);
+        float px = u, py = v;
         if (dist > 0.01f) {
-            /* 透视: 离观察者越远(z2 越小)缩放越小;
-               缩放朝透视中心(pcx,pcy)收缩 —— 父级 perspective 时即父盒中心 */
-            float k = dist / (dist - z2);
+            /* 透视: 离观察者越远(z 越小)缩放越小, 缩放朝消失点(pcx,pcy)
+               收缩 —— 父级 perspective 时即声明者盒中心 */
+            float k = dist / (dist - z);
             if (k < 0.05f) k = 0.05f;
             if (k > 20.0f) k = 20.0f;
             px = pcx + (px - pcx) * k;
             py = pcy + (py - pcy) * k;
         }
-        if (fabsf(z2) > 0.01f) tilted = 1;
         ox[i] = px - sx;
         oy[i] = py - sy;
     }
-    /* 判定: 绕 X/Y 旋转或绕 Z 旋转(非 0 角度)都会让矩形不再轴对齐,
-       必须按四边形绘制。只有"完全没有旋转变换"时才走矩形快路径
-       (translate/scale 不改变轴对齐性, 仍可用矩形 + 宽高缩放)。 */
-    /* translateZ/rotate3d 也会让矩形不再轴对齐(透视缩放或任意轴旋转),
-       所以它们同样必须走四边形路径。 */
-    if (st->rotate_x == 0 && st->rotate_y == 0 && fabsf(st->rotate) < 0.01f
-        && !st->has_r3d && st->translate_z == 0) return 0;
-    (void)tilted;
+}
+
+/* project_3d — 矩阵口径的投影入口: 局部矩阵叠上继承矩阵后投影四角。
+   parent = 祖先链复合矩阵(flat 祖先链上恒为单位阵, 行为与旧单元素口径
+   一致); out_total 恒被写出(= parent·L, preserve-3d 时传给子级),
+   无自身 3D 且 parent 为单位阵时早退返回 0(矩形快路径, 行为不变)。 */
+static int project_3d(const hn_style *st, const float parent[4][4],
+                      float bx, float by, float bw, float bh,
+                      float persp, float sx, float sy,
+                      float pcx, float pcy,
+                      float ox[4], float oy[4],
+                      float out_total[4][4]) {
+    float local[4][4];
+    if (!st_local_3d(st, bx, by, bw, bh, local)) {
+        /* 无自身 3D: 继承矩阵也是单位阵 → 矩形快路径(单元素行为不变);
+           否则内容坐在 preserve-3d 祖先的面片上, 随复合矩阵投影。 */
+        if (mat_is_identity(parent)) {
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++)
+                    out_total[i][j] = parent[i][j];
+            return 0;
+        }
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++)
+                out_total[i][j] = parent[i][j];
+        project_corners(out_total, bx, by, bw, bh, persp, sx, sy, pcx, pcy, ox, oy);
+        return 1;
+    }
+    mat_mul(out_total, parent, local);
+    project_corners(out_total, bx, by, bw, bh, persp, sx, sy, pcx, pcy, ox, oy);
     return 1;
 }
 
-/* 绝对坐标 → 设备坐标(先绕原点缩放, 再减滚动偏移)。
-   x/y 各自用**自己的**缩放分量 —— 之前只有一个 scale, 于是 scale(2,1)
-   被当成等比 2 处理(图形纵向也被拉高一倍)。 */
-static inline float tfx(const paint_guard *g, float sx, float x) {
-    return (x - g->ox) * g->scale * g->scale_x + g->ox - sx;
+/* 绝对坐标 → 设备坐标(先过摊平仿射, 再绕原点缩放, 最后减滚动偏移)。
+   摊平仿射缺省为单位阵 —— 此时与旧口径逐位一致((x-ox)*S + ox - sx)。
+   x/y 各自用自己的缩放分量 —— scale(2,1) 不能被当成等比 2 处理。 */
+static inline float tfx(const paint_guard *g, float sx, float x, float y) {
+    float u = g->axx * x + g->axy * y + g->atx;
+    return (u - g->ox) * g->scale * g->scale_x + g->ox - sx;
 }
-static inline float tfy(const paint_guard *g, float sy, float y) {
-    return (y - g->oy) * g->scale * g->scale_y + g->oy - sy;
+static inline float tfy(const paint_guard *g, float sy, float x, float y) {
+    float v = g->ayx * x + g->ayy * y + g->aty;
+    return (v - g->oy) * g->scale * g->scale_y + g->oy - sy;
+}
+
+/* 把"父面片的投影四边形"拟合成 2D 仿射装进绘制状态(flat 扁平化):
+   盒左上/右上/左下三个角各自映到投影四边形的 0/1/3 号角 —— 一般透视
+   四边形(8 自由度)不能被仿射(6 自由度)精确表达, 三点拟合是既定的
+   简化口径; 文字等平面内容以左上角与两条主边落位。
+   面片的尺度已并入仿射, 子树的累积 scale 归位(不叠加父的透视缩放)。 */
+static void install_flatten(paint_guard *g, float bx, float by, float bw, float bh,
+                            const float qx[4], const float qy[4]) {
+    if (bw < 0.0001f || bh < 0.0001f) return;
+    float e1x = (qx[1] - qx[0]) / bw, e1y = (qy[1] - qy[0]) / bw;
+    float e2x = (qx[3] - qx[0]) / bh, e2y = (qy[3] - qy[0]) / bh;
+    g->axx = e1x; g->axy = e2x; g->atx = qx[0] - e1x * bx - e2x * by;
+    g->ayx = e1y; g->ayy = e2y; g->aty = qy[0] - e1y * bx - e2y * by;
+    g->scale = 1.0f; g->scale_x = 1.0f; g->scale_y = 1.0f;
+    g->ox = 0.0f; g->oy = 0.0f;
 }
 
 static void push_cmd(hn_context *c, hn_cmd *cmd);
@@ -293,8 +404,8 @@ static void paint_focus_ring(hn_context *c, hn_node *n, const hn_style *st,
     hn_cmd cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.kind = HN_CMD_RECT;
-    cmd.x = tfx(g, sx, n->bx) - 2;
-    cmd.y = tfy(g, sy, n->by) - 2;
+    cmd.x = tfx(g, sx, n->bx, n->by) - 2;
+    cmd.y = tfy(g, sy, n->bx, n->by) - 2;
     cmd.w = w + 4;
     cmd.h = h + 4;
     cmd.radius = eff_radius(st, n->bw, n->bh) * g->scale + 2;
@@ -333,8 +444,8 @@ static void paint_check(hn_context *c, hn_node *n, const hn_style *st,
     int checked = hn_node_is_checked(n);
     /* 盒子取 bw/bh 的较小者作正方形边长, 居中于控件盒 */
     float s = w < h ? w : h;
-    float cx = tfx(g, sx, n->bx) + w * 0.5f;
-    float cy = tfy(g, sy, n->by) + h * 0.5f;
+    float cx = tfx(g, sx, n->bx, n->by) + w * 0.5f;
+    float cy = tfy(g, sy, n->bx, n->by) + h * 0.5f;
     float bx = cx - s * 0.5f, by = cy - s * 0.5f;
     hn_color track = (st->border_color & 0xFFu) ? st->border_color : 0x8A8A8AFF;
     float sw = st->border_w > 0 ? st->border_w : 1.5f;
@@ -394,8 +505,8 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
         cmd.kind = HN_CMD_TEXT;
         cmd.text = n->text + r->begin;
         cmd.text_len = r->end - r->begin;
-        cmd.tx = tfx(g, sx, r->x);
-        cmd.baseline = tfy(g, sy, r->baseline);
+        cmd.tx = tfx(g, sx, r->x, r->baseline);
+        cmd.baseline = tfy(g, sy, r->x, r->baseline);
         if (g->scale != 1.0f) cmd.font.size_px = st->font_size * g->scale;
         cmd.font.size_px = st->font_size;
         cmd.font.weight = st->font_weight;
@@ -438,7 +549,11 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
 
 static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
                        float alpha, float sx, float sy) {
-    paint_guard g = { 0, 0, 1.0f, 1.0f, 1.0f, 0, 0 };
+    paint_guard g;
+    memset(&g, 0, sizeof(g));
+    g.scale = 1.0f; g.scale_x = 1.0f; g.scale_y = 1.0f;   /* 累积缩放缺省 1 */
+    mat_identity(g.m3d);       /* 3D 复合矩阵缺省单位阵(正交, 无祖先变换) */
+    g.axx = 1.0f; g.ayy = 1.0f;   /* 摊平仿射缺省单位阵 */
     paint_walk_g(c, n, pst, alpha, sx, sy, &g);
 }
 
@@ -501,17 +616,21 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     float saved_sx = sx, saved_sy = sy;
     float saved_scale = g->scale, saved_ox = g->ox, saved_oy = g->oy;
     float saved_scale_x = g->scale_x, saved_scale_y = g->scale_y;
-    /* 透视视距: 元素自身的 perspective, 否则取父级的(与 CSS 一致)。
-       投影中心(消失点)跟着视距的**声明者**走: CSS perspective-origin
-       缺省 50% 50% —— 自己声明就是自己盒中心, 父级声明就是父盒中心。 */
+    /* 3D 层级状态: 出口恢复(兄弟节点不受本元素影响) */
+    float saved_m3d[4][4], saved_axx = g->axx, saved_axy = g->axy, saved_atx = g->atx;
+    float saved_ayx = g->ayx, saved_ayy = g->ayy, saved_aty = g->aty;
+    float saved_pd = g->persp_d, saved_pcx = g->persp_cx, saved_pcy = g->persp_cy;
+    memcpy(saved_m3d, g->m3d, sizeof(saved_m3d));
+    /* 透视视距: 元素自身的 perspective, 否则取**最近的**祖先声明
+       (绘制状态沿树携带, 不再局限于直接父级 —— 与 CSS"用最近的
+       perspective"一致)。投影中心(消失点)跟着视距的**声明者**走:
+       CSS perspective-origin 缺省 50% 50% —— 自己声明就是自己盒中心,
+       祖先声明就是声明者的盒中心。 */
     float persp = st->perspective;
     float pcx = n->bx + n->bw * 0.5f, pcy = n->by + n->bh * 0.5f;
-    if (persp <= 0 && pst && pst->perspective > 0) {
-        persp = pst->perspective;
-        if (n->parent) {
-            pcx = n->parent->bx + n->parent->bw * 0.5f;
-            pcy = n->parent->by + n->parent->bh * 0.5f;
-        }
+    if (persp <= 0 && g->persp_d > 0) {
+        persp = g->persp_d;
+        pcx = g->persp_cx; pcy = g->persp_cy;
     }
     if (st->translate_x != 0) sx -= st->translate_x;
     if (st->translate_y != 0) sy -= st->translate_y;
@@ -601,7 +720,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             struct hn_lottie *l = hn_context_lottie(c, lsrc);
             if (l) {
                 float bw = n->bw * g->scale * g->scale_x, bh = n->bh * g->scale * g->scale_y;
-                float bx = tfx(g, sx, n->bx), by = tfy(g, sy, n->by);
+                float bx = tfx(g, sx, n->bx, n->by), by = tfy(g, sy, n->bx, n->by);
                 /* 元素盒背景仍要画(承载底色/圆角), 动画画在其上 */
                 int lf = (st->background & 0xFFu) || st->has_gradient;
                 if (lf) {
@@ -636,7 +755,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         const char *msrc = hn_node_attr(n, "src");
         if (msrc && *msrc) {
             hn_mesh_emit(c, n, msrc, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
-                         tfx(g, sx, n->bx), tfy(g, sy, n->by), alpha);
+                         tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by), alpha);
             goto clip_done;
         }
     }
@@ -654,7 +773,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 hn_cmd cmd;
                 memset(&cmd, 0, sizeof(cmd));
                 cmd.kind = HN_CMD_BITMAP;
-                cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by);
+                cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by);
                 cmd.w = n->bw * g->scale * g->scale_x;
                 cmd.h = n->bh * g->scale * g->scale_y;
                 cmd.radius = eff_radius(st, cmd.w, cmd.h);
@@ -668,7 +787,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 hn_cmd cmd;
                 memset(&cmd, 0, sizeof(cmd));
                 cmd.kind = HN_CMD_RECT;
-                cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by);
+                cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by);
                 cmd.w = n->bw * g->scale * g->scale_x;
                 cmd.h = n->bh * g->scale * g->scale_y;
                 cmd.radius = eff_radius(st, cmd.w, cmd.h);
@@ -688,7 +807,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_IMAGE;
-            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by);
+            cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by);
             cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
             cmd.text = src;
@@ -714,7 +833,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_RECT;
-            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
+            cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
             cmd.fill = fill_color(st, st->background, alpha);
             cmd.stroke = fill_color(st, st->border_color, alpha);
@@ -766,8 +885,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 cmd.kind = HN_CMD_TEXT;
                 cmd.text = dots;
                 cmd.text_len = cps * 3;
-                cmd.tx = tfx(g, sx, x0);
-                cmd.baseline = tfy(g, sy, bl);
+                cmd.tx = tfx(g, sx, x0, bl);
+                cmd.baseline = tfy(g, sy, x0, bl);
                 cmd.font.size_px = st->font_size;
                 cmd.font.weight = st->font_weight;
                 cmd.font.italic = st->font_italic;
@@ -784,8 +903,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 cmd.kind = HN_CMD_TEXT;
                 cmd.text = val + r->begin;
                 cmd.text_len = r->end - r->begin;
-                cmd.tx = tfx(g, sx, r->x);
-                cmd.baseline = tfy(g, sy, r->baseline);
+                cmd.tx = tfx(g, sx, r->x, r->baseline);
+                cmd.baseline = tfy(g, sy, r->x, r->baseline);
                 if (g->scale != 1.0f) cmd.font.size_px = st->font_size * g->scale;
                 cmd.font.size_px = st->font_size;
                 cmd.font.weight = st->font_weight;
@@ -868,7 +987,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_RECT;
-            cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
+            cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
             cmd.radius = st->radius;
             cmd.fill = fill_color(st, st->background, alpha);
             cmd.stroke = fill_color(st, st->border_color, alpha);
@@ -889,7 +1008,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             hn_cmd bg;
             memset(&bg, 0, sizeof(bg));
             bg.kind = HN_CMD_RECT;
-            bg.x = tfx(g, sx, n->bx); bg.y = tfy(g, sy, n->by);
+            bg.x = tfx(g, sx, n->bx, n->by); bg.y = tfy(g, sy, n->bx, n->by);
             bg.w = n->bw * g->scale * g->scale_x; bg.h = n->bh * g->scale * g->scale_y;
             bg.radius = eff_radius(st, bg.w, bg.h);
             bg.fill = fill_color(st, st->background, alpha);
@@ -918,7 +1037,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             else if (side == 2) { by = n->by + n->bh - t; bhei = t; }
             else if (side == 3) { bhei = n->bh; bwid = t; }
             else                { bx = n->bx + n->bw - t; bhei = n->bh; bwid = t; }
-            e.x = tfx(g, sx, bx); e.y = tfy(g, sy, by);
+            e.x = tfx(g, sx, bx, by); e.y = tfy(g, sy, bx, by);
             e.w = bwid * g->scale; e.h = bhei * g->scale;
             e.fill = fill_color(st, bc, alpha);
             push_cmd(c, &e);
@@ -927,24 +1046,34 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     }
     int has_fill = (st->background & 0xFFu) || st->has_gradient;
     int has_border = st->border_w > 0 && (st->border_color & 0xFFu);
+    /* ---- 3D 投影(矩阵口径) ----
+       自身带 3D 变换, 或处于 preserve-3d 祖先的复合矩阵中(继承矩阵非单位)
+       时, 本盒按投影四边形绘制(矩形无法表达透视形变); 否则矩形快路径。
+       out_total = 继承矩阵·局部矩阵, preserve-3d 时原样传给子级。 */
+    float qx[4], qy[4];
+    float mtotal[4][4];
+    int proj3d = project_3d(st, g->m3d, n->bx, n->by, n->bw, n->bh,
+                            persp, sx, sy, pcx, pcy, qx, qy, mtotal);
     if (has_fill || has_border) {
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
-        /* 3D 变换: 有倾斜时按投影后的四边形填充(矩形无法表达透视形变) */
-        float qx[4], qy[4];
-        if (project_3d(st, n->bx, n->by, n->bw, n->bh, persp, sx, sy, pcx, pcy, qx, qy)) {
-            hn_cmd q;
-            memset(&q, 0, sizeof(q));
-            q.kind = HN_CMD_QUAD;
-            for (int k = 0; k < 4; k++) { q.qx[k] = qx[k]; q.qy[k] = qy[k]; }
-            q.fill = fill_color(st, st->background, alpha);
-            push_cmd(c, &q);
-            /* 四边形目前只填充; 子节点(文本)仍按平面绘制(简化),
-               对 UI 场景(卡片翻转/3D 倾斜)足够。 */
-            goto draw_children;
-        }
+        if (proj3d) {
+            /* 投影四边形填充。渐变字段与 RECT 同款 —— 之前只填平色,
+               linear-gradient 底色的 3D 元素(background 解析为 0)投影后全透明。 */
+            cmd.kind = HN_CMD_QUAD;
+            for (int k = 0; k < 4; k++) { cmd.qx[k] = qx[k]; cmd.qy[k] = qy[k]; }
+            cmd.fill = fill_color(st, st->background, alpha);
+            if (st->has_gradient) {
+                cmd.gradient = 1;
+                cmd.grad_from = fill_color(st, st->grad_from, alpha);
+                cmd.grad_to = fill_color(st, st->grad_to, alpha);
+                cmd.grad_angle = st->grad_angle;
+            }
+            push_cmd(c, &cmd);
+            /* 不再跳过子节点: 子树照常递归, 文字随摊平仿射落到面片上。 */
+        } else {
         cmd.kind = HN_CMD_RECT;
-        cmd.x = tfx(g, sx, n->bx); cmd.y = tfy(g, sy, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
+        cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
         cmd.radius = eff_radius(st, cmd.w, cmd.h);
         cmd.fill = fill_color(st, st->background, alpha);
         cmd.stroke = fill_color(st, st->border_color, alpha);
@@ -963,14 +1092,29 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             cmd.shadow_oy = st->sh_oy;
         }
         push_cmd(c, &cmd);
+        }
+    }
+
+    /* ---- 子树的 3D 状态(preserve-3d 复合 / flat 扁平化) ----
+       自身声明 perspective 则成为子树的**新视距声明者**(消失点=自身盒中心);
+       preserve-3d: 子级继承"自己叠完的"复合矩阵继续叠;
+       flat(缺省): 子级 3D 从零开始(矩阵复位), 但父面片的投影四边形以
+       2D 仿射并进绘制状态 —— 子随父卡转动后被摊平, 与 CSS 扁平化语义一致。 */
+    if (st->perspective > 0) {
+        g->persp_d = st->perspective;
+        g->persp_cx = n->bx + n->bw * 0.5f;
+        g->persp_cy = n->by + n->bh * 0.5f;
+    }
+    if (st->transform_style == 1) {
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++) g->m3d[i][j] = mtotal[i][j];
+    } else {
+        mat_identity(g->m3d);
+        if (proj3d) install_flatten(g, n->bx, n->by, n->bw, n->bh, qx, qy);
     }
 
     /* overflow 容器: 裁剪 + 子树滚动偏移。
-       clipped 在函数开头就初始化: 上面的 3D 分支会 `goto draw_children`
-       跳过本声明, 在 C 里那等于**未初始化**(不是 0)。后果是 3D 变换的
-       overflow 容器可能在没 push 过 CLIP_PUSH 的情况下走到末尾的
-       `if (clipped)` 发一个 CLIP_POP —— 后端裁剪栈弹出空栈,
-       CoreGraphics 的 restoreGState 与 hnsoft 的 clip 栈都会错位。 */
+       clipped 在函数开头就初始化(0), 任何分支都不会读到未初始化值。 */
     clipped = st->overflow != 0;
     if (clipped) {
         hn_cmd cmd;
@@ -996,7 +1140,6 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             g->depth--;
         }
     }
-draw_children:
     /* 容器自身的行内片段(目前仅 text-overflow 的省略号):
        在子节点之后绘制, 使其覆盖在被截断的文本之上 */
     if (n->n_runs > 0 && st->display != HN_DISP_INLINE && !hn_node_is_input(n)) {
@@ -1007,6 +1150,10 @@ draw_children:
     sx = saved_sx; sy = saved_sy;
     g->scale = saved_scale; g->scale_x = saved_scale_x; g->scale_y = saved_scale_y;
     g->ox = saved_ox; g->oy = saved_oy;
+    memcpy(g->m3d, saved_m3d, sizeof(saved_m3d));
+    g->persp_d = saved_pd; g->persp_cx = saved_pcx; g->persp_cy = saved_pcy;
+    g->axx = saved_axx; g->axy = saved_axy; g->atx = saved_atx;
+    g->ayx = saved_ayx; g->ayy = saved_ayy; g->aty = saved_aty;
 
     if (clipped) {
         hn_cmd cmd;

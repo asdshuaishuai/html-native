@@ -153,6 +153,11 @@ typedef struct hn_style {
     float      r3d_x, r3d_y, r3d_z;   /* 归一化轴 */
     unsigned char has_r3d;
     float      r3d_deg;
+    /* transform-style: 0 = flat(缺省, 子级被摊平到父的投影面上)
+                       1 = preserve-3d(子级继承父的复合 3D 矩阵继续叠)。
+       缺这个字段时 preserve-3d 声明无效 —— 立方体各面只按自身 transform
+       独立投影, 场景旋转根本进不了子级。 */
+    unsigned char transform_style;
     /* ---- 定位(脱离流的浮层: 弹窗/下拉/遮罩/固定头) ---- */
     unsigned char position;    /* HN_POS_* */
     unsigned char has_top, has_right, has_bottom, has_left;
