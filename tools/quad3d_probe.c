@@ -10,8 +10,8 @@
  *      当前 QUAD 路径只填平色 → 渐变元素投影后全透明。
  *   C. 3D 子树文字: 3D 变换元素内的文字必须以 TEXT 指令进显示列表
  *      (数量 >=1, 且片段 ⊆ 子树全文)。当前 QUAD 分支跳过全部子节点。
- *   D. 布局上下文: flex 直接子项 / position:absolute 的 3D 变换元素不得被
- *      静默丢弃 —— 各自至少产出 1 条非退化 QUAD。
+ *   D. 布局上下文: flex 直接子项 / position:absolute / inline-block 原子盒的
+ *      3D 变换元素不得被静默丢弃 —— 各自至少产出 1 条非退化 QUAD。
  *
  * 断言全部是 display list 层面的确定性结论(指令形态/几何), 不依赖文本度量
  * (与 render_probe 同口径: 文字宽度因 FreeType 有无而不同, 不进断言)。
@@ -296,6 +296,18 @@ static const char *ABS_HTML =
 "</style>\n"
 "<body><div class=\"absbox\"><div class=\"ael\"></div></div></body>";
 
+/* inline-block 原子盒: 布局期是行内流里的原子片段(hn_layout.c 的
+   is_inline_level 分支), 绘制期必须照常走 paint_walk_g 的 3D 投影主路,
+   不得被行内快路径(自带 run 的 inline 分支)截走 */
+static const char *INLINE_BLOCK_HTML =
+"<style>\n"
+"html, body { margin: 0; }\n"
+".host { display: block; width: 420; height: 160; }\n"
+".ibel { display: inline-block; width: 120; height: 80;\n"
+"        transform: rotateY(26deg); perspective: 500; background: #2ecc71; }\n"
+"</style>\n"
+"<body><div class=\"host\"><div class=\"ibel\"></div></div></body>";
+
 /* tag = 断言编号前缀("D1"/"D3"); what = 布局上下文名 */
 static void quad_case(const char *tag, const char *what, const char *html) {
     hn_context *ctx = build_ctx(html, 800, 600);
@@ -313,8 +325,9 @@ static void quad_case(const char *tag, const char *what, const char *html) {
 }
 
 static void test_layout_contexts(void) {
-    printf("== D. 布局上下文: flex 子项 / absolute 的 3D 元素不被丢弃 ==\n");
+    printf("== D. 布局上下文: flex 子项 / absolute / inline-block 的 3D 元素不被丢弃 ==\n");
     quad_case("D1", "flex 直接子项", FLEX_HTML);
+    quad_case("D2", "inline-block 原子盒", INLINE_BLOCK_HTML);
     quad_case("D3", "absolute", ABS_HTML);
 }
 
