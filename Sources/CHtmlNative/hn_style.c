@@ -908,11 +908,18 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             else if (!strcasecmp(buf, "rotatex")) st->rotate_x = a1;
             else if (!strcasecmp(buf, "rotatey")) st->rotate_y = a1;
             else if (!strcasecmp(buf, "scale")) {
-                /* scale(x, y): 第二个参数缺省 = 第一个(等比)。之前只取 a1,
-                   于是 scale(2,1) 被当成等比 2 —— 图形被纵向拉高一倍。 */
-                st->scale_x = a1;
-                st->scale_y = comma ? a2v : a1;
-                if (!comma) st->scale = a1;
+                /* scale(x, y): 第二个参数缺省 = 第一个(等比)。scale 与
+                   scale_x/scale_y 是**相乘**关系(hn_internal.h: scale 是
+                   等比那一路的载体, 非等比单独存) —— 无逗号时三路都装
+                   曾把 scale(2) 变成 scale·scale_x = 4 倍。现在等比形式
+                   只装 scale, 逗号形式只装非等比两路: scale(2) ≡
+                   scale(2,2) ≡ 2 倍, scale(2,1) 照旧 2 倍 x / 1 倍 y。 */
+                if (comma) {
+                    st->scale_x = a1;
+                    st->scale_y = a2v;
+                } else {
+                    st->scale = a1;
+                }
             }
             else if (!strcasecmp(buf, "scalex")) st->scale_x = a1;
             else if (!strcasecmp(buf, "scaley")) st->scale_y = a1;

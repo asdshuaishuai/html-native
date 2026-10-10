@@ -2,7 +2,12 @@
 # tools/quad3d_probe.py — quad3d_probe.c 的门禁薄封装。
 #
 # 只做三件事: 编译 tools/quad3d_probe.c + 引擎源 → 运行 → 透传退出码。
-# 全部语义断言在 .c 里(display list 层面的确定性结论), 本脚本不解析输出。
+# 全部语义断言在 .c 里(display list / hnsoft 位图层面的确定性结论),
+# 本脚本不解析输出。
+#
+# cairo 变体: pkg-config 找得到 cairo 时, 额外编一份 -DQUAD3D_HAVE_CAIRO
+# + hn_cairo.c 再跑一遍 —— 用例 G(cairo 缝线)只在该变体里真正执行;
+# 主运行里 G 恒为 skip。两份任一退出码非 0 → 本脚本 FAIL。
 #
 # 用法: python3 tools/quad3d_probe.py [二进制路径]
 #   二进制路径可给可不给: 给了且可执行且**确是本探针产物** → 直接运行
@@ -34,6 +39,21 @@ SOURCES = [PROBE] + [
               "hn_png.c", "hnsoft.c")
 ]
 
+# cairo 变体(用例 G): 本机 pkg-config 找得到 cairo 才多编一份
+# -DQUAD3D_HAVE_CAIRO + hn_cairo.c —— 探针里的 G 才真正执行; 找不到就跳过
+# (探针自己打印 skip, 不算失败)。
+CAIRO_SRC = os.path.join(ENGINE, "hn_cairo.c")
+
+
+def pkg_config_cairo() -> list:
+    """cairo 的 cflags+libs; 本机没有则返回空表"""
+    try:
+        r = subprocess.run(["pkg-config", "--cflags", "--libs", "cairo"],
+                           capture_output=True, text=True)
+    except OSError:
+        return []
+    return r.stdout.split() if r.returncode == 0 else []
+
 # freetype2 头在 homebrew 的子目录里(与 tools/build-multiplatform.sh 同口径)
 FT_INC = ""
 FT_LIB = []
@@ -61,9 +81,15 @@ def cc_cmd(out_path: str, with_text: bool) -> list:
     return cmd
 
 
-def compile_probe(out_path: str) -> bool:
+def compile_probe(out_path: str, with_cairo: bool = False) -> bool:
+    cairo = pkg_config_cairo()
+    if with_cairo and not cairo:
+        print("quad3d_probe.py: 本机无 cairo(pkg-config), 跳过 cairo 变体", flush=True)
+        return False
     for with_text in (True, False):
         cmd = cc_cmd(out_path, with_text)
+        if with_cairo:
+            cmd += ["-DQUAD3D_HAVE_CAIRO"] + cairo + [CAIRO_SRC]
         print("quad3d_probe.py: 编译:", " ".join(cmd), flush=True)
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:
@@ -104,11 +130,30 @@ def main() -> int:
 
     print(f"quad3d_probe.py: 运行 {bin_path}", flush=True)
     r = subprocess.run([bin_path])
-    if r.returncode != 0:
-        print(f"quad3d_probe.py: FAIL 探针退出码 {r.returncode}(非 0) "
-              "—— 存在失败断言(修复 3D 边界前这是预期)")
+    rc = r.returncode
+    if rc != 0:
+        print(f"quad3d_probe.py: 主变体退出码 {rc}(非 0) —— 存在失败断言"
+              "(修复 3D 边界/遗留清单前这是预期; 继续跑 cairo 变体以暴露全部结果)")
+
+    # cairo 变体(用例 G): 本机有 cairo 才多跑一份; 任一退出码非 0 → FAIL。
+    # 主变体已红也照跑 —— 一轮门禁同时暴露两份结果。
+    if pkg_config_cairo():
+        cout = os.path.join(tempfile.gettempdir(), "quad3d_probe_bin_cairo")
+        if not compile_probe(cout, with_cairo=True):
+            print("quad3d_probe.py: FAIL cairo 变体编译失败")
+            return 1
+        print(f"quad3d_probe.py: 运行 {cout}(cairo 变体, 用例 G 生效)", flush=True)
+        r2 = subprocess.run([cout])
+        if r2.returncode != 0:
+            print(f"quad3d_probe.py: FAIL cairo 变体退出码 {r2.returncode}(非 0)")
+            return 1
+    else:
+        print("quad3d_probe.py: 本机无 cairo —— 用例 G 在探针里以 skip 记")
+
+    if rc != 0:
+        print(f"quad3d_probe.py: FAIL 主变体退出码 {rc}(非 0)")
         return 1
-    print("quad3d_probe.py: PASS(退出码 0)")
+    print("quad3d_probe.py: PASS(两份变体退出码均 0)")
     return 0
 
 

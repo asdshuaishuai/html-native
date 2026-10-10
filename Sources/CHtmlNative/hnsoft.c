@@ -160,13 +160,16 @@ static float sd_rounded(float px, float py, float x, float y, float w, float h, 
 
 /* CSS 渐变参数: 点在渐变轴上的位置(0 = from 端, 1 = to 端)。
    CSS 角度: 0deg=向上, 顺时针; 轴沿该方向穿过盒中心。
+   轴长口径 = CSS 渐变线长 |W·sinθ|+|H·cosθ|, 端点在中心 ± 轴长/2 ——
+   盒沿轴向的极端点恰好落在渐变 0/1(此前多除一个 2, 两端只到 25%/75%)。
+   与 cairo 后端 make_gradient 的轴端点定义逐式一致(两后端同口径)。
    RECT 采样屏幕点, QUAD 采样**投影前的元素盒**角点 —— 同一条公式。 */
 static float grad_axis_t(const hn_cmd *c, float px, float py) {
     float rad = c->grad_angle * 3.14159265f / 180.0f;
     float dx = sinf(rad), dy = -cosf(rad);
     float cx = c->x + c->w * 0.5f, cy = c->y + c->h * 0.5f;
     float half = fabsf(c->w * dx) + fabsf(c->h * dy);
-    float t = ((px - cx) * dx + (py - cy) * dy) / (half > 0 ? half * 2 : 1) + 0.5f;
+    float t = ((px - cx) * dx + (py - cy) * dy) / (half > 0 ? half : 1) + 0.5f;
     if (t < 0) t = 0; else if (t > 1) t = 1;
     return t;
 }

@@ -124,17 +124,28 @@ static void paint_shadow(cairo_t *cr, const hn_cmd *c) {
 
 /* ---------------- 渐变 ---------------- */
 
-/* CSS 角度 → cairo 渐变轴, 轴跨**矩形自身**外接盒在该方向的投影。
+/* CSS 渐变轴端点(**元素盒局部坐标**): 轴过盒中心、方向按 CSS 角度
+ * (0deg=向上, 90deg=向右), 轴长 = CSS 渐变线长 |W·sinθ|+|H·cosθ|,
+ * 端点 = 中心 ± 轴长/2 —— 盒沿轴向的极端点恰好落在渐变 0/1。
+ * RECT(make_gradient)与 QUAD(单应投影后的屏幕轴)共用这一定义;
+ * 与 hnsoft 的 grad_axis_t 逐式同口径(两后端轴长语义一致)。
  * 建在画布上会让矩形落在渐变中段, 颜色全错。 */
-static cairo_pattern_t *make_gradient(const hn_cmd *c) {
-    double cx = c->x + c->w * 0.5, cy = c->y + c->h * 0.5;
+static void grad_axis_ends(const hn_cmd *c, double *ax0, double *ay0,
+                           double *ax1, double *ay1) {
     double ang = (double)c->grad_angle * M_PI / 180.0;
     double dx = sin(ang), dy = -cos(ang);       /* 0deg = 向上 */
-    double len = (fabs(c->w * dx) + fabs(c->h * dy)) * 0.5;
-    if (len < 0.001) len = 1.0;
+    double cx = c->x + c->w * 0.5, cy = c->y + c->h * 0.5;
+    double half = fabs(c->w * dx) + fabs(c->h * dy);
+    if (half < 0.001) half = 1.0;
+    *ax0 = cx - dx * half * 0.5; *ay0 = cy - dy * half * 0.5;
+    *ax1 = cx + dx * half * 0.5; *ay1 = cy + dy * half * 0.5;
+}
+
+static cairo_pattern_t *make_gradient(const hn_cmd *c) {
+    double x0, y0, x1, y1;
+    grad_axis_ends(c, &x0, &y0, &x1, &y1);
     fcolor a = unpack(c->grad_from), b = unpack(c->grad_to);
-    cairo_pattern_t *g = cairo_pattern_create_linear(
-        cx - dx * len, cy - dy * len, cx + dx * len, cy + dy * len);
+    cairo_pattern_t *g = cairo_pattern_create_linear(x0, y0, x1, y1);
     cairo_pattern_add_color_stop_rgba(g, 0, a.r, a.g, a.b, a.a);
     cairo_pattern_add_color_stop_rgba(g, 1, b.r, b.g, b.b, b.a);
     return g;
@@ -512,55 +523,85 @@ static void paint_mesh(cairo_t *cr, const hn_cmd *c) {
     cairo_surface_destroy(img);
 }
 
-/* ---------------- QUAD 渐变(面片上的 linear pattern) ---------------- */
+/* ---------------- QUAD 渐变(面片上的 linear pattern) ----------------
 
-/* 与 hnsoft 的面片渐变同一语义: 渐变轴建在**投影前的元素盒**上(cmd 的
-   x/y/w/h, 由 hn_paint 装入), 随面片一起被投影 —— 等效 CSS 的"渐变先画
-   在元素上, 再整体 3D 变换"。轴本身用 make_gradient(RECT 同一条通路)。
-   一般透视四边形不是仿射像: 四边形拆两条三角形(对角线 0-2), 每条解
-   "局部盒 → 该三角形"的仿射, 把 pattern 矩阵设为其逆(user→pattern,
-   见文件头注 2 —— 传正方向不报错, 只会静默画出错的贴图), clip 后 paint。
-   两三角形在对角线处连续、有折角 —— 与 hnsoft 的重心插值/MESH 网格同一
-   既定简化口径。 */
+   与 hnsoft 的面片渐变同一语义: 渐变画在**投影前的元素平面**上(cmd 的
+   x/y/w/h 由 hn_paint 装入), 随面片一起被投影 —— 等效 CSS 的"渐变先画
+   在元素上, 再整体 3D 变换"。
+
+   填充 = **单一路径(四个角点)+ 单一 pattern 一次 fill**。此前拆两条三角形
+   (对角线 0-2)各自 clip 后 paint: 拆分线两侧的半覆盖 clip 边做两次 OVER
+   合成, 有效覆盖是 α+β-αβ —— 像素中心恰在缝上时 α=β=0.5 → 只盖 75%,
+   底色从缝里漏出(实测沿对角线 ±40/255 振荡)。单次 fill 的路径内部没有
+   AA 边, 天然无缝。
+
+   pattern 端点 = 局部渐变轴两端(grad_axis_ends)经**单应**投到屏幕:
+   元素平面 → 屏幕是透视射影, 四对角点唯一确定单应, 这里用 Heckbert
+   "单位方 → 四边形"闭式解(纯算术, 无迭代, 确定性)。cairo 的 pattern
+   矩阵只支持仿射、表达不了整面单应, 但把轴向两端映过去后, 线性 pattern
+   的两端严格落在投影四边形的对应边上(轴长口径与 RECT/hnsoft 一致);
+   轴向中段的射影非线性是既定简化(与 hnsoft 的逐三角仿射同档)。 */
 static void paint_quad_gradient(cairo_t *cr, const hn_cmd *c) {
-    double lx[4] = { c->x, c->x + c->w, c->x + c->w, c->x };
-    double ly[4] = { c->y, c->y, c->y + c->h, c->y + c->h };
-    static const int tri[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
-    for (int t = 0; t < 2; t++) {
-        int i0 = tri[t][0], i1 = tri[t][1], i2 = tri[t][2];
-        /* 解 2x2: screen - s0 = A · (local - l0)(与 paint_mesh 同款求逆式) */
-        double ex1 = lx[i1] - lx[i0], ey1 = ly[i1] - ly[i0];
-        double ex2 = lx[i2] - lx[i0], ey2 = ly[i2] - ly[i0];
-        double det = ex1 * ey2 - ey1 * ex2;
-        if (fabs(det) < 1e-9) continue;        /* 退化的半边面片 */
-        double fx1 = (double)c->qx[i1] - c->qx[i0], fy1 = (double)c->qy[i1] - c->qy[i0];
-        double fx2 = (double)c->qx[i2] - c->qx[i0], fy2 = (double)c->qy[i2] - c->qy[i0];
-        double inv = 1.0 / det;
-        double a11 = (fx1 * ey2 - fx2 * ey1) * inv;
-        double a12 = (fx2 * ex1 - fx1 * ex2) * inv;
-        double a21 = (fy1 * ey2 - fy2 * ey1) * inv;
-        double a22 = (fy2 * ex1 - fy1 * ex2) * inv;
+    double bw = (double)c->w, bh = (double)c->h;
+    if (bw < 1e-6 || bh < 1e-6) return;      /* 退化元素盒, 无可投影面 */
 
-        cairo_save(cr);
-        cairo_new_path(cr);
-        cairo_move_to(cr, c->qx[i0], c->qy[i0]);
-        cairo_line_to(cr, c->qx[i1], c->qy[i1]);
-        cairo_line_to(cr, c->qx[i2], c->qy[i2]);
-        cairo_close_path(cr);
-        cairo_clip(cr);
-
-        cairo_pattern_t *g = make_gradient(c);
-        cairo_matrix_t m;
-        cairo_matrix_init(&m, a11, a21, a12, a22, 0, 0);
-        m.x0 = (double)c->qx[i0] - (a11 * lx[i0] + a12 * ly[i0]);
-        m.y0 = (double)c->qy[i0] - (a21 * lx[i0] + a22 * ly[i0]);
-        cairo_matrix_invert(&m);               /* user→pattern(见上) */
-        cairo_pattern_set_matrix(g, &m);
-        cairo_set_source(cr, g);
-        cairo_paint(cr);
-        cairo_pattern_destroy(g);
-        cairo_restore(cr);
+    /* Heckbert 闭式解: 局部盒 → 单位方 (u,v) → 投影四角。
+       s(u,v) = ((a·u + b·v + cc)/(g·u + h·v + 1),
+                 (d·u + e·v + f) /(g·u + h·v + 1))
+       仿射可表达时(sx=sy=0)g=h=0; 行列式退化(四边共线类)同样退回仿射
+       —— 渐变仍在、仍然无缝, 只是该退化面片的映射不精确。 */
+    double X0 = c->qx[0], Y0 = c->qy[0];
+    double X1 = c->qx[1], Y1 = c->qy[1];
+    double X2 = c->qx[2], Y2 = c->qy[2];
+    double X3 = c->qx[3], Y3 = c->qy[3];
+    double dx1 = X1 - X2, dx2 = X3 - X2;
+    double dy1 = Y1 - Y2, dy2 = Y3 - Y2;
+    double sx = X0 - X1 + X2 - X3, sy = Y0 - Y1 + Y2 - Y3;
+    double den = dx1 * dy2 - dy1 * dx2;
+    double gp = 0, hp = 0;
+    if ((fabs(sx) > 1e-9 || fabs(sy) > 1e-9) && fabs(den) > 1e-9) {
+        gp = (sx * dy2 - sy * dx2) / den;
+        hp = (dx1 * sy - dy1 * sx) / den;
     }
+    double ma = X1 - X0 + gp * X1;
+    double mb = X3 - X0 + hp * X3;
+    double mc = X0;
+    double md = Y1 - Y0 + gp * Y1;
+    double me = Y3 - Y0 + hp * Y3;
+    double mf = Y0;
+
+    /* 局部渐变轴两端 → (u,v) → 屏幕点 */
+    double ax0, ay0, ax1, ay1;
+    grad_axis_ends(c, &ax0, &ay0, &ax1, &ay1);
+    double u0 = (ax0 - (double)c->x) / bw, v0 = (ay0 - (double)c->y) / bh;
+    double u1 = (ax1 - (double)c->x) / bw, v1 = (ay1 - (double)c->y) / bh;
+    double w0 = gp * u0 + hp * v0 + 1.0, w1 = gp * u1 + hp * v1 + 1.0;
+    if (fabs(w0) < 1e-9 || fabs(w1) < 1e-9) {
+        /* 轴端落到射影奇异点: 退回仿射映射(恒有限), 保证仍一次填充 */
+        gp = hp = 0;
+        ma = X1 - X0; mb = X3 - X0; mc = X0;
+        md = Y1 - Y0; me = Y3 - Y0; mf = Y0;
+        w0 = w1 = 1.0;
+    }
+    double S0x = (ma * u0 + mb * v0 + mc) / w0, S0y = (md * u0 + me * v0 + mf) / w0;
+    double S1x = (ma * u1 + mb * v1 + mc) / w1, S1y = (md * u1 + me * v1 + mf) / w1;
+
+    fcolor ga = unpack(c->grad_from), gb = unpack(c->grad_to);
+    cairo_pattern_t *pat = cairo_pattern_create_linear(S0x, S0y, S1x, S1y);
+    cairo_pattern_add_color_stop_rgba(pat, 0, ga.r, ga.g, ga.b, ga.a);
+    cairo_pattern_add_color_stop_rgba(pat, 1, gb.r, gb.g, gb.b, gb.a);
+
+    cairo_save(cr);
+    cairo_new_path(cr);
+    cairo_move_to(cr, c->qx[0], c->qy[0]);
+    cairo_line_to(cr, c->qx[1], c->qy[1]);
+    cairo_line_to(cr, c->qx[2], c->qy[2]);
+    cairo_line_to(cr, c->qx[3], c->qy[3]);
+    cairo_close_path(cr);
+    cairo_set_source(cr, pat);
+    cairo_fill(cr);
+    cairo_restore(cr);
+    cairo_pattern_destroy(pat);
 }
 
 /* ---------------- 主入口 ---------------- */
@@ -629,8 +670,8 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             cairo_restore(cr);
             break;
         case HN_CMD_QUAD: {
-            /* 渐变面片: 两三角形 × 仿射映射的 linear pattern(见上);
-               平色面片: 路径填充(原口径) */
+            /* 渐变面片: 单一路径 + 单应投影的屏幕轴 linear pattern 一次填充
+               (见上, 无拆分缝); 平色面片: 路径填充(原口径) */
             if (c->gradient) {
                 paint_quad_gradient(cr, c);
                 break;

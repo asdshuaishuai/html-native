@@ -78,7 +78,12 @@ static hn_color anim_color(const float v[4]) {
    ---- flat 摊平仿射 ----
    axx..aty: 2D 仿射(axx axy / ayx ayy 为线性部分, atx aty 为平移),
    把"被投影祖先"的平面坐标映到屏幕 —— 父卡转动后子内容随面片摊平
-   (与 CSS 扁平化语义一致)。缺省 = 单位阵, 此时 tfx/tfy 与旧口径逐位一致。 */
+   (与 CSS 扁平化语义一致)。缺省 = 单位阵, 此时 tfx/tfy 与旧口径逐位一致。
+   fhx/fhy/fhw: 摊平的**射影分母**(w = fhx·x + fhy·y + fhw, 缺省 0/0/1 =
+   仿射)。透视投影是射影映射, 仿射 6 自由度表达不了第 4 角 —— 装入完整
+   单应后 tfx/tfy 按 u = 分子/w 求值(与旧口径逐位一致: w 恒为 1 时除法
+   精确)。fhx/fhy 非零即"射影摊平"生效, 文字/盒尺寸按锚点处局部线尺度
+   取档(近大远小)。 */
 typedef struct {
     int   depth;
     int   nodes;
@@ -92,6 +97,8 @@ typedef struct {
     float persp_cx, persp_cy;   /* 视距声明者盒中心(消失点) */
     float axx, axy, atx;  /* 摊平仿射: u = axx*x + axy*y + atx */
     float ayx, ayy, aty;  /*             v = ayx*x + ayy*y + aty */
+    float fhx, fhy, fhw;  /* 摊平射影分母: w = fhx*x + fhy*y + fhw
+                             (缺省 0/0/1 = 仿射; install_flatten 装单应) */
 } paint_guard;
 
 /* ---- 4x4 矩阵(preserve-3d 层级栈的最小算术) ----
@@ -206,6 +213,25 @@ static int st_local_3d(const hn_style *st, float bx, float by,
     return 1;
 }
 
+/* 元素的 2D 缩放, 3D 阵形式(preserve-3d 子级复合用):
+   S = T(origin)·diag(sx, sy, 1)·T(-origin)。因子与 2D 绘制状态同源
+   (scale·scale_x / scale·scale_y), 原点与 2D 路径同款(盒中心 /
+   transform-origin)。返回 0 = 元素无 2D 缩放(m 为单位阵, 调用方不必乘)。
+   CSS 里 2D 函数就是 3D 矩阵的退化形式 —— transform-style: preserve-3d
+   时它必须进复合矩阵, 否则 scale(2) 祖先下的子面片投影尺寸不变。 */
+static int st_scale_2d(const hn_style *st, float ox, float oy, float m[4][4]) {
+    mat_identity(m);
+    int active = (st->scale != 1.0f && st->scale > 0.01f)
+              || st->scale_x != 1.0f || st->scale_y != 1.0f;
+    if (!active) return 0;
+    float sx = st->scale_x, sy = st->scale_y;
+    if (st->scale != 1.0f && st->scale > 0.01f) { sx *= st->scale; sy *= st->scale; }
+    m[0][0] = sx; m[1][1] = sy;
+    m[0][3] = ox - sx * ox;
+    m[1][3] = oy - sy * oy;
+    return 1;
+}
+
 /* 复合矩阵 + 透视 → 屏幕四角。视距 persp ≤ 0 为正交(不除);
    透视时 w = 1 − z/d, 收缩系数 k = d/(d−z) 与既有单元素口径逐式相同
    (含 [0.05,20] 钳制 —— 面片越过视平面时压到近处, 不爆坐标)。 */
@@ -266,37 +292,115 @@ static int project_3d(const hn_style *st, const float parent[4][4],
     return 1;
 }
 
-/* 绝对坐标 → 设备坐标(先过摊平仿射, 再绕原点缩放, 最后减滚动偏移)。
-   摊平仿射缺省为单位阵 —— 此时与旧口径逐位一致((x-ox)*S + ox - sx)。
-   x/y 各自用自己的缩放分量 —— scale(2,1) 不能被当成等比 2 处理。 */
+/* 绝对坐标 → 设备坐标(先过摊平单应/仿射, 再绕原点缩放, 最后减滚动偏移)。
+   摊平缺省为单位阵 + 分母 1 —— 此时与旧口径逐位一致((x-ox)*S + ox - sx)。
+   射影摊平(install_flatten 装了单应)按 u = 分子/w 求值; w≈0(点越过视平面)
+   钳到 1e-6 防爆。x/y 各自用自己的缩放分量 —— scale(2,1) 不能被当成等比 2。 */
 static inline float tfx(const paint_guard *g, float sx, float x, float y) {
-    float u = g->axx * x + g->axy * y + g->atx;
+    float w = g->fhx * x + g->fhy * y + g->fhw;
+    if (w > -1e-6f && w < 1e-6f) w = w < 0.0f ? -1e-6f : 1e-6f;
+    float u = (g->axx * x + g->axy * y + g->atx) / w;
     return (u - g->ox) * g->scale * g->scale_x + g->ox - sx;
 }
 static inline float tfy(const paint_guard *g, float sy, float x, float y) {
-    float v = g->ayx * x + g->ayy * y + g->aty;
+    float w = g->fhx * x + g->fhy * y + g->fhw;
+    if (w > -1e-6f && w < 1e-6f) w = w < 0.0f ? -1e-6f : 1e-6f;
+    float v = (g->ayx * x + g->ayy * y + g->aty) / w;
     return (v - g->oy) * g->scale * g->scale_y + g->oy - sy;
 }
 
-/* 把"父面片的投影四边形"拟合成 2D 仿射装进绘制状态(flat 扁平化):
-   盒左上/右上/左下三个角各自映到投影四边形的 0/1/3 号角 —— 一般透视
-   四边形(8 自由度)不能被仿射(6 自由度)精确表达, 三点拟合是既定的
-   简化口径; 文字等平面内容以左上角与两条主边落位。
-   面片的尺度已并入仿射, 子树的累积 scale 归位(不叠加父的透视缩放)。 */
+/* ---- 8x8 线性方程组(列主元消元)—— 单应求解的内核 ---- */
+static int solve8(double a[8][9], double x[8]) {
+    for (int col = 0; col < 8; col++) {
+        int piv = col;
+        for (int r = col + 1; r < 8; r++)
+            if (fabs(a[r][col]) > fabs(a[piv][col])) piv = r;
+        if (fabs(a[piv][col]) < 1e-12) return 0;
+        if (piv != col)
+            for (int k = 0; k < 9; k++) {
+                double t = a[col][k]; a[col][k] = a[piv][k]; a[piv][k] = t;
+            }
+        for (int r = 0; r < 8; r++) {
+            if (r == col) continue;
+            double f = a[r][col] / a[col][col];
+            for (int k = col; k < 9; k++) a[r][k] -= f * a[col][k];
+        }
+    }
+    for (int i = 0; i < 8; i++) x[i] = a[i][8] / a[i][i];
+    return 1;
+}
+
+/* 元素盒四角 → 投影四边形四角的单应 H(3x3, h[8]=1)。
+   透视投影把元素平面映到屏幕是仿射表达不了的双线性射影 —— 四对对应点
+   唯一确定单应, 这才是"平面上任一点该落在哪"的精确口径。 */
+static int homography_box_to_quad(float bx, float by, float bw, float bh,
+                                  const float qx[4], const float qy[4],
+                                  double h[9]) {
+    static const float fx[4] = { 0, 1, 1, 0 }, fy[4] = { 0, 0, 1, 1 };
+    double a[8][9];
+    memset(a, 0, sizeof(a));
+    for (int k = 0; k < 4; k++) {
+        double x = bx + fx[k] * bw, y = by + fy[k] * bh;
+        double u = qx[k], v = qy[k];
+        double r1[9] = { x, y, 1, 0, 0, 0, -u * x, -u * y, u };
+        double r2[9] = { 0, 0, 0, x, y, 1, -v * x, -v * y, v };
+        for (int j = 0; j < 9; j++) { a[2 * k][j] = r1[j]; a[2 * k + 1][j] = r2[j]; }
+    }
+    double s[8];
+    if (!solve8(a, s)) return 0;
+    for (int i = 0; i < 8; i++) h[i] = s[i];
+    h[8] = 1.0;
+    return 1;
+}
+
+/* 射影摊平在点 (x,y) 处沿盒 x 边 / y 边的局部线尺度(雅可比列向量的模)。
+   透视下面片内近大远小 —— 均匀一档(sqrt|det|)给不出位置相关的尺度,
+   文字字号 / 盒尺寸以**锚点处**的局部尺度计:
+   ∂u/∂x = (axx·w − U·fhx)/w² 等(U/V 为分子多项式在点处的值)。 */
+static void flatten_axes_at(const paint_guard *g, float x, float y,
+                            float *kx, float *ky) {
+    float w = g->fhx * x + g->fhy * y + g->fhw;
+    if (w > -1e-6f && w < 1e-6f) w = w < 0.0f ? -1e-6f : 1e-6f;
+    float u = g->axx * x + g->axy * y + g->atx;
+    float v = g->ayx * x + g->ayy * y + g->aty;
+    float iw = 1.0f / (w * w);
+    float dux = (g->axx * w - u * g->fhx) * iw;
+    float dvx = (g->ayx * w - v * g->fhx) * iw;
+    float duy = (g->axy * w - u * g->fhy) * iw;
+    float dvy = (g->ayy * w - v * g->fhy) * iw;
+    *kx = sqrtf(dux * dux + dvx * dvx);
+    *ky = sqrtf(duy * duy + dvy * dvy);
+}
+
+/* 把"父面片的投影四边形"装进绘制状态(flat 扁平化):
+   盒四角 ↔ 投影四边形四角解**单应**(透视投影是射影映射, 仿射 6 自由度
+   表达不了第 4 角 —— 三点仿射拟合在远边误差达数十 px), 子树坐标经
+   tfx/tfy 按 u = 分子/w 落到面片对应位置。退化(四角共线等不可解)时
+   回退左上/右上/左下三点仿射(旧口径), 无射影分母。
+   面片的尺度已并入单应, 子树的累积 scale 归位(不叠加父的透视缩放)。 */
 static void install_flatten(paint_guard *g, float bx, float by, float bw, float bh,
                             const float qx[4], const float qy[4]) {
     if (bw < 0.0001f || bh < 0.0001f) return;
     float e1x = (qx[1] - qx[0]) / bw, e1y = (qy[1] - qy[0]) / bw;
     float e2x = (qx[3] - qx[0]) / bh, e2y = (qy[3] - qy[0]) / bh;
-    g->axx = e1x; g->axy = e2x; g->atx = qx[0] - e1x * bx - e2x * by;
-    g->ayx = e1y; g->ayy = e2y; g->aty = qy[0] - e1y * bx - e2y * by;
+    double h[9];
+    if (homography_box_to_quad(bx, by, bw, bh, qx, qy, h)) {
+        g->axx = (float)h[0]; g->axy = (float)h[1]; g->atx = (float)h[2];
+        g->ayx = (float)h[3]; g->ayy = (float)h[4]; g->aty = (float)h[5];
+        g->fhx = (float)h[6]; g->fhy = (float)h[7]; g->fhw = 1.0f;
+    } else {
+        g->axx = e1x; g->axy = e2x; g->atx = qx[0] - e1x * bx - e2x * by;
+        g->ayx = e1y; g->ayy = e2y; g->aty = qy[0] - e1y * bx - e2y * by;
+        g->fhx = 0.0f; g->fhy = 0.0f; g->fhw = 1.0f;
+    }
     g->scale = 1.0f; g->scale_x = 1.0f; g->scale_y = 1.0f;
     g->ox = 0.0f; g->oy = 0.0f;
-    /* 子树文字随面片缩放: 仿射的均匀等效 = sqrt|det|(det = 两棱叉积,
-       即投影四边形与元素盒的面积比)。**简化口径(如实写明)**: 只有锚点
-       位置与等比缩放是对的 —— 字形本身仍按轴对齐位图绘制, 不做逐像素
-       透视畸变(一般透视四边形需要逐字形纹理映射, 对 UI 卡片不值得;
-       preserve-3d 更深层文字本就按摊平仿射近似, 同一量级)。 */
+    /* 子树文字随面片缩放: 缺省档 = 仿射的均匀等效 sqrt|det|(det = 两棱叉积,
+       即投影四边形与元素盒的面积比)。射影摊平(fhx/fhy 非零)时 paint_runs
+       会以**锚点处局部线尺度**逐 run 覆盖 —— 同一张转动面片内近大远小。
+       **简化口径(如实写明)**: 锚点位置/字号档是对的 —— 字形本身仍按轴对齐
+       位图绘制, 不做逐像素透视畸变(一般透视四边形需要逐字形纹理映射,
+       对 UI 卡片不值得; preserve-3d 更深层文字本就按摊平仿射近似, 同一量级)。 */
     float det = e1x * e2y - e2x * e1y;
     g->text_scale = sqrtf(fabsf(det));
 }
@@ -355,9 +459,12 @@ static void push_deco(hn_context *c, const hn_style *st, float x, float baseline
     }
 }
 
-/* 列表标记: ul → 实心圆/方/空心圆, ol → 十进制序号(右对齐于内容左缘) */
+/* 列表标记: ul → 实心圆/方/空心圆, ol → 十进制序号(右对齐于内容左缘)。
+   坐标一律经 tfx/tfy(摊平单应 + 累积缩放), 尺寸/字号随 text_scale ——
+   此前直用 n->bx/by 减 sx/sy, 不经变换也不随缩放: scale(2) 祖先下
+   标记坐标/尺寸都不变(与已变换的正文脱节)。 */
 static void paint_marker(hn_context *c, hn_node *n, const hn_style *st,
-                         float alpha, float sx, float sy) {
+                         float alpha, float sx, float sy, const paint_guard *g) {
     hn_color col = fill_color(st, st->color, alpha);
     int ordered = !strcmp(n->parent->tag, "ol");
     if (ordered) {
@@ -370,14 +477,15 @@ static void paint_marker(hn_context *c, hn_node *n, const hn_style *st,
         hn_font_desc fd = { st->font_size, st->font_weight, st->font_italic, st->letter_spacing, st->font_family };
         float w = 0;
         if (c->tb_valid && c->tb.measure) w = c->tb.measure(c->tb.ctx, &fd, num, strlen(num));
+        float px = n->bx - 7 - w, py = n->by + st->font_size * 1.02f;
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_TEXT;
         cmd.text = num;
         cmd.text_len = strlen(num);
-        cmd.tx = n->bx - 7 - w - sx;
-        cmd.baseline = n->by + st->font_size * 1.02f - sy;
-        cmd.font.size_px = st->font_size;
+        cmd.tx = tfx(g, sx, px, py);
+        cmd.baseline = tfy(g, sy, px, py);
+        cmd.font.size_px = st->font_size * g->text_scale;
         cmd.font.weight = st->font_weight;
         cmd.font.italic = st->font_italic;
         cmd.font.letter_spacing = st->letter_spacing;
@@ -385,21 +493,25 @@ static void paint_marker(hn_context *c, hn_node *n, const hn_style *st,
         push_cmd(c, &cmd);
         return;
     }
-    /* 无序标记: 0=disc(默认) 2=square 3=circle(空心) */
+    /* 无序标记: 0=disc(默认) 2=square 3=circle(空心)。尺寸随 text_scale
+       (2D 链缩放或摊平面片的均匀档), 锚点(盒左缘外 14px, 字号 0.45 处)
+       经 tfx/tfy 变换。 */
+    float msize = 5.0f * g->text_scale;
+    float px = n->bx - 14, py = n->by + st->font_size * 0.45f;
     hn_cmd cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.kind = HN_CMD_RECT;
-    cmd.w = cmd.h = st->list_style == 2 ? 5 : 5;
-    cmd.x = n->bx - 14 - sx;
-    cmd.y = n->by + st->font_size * 0.45f - sy;
+    cmd.w = cmd.h = msize;
+    cmd.x = tfx(g, sx, px, py);
+    cmd.y = tfy(g, sy, px, py);
     if (st->list_style == 3) {          /* 空心圆 */
-        cmd.radius = 2.5f;
+        cmd.radius = msize * 0.5f;
         cmd.stroke = col;
         cmd.stroke_w = 1;
     } else if (st->list_style == 2) {   /* 方块 */
         cmd.fill = col;
     } else {                            /* 实心圆 */
-        cmd.radius = 2.5f;
+        cmd.radius = msize * 0.5f;
         cmd.fill = col;
     }
     push_cmd(c, &cmd);
@@ -567,6 +679,16 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
     for (int i = 0; i < n->n_runs; i++) {
         hn_run *r = &n->runs[i];
         if (r->end <= r->begin) continue;
+        /* 字号随等比缩放: 2D 链累积为均匀一档; 射影摊平(单应已装入)取
+           **锚点处局部线尺度** —— 同一张转动面片内近大远小(透视字号),
+           均匀一档给不出近远端差。锚点已走单应; 字形本身按轴对齐位图
+           绘制, 不做透视畸变(简化口径见 install_flatten 注)。 */
+        float ts = g->text_scale;
+        if (g->fhx != 0.0f || g->fhy != 0.0f) {
+            float kx, ky;
+            flatten_axes_at(g, r->x, r->baseline, &kx, &ky);
+            ts = sqrtf(kx * ky);
+        }
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_TEXT;
@@ -574,10 +696,7 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
         cmd.text_len = r->end - r->begin;
         cmd.tx = tfx(g, sx, r->x, r->baseline);
         cmd.baseline = tfy(g, sy, r->x, r->baseline);
-        /* 字号随等比缩放(2D 链累积, 或摊平仿射的均匀等效 —— 见
-           install_flatten)。锚点已走仿射; 字形本身按轴对齐位图绘制,
-           不做透视畸变(简化口径, 注释如实写在 install_flatten)。 */
-        cmd.font.size_px = st->font_size * g->text_scale;
+        cmd.font.size_px = st->font_size * ts;
         cmd.font.weight = st->font_weight;
         cmd.font.italic = st->font_italic;
         cmd.font.letter_spacing = st->letter_spacing;
@@ -592,9 +711,9 @@ static void paint_runs(hn_context *c, hn_node *n, const hn_style *st,
             cmd.shadow_oy = st->text_shadow_oy;
         }
         push_cmd(c, &cmd);
-        /* 装饰线与正文同一仿射(先变换再传 0 偏移), 宽/厚随 text_scale */
+        /* 装饰线与正文同一单应(先变换再传 0 偏移), 宽/厚随锚点处字号档 */
         push_deco(c, st, tfx(g, sx, r->x, r->baseline), tfy(g, sy, r->x, r->baseline),
-                  r->width * g->text_scale, alpha, 0.0f, 0.0f, g->text_scale);
+                  r->width * ts, alpha, 0.0f, 0.0f, ts);
     }
 }
 
@@ -626,6 +745,7 @@ static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
     g.text_scale = 1.0f;       /* 文字等比缩放缺省 1(3D 摊平时改写, 见下) */
     mat_identity(g.m3d);       /* 3D 复合矩阵缺省单位阵(正交, 无祖先变换) */
     g.axx = 1.0f; g.ayy = 1.0f;   /* 摊平仿射缺省单位阵 */
+    g.fhx = 0.0f; g.fhy = 0.0f; g.fhw = 1.0f;   /* 射影分母缺省 1(仿射) */
     paint_walk_g(c, n, pst, alpha, sx, sy, &g);
 }
 
@@ -692,6 +812,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     /* 3D 层级状态: 出口恢复(兄弟节点不受本元素影响) */
     float saved_m3d[4][4], saved_axx = g->axx, saved_axy = g->axy, saved_atx = g->atx;
     float saved_ayx = g->ayx, saved_ayy = g->ayy, saved_aty = g->aty;
+    float saved_fhx = g->fhx, saved_fhy = g->fhy, saved_fhw = g->fhw;
     float saved_pd = g->persp_d, saved_pcx = g->persp_cx, saved_pcy = g->persp_cy;
     memcpy(saved_m3d, g->m3d, sizeof(saved_m3d));
     /* 透视视距: 元素自身的 perspective, 否则取**最近的**祖先声明
@@ -785,7 +906,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     if (n->tag && !strcmp(n->tag, "li") && n->parent && n->parent->tag
         && st->list_style != 1
         && (!strcmp(n->parent->tag, "ul") || !strcmp(n->parent->tag, "ol"))) {
-        paint_marker(c, n, st, alpha, sx, sy);
+        paint_marker(c, n, st, alpha, sx, sy, g);
     }
 
     /* Lottie 矢量动画: 声明了 hn-lottie 的元素整体由动画接管(覆盖盒背景与子节点)。
@@ -1160,7 +1281,15 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_RECT;
-        cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
+        cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by);
+        /* 射影摊平: 盒尺寸随**锚点处局部线尺度**(近大远小) —— 只换锚点
+           不换尺寸的盒在面片远边会偏出单应位置数十 px。2D 缩放链
+           (fhx/fhy = 0)不进此档, 尺寸口径不变。 */
+        float kw = 1.0f, kh = 1.0f;
+        if (g->fhx != 0.0f || g->fhy != 0.0f)
+            flatten_axes_at(g, n->bx, n->by, &kw, &kh);
+        cmd.w = n->bw * g->scale * g->scale_x * kw;
+        cmd.h = n->bh * g->scale * g->scale_y * kh;
         cmd.radius = eff_radius(st, cmd.w, cmd.h);
         cmd.fill = fill_color(st, st->background, alpha);
         cmd.stroke = fill_color(st, st->border_color, alpha);
@@ -1192,8 +1321,16 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         g->persp_cy = n->by + n->bh * 0.5f;
     }
     if (st->transform_style == 1) {
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++) g->m3d[i][j] = mtotal[i][j];
+        /* preserve-3d: 子级继承"自己叠完的"复合矩阵。2D 缩放分量也要并进
+           3D 链(右乘: 元素自身变换先于子级局部矩阵生效) —— 此前只复合
+           rotate/translateZ, scale(2) 祖先下的子面片投影尺寸不变(比值 ≈1)。
+           无 2D 缩放时逐位拷贝(既有场景矩阵不变)。 */
+        float s2[4][4];
+        if (st_scale_2d(st, g->ox, g->oy, s2))
+            mat_mul(g->m3d, mtotal, s2);
+        else
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++) g->m3d[i][j] = mtotal[i][j];
     } else {
         mat_identity(g->m3d);
         if (proj3d) install_flatten(g, n->bx, n->by, n->bw, n->bh, qx, qy);
@@ -1241,6 +1378,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     g->persp_d = saved_pd; g->persp_cx = saved_pcx; g->persp_cy = saved_pcy;
     g->axx = saved_axx; g->axy = saved_axy; g->atx = saved_atx;
     g->ayx = saved_ayx; g->ayy = saved_ayy; g->aty = saved_aty;
+    g->fhx = saved_fhx; g->fhy = saved_fhy; g->fhw = saved_fhw;
 
     if (clipped) {
         hn_cmd cmd;
