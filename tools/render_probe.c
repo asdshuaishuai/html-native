@@ -7,7 +7,7 @@
  *   cc -O2 -I Sources/CHtmlNative/include -I Sources/CHtmlNative \
  *      -I /opt/homebrew/include/freetype2 tools/render_probe.c \
  *      Sources/CHtmlNative/hn_{arena,html,css,style,layout,paint,context,theme}.c \
- *      Sources/CHtmlNative/hn_{json,lottie,mesh,png}.c \
+ *      Sources/CHtmlNative/hn_{json,lottie,mesh,png,media}.c \
  *      Sources/CHtmlNative/hnsoft.c -L/opt/homebrew/lib -lfreetype -lm \
  *      -o /tmp/render_probe
  *   /tmp/render_probe                           # 内置用例 + 断言(全绿退出 0)
