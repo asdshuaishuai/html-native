@@ -10,12 +10,25 @@
  *   hn_app <file.html> [W H]                开窗口
  *   hn_app <file.html> --probe [W H]        无窗口自检(管线统计+命中)
  *   hn_app <file.html> --shot <png> [W H]   渲染落盘
+ *
+ * mtime 热重载(--watch, 缺省开): 窗口主循环每 ~300ms stat 源文件,
+ * mtime/尺寸变了就整文档换装(窗口表面/进程不动, 内容替换 + 重绘)——
+ * daemon 的 update op 对 window 应用即"原子写回源文件 + 子进程自行重载",
+ * `hn dev` 的核心语义(mtime 热重载)由此落地。
  */
+/* 特性宏: watch 要纳秒 mtime(秒级会漏同秒内的流式连推)。Darwin 的
+ * st_mtimespec 在 _DARWIN_C_SOURCE 里(超集, 含全部 POSIX); 其余平台
+ * 走 POSIX 2008(st_mtim)。 */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#else
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "hn_rt.h"
 #include "hn_platform.h"
@@ -42,18 +55,67 @@ static void blit_now(hn_rt *rt, hnp_window *w) {
                             (size_t)hn_rt_width(rt) * 4);
 }
 
+/* ---------------- mtime 热重载 ---------------- */
+
+/* watch 轮询周期(ms): 与 16ms 帧节拍解耦, 文件系统事件不值得更密 */
+#define HN_WATCH_INTERVAL_MS 300
+
+/* 源文件指纹(mtime 纳秒 + 尺寸): 秒级 mtime 会漏掉同秒内的连推,
+ * 纳秒口径才能接住 daemon 每几百毫秒一帧的流式推送。 */
+typedef struct { long long mtime_ns; long long size; } file_fp;
+
+static int file_fp_of(const char *path, file_fp *fp) {
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    fp->size = (long long)st.st_size;
+#if defined(__APPLE__)
+    fp->mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL
+                 + (long long)st.st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+    fp->mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000LL
+                 + (long long)st.st_mtim.tv_nsec;
+#else
+    fp->mtime_ns = (long long)st.st_mtime * 1000000000LL;
+#endif
+    return 1;
+}
+
+/* 整文档换装: 先开新 rt, 成功才关旧的 —— 新装载失败(文件被写劈/解析失败)
+ * 时旧文档原样在屏, 窗口不闪不退。hn_rt_close 对含 JS 定义的 runtime 安全:
+ * JS 上下文挂在进程级 scope 表(js_scopes, rt/hn_rt.c, 按 rt->id 记名),
+ * hn_rt_close 不回收它, 同 id 重开在下次 eval 时复用同一上下文并刷新
+ * doc/ctx 桥 —— daemon 的 open/close/open 循环同款姿势, 已被 chat-stream
+ * 五步推流反复验证。 */
+static hn_rt *doc_reload(const char *path, int W, int H) {
+    size_t len = 0;
+    char *html = read_all(path, &len);
+    if (!html) return NULL;   /* 撞上原子替换瞬间(读到旧 inode/半截): 重试 */
+    hn_rt_desc d = { "app", html, len, NULL, 0, W, H };
+    hn_rt *rt = hn_rt_open(&d);
+    free(html);
+    return rt;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "用法: hn_app <file.html> [W H] | --probe | --shot <png>\n");
+        fprintf(stderr, "用法: hn_app <file.html> [W H] [--watch 0|1] | --probe | --shot <png>\n");
         return 2;
     }
     const char *path = argv[1];
     int probe = (argc > 2 && !strcmp(argv[2], "--probe"));
     int shot = (argc > 2 && !strcmp(argv[2], "--shot"));
+    int watch = 1;   /* mtime 热重载缺省开(向后兼容); --watch 0 显式关 */
     int W = 480, H = 700;
+    for (int i = 2; i < argc; i++)
+        if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch = atoi(argv[i + 1]);
     if (!probe && !shot) {
-        if (argc > 2) W = atoi(argv[2]);
-        if (argc > 3) H = atoi(argv[3]);
+        /* 位置参数 W H: 跳过 --watch 及其值(选项与位置参数可混排) */
+        int got = 0;
+        for (int i = 2; i < argc && got < 2; i++) {
+            if (!strcmp(argv[i], "--watch")) { i++; continue; }
+            if (got == 0) W = atoi(argv[i]); else H = atoi(argv[i]);
+            got++;
+        }
     } else {
         int a = shot ? 4 : 3;
         if (argc > a) W = atoi(argv[a]);
@@ -64,7 +126,9 @@ int main(int argc, char **argv) {
     char *html = read_all(path, &hlen);
     if (!html) { fprintf(stderr, "无法读取 %s\n", path); return 1; }
 
-    /* 路径口径: 资产/图片/<link> 相对文档目录(与浏览器一致) */
+    /* 路径口径: 资产/图片/<link> 相对文档目录(与浏览器一致)。
+       base = chdir 后的文档目录内文件名 —— watch/reload 也用它 stat/读,
+       重载发生在主循环里, 那时 cwd 已是文档目录。 */
     const char *base = path;
     const char *slash = strrchr(path, '/');
     if (slash) {
@@ -118,6 +182,12 @@ int main(int argc, char **argv) {
     }
     blit_now(rt, w);
 
+    /* ---- mtime 热重载 watch: 指纹基线(重载只认它, 与窗口表面无关) ---- */
+    file_fp fp = { 0, 0 };
+    int have_fp = file_fp_of(base, &fp);
+    unsigned long last_poll = hnp_now_ms();
+    int ww = hn_rt_width(rt), wh = hn_rt_height(rt);   /* 当前窗口表面尺寸 */
+
     int quit = 0;
     unsigned long last = hnp_now_ms();
     while (!quit) {
@@ -149,6 +219,35 @@ int main(int argc, char **argv) {
             }
         }
         unsigned long now = hnp_now_ms();
+        /* ---- 热重载轮询(~300ms 一次): 指纹变了 → 整文档换装 ----
+           窗口表面/进程不动: 先开新 rt, 成功才关旧 + 重绘; 失败重试一次
+           (写方 tmp+rename 的瞬时旧 inode/半截读), 仍失败则保留旧文档,
+           指纹不落账 —— 下个轮询周期自然再试, 窗口不闪不退。 */
+        if (watch && have_fp && now - last_poll >= HN_WATCH_INTERVAL_MS) {
+            last_poll = now;
+            file_fp cur;
+            if (file_fp_of(base, &cur) &&
+                (cur.mtime_ns != fp.mtime_ns || cur.size != fp.size)) {
+                hn_rt *nr = doc_reload(base, W, H);
+                if (!nr) nr = doc_reload(base, W, H);   /* 重试一次 */
+                if (nr) {
+                    hn_rt_close(rt);   /* JS 安全性见 doc_reload 注释 */
+                    rt = nr;
+                    fp = cur;
+                    have_fp = 1;
+                    /* 文档清单改了尺寸 → 窗口表面跟着走(同 RESIZE 口径)。
+                       注意 macOS 壳的 hnp_window_resize 只 setContentSize/
+                       调内容表面, NSWindow 外框不跟动 —— 重载期间窗口外框
+                       保持开窗时几何, 新文档尺寸不同则表面按新文档重绘
+                       (演示口径: 前后帧声明同一 hn-window 即无此差异)。 */
+                    if (hn_rt_width(rt) != ww || hn_rt_height(rt) != wh) {
+                        ww = hn_rt_width(rt); wh = hn_rt_height(rt);
+                        hnp_window_resize(w, ww, wh);
+                    }
+                    blit_now(rt, w);
+                }
+            }
+        }
         int repaint = 0;
         hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;

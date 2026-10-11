@@ -576,7 +576,8 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   拼接, src 相对**包含它的文件**, 嵌套上限 6, 环检测/缺文件容错占位 ——
   口径由 `tools/include_probe.c` 23 断言钉死); `sys://store/get|set` 应用级 KV 持久化、`sys://clipboard/get|set`、
   `sys://notify`、`sys://open` —— 全部本地, 无网络无服务进程。
-  `hn new` 脚手架与 mtime 热重载(`hn dev`)在路线图上。
+  `hn new` 脚手架在路线图上(mtime 热重载已随 `hn_app --watch` 落地:
+  源文件保存 ~300ms 内真窗口热更新, daemon update 对窗口应用即写源触发)。
 - **daemon 接管开窗(窗口即 UI)**: agent 一条命令桌面弹原生窗 ——
   `hn open <id> <file.html> [--w N --h N] --window`, daemon 不建文档
   (不占 headless 槽位), 而是 `posix_spawn` 平台壳子进程
@@ -586,10 +587,19 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   daemon 退出(SIGINT/SIGTERM/SIGHUP)对存活窗口统一收口, 不留孤儿窗、
   不留 stale socket; 非 macOS 或平台壳二进制缺失自动回退 headless
   (响应标注 `"fallback":"headless"`)。`hn list` 里窗口应用以
-  `kind:"window"`(带 pid/w/h)与 headless 应用并列。分工: **headless
-  是 agent 的渲染/截图管线, window 是给人看的桌面窗** —— 无安装、
-  无 Dock 常驻应用形态, 窗口即 UI。生命周期由 `tools/window_probe.sh`
-  断言(open→list→close→退出收口, 13 断言)。
+  `kind:"window"`(带 pid/w/h)与 headless 应用并列。**update 热推送对
+  真窗口生效**: `hn update <id> <file>` 把新内容(html + 可选 css 以
+  `<style>` 并入)**原子写回** spawn 的源文件(同目录 tmp + rename, 子
+  进程永远读到完整文档), 子进程 `hn_app` 的 mtime watch(~300ms 轮询,
+  `--watch 0` 可关)检测到变化即整文档重载 —— 窗口表面/进程不动, 内容
+  替换 + 重绘, 不闪不退(装载失败保留旧文档, 下个轮询自然重试)。
+  分工: **headless 是 agent 的渲染/截图管线, window 是给人看的桌面窗**
+  —— `eval`/`shot`/`dump`/`text` 对 window 应用回
+  `"error":"unsupported for window apps (headless only)"`(文档在子进程
+  里, daemon 无句柄)。无安装、无 Dock 常驻应用形态, 窗口即 UI。生命
+  周期与热推送由 `tools/window_probe.sh` 断言(open→list→update×2→
+  分工错误→close→退出收口, 25 断言); 真窗口流式演示见
+  `tools/chat-stream-window.sh`(肉眼版)。
 - **交互**: 命中测试(冒泡找 id)、`hx-get/post/target/swap`、
   `hx-trigger`(`click` | `load` | **`every Ns`** 轮询)、
   hx 请求自动携带表单参数(GET 拼 query / POST 发 body)、
@@ -642,8 +652,9 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 ## 已知简化与路线图
 
 - 片段热更新走 arena, 旧节点不回收; class/id 选择器统一小写
-- 近期: select、grid 布局、多屏/多表面组合、`hn new`/`hn dev` 脚手架与
-  mtime 热重载
+- 近期: select、grid 布局、多屏/多表面组合、`hn new` 脚手架;
+  **mtime 热重载已落地**(`hn_app --watch`, 缺省开 —— update 热推送
+  真窗口即靠它; `hn dev` CLI 脚手架仍路线图)
 - 已完成: **daemon 接管开窗 op** —— open 带 `--window`(`"window":1`)
   由 daemon spawn 平台壳子进程开真窗, 每窗一进程, close/list/退出收口
   统一管理(见"daemon 接管开窗(窗口即 UI)"); 顺手修掉 `hn list` 一开

@@ -13,6 +13,14 @@
  *    "title":"...","transparent":0|1,"headless":0|1,"path":"a.html"}
  *   {"op":"open",...,"window":1,"path":"a.html"}   → 桌面弹原生窗(见下)
  *   {"op":"update","id":"a","html":"...","path":"a.html"}
+ *       headless 应用: hn_rt_render 整文档热替换;
+ *       window 应用:   新内容(html + 可选 css)原子写回 spawn 的源文件,
+ *                      子进程 hn_app 的 mtime watch 自行重载 —— 热推送
+ *                      对真窗口生效。回 {"ok":true,"window":true,"reloaded":true}
+ *   {"op":"eval"/"shot"/"dump"/"text"} 对 window 应用回
+ *       ok:false,"error":"unsupported for window apps (headless only)"
+ *       (文档在子进程里, daemon 无句柄 —— headless 是渲染/截图管线,
+ *        window 是给人看的桌面窗, 分工见下)
  *   {"op":"close","id":"a"}           → headless 销毁; window 应用 SIGTERM+waitpid
  *   {"op":"list"}                     → {"apps":[{id,kind:"headless",w,h} |
  *                                                {id,kind:"window",pid,w,h}]}
@@ -174,8 +182,10 @@ static void app_destroy(dapp *a) {
 /* ---------------- 窗口应用表(spawn 平台壳子进程, 每窗一进程) ----------------
  *
  * "窗口即 UI": open window:1 不占上面的 headless 槽位, 这里只记
- * 子进程 pid 与请求尺寸 —— 文档/事件循环全在平台壳(hn_app)里,
- * daemon 只管生命周期: list 列出、close 杀掉、退出统一收口。
+ * 子进程 pid、请求尺寸与 spawn 的源文件 path —— 文档/事件循环全在
+ * 平台壳(hn_app)里, daemon 只管生命周期与热推送: list 列出、
+ * close 杀掉、update 把新内容原子写回 path(子进程 mtime watch 自行
+ * 重载, 见 app/hn_app.c)、退出统一收口。
  */
 
 #define HN_DAEMON_MAX_WINS 64
@@ -185,6 +195,7 @@ typedef struct {
     pid_t pid;
     int w, h;
     int alive;
+    char path[1024];     /* spawn 时上送的源文件: update 热推送原子写回这里 */
 } dwin;
 
 static dwin g_wins[HN_DAEMON_MAX_WINS];
@@ -258,6 +269,25 @@ static pid_t win_spawn(const char *shell, const char *path, int w, int h) {
     int rc = posix_spawn(&pid, shell, NULL, &attr, cargv, environ);
     posix_spawnattr_destroy(&attr);
     return rc == 0 ? pid : -1;
+}
+
+/* 原子覆写: tmp 写**同目录** + rename(同目录才在同一文件系统, rename 原子)。
+ * 子进程 hn_app 的 mtime watch 随时可能 stat+read 这个 path —— fopen "wb"
+ * 先截断再写会让它读到半截 HTML; rename 语义下 path 要么指旧文件要么指
+ * 新文件, 子进程永远读到完整内容(tmp+rename 的"稳定 inode"口径)。 */
+static int win_atomic_write(const char *path, const char *data, size_t len) {
+    char tmp[1152];
+    snprintf(tmp, sizeof(tmp), "%s.hnu-%d.tmp", path, (int)getpid());
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return 0;
+    size_t n = fwrite(data, 1, len, f);
+    int werr = ferror(f);
+    fclose(f);
+    if (werr || n != len || rename(tmp, path) != 0) {
+        unlink(tmp);
+        return 0;
+    }
+    return 1;
 }
 
 /* ---------------- 文本后端(FreeType 可用则真实测量) ---------------- */
@@ -596,6 +626,7 @@ static void handle_line(const char *line, char *out, size_t cap) {
                     wv->pid = pid;
                     wv->w = (int)w; wv->h = (int)h;
                     wv->alive = 1;
+                    snprintf(wv->path, sizeof(wv->path), "%s", spath);
                     char body[192];
                     snprintf(body, sizeof(body),
                              "\"id\":\"%s\",\"pid\":%d,\"window\":true,\"w\":%d,\"h\":%d",
@@ -688,7 +719,55 @@ static void handle_line(const char *line, char *out, size_t cap) {
     char *id = json_str(line, "id");
     dapp *a = id ? app_find(id) : NULL;
 
+    /* window 应用只伺候 open/update(热推送)/close/list —— eval/shot/
+       dump/text 需要 daemon 内的文档句柄, 而窗口应用的文档在子进程
+       hn_app 里。错误信息写明分工: headless 是 agent 的渲染/截图管线,
+       window 是给人看的桌面窗。 */
+    win_reap();   /* 已手关的窗口不再挡道(落回 app not found 口径) */
+    if (id) {
+        static const char *const headless_only[] = { "eval", "shot", "dump", "text" };
+        for (int i = 0; i < 4; i++) {
+            if (!strcmp(op, headless_only[i]) && win_find(id)) {
+                free(id);
+                resp_json(out, cap, 0,
+                          "\"error\":\"unsupported for window apps (headless only)\"");
+                return;
+            }
+        }
+    }
+
     if (!strcmp(op, "update")) {
+        /* ---- window 应用: 新内容原子写回 spawn 的源文件 ----
+           daemon 不持有窗口应用的文档(在子进程 hn_app 里), 热推送 = 把
+           html(以及可选 css) 原子覆写 wv->path, 子进程 mtime watch 检测到
+           变化自行整文档重载(窗口表面/进程不动)。css 无独立通道(文件即
+           整文档), 以 <style> 前缀并入。(僵尸窗口已在上面的统一 reap 收掉) */
+        dwin *wv = id ? win_find(id) : NULL;
+        if (wv) {
+            char *whtml = json_str(line, "html");
+            char *wcss = json_str(line, "css");
+            if (!whtml || !wv->path[0]) {
+                free(whtml); free(wcss); free(id);
+                resp_json(out, cap, 0, "\"error\":\"html required\"");
+                return;
+            }
+            int ok;
+            if (wcss && wcss[0]) {
+                size_t need = strlen(whtml) + strlen(wcss) + 32;
+                char *full = (char *)malloc(need);
+                if (full) {
+                    snprintf(full, need, "<style>%s</style>\n%s", wcss, whtml);
+                    ok = win_atomic_write(wv->path, full, strlen(full));
+                    free(full);
+                } else ok = 0;
+            } else {
+                ok = win_atomic_write(wv->path, whtml, strlen(whtml));
+            }
+            free(whtml); free(wcss); free(id);
+            if (ok) resp_json(out, cap, 1, "\"window\":true,\"reloaded\":true");
+            else resp_json(out, cap, 0, "\"error\":\"write failed\"");
+            return;
+        }
         if (!a) { free(id); resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
         char *html = json_str(line, "html");
         char *spath = json_str(line, "path");
