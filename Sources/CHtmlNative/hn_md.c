@@ -22,7 +22,9 @@
  *   任务清单 - [ ] / - [x]      → li + <input type=checkbox checked>
  *                                 (既有控件语义; li 加 class=task 与
  *                                  list-style:none 取消圆点标记)
- *   围栏代码块 ```lang          → pre > code(data-lang 存语言)
+ *   围栏代码块 ```lang          → pre > code(data-lang 存语言; 逐行最小
+ *                                 tokenizer 高亮: 注释/字符串/关键字+数字
+ *                                 三类 span 包原文, 文本零损耗)
  *   引用 >                      → blockquote(内容递归走块级解析)
  *   管道表格 | a | b |          → table > tr > th/td(表头行 + 分隔行
  *                                 识别; :---:/---: 对齐落 text-align;
@@ -30,12 +32,15 @@
  *   分隔线 --- / *** / ___      → hr
  * v1 行内子集:
  *   **粗** → strong   *斜* → em   `行内码` → code(内不递归)
- *   ~~删除~~ → s   [文本](url) → a(href 存属性; 点击行为后续轮次)
+ *   ~~删除~~ → s   [文本](url) → a(href 存属性; 点击导航见
+ *                                 hn_context_activate_link —— 引擎侧命中
+ *                                 后 #锚就地滚动、外链置 pending link 交
+ *                                 宿主消费)
+ *   ![alt](src) → img(src/alt 存属性, 走既有图片管线零新绘制)
  *   \ 转义后随字符(\` \* \~ \[ \\ 等)。
- * 明确不做(声明即契约): 图片 ![]()(按字面文本渲染)、HTML 内嵌、脚注、
- * 定义列表、setext 标题(=== / --- 下划线式)、缩进式代码块、引用的懒惰
- * 续行(> 行之间夹非 > 行会断开引用)、列表项间空行(空行结束列表 ——
- * 只做紧凑列表)。
+ * 明确不做(声明即契约): HTML 内嵌、脚注、定义列表、setext 标题
+ * (=== / --- 下划线式)、缩进式代码块、引用的懒惰续行(> 行之间夹非 >
+ * 行会断开引用)、列表项间空行(空行结束列表 —— 只做紧凑列表)。
  */
 #include <stdlib.h>
 #include <string.h>
@@ -338,6 +343,181 @@ static int cell_align(const md_line *l, int col) {
 static void parse_blocks(hn_arena *ar, hn_node *parent, const md_line *L, int lo, int hi);
 static void md_inline(hn_arena *ar, hn_node *parent, const char *s, size_t n);
 
+/* ---------- 围栏代码块最小 tokenizer(v1 三色) ----------
+ * 口径: 逐行按字符扫描; 只认三类 —— 注释(tok-c)/ 字符串(tok-s)/
+ * 关键字+数字(tok-k), 其余原文。按"务实不正确"的原则:
+ *   - 行注释(斜杠斜杠 与 #(py/sh))吞到行尾; 块注释吞到闭合或行尾,
+ *     不跨行延续(逐行口径, 上一行的未闭合注释不影响下一行);
+ *   - 字符串从引号到闭引号, 支持 \" 转义, 未闭合吞到行尾;
+ *   - 整词([A-Za-z0-9_]+)查关键字表; 纯数字词同样归 tok-k;
+ *   - 未知语言(及无 lang)只做字符串+注释(空关键字表)。
+ * 文本内容**逐字节无损**: span 只是"包一层", 拼回 exactly 是原文
+ * (md_probe 按此断言)。颜色由主题表给 .tok-c/.tok-s/.tok-k(hn_theme.c),
+ * 本文件不写死任何颜色。 */
+
+typedef struct {
+    const char *const *kw;   /* 关键字表(整词匹配) */
+    int n_kw;
+    int hash_comment;        /* '#' 行注释(py/sh/未知) */
+    int slash_comment;       /* // 与块注释(c/js/ts/rust/未知) */
+} md_langdef;
+
+static const char *KW_C[] = {
+    "auto", "break", "case", "char", "const", "continue", "default", "do",
+    "double", "else", "enum", "extern", "float", "for", "goto", "if", "int",
+    "long", "register", "return", "short", "signed", "sizeof", "static",
+    "struct", "switch", "typedef", "union", "unsigned", "void", "volatile",
+    "while", "bool", "true", "false", "NULL", "include", "define" };
+static const char *KW_JS[] = {
+    "var", "let", "const", "function", "return", "if", "else", "for", "while",
+    "do", "switch", "case", "break", "continue", "new", "this", "typeof",
+    "instanceof", "class", "extends", "super", "import", "export", "from",
+    "default", "try", "catch", "finally", "throw", "async", "await", "yield",
+    "of", "in", "delete", "void", "static", "null", "undefined", "true", "false" };
+static const char *KW_PY[] = {
+    "def", "return", "if", "elif", "else", "for", "while", "class", "import",
+    "from", "as", "try", "except", "finally", "raise", "with", "lambda",
+    "pass", "break", "continue", "and", "or", "not", "in", "is", "None",
+    "True", "False", "global", "nonlocal", "del", "yield", "async", "await",
+    "assert" };
+static const char *KW_RS[] = {
+    "fn", "let", "mut", "const", "static", "struct", "enum", "impl", "trait",
+    "pub", "use", "mod", "match", "if", "else", "for", "while", "loop",
+    "return", "break", "continue", "self", "Self", "crate", "where", "async",
+    "await", "move", "ref", "dyn", "unsafe", "true", "false", "Some", "None",
+    "Ok", "Err", "as", "in", "type" };
+static const char *KW_SH[] = {
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
+    "case", "esac", "function", "in", "select", "return", "exit", "local",
+    "export", "readonly", "shift", "break", "continue", "set", "unset",
+    "trap", "echo", "source", "alias", "eval", "exec" };
+static const char *KW_JSON[] = { "true", "false", "null" };
+
+#define MD_LANG(nm, arr, hash, slash) \
+    static const md_langdef nm = { arr, (int)(sizeof(arr) / sizeof(arr[0])), hash, slash }
+
+MD_LANG(LANG_C, KW_C, 0, 1);
+MD_LANG(LANG_JS, KW_JS, 0, 1);
+MD_LANG(LANG_PY, KW_PY, 1, 0);
+MD_LANG(LANG_RS, KW_RS, 0, 1);
+MD_LANG(LANG_SH, KW_SH, 1, 0);
+MD_LANG(LANG_JSON, KW_JSON, 0, 0);
+/* 未知语言 / 无 lang: 只做字符串+注释(两种行注释都认, 务实口径) */
+static const md_langdef LANG_PLAIN = { NULL, 0, 1, 1 };
+
+/* data-lang 首 token → 语言定义; 未知名返回 NULL(调用方落 LANG_PLAIN) */
+static const md_langdef *md_lang_of(const char *s, size_t n) {
+    if (!s || !n) return NULL;
+    if (n == 1 && s[0] == 'c') return &LANG_C;
+    if ((n == 1 && s[0] == 'h') || (n == 3 && !memcmp(s, "cpp", 3)) ||
+        (n == 3 && !memcmp(s, "cxx", 3)))
+        return &LANG_C;
+    if ((n == 2 && (!memcmp(s, "js", 2) || !memcmp(s, "ts", 2))) ||
+        (n == 10 && !memcmp(s, "javascript", 10)) ||
+        (n == 9 && !memcmp(s, "typescript", 9)))
+        return &LANG_JS;
+    if ((n == 2 && !memcmp(s, "py", 2)) || (n == 6 && !memcmp(s, "python", 6)))
+        return &LANG_PY;
+    if ((n == 4 && !memcmp(s, "rust", 4)) || (n == 2 && !memcmp(s, "rs", 2)))
+        return &LANG_RS;
+    if ((n == 2 && !memcmp(s, "sh", 2)) || (n == 3 && !memcmp(s, "zsh", 3)))
+        return &LANG_SH;
+    if ((n == 4 && !memcmp(s, "bash", 4)) || (n == 5 && !memcmp(s, "shell", 5)))
+        return &LANG_SH;
+    if (n == 4 && !memcmp(s, "json", 4)) return &LANG_JSON;
+    return NULL;
+}
+
+static int md_is_word(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static int md_word_known(const md_langdef *lg, const char *s, size_t n) {
+    for (int i = 0; i < lg->n_kw; i++) {
+        size_t kl = strlen(lg->kw[i]);
+        if (kl == n && !memcmp(lg->kw[i], s, n)) return 1;
+    }
+    return 0;
+}
+
+/* 一行代码 → code 的子节点序列(plain 文本 + 三类 span)。
+ * plain 片段用 [plain, i) 区间累积, 命中令牌时一次 flush —— 相邻 plain
+ * 不产生多余文本节点。 */
+static hn_node *md_code_span(hn_arena *ar, hn_node *code, const char *cls,
+                             const char *s, size_t n) {
+    hn_node *sp = hn_dom_elem(ar, "span");
+    hn_node_set_attr(sp, "class", cls);
+    hn_dom_append(code, sp);
+    if (n) hn_dom_append(sp, hn_dom_text(ar, s, n));
+    return sp;
+}
+
+static void md_code_line(hn_arena *ar, hn_node *code, const md_langdef *lg,
+                         const char *s, size_t n) {
+    size_t i = 0, plain = 0;
+#define MD_CFLUSH(end) do { \
+        if ((end) > plain) hn_dom_append(code, hn_dom_text(ar, s + plain, (end) - plain)); \
+    } while (0)
+    while (i < n) {
+        char c = s[i];
+        /* 行注释: //(c 族) 或 #(py/sh)吞到行尾 */
+        if ((lg->slash_comment && c == '/' && i + 1 < n && s[i + 1] == '/') ||
+            (lg->hash_comment && c == '#')) {
+            MD_CFLUSH(i);
+            md_code_span(ar, code, "tok-c", s + i, n - i);
+            i = n;
+            plain = n;               /* 已吞到行尾, 末尾 flush 不得重复 */
+            break;
+        }
+        /* 块注释: 吞到闭合或行尾(跨行不延续 —— 逐行口径) */
+        if (lg->slash_comment && c == '/' && i + 1 < n && s[i + 1] == '*') {
+            MD_CFLUSH(i);
+            size_t e = i + 2;
+            while (e + 1 < n && !(s[e] == '*' && s[e + 1] == '/')) e++;
+            e = (e + 1 < n) ? e + 2 : n;
+            md_code_span(ar, code, "tok-c", s + i, e - i);
+            i = e;
+            plain = i;
+            continue;
+        }
+        /* 字符串: 引号到闭引号(\" 不终止), 未闭合吞到行尾 */
+        if (c == '"' || c == '\'') {
+            MD_CFLUSH(i);
+            size_t e = i + 1;
+            while (e < n) {
+                if (s[e] == '\\') { e += 2; continue; }
+                if (s[e] == c) { e++; break; }
+                e++;
+            }
+            if (e > n) e = n;
+            md_code_span(ar, code, "tok-s", s + i, e - i);
+            i = e;
+            plain = i;
+            continue;
+        }
+        /* 整词: 纯数字或关键字表命中 → tok-k; 其余留在 plain(不切断) */
+        if (md_is_word(c)) {
+            size_t e = i;
+            while (e < n && md_is_word(s[e])) e++;
+            if (s[i] >= '0' && s[i] <= '9') {
+                MD_CFLUSH(i);
+                md_code_span(ar, code, "tok-k", s + i, e - i);
+                plain = e;
+            } else if (md_word_known(lg, s + i, e - i)) {
+                MD_CFLUSH(i);
+                md_code_span(ar, code, "tok-k", s + i, e - i);
+                plain = e;
+            }
+            i = e;
+            continue;
+        }
+        i++;
+    }
+    MD_CFLUSH(n);
+#undef MD_CFLUSH
+}
+
 /* ---------- 块级解析 ---------- */
 
 /* 当前行是否开启新块(段落收集的终止条件) */
@@ -498,19 +678,14 @@ static void parse_blocks(hn_arena *ar, hn_node *parent, const md_line *L, int lo
                 }
                 hn_dom_append(parent, pre);
                 hn_dom_append(pre, code);
-                /* 内容行以 '\n' 连接(不带尾换行: 否则 pre 排版多出空行) */
-                size_t total = 0;
-                for (int k = i + 1; k < j; k++)
-                    total += L[k].n + (k + 1 < j ? 1 : 0);
-                if (total) {
-                    char *buf = (char *)hn_arena_alloc(ar, total);
-                    size_t o = 0;
-                    for (int k = i + 1; k < j; k++) {
-                        memcpy(buf + o, L[k].s, L[k].n);
-                        o += L[k].n;
-                        if (k + 1 < j) buf[o++] = '\n';
-                    }
-                    hn_dom_append(code, hn_dom_text(ar, buf, o));
+                /* 逐行生成高亮子树: 三类 span(tok-c/tok-s/tok-k)包原文 +
+                   行间 '\n' 独立文本节点(断行交给 code 的 white-space:pre)。
+                   拼回 exactly 等于原内容 —— 高亮只包一层, 不改一个字节。 */
+                const md_langdef *lg = lang_n ? md_lang_of(lang, lang_n) : &LANG_PLAIN;
+                if (!lg) lg = &LANG_PLAIN;
+                for (int k = i + 1; k < j; k++) {
+                    if (k > i + 1) hn_dom_append(code, hn_dom_text(ar, "\n", 1));
+                    if (L[k].n) md_code_line(ar, code, lg, L[k].s, L[k].n);
                 }
                 i = j < hi ? j + 1 : j;              /* 消费闭栏(若有) */
                 continue;
@@ -716,7 +891,9 @@ static void md_inline(hn_arena *ar, hn_node *parent, const char *s, size_t n) {
             continue;
         }
 
-        /* 图片 ![](): v1 明确不做 —— 完整语法按字面文本渲染 */
+        /* 图片 ![](src): 生成既有 <img> 元素(alt/src 存属性), 走既有图片
+           管线零新绘制; 相对路径由装载层按文档目录解析(与 <img src> 同
+           口径)。括号不闭合等畸形按字面文本渲染(与未闭合标记同一口径)。 */
         if (c == '!' && i + 1 < n && s[i + 1] == '[') {
             size_t j = i + 2;
             while (j < n && s[j] != ']') j++;
@@ -724,8 +901,19 @@ static void md_inline(hn_arena *ar, hn_node *parent, const char *s, size_t n) {
                 size_t k = j + 2;
                 while (k < n && s[k] != ')') k++;
                 if (k < n) {
+                    const char *u = s + j + 2;
+                    size_t un = k - (j + 2);
+                    while (un && is_space_ch(*u)) { u++; un--; }
+                    while (un && is_space_ch(u[un - 1])) un--;
                     MD_FLUSH();
-                    hn_dom_append(parent, hn_dom_text(ar, s + i, k - i + 1));
+                    hn_node *img = hn_dom_elem(ar, "img");
+                    char *sv = hn_arena_strndup(ar, u, un);
+                    hn_node_set_attr(img, "src", sv);
+                    if (j > i + 2) {
+                        char *av = hn_arena_strndup(ar, s + i + 2, j - i - 2);
+                        hn_node_set_attr(img, "alt", av);
+                    }
+                    hn_dom_append(parent, img);
                     i = k + 1;
                     tok = i;
                     continue;
@@ -735,7 +923,8 @@ static void md_inline(hn_arena *ar, hn_node *parent, const char *s, size_t n) {
             continue;
         }
 
-        /* 链接 [文本](url): href 存属性, 点击行为由后续轮次接线 */
+        /* 链接 [文本](url): href 存属性; 点击导航由 hn_context_activate_link
+           在派发处接线(锚滚动 / 外链 pending) */
         if (c == '[') {
             size_t j = i + 1;
             while (j < n && s[j] != ']') j++;

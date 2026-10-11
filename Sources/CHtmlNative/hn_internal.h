@@ -318,6 +318,10 @@ struct hn_node {
        附近自动恢复)。存节点上: 文档替换(节点重建)即回默认跟随 —— 与
        流式推送"新内容优先贴底"的直觉一致。 */
     int stream_yield;
+    /* hn-stream 平滑追上: 1 = 跟随动画在途(布局期武装, hn_context_anim_tick
+       逐帧向底部指数逼近; gap < 1px 落位即清)。用户让出立即清 —— 动画
+       中断, 让出状态机只有 stream_yield 一套。 */
+    int stream_anim;
     /* 测量模式下收缩后的内容宽(shrink-to-fit); pref_h = flex 自然主轴高(定高被压缩前的内容需求) */
     float pref_w, pref_h;
     /* 行内排版结果(每次 layout 重建; 元素节点也会持有 — 输入控件用) */
@@ -341,6 +345,10 @@ struct hn_doc {
     hn_node  *root;
     struct hn_sheet **inline_sheets;
     int n_inline, cap_inline;
+    /* 待消费链接(markdown 外链点击时置入; 宿主经
+       hn_doc_take_pending_link 取走, 一次消费即清空)。malloc 副本 ——
+       消费即 free, 不进 arena。 */
+    char *pending_link;
 };
 
 /* ---------- 媒体(<video>/<audio>)会话 ----------
@@ -379,6 +387,10 @@ void     hn_dom_append(hn_node *parent, hn_node *child);
  * 在装载序列里调用(首次 layout 之前、<script> 执行之前), 返回转换的
  * 元素数量。之后样式/布局/绘制/交互全部走既有管线, 零特例。 */
 int hn_md_apply(hn_doc *doc);
+
+/* ---------- 链接导航(pending link; hn_context.c 实现) ---------- */
+/* 置入待消费链接(替换旧值); 供 hn_context_activate_link 内部使用 */
+void hn_doc_set_pending_link(hn_doc *doc, const char *href);
 
 /* ---------- CSS AST ---------- */
 
@@ -507,6 +519,11 @@ struct hn_context {
     hn_media_session *med_sessions; int n_med, cap_med;
     /* <canvas> op 账本表(hn_canvas.c 持有; 按 canvas id 寻址) */
     hn_canvas_ledger *canvases; int n_canvases, cap_canvases;
+    /* 帧循环活跃标志: anim_tick 收到过 dt>0 即置位(不复位)。布局期锚定
+       据此分流 —— 有帧循环的窗口走"平滑追上"动画(逐帧推进, 需要 dt);
+       无帧循环的管线(离屏 shot/dump, 无从推进动画)保持"直接贴底"的旧
+       口径, 单帧出图仍是终态。 */
+    int live_frame;
 };
 
 /* ---------- 共享工具 ---------- */

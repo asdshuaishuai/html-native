@@ -2,17 +2,27 @@
 <!-- examples/md-demo.html — Markdown 直染演示: "agent 报告窗"
      ============================================================
      agent 的母语是 markdown: 这里没有任何 <p>/<h2>/<table> 手写结构,
-     全部内容都在一个 <div hn-md> 里 —— 引擎装载时把 markdown 源替换成
-     普通 DOM 子树(h1/ul/table/pre/...), 之后样式/布局/绘制/交互全部走
-     既有管线, 零特例。语义元素的缺省观感由 UA 样式表提供(hn_style.c),
-     深色皮肤来自 <meta name="hn-theme" content="dark">(hn_theme.c)。
+     全部内容都在 <div hn-md> 里 —— 引擎装载时把 markdown 源替换成
+     普通 DOM 子树(h1/ul/table/pre/img/a/...), 之后样式/布局/绘制/交互
+     全部走既有管线, 零特例。语义元素的缺省观感由 UA 样式表提供
+     (hn_style.c), 深色皮肤来自 <meta name="hn-theme" content="dark">
+     (hn_theme.c)。
 
      已验证渲染命令(实际执行, 产物见 screenshots/md-demo.png):
        dist/hncore-macos-arm64 render examples/md-demo.html screenshots/md-demo.png 720 900
 
+     本页同时演示本轮新增的三项交互/资产语义:
+       1. 图片 ![](assets/avatar-a.png)  → 既有 <img> 管线(相对路径按
+          文档目录解析, 与 <img src> 同口径);
+       2. 代码块三色高亮: ```python 里的注释/字符串/关键字+数字被
+          span.tok-c/.tok-s/.tok-k 包住(文本零损耗), 配色在 hn_theme.c;
+       3. 链接点击导航: 外链(https://example.com/...)点击后置入
+          pending link 交宿主系统打开; #todo 页内锚点击就地滚动到
+          "遗留与行动"一节(锚点是两个 hn-md 容器之间的 <div id=todo>)。
+
      约束(见 Sources/CHtmlNative/hn_md.c 文件头): md 源顶格书写或统一
      缩进即可(引擎按公共缩进剥层); 源内不要写 HTML 标签; 实体被 HTML
-     层解码一次(&amp; → &)。
+     层解码一次(&amp; → &amp;)。页内锚目标放在两个 hn-md 容器之间。
 -->
 <html>
 <head>
@@ -44,6 +54,8 @@
   <div hn-md>
 # 深夜构建报告: deepStudio 渲染管线体检
 
+![值班 agent 头像](assets/avatar-a.png)
+
 本次巡检覆盖 **C99 渲染核心** 的解析、级联、布局与绘制四段管线, 并抽样
 回归了 *三平台* 产物。总体结论: 核心指标全部在预算内, 有 **1 项** 待办
 需要排期。
@@ -55,13 +67,13 @@
 | 首帧耗时 | 8ms | 16ms | 达标 |
 | 显示列表规模 | 1.2k 条 | 2k 条 | 达标 |
 | 内存占用 | 24MB | 48MB | 达标 |
-| 回归断言 | 214 项 | 全绿 | 达标 |
+| 回归断言 | 107 项 | 全绿 | 达标 |
 
 ## 亮点
 
 1. **Markdown 直染**落地: `&lt;div hn-md&gt;` 装载即变成普通 DOM, 引擎零特例。
 2. 表格走 flex 行等分, 对齐声明(`:---:`)映射到 text-align。
-3. 代码块保留字面排版, `data-lang` 挂在 code 节点上供后续高亮。
+3. 代码块逐行 tokenizer 高亮: 注释/字符串/关键字+数字三类 span, 文本零损耗。
 
 ## 抽样验证
 
@@ -71,15 +83,25 @@
 def pipeline(doc):
     doc = parse(doc)        # hn 编码 → DOM
     doc = cascade(doc)      # UA < 主题 < 作者
-    return layout(doc)      # 盒模型 + 显示列表
+    s = "显示列表指令"
+    return layout(doc, 42)
 ```
 
+## 目录
+
+- [引擎设计说明(外部链接, 宿主系统打开)](https://example.com/deepstudio/design)
+- [页内跳转: 遗留与行动](#todo)
+  </div>
+
+  <div id="todo"></div>
+
+  <div hn-md>
 ## 遗留与行动
 
-- [ ] 给 `a` 链接接上点击导航(下一轮)
+- [x] 给 `a` 链接接上点击导航(锚滚动 + 外链 pending)
 - [x] 修复表格分隔行识别
 - [ ] 行内代码高亮配色打磨
-- [x] md_probe 55 项确定性断言
+- [x] md_probe 107 项确定性断言
 
 ---
 

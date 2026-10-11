@@ -518,14 +518,20 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 - **Markdown 直染(agent 母语)**: `<div hn-md>…markdown 源…</div>` 装载即替换成
   普通 DOM 子树 —— 标题/列表(嵌套 2 层)/任务清单/围栏代码块(data-lang)/引用/
   管道表格(对齐)/分隔线; 行内 **粗** *斜* `码` ~~删除~~ [链接](url) 与嵌套、
-  转义。之后样式/布局/绘制/交互零特例(标题走 h1-h6、代码块走 pre>code、
-  任务清单走既有 checkbox)。明确不做: 图片/HTML 内嵌/脚注/缩进式代码块。
+  转义; 图片 `![]()` 走既有 img 管线; 围栏代码块**三色语法高亮**
+  (注释/字符串/关键字, 逐行口径)。之后样式/布局/绘制/交互零特例。
+  **链接点击导航**: `#锚` 滚进可视区(引擎内), 外部链接置 pending 由宿主
+  消费 —— 窗口壳路径直接系统打开(hn_rt_button → sys://open 同一出口),
+  daemon `event` op 回传 `"link":"…"` 由 agent 决定。明确不做:
+  HTML 内嵌/脚注/缩进式代码块/跨行块注释延续。
   见 `examples/md-demo.html`(agent 报告窗); 口径由 `tools/md_probe.c`
-  66 断言钉死
+  107 断言钉死
 - **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 的 overflow 容器即获得
-  "自动跟随底部"语义(引擎实现, 页面零脚本): 内容增长时滚动贴底, 用户上翻
-  (离底 >48px)让出不追, 滚回底部附近自动恢复跟随(`hn_node_scroll_by` 更新
-  让出状态; 平滑追上动画是后续优化)。整文档替换式流式推送的最简姿势:
+  "自动跟随底部"语义(引擎实现, 页面零脚本): 内容增长时**平滑追上**
+  (帧率无关指数逼近 τ=80ms, 实时帧驱动; 离屏单帧路径直接贴底),
+  用户上翻(离底 >48px)让出不追(动画即断), 滚回底部附近自动恢复;
+  **`hn-stream-loop="N"` 环形缓冲**只保留最近 N 个子元素, 内容无限追加
+  而内存与视觉收敛。整文档替换式流式推送的最简姿势:
   脚本持有累积缓冲 + daemon `update` 整推 —— 完整演示 `tools/chat-stream.sh`
   五步推流 + 三帧留档, 见 `examples/agent-chat.html` 与
   `screenshots/chat-stream-{1,2,3}.png`
@@ -571,6 +577,19 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   口径由 `tools/include_probe.c` 23 断言钉死); `sys://store/get|set` 应用级 KV 持久化、`sys://clipboard/get|set`、
   `sys://notify`、`sys://open` —— 全部本地, 无网络无服务进程。
   `hn new` 脚手架与 mtime 热重载(`hn dev`)在路线图上。
+- **daemon 接管开窗(窗口即 UI)**: agent 一条命令桌面弹原生窗 ——
+  `hn open <id> <file.html> [--w N --h N] --window`, daemon 不建文档
+  (不占 headless 槽位), 而是 `posix_spawn` 平台壳子进程
+  (`hnapp-macos-arm64 <path> [W H]`, 路径/资产解析口径与 `hn_app` 直开
+  完全一致), 回 `{"ok":true,"pid":N,"window":true}`。进程模型:
+  **每窗一进程, 关窗即退** —— `hn close <id>` SIGTERM+waitpid 回收,
+  daemon 退出(SIGINT/SIGTERM/SIGHUP)对存活窗口统一收口, 不留孤儿窗、
+  不留 stale socket; 非 macOS 或平台壳二进制缺失自动回退 headless
+  (响应标注 `"fallback":"headless"`)。`hn list` 里窗口应用以
+  `kind:"window"`(带 pid/w/h)与 headless 应用并列。分工: **headless
+  是 agent 的渲染/截图管线, window 是给人看的桌面窗** —— 无安装、
+  无 Dock 常驻应用形态, 窗口即 UI。生命周期由 `tools/window_probe.sh`
+  断言(open→list→close→退出收口, 13 断言)。
 - **交互**: 命中测试(冒泡找 id)、`hx-get/post/target/swap`、
   `hx-trigger`(`click` | `load` | **`every Ns`** 轮询)、
   hx 请求自动携带表单参数(GET 拼 query / POST 发 body)、
@@ -624,7 +643,12 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 
 - 片段热更新走 arena, 旧节点不回收; class/id 选择器统一小写
 - 近期: select、grid 布局、多屏/多表面组合、`hn new`/`hn dev` 脚手架与
-  mtime 热重载、daemon 接管开窗 op(目前开窗在平台壳)
+  mtime 热重载
+- 已完成: **daemon 接管开窗 op** —— open 带 `--window`(`"window":1`)
+  由 daemon spawn 平台壳子进程开真窗, 每窗一进程, close/list/退出收口
+  统一管理(见"daemon 接管开窗(窗口即 UI)"); 顺手修掉 `hn list` 一开
+  应用就把 daemon 打崩的 FORTIFY 越界与 SIGHUP 无 handler 留 stale
+  socket 两个旧账
 - **媒体/WASM 收尾**: 引擎侧已落地(契约见 `docs/media-design.md`, 逐项实现
   状态标注在该文末) —— `<video>`/`<audio>` 六态状态机 + hncore 合成宿主 +
   `hnMedia*`/`hnWasm*` JS 桥、wasm3 内嵌 + `hnWasmLoad`/`hnWasmCall`、

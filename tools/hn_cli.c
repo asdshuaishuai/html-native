@@ -5,12 +5,13 @@
  *
  * 用法:
  *   hn open <id> <file.html> [--css f.css] [--w N] [--h N] [--headless 0|1]
+ *           [--window]        桌面弹原生窗(daemon spawn 平台壳, 回 pid)
  *   hn update <id> <file.html>
  *   hn close <id>
  *   hn list
  *   hn dump <id>
  *   hn text <id> --element <sel>
- *   hn event <id> --kind click --target <sel>
+ *   hn event <id> --kind click --target <sel> [--x N --y N]
  *   hn shot <id> <out.png>
  *   hn ping
  */
@@ -113,7 +114,7 @@ static void usage(void) {
     fprintf(stderr,
         "hn — html-native C99 命令行(agent 的系统入口)\n"
         "  hn ping\n"
-        "  hn open <id> <file.html> [--css f.css] [--w N] [--h N]\n"
+        "  hn open <id> <file.html> [--css f.css] [--w N] [--h N] [--window]\n"
         "  hn update <id> <file.html>\n"
         "  hn close <id>\n"
         "  hn list\n"
@@ -164,7 +165,17 @@ int main(int argc, char **argv) {
         free(html);
         if (!esc) return 1;
         const char *op = !strcmp(cmd, "open") ? "open" : "update";
-        snprintf(req, sizeof(req), "{\"op\":\"%s\",\"id\":\"%s\",\"html\":\"%s\"", op, id, esc);
+        /* --window 预扫: 字段要放在 "html" 之前上报(daemon 的极简 JSON 读取
+           按第一次出现的键取值, 结构键在前最稳) */
+        int want_window = 0;
+        for (int i = 4; i < argc; i++)
+            if (!strcmp(argv[i], "--window")) want_window = 1;
+        if (want_window)
+            snprintf(req, sizeof(req), "{\"op\":\"%s\",\"window\":1,\"id\":\"%s\",\"html\":\"%s\"",
+                     op, id, esc);
+        else
+            snprintf(req, sizeof(req), "{\"op\":\"%s\",\"id\":\"%s\",\"html\":\"%s\"",
+                     op, id, esc);
         free(esc);
         /* 源文件路径一并上送: daemon 据此把装载基准切到文档目录
            (<link>/<include>/资产相对文档目录解析, 与 hn_app 同款) */
@@ -196,9 +207,14 @@ int main(int argc, char **argv) {
         snprintf(req + l, sizeof(req) - l, "}");
         char *r = rpc(sock, req);
         if (!r) { printf("daemon 未响应\n"); return 1; }
-        char val[256];
-        resp_field(r, "id", val, sizeof(val));
-        printf("%s: %s\n", !strcmp(cmd, "open") ? "已打开" : "已热更新", val[0] ? val : id);
+        if (strstr(r, "\"window\":true")) {
+            /* 窗口应用: 回包带 pid(每窗一进程), 原样展示 */
+            printf("%s\n", r);
+        } else {
+            char val[256];
+            resp_field(r, "id", val, sizeof(val));
+            printf("%s: %s\n", !strcmp(cmd, "open") ? "已打开" : "已热更新", val[0] ? val : id);
+        }
         free(r);
         return 0;
     }
@@ -216,17 +232,24 @@ int main(int argc, char **argv) {
             snprintf(req, sizeof(req), "{\"op\":\"text\",\"id\":\"%s\",\"element\":\"%s\"}", id, es ? es : "");
             free(es);
         } else if (!strcmp(cmd, "event")) {
-            /* --kind click --target <sel> */
+            /* --kind click --target <sel> [--x N --y N](链接命中激活用文档坐标) */
             const char *kind = "click";
             const char *target = "";
+            const char *xs = NULL, *ys = NULL;
             for (int i = 3; i < argc; i++) {
                 if (!strcmp(argv[i], "--kind") && i + 1 < argc) kind = argv[++i];
                 if (!strcmp(argv[i], "--target") && i + 1 < argc) target = argv[++i];
+                if (!strcmp(argv[i], "--x") && i + 1 < argc) xs = argv[++i];
+                if (!strcmp(argv[i], "--y") && i + 1 < argc) ys = argv[++i];
             }
             char *te = json_esc(target);
-            snprintf(req, sizeof(req), "{\"op\":\"event\",\"id\":\"%s\",\"kind\":\"%s\",\"target\":\"%s\"}",
-                     id, kind, te ? te : "");
+            int n = snprintf(req, sizeof(req), "{\"op\":\"event\",\"id\":\"%s\",\"kind\":\"%s\",\"target\":\"%s\"",
+                             id, kind, te ? te : "");
             free(te);
+            if (xs && ys && n > 0 && (size_t)n < sizeof(req))
+                n += snprintf(req + n, sizeof(req) - (size_t)n, ",\"x\":%s,\"y\":%s", xs, ys);
+            if (n > 0 && (size_t)n < sizeof(req))
+                snprintf(req + n, sizeof(req) - (size_t)n, "}");
         } else if (!strcmp(cmd, "shot")) {
             char *pe = json_esc(argv[3]);
             snprintf(req, sizeof(req), "{\"op\":\"shot\",\"id\":\"%s\",\"path\":\"%s\"}", id, pe ? pe : "");

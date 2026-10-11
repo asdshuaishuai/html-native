@@ -11,15 +11,26 @@
  *   {"op":"ping"}
  *   {"op":"open","id":"a","html":"...","css":"...","w":480,"h":700,
  *    "title":"...","transparent":0|1,"headless":0|1,"path":"a.html"}
+ *   {"op":"open",...,"window":1,"path":"a.html"}   → 桌面弹原生窗(见下)
  *   {"op":"update","id":"a","html":"...","path":"a.html"}
- *   {"op":"close","id":"a"}
- *   {"op":"list"}                     → {"apps":[{id,w,h,headless}]}
+ *   {"op":"close","id":"a"}           → headless 销毁; window 应用 SIGTERM+waitpid
+ *   {"op":"list"}                     → {"apps":[{id,kind:"headless",w,h} |
+ *                                                {id,kind:"window",pid,w,h}]}
  *   {"op":"eval","id":"a","js":"..."} → {"value":"..."}
  *   {"op":"dom","id":"a"}             → {"dom":[...]}
  *   {"op":"dump","id":"a"}            → {"cmds":N}
  *   {"op":"text","id":"a","element":"x"} → {"text":"..."}
  *   {"op":"event","id":"a","kind":"click","target":"go","x":..,"y":..}
  *   {"op":"shot","id":"a","path":"out.png"}
+ *
+ * **窗口即 UI**(daemon 接管开窗): open 带 "window":1 时 daemon 不建文档
+ * (不占 headless 槽位), 而是 posix_spawn 平台壳子进程
+ * `hnapp-macos-arm64 <path> [W H]` —— 每窗一进程, 关窗即退。回包
+ * `{"ok":true,"id":..,"pid":N,"window":true,"w":..,"h":..}`; 非 macOS
+ * 本机或平台壳二进制缺失 → 回退 headless 并标注 "fallback":"headless"。
+ * 文件路径口径与 hn_app 相同: 相对 daemon cwd 传给子进程, hn_app 自会
+ * 读文件后 chdir 文档目录解析资产。daemon 退出(SIGINT/SIGTERM/SIGHUP)
+ * 对存活窗口子进程统一 SIGTERM 收口, 不留孤儿窗口、不留 stale socket。
  *
  * 装载路径: open/update 走 hn_rt(与 app/hn_app.c 完全同款)——
  * <link rel=stylesheet> 内联、--css 附加表、文档 <script> 执行、hx load
@@ -29,8 +40,8 @@
  *
  * 与 Swift 版的差异(刻意):
  *   - 窗口/事件循环归各平台壳(tools/hnweb_macos.c / hnweb_linux.c / hnwin.c)
- *     —— daemon 只管**无头**应用与窗口应用的文档生命周期。平台壳后续可通过
- *     同一 socket 接管"开窗"op(本期无头优先, 窗口由壳的 CLI 直开)。
+ *     —— daemon 只管**无头**应用的文档生命周期; 开窗 = spawn 平台壳子进程
+ *     (open window:1), 窗口的事件循环仍在壳里, daemon 只记 pid/生命周期。
  *   - sys:// 桥统一在这一层(原来 Swift/SystemBridge 与 C sysbridge 两份)。
  *
  * 用法: hn_daemon [--socket PATH]   默认 ~/.html-native/hn-daemon.sock
@@ -41,9 +52,15 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+
+extern char **environ;
 
 #include "hn.h"
 #include "hnsoft.h"
@@ -152,6 +169,95 @@ static void app_destroy(dapp *a) {
     free(a->html);
     a->rt = NULL;
     a->alive = 0;
+}
+
+/* ---------------- 窗口应用表(spawn 平台壳子进程, 每窗一进程) ----------------
+ *
+ * "窗口即 UI": open window:1 不占上面的 headless 槽位, 这里只记
+ * 子进程 pid 与请求尺寸 —— 文档/事件循环全在平台壳(hn_app)里,
+ * daemon 只管生命周期: list 列出、close 杀掉、退出统一收口。
+ */
+
+#define HN_DAEMON_MAX_WINS 64
+
+typedef struct {
+    char id[128];
+    pid_t pid;
+    int w, h;
+    int alive;
+} dwin;
+
+static dwin g_wins[HN_DAEMON_MAX_WINS];
+static int g_win_n = 0;
+static const char *g_argv0 = NULL;   /* 用于定位同目录的平台壳 */
+
+static dwin *win_find(const char *id) {
+    for (int i = 0; i < g_win_n; i++)
+        if (g_wins[i].alive && !strcmp(g_wins[i].id, id)) return &g_wins[i];
+    return NULL;
+}
+
+/* 收割已退出的子进程(用户 Esc 手关窗后 pid 会变僵尸, list/close 前顺手收) */
+static void win_reap(void) {
+    for (int i = 0; i < g_win_n; i++) {
+        if (!g_wins[i].alive) continue;
+        int st = 0;
+        pid_t r = waitpid(g_wins[i].pid, &st, WNOHANG);
+        if (r == g_wins[i].pid || (r < 0 && errno == ECHILD)) g_wins[i].alive = 0;
+    }
+}
+
+/* SIGTERM + 限时回收; 500ms 顽抗则 SIGKILL。返回前 alive 已落账 */
+static void win_kill(dwin *w) {
+    if (kill(w->pid, SIGTERM) == 0) {
+        for (int i = 0; i < 50; i++) {
+            int st = 0;
+            if (waitpid(w->pid, &st, WNOHANG) == w->pid) { w->alive = 0; return; }
+            struct timespec ts = { 0, 10 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+        kill(w->pid, SIGKILL);
+        while (waitpid(w->pid, NULL, 0) < 0 && errno == EINTR) {}
+    }
+    w->alive = 0;
+}
+
+/* 平台壳路径: 仅 macOS 本机接管开窗, 其余平台一律回退 headless。
+ * 候选顺序: daemon 可执行文件同目录(dist/ 自包含) → 相对 cwd 的 dist/。 */
+static int win_shell_path(char *out, size_t cap) {
+#if !defined(__APPLE__)
+    (void)out; (void)cap;
+    return 0;
+#else
+    const char *name = "hnapp-macos-arm64";
+    if (g_argv0 && g_argv0[0]) {
+        char dir[1024];
+        snprintf(dir, sizeof(dir), "%s", g_argv0);
+        char *sl = strrchr(dir, '/');
+        if (sl) {
+            *sl = 0;
+            int n = snprintf(out, cap, "%s/%s", dir, name);
+            if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
+        }
+    }
+    int n = snprintf(out, cap, "dist/%s", name);
+    if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
+    return 0;
+#endif
+}
+
+/* posix_spawn 平台壳: hnapp <path> [W H](与手工 CLI 直开完全同参) */
+static pid_t win_spawn(const char *shell, const char *path, int w, int h) {
+    char ws[16], hs[16];
+    snprintf(ws, sizeof(ws), "%d", w);
+    snprintf(hs, sizeof(hs), "%d", h);
+    char *cargv[] = { (char *)shell, (char *)path, ws, hs, NULL };
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    pid_t pid = -1;
+    int rc = posix_spawn(&pid, shell, NULL, &attr, cargv, environ);
+    posix_spawnattr_destroy(&attr);
+    return rc == 0 ? pid : -1;
 }
 
 /* ---------------- 文本后端(FreeType 可用则真实测量) ---------------- */
@@ -461,10 +567,45 @@ static void handle_line(const char *line, char *out, size_t cap) {
         long w = json_num(line, "w", 480);
         long h = json_num(line, "h", 700);
         long headless = json_num(line, "headless", 1);
+        long window = json_num(line, "window", 0);
         if (!id || !html) {
             free(id); free(html); free(css); free(title); free(spath);
             resp_json(out, cap, 0, "\"error\":\"id/html required\"");
             return;
+        }
+        /* ---- window:1 → 不建文档, spawn 平台壳子进程开真窗 ----
+           每窗一进程, 不占 headless 槽位; 非 macOS 本机或平台壳二进制缺失
+           → 落到下面原 headless 路径并在响应标注 fallback。 */
+        int fallback_headless = 0;
+        if (window) {
+            if (!spath || !spath[0]) {
+                free(id); free(html); free(css); free(title); free(spath);
+                resp_json(out, cap, 0, "\"error\":\"window open needs path\"");
+                return;
+            }
+            char shell[1024];
+            int shelled = win_shell_path(shell, sizeof(shell));
+            if (shelled) win_reap();
+            if (shelled && g_win_n < HN_DAEMON_MAX_WINS &&
+                !win_find(id) && !app_find(id)) {
+                pid_t pid = win_spawn(shell, spath, (int)w, (int)h);
+                if (pid > 0) {
+                    dwin *wv = &g_wins[g_win_n++];
+                    memset(wv, 0, sizeof(*wv));
+                    snprintf(wv->id, sizeof(wv->id), "%s", id);
+                    wv->pid = pid;
+                    wv->w = (int)w; wv->h = (int)h;
+                    wv->alive = 1;
+                    char body[192];
+                    snprintf(body, sizeof(body),
+                             "\"id\":\"%s\",\"pid\":%d,\"window\":true,\"w\":%d,\"h\":%d",
+                             id, (int)pid, (int)w, (int)h);
+                    resp_json(out, cap, 1, body);
+                    free(id); free(html); free(css); free(title); free(spath);
+                    return;
+                }
+            }
+            fallback_headless = 1;   /* 壳缺失/spawn 失败/表满或撞 id */
         }
         dapp *a = app_create(id, (int)headless);
         if (!a) {
@@ -504,25 +645,41 @@ static void handle_line(const char *line, char *out, size_t cap) {
         if (m.w > 0) a->w = m.w;
         if (m.h > 0) a->h = m.h;
         char body[256];
-        snprintf(body, sizeof(body), "\"id\":\"%s\",\"w\":%d,\"h\":%d,\"headless\":%s",
-                 a->id, a->w, a->h, a->headless ? "true" : "false");
+        if (fallback_headless)
+            snprintf(body, sizeof(body), "\"id\":\"%s\",\"w\":%d,\"h\":%d,\"headless\":%s,\"fallback\":\"headless\"",
+                     a->id, a->w, a->h, a->headless ? "true" : "false");
+        else
+            snprintf(body, sizeof(body), "\"id\":\"%s\",\"w\":%d,\"h\":%d,\"headless\":%s",
+                     a->id, a->w, a->h, a->headless ? "true" : "false");
         resp_json(out, cap, 1, body);
         free(id); free(html); free(css); free(title); free(spath);
         return;
     }
 
     if (!strcmp(op, "list")) {
+        /* 注: 界宽一律用 sizeof(body)-n —— 曾误写 cap-n(out 的容量),
+           FORTIFY 下必触发 __chk_fail(开个应用 hn list 就把 daemon 打崩) */
         char body[2048];
         size_t n = 0;
-        n += (size_t)snprintf(body + n, cap - n, "\"apps\":[");
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "\"apps\":[");
         int first = 1;
+        win_reap();   /* 先收僵尸, list 只列活着的 */
         for (int i = 0; i < g_app_n; i++) {
             if (!g_apps[i].alive) continue;
-            n += (size_t)snprintf(body + n, cap - n, "%s{\"id\":\"%s\",\"w\":%d,\"h\":%d}",
+            n += (size_t)snprintf(body + n, sizeof(body) - n,
+                                  "%s{\"id\":\"%s\",\"kind\":\"headless\",\"w\":%d,\"h\":%d}",
                                   first ? "" : ",", g_apps[i].id, g_apps[i].w, g_apps[i].h);
             first = 0;
         }
-        n += (size_t)snprintf(body + n, cap - n, "]");
+        for (int i = 0; i < g_win_n; i++) {
+            if (!g_wins[i].alive) continue;
+            n += (size_t)snprintf(body + n, sizeof(body) - n,
+                                  "%s{\"id\":\"%s\",\"kind\":\"window\",\"pid\":%d,\"w\":%d,\"h\":%d}",
+                                  first ? "" : ",", g_wins[i].id,
+                                  (int)g_wins[i].pid, g_wins[i].w, g_wins[i].h);
+            first = 0;
+        }
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "]");
         resp_json(out, cap, 1, body);
         return;
     }
@@ -558,6 +715,13 @@ static void handle_line(const char *line, char *out, size_t cap) {
         return;
     }
     if (!strcmp(op, "close")) {
+        dwin *wv = id ? win_find(id) : NULL;
+        if (wv) {
+            win_kill(wv);   /* SIGTERM + waitpid 回收, 不留僵尸/孤儿窗 */
+            free(id);
+            resp_json(out, cap, 1, "\"window\":true");
+            return;
+        }
         if (!a) { free(id); resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
         app_destroy(a);
         free(id);
@@ -606,8 +770,28 @@ static void handle_line(const char *line, char *out, size_t cap) {
             if (carrier && kind && !strcmp(kind, "click")) hit = hx_perform(a, carrier);
             else hit = n != NULL;
         }
-        char body[128];
-        snprintf(body, sizeof(body), "\"consumed\":%s", hit ? "true" : "false");
+        /* 链接导航(md 直染的 a[href]): 事件带 x/y 时做命中激活 ——
+           #锚引擎内滚动; 外部链接取回 pending 回传 agent(headless 无桌面,
+           由调用方决定如何打开; 真窗口壳路径由 hn_rt_button 直接系统打开) */
+        char linkurl[2048] = { 0 };
+        if (kind && !strcmp(kind, "click")) {
+            /* x/y 是数字字段(w/h 同款), 走 json_num; 双双出现才做命中激活 */
+            char xs[32], ys[32];
+            long has_x = json_num(line, "x", -2147483647L), has_y = json_num(line, "y", -2147483647L);
+            snprintf(xs, sizeof xs, "%ld", has_x);
+            snprintf(ys, sizeof ys, "%ld", has_y);
+            if (has_x != -2147483647L && has_y != -2147483647L) {
+                float ex = strtof(xs, NULL), ey = strtof(ys, NULL);
+                int lk = hn_context_activate_link(app_ctx(a), ex, ey);
+                if (lk == HN_LINK_ANCHOR) { hit = 1; hn_context_repaint(app_ctx(a)); }
+                else if (lk == HN_LINK_EXTERNAL) { hn_doc_take_pending_link(doc, linkurl, sizeof linkurl); hit = 1; }
+            }
+        }
+        char body[2200];
+        if (linkurl[0])
+            snprintf(body, sizeof(body), "\"consumed\":true,\"link\":\"%s\"", linkurl);
+        else
+            snprintf(body, sizeof(body), "\"consumed\":%s", hit ? "true" : "false");
         free(kind); free(target);
         resp_json(out, cap, 1, body);
         return;
@@ -656,15 +840,15 @@ static void handle_line(const char *line, char *out, size_t cap) {
         /* 轻应用槽位枚举(简化: 返回当前所有 headless 应用的 id) */
         char body[2048];
         size_t n = 0;
-        n += (size_t)snprintf(body + n, cap - n, "\"apps\":[");
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "\"apps\":[");
         int first = 1;
         for (int i = 0; i < g_app_n; i++) {
             if (!g_apps[i].alive) continue;
-            n += (size_t)snprintf(body + n, cap - n, "%s{\"id\":\"%s\"}",
+            n += (size_t)snprintf(body + n, sizeof(body) - n, "%s{\"id\":\"%s\"}",
                                   first ? "" : ",", g_apps[i].id);
             first = 0;
         }
-        n += (size_t)snprintf(body + n, cap - n, "]");
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "]");
         resp_json(out, cap, 1, body);
         return;
     }
@@ -800,6 +984,7 @@ static void serve(int cfd) {
 }
 
 int main(int argc, char **argv) {
+    g_argv0 = argc > 0 ? argv[0] : NULL;
     const char *home = getenv("HOME");
     char sock[1024];
     if (argc > 2 && !strcmp(argv[1], "--socket")) {
@@ -807,8 +992,18 @@ int main(int argc, char **argv) {
     } else {
         snprintf(sock, sizeof(sock), "%s/.html-native/hn-daemon.sock", home ? home : ".");
     }
-    signal(SIGINT, on_term);
-    signal(SIGTERM, on_term);
+    /* 收尾信号: INT/TERM/HUP 同一 handler。用 sigaction 且**不带 SA_RESTART**
+       —— 阻塞中的 accept 被 EINTR 打断, 主循环立刻看到 g_run=0 退出收口。
+       (signal() 的 BSD 语义带 SA_RESTART, 以前 SIGHUP 无 handler 更是直接
+       默认终止, socket 文件留在盘上成 stale。) */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_term;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
     g_tb.ctx = NULL; g_tb.measure = tb_measure; g_tb.metrics = tb_metrics;
@@ -828,6 +1023,7 @@ int main(int argc, char **argv) {
     }
     if (bind(g_listen, (struct sockaddr *)&addr, sizeof(addr)) != 0) { perror("bind"); return 1; }
     if (listen(g_listen, 16) != 0) { perror("listen"); return 1; }
+    fcntl(g_listen, F_SETFD, FD_CLOEXEC);   /* spawn 的窗口子进程不继承监听 fd */
     fprintf(stderr, "hn_daemon(C99): listening %s\n", sock);
 
     while (g_run) {
@@ -837,6 +1033,9 @@ int main(int argc, char **argv) {
     }
     close(g_listen);
     unlink(sock);
+    /* 窗口应用 = 子进程: 统一 SIGTERM 收口, 不留孤儿窗口 */
+    for (int i = 0; i < g_win_n; i++)
+        if (g_wins[i].alive) win_kill(&g_wins[i]);
     for (int i = 0; i < g_app_n; i++)
         if (g_apps[i].alive) app_destroy(&g_apps[i]);
     return 0;

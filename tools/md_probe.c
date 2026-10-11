@@ -40,6 +40,12 @@ static void check_str(const char *got, const char *want, const char *label) {
     if (ok) g_pass++; else g_fail++;
 }
 
+static void check_float(float got, float want, const char *label) {
+    int ok = got > want - 0.01f && got < want + 0.01f;
+    printf("%s %s (got %.2f want %.2f)\n", ok ? "  ✔" : "  ✘", label, got, want);
+    if (ok) g_pass++; else g_fail++;
+}
+
 /* ---------- DOM 查询辅助 ---------- */
 
 static hn_node *find_tag(hn_node *n, const char *tag) {
@@ -417,6 +423,250 @@ static void test_render(void) {
     hn_context_destroy(c);
 }
 
+/* ---------- 用例六: 图片 ![](src) → <img> ---------- */
+
+static void test_images(void) {
+    printf("== Markdown 直染: 图片 ==\n");
+    const char *SRC =
+        "<html><body><div hn-md>\n"
+        "![构建徽标](assets/avatar-a.png)\n"
+        "\n"
+        "正文引用一张空 alt 图 ![](assets/avatar-k.png) 与一段文字。\n"
+        "\n"
+        "畸形不吞字: ![alt](no-close 仍按字面渲染。\n"
+        "</div></body></html>";
+    hn_doc *doc = NULL;
+    hn_context *c = load(SRC, &doc);
+    if (!c) { check(0, "图片用例装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    check_int(count_tag(root, "img"), 2, "两张合法图片 → 2 个 img(畸形不计)");
+
+    /* 第一张: src/alt 存属性(走既有图片管线, 零新绘制) */
+    hn_node *img = find_tag(root, "img");
+    check_str(img ? hn_node_attr(img, "src") : NULL, "assets/avatar-a.png", "img src 属性正确");
+    check_str(img ? hn_node_attr(img, "alt") : NULL, "构建徽标", "img alt 属性正确");
+
+    /* 第二张: 空 alt 文本 → 不设 alt 属性 */
+    hn_node *img2 = find_tag_with_text(root, "p", "空 alt") ?
+                     child_tag(find_tag_with_text(root, "p", "空 alt"), "img") : NULL;
+    check(img2 != NULL, "行内图片生成 img(参与行内流)");
+    check(img2 && hn_node_attr(img2, "alt") == NULL, "空 alt 文本不设 alt 属性");
+    check_str(img2 ? hn_node_attr(img2, "src") : NULL, "assets/avatar-k.png", "行内图片 src 正确");
+
+    /* 畸形: 未闭合括号按字面文本渲染(不吞字) */
+    hn_node *lit = find_tag_with_text(root, "p", "no-close");
+    check(lit != NULL, "畸形图片语法按字面保留");
+
+    /* img 是既有语义元素: 有布局盒(图片后端缺席时走占位尺寸) */
+    float ix, iy, iw, ih;
+    hn_node_box(img, &ix, &iy, &iw, &ih);
+    check(iw > 0 && ih > 0, "img 布局盒非退化");
+    check_int(hn_doc_validate(doc, 0), 0, "图片用例 DOM 自检");
+    hn_context_destroy(c);
+}
+
+/* ---------- 用例七: 链接点击导航(锚滚动 + pending link) ---------- */
+
+static const char *LINK_HTML =
+"<html><body>"
+"<div id=\"view\" style=\"height: 300; overflow: scroll;\">"
+"<div hn-md>\n"
+"## 目录\n"
+"\n"
+"[外部文档](https://example.com/docs)\n"
+"\n"
+"[页内跳转](#target)\n"
+"\n"
+"占位段落甲, 撑出可滚动高度。\n"
+"\n"
+"占位段落乙, 撑出可滚动高度。\n"
+"\n"
+"占位段落丙, 撑出可滚动高度。\n"
+"\n"
+"占位段落丁, 撑出可滚动高度。\n"
+"\n"
+"占位段落戊, 撑出可滚动高度。\n"
+"\n"
+"占位段落己, 撑出可滚动高度。\n"
+"\n"
+"占位段落庚, 撑出可滚动高度。\n"
+"</div>"
+"<div id=\"target\" style=\"height: 60;\">TARGET-ANCHOR</div>"
+"</div>"
+"</body></html>";
+
+/* 找 href 匹配的 a 元素 */
+static hn_node *find_link(hn_node *n, const char *href) {
+    if (!n) return NULL;
+    const char *t = hn_node_tag(n);
+    if (t && !strcmp(t, "a")) {
+        const char *h = hn_node_attr(n, "href");
+        if (h && !strcmp(h, href)) return n;
+    }
+    for (hn_node *c2 = hn_node_first_child(n); c2; c2 = hn_node_next_sibling(c2)) {
+        hn_node *r = find_link(c2, href);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+static void test_links(void) {
+    printf("== Markdown 直染: 链接点击导航 ==\n");
+    hn_doc *doc = NULL;
+    hn_context *c = load(LINK_HTML, &doc);
+    if (!c) { check(0, "链接用例装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+
+    /* 外链: 命中 → pending link 置位 → take 一次取走, 二次为空 */
+    hn_node *ext = find_link(root, "https://example.com/docs");
+    check(ext != NULL, "外链 a[href] 存在");
+    float x, y, w, h;
+    hn_node_box(ext, &x, &y, &w, &h);
+    check(w > 0 && h > 0, "外链布局盒非退化");
+    int r = hn_context_activate_link(c, x + w / 2, y + h / 2);
+    check_int(r, HN_LINK_EXTERNAL, "命中外链 → HN_LINK_EXTERNAL");
+    char link[512];
+    check_int(hn_doc_take_pending_link(doc, link, sizeof(link)), 1, "take_pending_link 取到链接");
+    check_str(link, "https://example.com/docs", "pending link 内容正确");
+    check_int(hn_doc_take_pending_link(doc, link, sizeof(link)), 0, "二次 take 为空(一次消费即清)");
+
+    /* 锚: 命中 → 引擎内滚动, 容器偏移变化 */
+    hn_node *anc = find_link(root, "#target");
+    check(anc != NULL, "锚链接 a[href=#target] 存在");
+    hn_node *view = hn_doc_find_by_id(doc, "view");
+    check(view != NULL, "滚动容器存在");
+    float sy0;
+    hn_node_scroll_get(view, NULL, &sy0);
+    check_float(sy0, 0, "初始滚动偏移为 0");
+    hn_node_box(anc, &x, &y, &w, &h);
+    r = hn_context_activate_link(c, x + w / 2, y + h / 2);
+    check_int(r, HN_LINK_ANCHOR, "命中锚链接 → HN_LINK_ANCHOR");
+    float sy1;
+    hn_node_scroll_get(view, NULL, &sy1);
+    check(sy1 > sy0 + 1.0f, "锚滚动后容器偏移变化(向目标滚动)");
+    hn_node *target = hn_doc_find_by_id(doc, "target");
+    float tby, vbx, vby, vbw, vbh;
+    hn_node_box(view, &vbx, &vby, &vbw, &vbh);
+    hn_node_box(target, NULL, &tby, NULL, NULL);
+    check(tby - sy1 <= vby + vbh + 1.0f, "目标元素滚进容器可视区");
+
+    /* 无链接处点击: 无动作且不污染 pending */
+    hn_node *p1 = find_tag_with_text(root, "p", "占位段落甲");
+    hn_node_box(p1, &x, &y, &w, &h);
+    r = hn_context_activate_link(c, x + w / 2, y + h / 2);
+    check_int(r, HN_LINK_NONE, "普通段落点击 → HN_LINK_NONE");
+    check_int(hn_doc_take_pending_link(doc, link, sizeof(link)), 0, "无链接点击不置 pending");
+
+    /* 直调入口: 不存在的 id 返回 0 */
+    check_int(hn_doc_scroll_to(doc, "no-such-id"), 0, "scroll_to 未知 id 返回 0");
+    check_int(hn_doc_validate(doc, 0), 0, "链接用例 DOM 自检");
+    hn_context_destroy(c);
+}
+
+/* ---------- 用例八: 围栏代码块语法高亮(最小 tokenizer 三色) ---------- */
+
+static hn_node *find_span_cls(hn_node *n, const char *cls) {
+    if (!n) return NULL;
+    const char *t = hn_node_tag(n);
+    if (t && !strcmp(t, "span")) {
+        const char *cl = hn_node_attr(n, "class");
+        if (cl && strstr(cl, cls)) return n;
+    }
+    for (hn_node *c2 = hn_node_first_child(n); c2; c2 = hn_node_next_sibling(c2)) {
+        hn_node *r = find_span_cls(c2, cls);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+static int count_span_cls(hn_node *n, const char *cls) {
+    if (!n) return 0;
+    int k = 0;
+    const char *t = hn_node_tag(n);
+    if (t && !strcmp(t, "span")) {
+        const char *cl = hn_node_attr(n, "class");
+        if (cl && strstr(cl, cls)) k++;
+    }
+    for (hn_node *c2 = hn_node_first_child(n); c2; c2 = hn_node_next_sibling(c2))
+        k += count_span_cls(c2, cls);
+    return k;
+}
+
+static void test_highlight(void) {
+    printf("== Markdown 直染: 代码高亮 ==\n");
+    /* python: 关键字(def/return) + 字符串 + 注释 + 数字, 四类齐全 */
+    const char *SRC =
+        "<html><body><div hn-md>\n"
+        "```python\n"
+        "def render(doc):      # 注释说明\n"
+        "    s = \"字符串字面量\"\n"
+        "    return 42\n"
+        "```\n"
+        "</div></body></html>";
+    const char *RAW = "def render(doc):      # 注释说明\n    s = \"字符串字面量\"\n    return 42";
+    hn_doc *doc = NULL;
+    hn_context *c = load(SRC, &doc);
+    if (!c) { check(0, "高亮用例装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    hn_node *code = find_tag(root, "pre");
+    code = code ? child_tag(code, "code") : NULL;
+    check(code != NULL, "高亮: pre>code 存在");
+    check_str(code ? hn_node_attr(code, "data-lang") : NULL, "python", "data-lang=python");
+
+    hn_node *kk = find_span_cls(code, "tok-k");
+    hn_node *ss = find_span_cls(code, "tok-s");
+    hn_node *cc = find_span_cls(code, "tok-c");
+    check(kk != NULL, "存在 tok-k span(关键字/数字)");
+    check(ss != NULL, "存在 tok-s span(字符串)");
+    check(cc != NULL, "存在 tok-c span(注释)");
+    check_int(count_span_cls(code, "tok-k"), 3, "tok-k 共 3 个(def/return/42)");
+    if (ss) { char b[128]; node_text(ss, b, sizeof(b)); check_str(b, "\"字符串字面量\"", "tok-s 包住完整引号串"); }
+    if (cc) { char b[128]; node_text(cc, b, sizeof(b)); check_str(b, "# 注释说明", "tok-c 包住整行注释"); }
+
+    /* 文本内容逐字节无损: 高亮只是包一层 */
+    char buf[512];
+    node_text(code, buf, sizeof(buf));
+    check(!strcmp(buf, RAW), "高亮后文本内容逐字节无损");
+    check_int(hn_doc_validate(doc, 0), 0, "高亮用例 DOM 自检");
+    hn_context_destroy(c);
+
+    /* 未知语言: 只做字符串+注释(无关键字) */
+    const char *SRC2 =
+        "<html><body><div hn-md>\n"
+        "```brainfuck\n"
+        "say \"hi\" # note\n"
+        "```\n"
+        "</div></body></html>";
+    doc = NULL;
+    c = load(SRC2, &doc);
+    if (!c) { check(0, "未知 lang 用例装载"); return; }
+    root = hn_doc_root(doc);
+    hn_node *pre2 = find_tag(root, "pre");
+    hn_node *code2 = pre2 ? child_tag(pre2, "code") : NULL;
+    check(code2 != NULL, "未知 lang: pre>code 存在");
+    check(find_span_cls(code2, "tok-s") != NULL, "未知 lang: 仍有字符串高亮");
+    check(find_span_cls(code2, "tok-c") != NULL, "未知 lang: 仍有注释高亮");
+    check_int(count_span_cls(code2, "tok-k"), 0, "未知 lang: 无关键字高亮");
+    hn_context_destroy(c);
+
+    /* 无 lang 围栏: 同未知语言口径(字符串+注释) */
+    const char *SRC3 =
+        "<html><body><div hn-md>\n"
+        "```\n"
+        "x = \"v\"  // 斜杠注释\n"
+        "```\n"
+        "</div></body></html>";
+    doc = NULL;
+    c = load(SRC3, &doc);
+    if (!c) { check(0, "无 lang 用例装载"); return; }
+    root = hn_doc_root(doc);
+    hn_node *pre3 = find_tag(root, "pre");
+    hn_node *code3 = pre3 ? child_tag(pre3, "code") : NULL;
+    check(find_span_cls(code3, "tok-s") != NULL, "无 lang: 字符串高亮");
+    check(find_span_cls(code3, "tok-c") != NULL, "无 lang: // 注释高亮");
+    hn_context_destroy(c);
+}
+
 /* ---------- 用例四: 回归(普通 HTML 零影响) ---------- */
 
 static void test_regression(void) {
@@ -459,26 +709,34 @@ static void test_regression(void) {
  *   - <br> 两行段落同断言。
  */
 
-/* 从元素**直接子文本节点**收集"不同 y_top 的行数"与最大行盒高。
-   空行没有 run, 不计入 —— 总行数断言用源码行数另行给出。 */
-static int count_lines(hn_node *el, float *lh_out) {
-    float ys[256];
-    int n = 0;
-    float lh = 0;
-    for (hn_node *txt = hn_node_first_child(el); txt; txt = hn_node_next_sibling(txt)) {
-        if (hn_node_tag(txt)) continue;      /* 只看直接子文本节点 */
-        for (int i = 0; i < hn_node_run_count(txt) && n < 256; i++) {
+/* 从元素子树收集"不同 y_top 的行数"与最大行盒高。
+   递归进子元素 —— 围栏代码块高亮后, 行内文本分布在 span(tok-*)的文本
+   节点上, 只看直接子文本节点会把多行数成一行。空行没有 run, 不计入 ——
+   总行数断言用源码行数另行给出。 */
+typedef struct { float ys[256]; int n; float lh; } line_acc;
+
+static void count_lines_walk(hn_node *el, line_acc *acc) {
+    for (hn_node *ch = hn_node_first_child(el); ch; ch = hn_node_next_sibling(ch)) {
+        if (hn_node_tag(ch)) { count_lines_walk(ch, acc); continue; }
+        for (int i = 0; i < hn_node_run_count(ch) && acc->n < 256; i++) {
             float x, b, w, yt, h;
-            hn_node_run_at(txt, i, &x, &b, &w, &yt, &h);
-            if (h > lh) lh = h;
+            hn_node_run_at(ch, i, &x, &b, &w, &yt, &h);
+            if (h > acc->lh) acc->lh = h;
             int seen = 0;
-            for (int k = 0; k < n; k++)
-                if (ys[k] == yt) { seen = 1; break; }
-            if (!seen) ys[n++] = yt;
+            for (int k = 0; k < acc->n; k++)
+                if (acc->ys[k] == yt) { seen = 1; break; }
+            if (!seen) acc->ys[acc->n++] = yt;
         }
     }
-    if (lh_out) *lh_out = lh;
-    return n;
+}
+
+static int count_lines(hn_node *el, float *lh_out) {
+    line_acc acc;
+    acc.n = 0;
+    acc.lh = 0;
+    count_lines_walk(el, &acc);
+    if (lh_out) *lh_out = acc.lh;
+    return acc.n;
 }
 
 static void test_pre_br_height(void) {
@@ -591,6 +849,9 @@ int main(void) {
     test_multi_container();
     test_render();
     test_pre_br_height();
+    test_images();
+    test_links();
+    test_highlight();
     test_regression();
     printf("\nmd_probe: %d 项断言, 失败 %d\n", g_pass + g_fail, g_fail);
     return g_fail ? 1 : 0;

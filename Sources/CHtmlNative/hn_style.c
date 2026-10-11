@@ -39,6 +39,9 @@ static const char *UA_CSS =
     "pre { margin: 10 0; }\n"
     "pre code { display: block; white-space: pre; padding: 9 11; border-radius: 6;\n"
     "  background: rgba(127,127,127,0.14); }\n"
+    /* 代码高亮 span(hn_md.c 围栏块生成): white-space 不在引擎继承集里,
+       span 内文本缺这条会按折叠模式排 —— 缩进压扁、行间 '\n' 不再断行。 */
+    "pre code span { display: inline; white-space: pre; }\n"
     "table { display: block; margin: 10 0; }\n"
     "tr { display: flex; }\n"
     "th, td { flex: 1 1 0; padding: 5 9; border: 1 solid rgba(127,127,127,0.28); }\n"

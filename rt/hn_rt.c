@@ -1391,6 +1391,16 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
         fflush(stdout);
         if (hx_perform(rt, carrier)) return rt_render(rt);
     }
+    /* 链接导航(md 直染的 a[href]): #锚引擎内滚进可视区;
+       外部链接交系统默认方式打开(sys://open 同一出口), 不在窗内导航 */
+    int lk = hn_context_activate_link(rt->ctx, x, y);
+    if (lk == HN_LINK_ANCHOR) return rt_render(rt);
+    if (lk == HN_LINK_EXTERNAL) {
+        char url[2048] = { 0 };
+        hn_doc_take_pending_link(hn_context_doc(rt->ctx), url, sizeof url);
+        if (url[0]) sys_open_url(url);
+        return rt_render(rt);
+    }
     return 0;
 }
 

@@ -28,9 +28,14 @@ static const char *DARK_CSS =
     "blockquote { border-left: 3 solid var(--accent); padding: 8 12; margin: 10 0;\n"
     "  color: var(--dim); background: #4f7cff0f; }\n"
     "hr { border-color: var(--line); }\n"
-    "a { color: var(--accent); }\n"
+    "a { color: var(--accent); cursor: pointer; }\n"
     /* Markdown 直染(hn-md)语义结构的主题皮肤: 覆盖 UA 的中性色 */
     "pre code { background: #10151f; color: #c9d4e8; font-size: 12; }\n"
+    /* 代码高亮三色(hn_md.c tokenizer 的三类 span): 注释=dim 偏绿、
+       字符串=暖色、关键字/数字=强调色 —— 只定语义档位, 具体值随主题 */
+    ".tok-c { color: #6f9c7d; }\n"
+    ".tok-s { color: #d9a76a; }\n"
+    ".tok-k { color: var(--accent-2); }\n"
     "th, td { border-color: var(--line); }\n"
     "th { color: var(--ink); }\n"
     "input:not([type=checkbox]):not([type=radio]), textarea { background: #10151f; }\n"
@@ -55,9 +60,14 @@ static const char *LIGHT_CSS =
     "blockquote { border-left: 3 solid var(--accent); padding: 8 12; margin: 10 0;\n"
     "  color: var(--dim); background: #2f6bff08; }\n"
     "hr { border-color: var(--line); }\n"
-    "a { color: var(--accent); }\n"
+    "a { color: var(--accent); cursor: pointer; }\n"
     /* Markdown 直染(hn-md)语义结构的主题皮肤: 覆盖 UA 的中性色 */
     "pre code { background: #eef1f5; color: #333a46; font-size: 12; }\n"
+    /* 代码高亮三色(hn_md.c tokenizer 的三类 span): 注释=dim 偏绿、
+       字符串=暖色、关键字/数字=强调色 —— 只定语义档位, 具体值随主题 */
+    ".tok-c { color: #5d8a6a; }\n"
+    ".tok-s { color: #a05a2c; }\n"
+    ".tok-k { color: var(--accent); }\n"
     "th, td { border-color: var(--line); }\n"
     "th { color: var(--ink); }\n"
     "input:not([type=checkbox]):not([type=radio]), textarea { background: #ffffff; }\n"

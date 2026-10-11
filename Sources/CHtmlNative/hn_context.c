@@ -8,7 +8,9 @@
 
 const char *hn_ua_css(void); /* hn_style.c */
 static int anim_walk(hn_context *c, hn_node *n, float dt_ms);
-static void stream_anchor_walk(hn_node *n);   /* hn-stream 贴底/让出(定义在滚动节) */
+static void stream_anchor_walk(hn_context *c, hn_node *n); /* hn-stream 贴底/让出(滚动节) */
+static int  stream_loop_walk(hn_node *n);   /* hn-stream-loop 滑窗摘除(滚动节) */
+static int  stream_anim_walk(hn_node *n, float dt_ms); /* 平滑追上推进(滚动节) */
 
 hn_context *hn_context_create(void) {
     hn_context *c = calloc(1, sizeof(hn_context));
@@ -68,12 +70,10 @@ void hn_context_add_sheet(hn_context *c, hn_sheet *sheet) {
     c->sheets[c->n_sheets++] = sheet;
 }
 
-void hn_context_layout(hn_context *c, float width, float height,
-                       const hn_text_backend *backend) {
-    if (!c->doc) return;
-    c->vw = width;
-    c->vh = height;
-    if (backend) { c->tb = *backend; c->tb_valid = 1; } else { c->tb_valid = 0; }
+/* 一遍布局: 临时区/显示列表重建 → 级联 → 布局根。
+   hn-stream-loop 摘除后要走第二遍 —— 摘除改变子项栈叠, 保留子项的
+   坐标与容器 content_h 必须重新计算(见 hn_context_layout)。 */
+static void layout_pass(hn_context *c) {
     hn_arena_destroy(c->tmp);
     c->tmp = hn_arena_create();
     c->n_cmds = 0;
@@ -82,7 +82,22 @@ void hn_context_layout(hn_context *c, float width, float height,
        这是"持久开关"语义的关键一步(见 hn_context_strip_root_background)。 */
     if (c->transparent) hn_strip_root_background_now(c);
     hn_layout_root(c);
-    stream_anchor_walk(c->doc->root);   /* hn-stream: 贴底/让出锚定(绘制前) */
+}
+
+void hn_context_layout(hn_context *c, float width, float height,
+                       const hn_text_backend *backend) {
+    if (!c->doc) return;
+    c->vw = width;
+    c->vh = height;
+    if (backend) { c->tb = *backend; c->tb_valid = 1; } else { c->tb_valid = 0; }
+    layout_pass(c);
+    /* hn-stream-loop: 布局后、贴底锚定前数窗, 摘除超窗旧子元素。
+       摘了就再走一遍布局: 保留子项的坐标与容器 content_h 还是按摘除前
+       的子项算的, 不重算的话贴底会贴向已不存在的内容。摘除单调递减,
+       第二遍必已稳定(不会再触发)。 */
+    if (stream_loop_walk(c->doc->root))
+        layout_pass(c);
+    stream_anchor_walk(c, c->doc->root);   /* hn-stream: 贴底/让出锚定(绘制前) */
     hn_paint_root(c);
     c->dl.cmds = c->cmds;
     c->dl.count = c->n_cmds;
@@ -199,12 +214,20 @@ int hn_node_mesh_info(hn_node *n, int *cols, int *rows) {
 
 /* 推进过渡动画并写回样式; 返回 1 表示仍有动画在跑(dt_ms<0 → 仅初始化)。
    媒体会话同帧驱动: PLAYING/待起播会话每帧必达宿主 tick(契约 §3),
-   返回值并入 —— 视频在播时帧循环不能停, 否则画面冻结在最后一帧。 */
+   返回值并入 —— 视频在播时帧循环不能停, 否则画面冻结在最后一帧。
+   hn-stream 平滑追上同一帧循环: dt>0 即标记帧循环活跃(布局期锚定从
+   "直接贴底"切换到动画口径), 在途容器逐帧指数逼近, 返回值并入 ——
+   收敛前帧循环不熄火, 否则追上动画停在半途。 */
 int hn_context_anim_tick(hn_context *c, float dt_ms) {
     if (!c->doc || !c->doc->root) return 0;
     int media = 0;
     if (dt_ms >= 0) media = hn_media_tick_ret(c, dt_ms);
-    return anim_walk(c, c->doc->root, dt_ms) || media;
+    int streams = 0;
+    if (dt_ms > 0) {
+        c->live_frame = 1;
+        streams = stream_anim_walk(c->doc->root, dt_ms);
+    }
+    return anim_walk(c, c->doc->root, dt_ms) || media || streams;
 }
 
 void hn_context_set_hover(hn_context *c, hn_node *n) { c->hover_node = n; }
@@ -1260,18 +1283,80 @@ children:
  * > HN_STREAM_NEAR px)则让出不追; 用户滚回底部附近(≤ HN_STREAM_NEAR)
  * 恢复跟随。实现挂在 hn_context_layout 尾部: 布局定稿后按让出状态
  * 校正偏移, 再进绘制 —— 显示列表与位图直接反映锚定结果。
- * 直接贴底, 不做平滑动画(平滑追上是后续优化)。
+ * 跟随的"贴底"分两种口径: 上下文有过帧循环(c->live_frame)则武装平滑
+ * 追上动画, 由 hn_context_anim_tick 逐帧指数逼近; 无帧循环的管线
+ * (离屏 shot/dump, 无从推进动画)保持直接贴底 —— 单帧出图仍是终态。
  * 让出状态存节点上: 文档替换(节点重建)即回默认跟随; 同一容器内的
  * swap 追加保持节点身份, 状态随之保留。 */
 #define HN_STREAM_NEAR 48.0f
+#define HN_STREAM_TAU  80.0f   /* 平滑追上的时间常数(ms) */
 
 static int is_stream_container(hn_node *n) {
     return n->kind == HN_ELEM && n->style.overflow != 0 &&
            hn_node_attr(n, "hn-stream") != NULL;
 }
 
+/* ---- hn-stream-loop="N": 环形缓冲滑窗 ----
+ * 声明 hn-stream-loop="N" 的 hn-stream 容器只保留最近 N 个**直接子元素**,
+ * 超出即从最旧(链首)摘除 —— 内容可无限追加而 DOM 与视觉收敛(agent
+ * 轨迹/日志场景; examples/agent-stream.html 的 14 条窗口)。
+ * 摘除走 hn_node_trim_children: 从兄弟链表解链(first/last/prev/next
+ * 重接, 被摘节点自身指针清空防遍历成环)。arena 不回收单节点 —— 既有
+ * 口径是整体销毁/compact 重建(hn_context_compact), 摘除后的节点再无
+ * 任何遍历触达, 内存留待 arena 回收周期。
+ * N<=0 或非数字(atoi 得 0)= 不限。
+ * 挂点: 布局后、贴底锚定前(与 stream_anchor_walk 同一 walkers)。返回
+ * 摘除数量; 非 0 时 hn_context_layout 再走一遍布局 —— 摘除改变子项
+ * 栈叠, 保留子项的坐标与容器 content_h 必须重算(见 hn_context_layout)。 */
+static int stream_loop_walk(hn_node *n) {
+    if (n->kind != HN_ELEM) return 0;
+    int removed = 0;
+    if (is_stream_container(n)) {
+        const char *v = hn_node_attr(n, "hn-stream-loop");
+        int keep = v ? atoi(v) : 0;
+        if (keep > 0) removed = hn_node_trim_children(n, keep);
+    }
+    for (hn_node *ch = n->first; ch; ch = ch->next)
+        removed += stream_loop_walk(ch);
+    return removed;
+}
+
+/* ---- 平滑追上: 跟随从"直接贴底"改为逐帧指数逼近 ----
+ * 每帧向目标(当前底部 max_y)推进 step = gap·(1−e^(−dt/τ)), τ≈80ms ——
+ * 帧率无关: 同一墙钟走过同一比例(大 dt 一步走掉大半 gap, 小 dt 小步)。
+ * gap 落入 ±1px 直接贴到位并结束动画。目标每帧现算(content_h-bh):
+ * 动画途中内容再增长, 目标自动前移, 不需要重启。
+ * 用户让出(上翻 > 48px, hn_node_scroll_by 置位 stream_yield 并清
+ * stream_anim)立即中断 —— 让出状态机只有一套。
+ * 确定性: 纯 float 固定顺序运算 + libm expf(同平台同结果), 无随机 ——
+ * 同一 dt 序列喂出同一轨迹(HN_CLOCK/anim_tick 驱动下多帧收敛贴底)。
+ * 返回 1 = 仍有容器在途: hn_context_anim_tick 并入返回值保持帧循环。 */
+static int stream_anim_walk(hn_node *n, float dt_ms) {
+    int active = 0;
+    if (n->kind == HN_ELEM && is_stream_container(n) &&
+        n->stream_anim && !n->stream_yield) {
+        float max_y = n->content_h - n->bh;
+        if (max_y < 0) max_y = 0;
+        float gap = max_y - n->scroll_y;
+        if (gap > -1.0f && gap < 1.0f) {
+            n->scroll_y = max_y;        /* 已贴底: 当帧落位, 动画结束 */
+            n->stream_anim = 0;
+        } else if (dt_ms > 0) {
+            /* 朝底部推进不会触发让出(离底单调减小), 直接写偏移并钳界 */
+            float ny = n->scroll_y + gap * (1.0f - expf(-dt_ms / HN_STREAM_TAU));
+            if (ny < 0) ny = 0;
+            if (ny > max_y) ny = max_y;
+            n->scroll_y = ny;
+            active = 1;                 /* 未到底: 下一帧继续 */
+        }
+    }
+    for (hn_node *ch = n->first; ch; ch = ch->next)
+        if (stream_anim_walk(ch, dt_ms)) active = 1;
+    return active;
+}
+
 /* layout 尾部遍历: 对所有 hn-stream 容器做贴底/让出校正(绘制前) */
-static void stream_anchor_walk(hn_node *n) {
+static void stream_anchor_walk(hn_context *c, hn_node *n) {
     if (n->kind != HN_ELEM) return;
     if (is_stream_container(n)) {
         float max_y = n->content_h - n->bh;
@@ -1282,10 +1367,23 @@ static void stream_anchor_walk(hn_node *n) {
             if (n->scroll_y > max_y) n->scroll_y = max_y;
             if (max_y - n->scroll_y <= HN_STREAM_NEAR) n->stream_yield = 0;
         }
-        if (!n->stream_yield)
-            n->scroll_y = max_y;        /* 跟随: 直接贴底 */
+        if (!n->stream_yield) {
+            float gap = max_y - n->scroll_y;
+            if (gap > -1.0f && gap < 1.0f) {
+                n->scroll_y = max_y;    /* 已在底部(<1px): 当帧落位 */
+                n->stream_anim = 0;
+            } else if (c->live_frame) {
+                /* 跟随(帧循环活跃): 武装平滑追上, anim_tick 逐帧逼近 */
+                n->stream_anim = 1;
+            } else {
+                /* 跟随(无帧循环: 离屏/守护进程, 无从推进动画): 保持
+                   旧口径直接贴底 —— 单帧出图即终态, 截图管线不变 */
+                n->scroll_y = max_y;
+                n->stream_anim = 0;
+            }
+        }
     }
-    for (hn_node *ch = n->first; ch; ch = ch->next) stream_anchor_walk(ch);
+    for (hn_node *ch = n->first; ch; ch = ch->next) stream_anchor_walk(c, ch);
 }
 
 /* 找点位下最深的 overflow 容器 */
@@ -1316,9 +1414,12 @@ int hn_node_scroll_by(hn_node *n, float dx, float dy) {
     if (ny > max_y) ny = max_y;
     (void)dx; (void)max_x;
     /* hn-stream 容器: 滚动即更新"让出"状态 —— 离底 > 48px 视为用户在
-       看历史(布局不再贴底); 滚回底部附近(≤ 48px)恢复跟随 */
-    if (is_stream_container(n))
+       看历史(布局不再贴底); 滚回底部附近(≤ 48px)恢复跟随。
+       让出同时清掉在途的平滑追上动画 —— 用户接管, 立即中断。 */
+    if (is_stream_container(n)) {
         n->stream_yield = (max_y - ny > HN_STREAM_NEAR) ? 1 : 0;
+        if (n->stream_yield) n->stream_anim = 0;
+    }
     if (ny == n->scroll_y) return 0;
     n->scroll_y = ny;
     return 1;
@@ -1688,6 +1789,68 @@ hn_node *hn_doc_body(hn_doc *doc) {
 hn_node *hn_doc_find_by_id(hn_doc *doc, const char *id) {
     if (!doc || !doc->root || !id) return NULL;
     return find_by_id_rec(doc->root, id);
+}
+
+/* ---------------- 链接导航(markdown a[href] 的点击语义) ----------------
+ *
+ * 引擎不做"打开浏览器"这类平台动作 —— 外部链接只置入待消费链接, 宿主
+ * (daemon/壳/rt)在 click 派发处调 hn_context_activate_link 后按返回值
+ * 处理: ANCHOR 已在引擎内滚动完(需 repaint), EXTERNAL 则 take 出 href
+ * 交系统打开(与 sys://open 同款动作)。 #锚滚动复用既有溢出容器语义:
+ * 布局盒是内容坐标(未含滚动偏移, 点击/绘制时才叠加各层 scroll), 因此
+ * 溢出容器的可视窗口 = [容器.by + scroll, +bh], 目标盒滚进窗口即可,
+ * hn_node_scroll_by 负责钳制。 */
+
+int hn_doc_scroll_to(hn_doc *doc, const char *id) {
+    if (!doc || !doc->root || !id || !*id) return 0;
+    hn_node *t = find_by_id_rec(doc->root, id);
+    if (!t) return 0;
+    /* 沿祖先链把目标滚进每一层溢出容器的可视区(嵌套容器逐层校正;
+       单层容器即最常见情形, 坐标精确)。 */
+    for (hn_node *a = t->parent; a; a = a->parent) {
+        if (a->kind != HN_ELEM || !a->style.overflow) continue;
+        float top = a->by + a->scroll_y;
+        if (t->by < top - 0.5f)
+            hn_node_scroll_by(a, 0, t->by - top);            /* 上方不可见 → 顶对齐 */
+        else if (t->by + t->bh > top + a->bh + 0.5f)
+            hn_node_scroll_by(a, 0, (t->by + t->bh) - (top + a->bh)); /* 底对齐 */
+    }
+    return 1;
+}
+
+void hn_doc_set_pending_link(hn_doc *doc, const char *href) {
+    if (!doc || !href) return;
+    free(doc->pending_link);
+    size_t n = strlen(href);
+    doc->pending_link = (char *)malloc(n + 1);
+    if (doc->pending_link) memcpy(doc->pending_link, href, n + 1);
+}
+
+int hn_doc_take_pending_link(hn_doc *doc, char *buf, size_t cap) {
+    if (!doc || !buf || cap == 0) return 0;
+    if (!doc->pending_link) { buf[0] = 0; return 0; }
+    size_t n = strlen(doc->pending_link);
+    size_t take = n < cap - 1 ? n : cap - 1;   /* cap 不足安全截断 */
+    memcpy(buf, doc->pending_link, take);
+    buf[take] = 0;
+    free(doc->pending_link);                   /* 一次消费即清空 */
+    doc->pending_link = NULL;
+    return 1;
+}
+
+/* 点击激活: 命中测试 + 向上找最近 a[href](冒泡语义, 与命中找 id 同款)。
+ * 返回 HN_LINK_*, 宿主按返回值决定 repaint / 打开外链。 */
+int hn_context_activate_link(hn_context *c, float x, float y) {
+    if (!c || !c->doc) return HN_LINK_NONE;
+    hn_node *n = hn_context_hit_node(c, x, y);
+    if (!n) return HN_LINK_NONE;
+    hn_node *a = hn_node_ancestor_with_attr(n, "href");
+    const char *href = a ? hn_node_attr(a, "href") : NULL;
+    if (!href || !*href) return HN_LINK_NONE;
+    if (href[0] == '#')                          /* 页内锚 → 引擎内滚动 */
+        return hn_doc_scroll_to(c->doc, href + 1) ? HN_LINK_ANCHOR : HN_LINK_NONE;
+    hn_doc_set_pending_link(c->doc, href);       /* 外链 → 宿主消费 */
+    return HN_LINK_EXTERNAL;
 }
 
 const char *hn_doc_find_trigger_on_load(hn_doc *doc) {

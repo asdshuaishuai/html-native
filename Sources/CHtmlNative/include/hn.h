@@ -513,6 +513,23 @@ int  hn_node_scroll_by(hn_node *n, float dx, float dy);
 void hn_node_scroll_get(hn_node *n, float *x, float *y);
 /* 可滚动上限(content 高 - 盒高); 不可滚动写 0 */
 void hn_node_scroll_range(hn_node *n, float *max_x, float *max_y);
+
+/* ---- 交互: 链接导航(markdown a[href] 的点击语义) ----
+ * 引擎不做平台打开动作: #锚就地滚动, 外部链接置入"待消费链接"交宿主
+ * —— 宿主在 click 派发处调 activate, 按返回值处理: ANCHOR 需 repaint;
+ * EXTERNAL 则 take 出 href 走系统打开(daemon/壳/rt, 与 sys://open 同款)。 */
+enum {
+    HN_LINK_NONE = 0,   /* 命中处无链接 */
+    HN_LINK_ANCHOR,     /* #锚: 已在引擎内滚动 */
+    HN_LINK_EXTERNAL    /* 外部链接: 已置待消费链接(hn_doc_take_pending_link 取走) */
+};
+/* 点击激活: 命中测试 + 向上找最近 a[href](冒泡语义)。返回 HN_LINK_*。 */
+int  hn_context_activate_link(hn_context *c, float x, float y);
+/* 页内滚动到指定 id 元素(锚语义, 复用溢出容器滚动); 找不到 id 返回 0 */
+int  hn_doc_scroll_to(hn_doc *doc, const char *id);
+/* 取走待消费链接(写入 buf 并清空; 返回 1 = 有链接, 二次调用返回 0)。
+ * cap 不足安全截断。 */
+int  hn_doc_take_pending_link(hn_doc *doc, char *buf, size_t cap);
 typedef enum {
     HN_SWAP_INNER = 0,  /* 替换目标元素内容(默认, innerHTML) */
     HN_SWAP_OUTER,      /* 替换目标元素自身(outerHTML) */

@@ -669,6 +669,7 @@ hn_doc *hn_parse_html(const char *src, size_t len) {
 void hn_doc_free(hn_doc *doc) {
     if (!doc) return;
     for (int i = 0; i < doc->n_inline; i++) hn_sheet_free(doc->inline_sheets[i]);
+    free(doc->pending_link);   /* 待消费链接是 malloc 副本(消费即 free) */
     hn_arena_destroy(doc->arena);
     free(doc);
 }
