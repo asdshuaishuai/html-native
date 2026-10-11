@@ -10,8 +10,8 @@
  * 协议(每行一个 JSON 请求, 回一行 JSON 响应):
  *   {"op":"ping"}
  *   {"op":"open","id":"a","html":"...","css":"...","w":480,"h":700,
- *    "title":"...","transparent":0|1,"headless":0|1}
- *   {"op":"update","id":"a","html":"..."}
+ *    "title":"...","transparent":0|1,"headless":0|1,"path":"a.html"}
+ *   {"op":"update","id":"a","html":"...","path":"a.html"}
  *   {"op":"close","id":"a"}
  *   {"op":"list"}                     → {"apps":[{id,w,h,headless}]}
  *   {"op":"eval","id":"a","js":"..."} → {"value":"..."}
@@ -20,6 +20,12 @@
  *   {"op":"text","id":"a","element":"x"} → {"text":"..."}
  *   {"op":"event","id":"a","kind":"click","target":"go","x":..,"y":..}
  *   {"op":"shot","id":"a","path":"out.png"}
+ *
+ * 装载路径: open/update 走 hn_rt(与 app/hn_app.c 完全同款)——
+ * <link rel=stylesheet> 内联、--css 附加表、文档 <script> 执行、hx load
+ * 动作、资产后端一条龙。上送 "path" 时装载基准切到**文档目录**
+ * (<link>/<include>/资产相对文档位置解析, 装载完即回), 不送则按 daemon
+ * cwd —— 与 hn_app 的 chdir 口径一致, 两条路径出图逐字节相同。
  *
  * 与 Swift 版的差异(刻意):
  *   - 窗口/事件循环归各平台壳(tools/hnweb_macos.c / hnweb_linux.c / hnwin.c)
@@ -106,7 +112,7 @@ static long json_num(const char *json, const char *key, long dflt) {
 
 typedef struct {
     char id[128];
-    hn_context *ctx;
+    hn_rt *rt;           /* hn_rt 装载路径(与 hn_app 同款): link 内联/css/script */
     int w, h;
     int headless;
     int alive;
@@ -133,15 +139,18 @@ static dapp *app_create(const char *id, int headless) {
     snprintf(a->id, sizeof(a->id), "%s", id);
     a->headless = headless;
     a->alive = 1;
-    a->ctx = hn_context_create();
-    if (a->ctx) hn_context_set_assets(a->ctx, NULL);  /* 资产后端按 cwd 解析 */
     return a;
 }
 
+/* 引擎上下文(hn_rt 持有; dump/shot/event 等只读消费) */
+static hn_context *app_ctx(dapp *a) {
+    return a && a->rt ? hn_rt_context(a->rt) : NULL;
+}
+
 static void app_destroy(dapp *a) {
-    if (a->ctx) hn_context_destroy(a->ctx);
+    if (a->rt) hn_rt_close(a->rt);
     free(a->html);
-    a->ctx = NULL;
+    a->rt = NULL;
     a->alive = 0;
 }
 
@@ -352,7 +361,7 @@ static int hx_perform(dapp *a, hn_node *carrier) {
     const char *get = hn_node_attr(carrier, "hx-get");
     const char *url = post ? post : get;
     if (!url) return 0;
-    hn_doc *doc = hn_context_doc(a->ctx);
+    hn_doc *doc = hn_context_doc(app_ctx(a));
     char form[4096];
     form[0] = 0;
     hn_doc_form_encode(doc, form, sizeof(form));
@@ -370,8 +379,37 @@ static int hx_perform(dapp *a, hn_node *carrier) {
     }
     int ok = hn_doc_swap(doc, tid, m, frag, strlen(frag));
     free(frag);
-    if (ok) hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
+    if (ok) hn_context_layout(app_ctx(a), (float)a->w, (float)a->h, &g_tb);
     return ok;
+}
+
+/* 装载基准: <link>/<include>/资产相对**文档目录**解析(与 app/hn_app.c 的
+   chdir 同款)。daemon 是多应用宿主, 只在装载期间切入文档目录, 装载完
+   即回 —— shot 等路径仍按 daemon 自身 cwd 解析。无 path(纯内存 HTML)时
+   按 daemon cwd 兜底, 协议向后兼容。 */
+typedef struct { char prev[1024]; int saved; } doc_dir_guard;
+
+static void doc_dir_enter(doc_dir_guard *g, const char *path) {
+    g->saved = 0;
+    g->prev[0] = 0;
+    if (!path || !path[0]) return;
+    const char *slash = strrchr(path, '/');
+    if (!slash) return;                     /* 裸文件名: cwd 已是文档目录 */
+    char cwdbuf[1024];
+    if (!getcwd(cwdbuf, sizeof(cwdbuf))) return;
+    size_t dl = (size_t)(slash - path + 1);  /* 含尾斜杠 */
+    char dir[1024];
+    if (dl >= sizeof(dir)) return;
+    memcpy(dir, path, dl);
+    dir[dl] = 0;
+    if (chdir(dir) != 0) return;
+    snprintf(g->prev, sizeof(g->prev), "%s", cwdbuf);
+    g->saved = 1;
+}
+
+static void doc_dir_leave(doc_dir_guard *g) {
+    if (g->saved) chdir(g->prev);
+    g->saved = 0;
 }
 
 /* ---------------- op 处理 ---------------- */
@@ -419,43 +457,57 @@ static void handle_line(const char *line, char *out, size_t cap) {
         char *html = json_str(line, "html");
         char *css = json_str(line, "css");
         char *title = json_str(line, "title");
+        char *spath = json_str(line, "path");   /* 源文件路径(CLI 上送) */
         long w = json_num(line, "w", 480);
         long h = json_num(line, "h", 700);
         long headless = json_num(line, "headless", 1);
         if (!id || !html) {
-            free(id); free(html); free(css); free(title);
+            free(id); free(html); free(css); free(title); free(spath);
             resp_json(out, cap, 0, "\"error\":\"id/html required\"");
             return;
         }
         dapp *a = app_create(id, (int)headless);
         if (!a) {
-            free(id); free(html); free(css); free(title);
+            free(id); free(html); free(css); free(title); free(spath);
             resp_json(out, cap, 0, "\"error\":\"table full or dup id\"");
             return;
         }
         a->w = (int)w; a->h = (int)h;
         a->html = strdup(html);
         a->html_len = strlen(html);
-        hn_doc *doc = hn_parse_html(html, strlen(html));
-        if (!doc) {
+        /* 装载走 hn_rt(与 app/hn_app.c 同款): <link rel=stylesheet> 内联、
+           --css 附加样式表、文档 <script> 执行、hx load 动作一条龙 ——
+           daemon 与桌面应用两条路径自此同一装载语义。装载期间切入文档
+           目录(link/include/资产按文档位置解析), 完成即回。 */
+        hn_rt_desc d;
+        memset(&d, 0, sizeof(d));
+        d.id = a->id;
+        d.html = html;
+        d.html_len = strlen(html);
+        d.css = css;
+        d.css_len = css ? strlen(css) : 0;
+        d.w = a->w;
+        d.h = a->h;
+        doc_dir_guard g;
+        doc_dir_enter(&g, spath);
+        a->rt = hn_rt_open(&d);
+        doc_dir_leave(&g);
+        if (!a->rt) {
             app_destroy(a);
-            free(id); free(html); free(css); free(title);
+            free(id); free(html); free(css); free(title); free(spath);
             resp_json(out, cap, 0, "\"error\":\"parse failed\"");
             return;
         }
-        hn_doc_autoid_hx(doc);
-        hn_context_set_doc(a->ctx, doc);
         hn_manifest m;
         memset(&m, 0, sizeof(m));
-        hn_doc_manifest(doc, &m);
+        hn_doc_manifest(hn_rt_doc(a->rt), &m);
         if (m.w > 0) a->w = m.w;
         if (m.h > 0) a->h = m.h;
-        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
         char body[256];
         snprintf(body, sizeof(body), "\"id\":\"%s\",\"w\":%d,\"h\":%d,\"headless\":%s",
                  a->id, a->w, a->h, a->headless ? "true" : "false");
         resp_json(out, cap, 1, body);
-        free(id); free(html); free(css); free(title);
+        free(id); free(html); free(css); free(title); free(spath);
         return;
     }
 
@@ -482,16 +534,25 @@ static void handle_line(const char *line, char *out, size_t cap) {
     if (!strcmp(op, "update")) {
         if (!a) { free(id); resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
         char *html = json_str(line, "html");
-        if (!html) { free(id); resp_json(out, cap, 0, "\"error\":\"html required\""); return; }
-        hn_doc *nd = hn_parse_html(html, strlen(html));
-        if (!nd) { free(html); free(id); resp_json(out, cap, 0, "\"error\":\"parse failed\""); return; }
-        hn_doc_autoid_hx(nd);
-        hn_context_set_doc(a->ctx, nd);
-        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
+        char *spath = json_str(line, "path");
+        if (!html) { free(id); free(spath); resp_json(out, cap, 0, "\"error\":\"html required\""); return; }
+        /* 热更新同走 hn_rt: 整文档替换(样式表与 link 内联保留), 文档
+           <script> 重跑、hx load 动作重放 —— 与 hn_app 的 render 语义一致。
+           装载基准同 open: 有 path 则切入文档目录, 完成即回 */
+        doc_dir_guard g;
+        doc_dir_enter(&g, spath);
+        int ok = hn_rt_render(a->rt, html, strlen(html));
+        doc_dir_leave(&g);
+        if (!ok) {
+            free(html); free(spath); free(id);
+            resp_json(out, cap, 0, "\"error\":\"parse failed\"");
+            return;
+        }
         free(a->html);
         a->html = strdup(html);
         a->html_len = strlen(html);
         free(html);
+        free(spath);
         free(id);
         resp_json(out, cap, 1, "");
         return;
@@ -506,8 +567,8 @@ static void handle_line(const char *line, char *out, size_t cap) {
     if (!a) { free(id); resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
 
     if (!strcmp(op, "dump")) {
-        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
-        const hn_display_list *dl = hn_context_display_list(a->ctx);
+        hn_context_layout(app_ctx(a), (float)a->w, (float)a->h, &g_tb);
+        const hn_display_list *dl = hn_context_display_list(app_ctx(a));
         char body[128];
         snprintf(body, sizeof(body), "\"cmds\":%d", dl ? dl->count : 0);
         resp_json(out, cap, 1, body);
@@ -516,7 +577,7 @@ static void handle_line(const char *line, char *out, size_t cap) {
     if (!strcmp(op, "text")) {
         char *el = json_str(line, "element");
         free(id);
-        hn_doc *doc = hn_context_doc(a->ctx);
+        hn_doc *doc = hn_context_doc(app_ctx(a));
         hn_node *n = el ? hn_doc_find_by_id(doc, el) : NULL;
         char body[4128];
         if (n) {
@@ -537,7 +598,7 @@ static void handle_line(const char *line, char *out, size_t cap) {
         free(id);
         char *kind = json_str(line, "kind");
         char *target = json_str(line, "target");
-        hn_doc *doc = hn_context_doc(a->ctx);
+        hn_doc *doc = hn_context_doc(app_ctx(a));
         hn_node *n = target ? hn_doc_find_by_id(doc, target) : hn_doc_root(doc);
         int hit = 0;
         if (n) {
@@ -554,8 +615,8 @@ static void handle_line(const char *line, char *out, size_t cap) {
     if (!strcmp(op, "shot")) {
         free(id);
         char *p = json_str(line, "path");
-        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
-        const hn_display_list *dl = hn_context_display_list(a->ctx);
+        hn_context_layout(app_ctx(a), (float)a->w, (float)a->h, &g_tb);
+        const hn_display_list *dl = hn_context_display_list(app_ctx(a));
         int rc = 1;
         if (dl) {
             unsigned char *px = hnsoft_render(dl, a->w, a->h, 0x0B0E13FFu);
@@ -576,8 +637,8 @@ static void handle_line(const char *line, char *out, size_t cap) {
     }
     if (!strcmp(op, "anim")) {
         if (!a) { resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
-        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
-        const hn_display_list *dl = hn_context_display_list(a->ctx);
+        hn_context_layout(app_ctx(a), (float)a->w, (float)a->h, &g_tb);
+        const hn_display_list *dl = hn_context_display_list(app_ctx(a));
         int anim_count = 0;
         if (dl) {
             /* 遍历显示列表, 统计有过渡/动画标记的指令 */
@@ -587,7 +648,7 @@ static void handle_line(const char *line, char *out, size_t cap) {
         }
         /* 引擎的动画时钟在 tick — 告知调用方动画系统在跑 */
         snprintf(out, cap, "{\"ok\":true,\"anim_active\":%s,\"cmds\":%d}",
-                 hn_context_anim_tick(a->ctx, 16.0f) ? "true" : "false", dl ? dl->count : 0);
+                 hn_context_anim_tick(app_ctx(a), 16.0f) ? "true" : "false", dl ? dl->count : 0);
         (void)anim_count;
         return;
     }
@@ -617,11 +678,11 @@ static void handle_line(const char *line, char *out, size_t cap) {
             p = path_buf;
         }
         /* 持久化: 把当前 HTML + CSS 写进 JSON 胶囊 */
-        hn_doc *doc = hn_context_doc(a->ctx);
+        hn_doc *doc = hn_context_doc(app_ctx(a));
         FILE *f = fopen(p, "wb");
         if (!f) { resp_json(out, cap, 0, "\"error\":\"cannot write\""); return; }
         /* 用 --shot 生成 PNG + JSON 元数据打包(简化为 HTML+meta) */
-        const hn_display_list *dl = hn_context_display_list(a->ctx);
+        const hn_display_list *dl = hn_context_display_list(app_ctx(a));
         fprintf(f, "{\"format\":\"hnapp\",\"version\":1,\"id\":\"%s\",\"w\":%d,\"h\":%d,\"html\":\"",
                 a->id, a->w, a->h);
         {   /* JSON 字符串转义: 只需处理 \ 和 " 和控制字符 */
@@ -656,12 +717,16 @@ static void handle_line(const char *line, char *out, size_t cap) {
         dapp *ra = app_create(rid, 1);
         if (ra) {
             ra->w = 480; ra->h = 700;
-            hn_doc *nd = hn_parse_html(rhtml, strlen(rhtml));
-            if (nd) {
-                hn_doc_autoid_hx(nd);
-                hn_context_set_doc(ra->ctx, nd);
-                hn_context_layout(ra->ctx, (float)ra->w, (float)ra->h, &g_tb);
-            }
+            /* 恢复同走 hn_rt 装载路径(link 内联/script 执行与 open 一致) */
+            hn_rt_desc d;
+            memset(&d, 0, sizeof(d));
+            d.id = ra->id;
+            d.html = rhtml;
+            d.html_len = strlen(rhtml);
+            d.w = ra->w;
+            d.h = ra->h;
+            ra->rt = hn_rt_open(&d);
+            if (!ra->rt) { ra->alive = 0; }
         }
         free(rid); free(rhtml);
         resp_json(out, cap, ra != NULL, ra ? "" : "\"error\":\"restore failed\"");
@@ -671,7 +736,7 @@ static void handle_line(const char *line, char *out, size_t cap) {
         if (!strcmp(op, "eval")) {
         char *js = json_str(line, "js");
         if (!js) { resp_json(out, cap, 0, "\"error\":\"js required\""); return; }
-        hn_doc *doc = hn_context_doc(a->ctx);
+        hn_doc *doc = hn_context_doc(app_ctx(a));
         if (!doc) fprintf(stderr, "[eval] doc=NULL\n");
         char *result = hn_rt_eval(js, id, doc);
         fprintf(stderr, "[eval] result=%s\n", result ? result : "(null)");
@@ -686,7 +751,7 @@ static void handle_line(const char *line, char *out, size_t cap) {
         }
         /* eval 里的 hnSetText/hnSetValue 改了 DOM, 布局重排后 text_content
            才能反映 —— 不重排的话 text op 读到的是旧值。 */
-        hn_context_layout(a->ctx, (float)a->w, (float)a->h, &g_tb);
+        hn_context_layout(app_ctx(a), (float)a->w, (float)a->h, &g_tb);
         return;
     }
 

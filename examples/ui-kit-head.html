@@ -1,0 +1,222 @@
+/* ============================================================================
+   ui-kit-head — 智能 UI 组件预设(纯 CSS, 零引擎改动, 上层组件库第一块砖)
+
+   定位: agent 现场生成 UI 时, include 一次本文件, 之后只写 HTML 类名
+   就能产出桌面级精致界面 —— 不必每次从零写样式。
+
+   接法(任选其一, 当前引擎装载路径两者皆可):
+     <link rel="stylesheet" href="examples/ui-kit-head.html">   <!-- link 内联 -->
+     <include src="examples/ui-kit-head.html">                  <!-- 片段引入 -->
+
+   设计原则: 只依赖 hn-theme 令牌(--accent/--accent-2/--bg/--card/--line/
+   --ink/--dim), 主题自动皮肤化 —— 页面声明 <meta name="hn-theme" content="dark">
+   或 "light" 即得两套皮肤, 本文件不写死任何主题色。唯一的扩展面是语义状态色,
+   以 var(--ok/--warn/--err/--ok-soft/--warn-soft/--err-soft/--code-bg/
+   --code-ink/--code-dim, 缺省值) 形式提供, 主题或页面可随时覆盖。
+
+   约束: 只用引擎已支持的 CSS 子集(flex/盒模型/圆角/渐变/阴影/overflow/
+   变量/伪类/transition/@keyframes), 无 grid、无 radial-gradient、无 SVG、
+   无伪元素 —— 每个组件的最小 HTML 用法见各自注释。
+   ========================================================================== */
+
+/* ---- 对话气泡 ------------------------------------------------------------
+   用途: agent 会话的 AI/用户消息。AI 左侧强调色描边卡, 用户右侧实底渐变卡;
+   每条消息包一层 .msg 行容器(.msg.end 靠右), 气泡最宽 78% 不顶满。
+   用法: <div class="chat">
+           <div class="msg"><div class="chat-ai">已完成分析, 共 <strong>12</strong> 处。</div></div>
+           <div class="msg end"><div class="chat-user">先改前三处</div></div>
+         </div> ---------------------------------------------------------------- */
+.chat { display: flex; flex-direction: column; gap: 10; }
+.msg { display: flex; }
+.msg.end { justify-content: flex-end; }
+.chat-ai, .chat-user {
+  max-width: 78%; padding: 10 14; font-size: 13; line-height: 1.6;
+  box-sizing: border-box; border-radius: 4 12 12 12;
+}
+.chat-ai {
+  background: var(--card, #171c26);
+  border: 1 solid var(--line, #262e3d); border-left: 3 solid var(--accent, #4f7cff);
+  color: var(--ink, #e8eaf0);
+}
+.chat-user {
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--accent, #4f7cff), var(--accent-2, #7a9bff));
+  border-radius: 12 12 4 12;
+}
+.chat-ai p, .chat-user p { margin: 0 0 8; }
+.chat-ai ul, .chat-user ul, .chat-ai ol, .chat-user ol { margin: 4 0; }
+.chat-ai > :last-child, .chat-user > :last-child { margin-bottom: 0; }
+
+/* ---- 工具调用卡 ----------------------------------------------------------
+   用途: agent 的工具调用记录。标题行(工具名+状态 chip)+可折叠参数/输出体。
+   状态三档: .ok 完成 / .run 运行中 / .err 失败; 加 class="folded" 折叠体。
+   用法: <div class="tool-card">
+           <div class="tool-head">
+             <span class="tool-name">grep.codebase</span>
+             <span class="tool-state ok">完成 · 1.2s</span>
+           </div>
+           <div class="tool-body">pattern="render" path="Sources/"</div>
+         </div> -------------------------------------------------------------- */
+.tool-card {
+  background: var(--card, #171c26); border: 1 solid var(--line, #262e3d);
+  border-radius: 10; overflow: hidden;
+}
+.tool-card:hover { border-color: var(--dim, #8a93a8); }
+.tool-head { display: flex; align-items: center; gap: 8; padding: 8 12; }
+.tool-name {
+  font-family: monospace; font-size: 12; font-weight: 600;
+  color: var(--ink, #e8eaf0);
+}
+.tool-arg {
+  font-family: monospace; font-size: 11; color: var(--dim, #8a93a8);
+  margin-left: 10;
+}
+.tool-state {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 5;
+  padding: 2 8; border-radius: 6; font-size: 10; font-weight: 700;
+}
+.tool-state.ok  { color: var(--ok, #3ecf6f);   background: var(--ok-soft, #3ecf6f1f); }
+.tool-state.run { color: var(--accent, #4f7cff); background: var(--accent-soft, #4f7cff1f); }
+.tool-state.err { color: var(--err, #ff5f57);  background: var(--err-soft, #ff5f571f); }
+.tool-body {
+  padding: 7 12 9; font-family: monospace; font-size: 11; line-height: 1.6;
+  color: var(--dim, #8a93a8); border-top: 1 solid var(--line, #262e3d);
+  background: var(--bg, #0f1218);
+}
+.tool-card.folded .tool-body { display: none; }
+
+/* ---- 代码卡 --------------------------------------------------------------
+   用途: 展示代码片段。深底等宽 + 顶部语言标签(可配 .dot 三圆点装饰)。
+   用法: <div class="code-card">
+           <div class="code-head">
+             <span class="dot dot-err"></span><span class="dot dot-warn"></span>
+             <span class="dot dot-ok"></span>
+             <span class="code-lang">RUST</span>
+           </div>
+           <pre>fn main() { println!("hi"); }</pre>
+         </div> -------------------------------------------------------------- */
+.code-card {
+  background: var(--code-bg, #0d1118); border: 1 solid var(--line, #262e3d);
+  border-radius: 10; overflow: hidden;
+}
+.code-head {
+  display: flex; align-items: center; gap: 6;
+  padding: 7 12; border-bottom: 1 solid var(--line, #262e3d);
+}
+.code-lang {
+  font-family: monospace; font-size: 10; font-weight: 700;
+  letter-spacing: 1.2; color: var(--code-dim, #7d8aa3); margin-left: 4;
+}
+.code-file {
+  margin-left: auto; font-family: monospace; font-size: 10;
+  color: var(--code-dim, #7d8aa3);
+}
+.code-card pre { margin: 0; padding: 10 14; font-size: 11.5; line-height: 1.65;
+  white-space: pre;   /* UA 不给 pre 缺省 white-space, 必须显式声明换行才保留 */
+  color: var(--code-ink, #c9d5e8); }
+
+/* ---- 统计卡 --------------------------------------------------------------
+   用途: 关键指标。大数字 + 标签 + 环比小字, 外层 .stats 三列均分。
+   用法: <div class="stats">
+           <div class="stat-card">
+             <div class="stat-num">98.2%</div>
+             <div class="stat-label">测试通过率</div>
+             <div class="stat-delta up">+1.4 较上周</div>
+           </div>
+           … ×3
+         </div> -------------------------------------------------------------- */
+.stats { display: flex; gap: 10; }
+.stat-card {
+  flex: 1; box-sizing: border-box;   /* 引擎按内容宽 flex 布局, 不加此声明 padding 会外溢叠到邻卡 */
+  background: var(--card, #171c26); border: 1 solid var(--line, #262e3d);
+  border-radius: 10; padding: 12 14;
+}
+.stat-card:hover { border-color: var(--dim, #8a93a8); }
+.stat-num { font-size: 22; font-weight: 700; color: var(--ink, #e8eaf0); }
+.stat-label { font-size: 11; color: var(--dim, #8a93a8); margin-top: 2; }
+.stat-delta { font-size: 10; font-weight: 700; margin-top: 5; }
+.stat-delta.up   { color: var(--ok, #3ecf6f); }
+.stat-delta.down { color: var(--err, #ff5f57); }
+
+/* ---- 细进度条 ------------------------------------------------------------
+   用途: 任务/构建进度。轨道用 --line, 填充走强调色渐变, 宽度行内声明。
+   (填充高度用显式 px 与轨道对齐 —— overflow:hidden 轨道内 height:100% 不生效)
+   用法: <div class="progress"><div class="progress-fill" style="width:64%"></div></div> */
+.progress { height: 6; background: var(--line, #262e3d); border-radius: 3; overflow: hidden; }
+.progress-fill {
+  height: 6; border-radius: 3;
+  background: linear-gradient(90deg, var(--accent, #4f7cff), var(--accent-2, #7a9bff));
+  transition: width 400ms;
+}
+
+/* ---- 迷你条形组 ----------------------------------------------------------
+   用途: 小型趋势/分布(近 7 天、分桶计数)。条高行内声明(%)。顶对齐
+   (引擎 flex-end 竖向定位异常, 勿改); 普通条半透明强调色, .hi 高亮当前项。
+   用法: <div class="bar-mini">
+           <b style="height:40%"></b><b style="height:70%"></b>
+           <b class="hi" style="height:100%"></b>
+         </div> -------------------------------------------------------------- */
+.bar-mini { display: flex; align-items: flex-start; gap: 3; height: 30; }
+.bar-mini b {
+  display: block; flex: 1; border-radius: 2;
+  background: var(--accent-dim, #4f7cff59);
+}
+.bar-mini b.hi { background: var(--accent, #4f7cff); }
+
+/* ---- 小标签 --------------------------------------------------------------
+   用途: 状态/分类 chip。中性 .tag, 三档语义 .tag-ok / .tag-warn / .tag-err。
+   用法: <span class="tag">默认</span> <span class="tag-ok">通过</span>
+         <span class="tag-warn">警告</span> <span class="tag-err">失败</span> --- */
+.tag {
+  display: inline-flex; align-items: center; padding: 2 9; border-radius: 6;
+  font-size: 10; font-weight: 700; letter-spacing: 0.3;
+  color: var(--dim, #8a93a8); background: var(--line, #262e3d);
+}
+.tag-ok   { color: var(--ok, #3ecf6f);   background: var(--ok-soft, #3ecf6f1f); }
+.tag-warn { color: var(--warn, #f5b73d); background: var(--warn-soft, #f5b73d1f); }
+.tag-err  { color: var(--err, #ff5f57);  background: var(--err-soft, #ff5f571f); }
+
+/* ---- 骨架条 --------------------------------------------------------------
+   用途: 内容加载占位。观感同主题 .sk, 但只依赖 --line(可脱离主题基类);
+   自带呼吸动画, 宽度行内声明。
+   用法: <div class="skeleton" style="width:220"></div>
+         <div class="skeleton" style="width:160"></div> --------------------- */
+.skeleton {
+  height: 10; border-radius: 4; margin: 5 0;
+  background: var(--line, #262e3d);
+  animation: uk-pulse 1.6s ease-in-out infinite alternate;
+}
+@keyframes uk-pulse { from { opacity: 1; } to { opacity: 0.5; } }
+
+/* ---- 带文字的分隔线 ------------------------------------------------------
+   用途: 分节标题线。两根 <i> 撑开, 中间文字自动居中(无伪元素可用)。
+   用法: <div class="divider-label"><i></i><span>SECTION</span><i></i></div> - */
+.divider-label {
+  display: flex; align-items: center; gap: 10;
+  color: var(--dim, #8a93a8); font-size: 11; font-weight: 700; letter-spacing: 0.5;
+}
+.divider-label i { display: block; flex: 1; height: 1; background: var(--line, #262e3d); }
+
+/* ---- 键帽 ----------------------------------------------------------------
+   用途: 快捷键展示。等宽小方块 + 细边 + 底部投影, 组合键并排即成。
+   用法: <span class="kbd">Ctrl</span> <span class="kbd">Shift</span>
+         <span class="kbd">P</span> ----------------------------------------- */
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20; padding: 1 6; border: 1 solid var(--line, #262e3d);
+  border-radius: 5; background: var(--card, #171c26);
+  font-family: monospace; font-size: 11; color: var(--ink, #e8eaf0);
+  box-shadow: 0 1 2 rgba(0, 0, 0, 0.35);
+}
+
+/* ---- 状态圆点 ------------------------------------------------------------
+   用途: 行内状态指示。中性 .dot, 语义 .dot-ok/.dot-warn/.dot-err,
+   运行中 .dot-run 自带呼吸。
+   用法: <span class="dot dot-ok"></span><span>服务正常</span> ------------ */
+.dot { display: inline-block; width: 8; height: 8; border-radius: 50%;
+  background: var(--dim, #8a93a8); }
+.dot-ok   { background: var(--ok, #3ecf6f); }
+.dot-warn { background: var(--warn, #f5b73d); }
+.dot-err  { background: var(--err, #ff5f57); }
+.dot-run  { background: var(--accent, #4f7cff);
+  animation: uk-pulse 1s ease-in-out infinite alternate; }

@@ -29,6 +29,10 @@ static const char *DARK_CSS =
     "  color: var(--dim); background: #4f7cff0f; }\n"
     "hr { border-color: var(--line); }\n"
     "a { color: var(--accent); }\n"
+    /* Markdown 直染(hn-md)语义结构的主题皮肤: 覆盖 UA 的中性色 */
+    "pre code { background: #10151f; color: #c9d4e8; font-size: 12; }\n"
+    "th, td { border-color: var(--line); }\n"
+    "th { color: var(--ink); }\n"
     "input:not([type=checkbox]):not([type=radio]), textarea { background: #10151f; }\n"
     ".sysbar { background: #232733; }\n"
     ".sk { background: #ffffff12; }\n"
@@ -52,6 +56,10 @@ static const char *LIGHT_CSS =
     "  color: var(--dim); background: #2f6bff08; }\n"
     "hr { border-color: var(--line); }\n"
     "a { color: var(--accent); }\n"
+    /* Markdown 直染(hn-md)语义结构的主题皮肤: 覆盖 UA 的中性色 */
+    "pre code { background: #eef1f5; color: #333a46; font-size: 12; }\n"
+    "th, td { border-color: var(--line); }\n"
+    "th { color: var(--ink); }\n"
     "input:not([type=checkbox]):not([type=radio]), textarea { background: #ffffff; }\n"
     ".sysbar { background: #e8eaef; }\n"
     ".sk { background: #00000010; }\n"

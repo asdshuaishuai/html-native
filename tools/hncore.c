@@ -515,6 +515,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* <include> 零构建组件: 装载通道喂文档路径 —— 片段相对**包含它的
+       文件**所在目录解析(与 g_base_dir 的资产口径一致)。 */
+    hn_html_set_doc_path(path);
+
     hn_doc *doc = hn_parse_html(html, hlen);
     if (!doc) {
         fprintf(stderr, "hncore: 解析失败\n");

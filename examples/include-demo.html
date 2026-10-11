@@ -1,0 +1,20 @@
+<!-- include-demo.html — <include> 零构建组件演示
+     页面本体只有三条 <include>: 一条页头片段 + 两张卡片片段;
+     卡片内部再引脚注片段(嵌套 2 层, src 基准随包含层级走)。
+     片段都在 examples/fixtures/(与探针夹具同处, 组件库即夹具)。
+     渲染截图(命令):
+       dist/hncore-macos-arm64 render examples/include-demo.html screenshots/include-demo.png 460 560
+-->
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-window" content="460x560">
+<meta name="hn-title" content="include-demo · 零构建组件">
+<style>
+  body { margin: 0; padding: 16px; background: #0b0e13; }
+</style>
+</head><body>
+  <include src="fixtures/inc-head.html">
+  <include src="fixtures/inc-card.html">
+  <include src="fixtures/inc-card.html">
+  <div style="margin-top:12px;font-size:11px;color:#5f7391">以上 3 块 UI 全部来自 &lt;include src=&gt; —— 页面源码里没有一个手写的卡片节点。</div>
+</body></html>

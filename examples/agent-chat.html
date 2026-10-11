@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<!-- examples/agent-chat.html — agent 流式会话窗(720x860, dark)
+     ============================================================================
+     智能 UI 招牌场景: agent 在桌面原生窗里流式输出 markdown 回答, 中途插入
+     工具调用卡, 全程可经 dist/hn shot 截图留档(tools/chat-stream.sh 驱动)。
+
+     内容锚点: <div id="transcript">。daemon 的 update 是**整文档替换**,
+     因此脚本侧持有累积缓冲, 每步推送"完整累积后的 HTML"—— 追加后整体推。
+
+     流区自动跟随: 容器 #stream 声明 hn-stream(引擎契约, 见 hn_theme.c 与
+     hn_context.c 的 stream_anchor_walk)。本页用 CSS 惯用法表达同一语义 ——
+     #transcript 绝对定位 bottom:0, 内容变高时底部恒贴容器底, 顶部溢出被
+     overflow:hidden 裁掉; 引擎侧的滚动跟随(贴底/让出/恢复)由 stream_probe 验收。
+
+     组件样式: 引入 ui-kit-head.html 组件预设(chat-ai/chat-user 气泡、
+     tool-card、code-card)。daemon 的 open/update 自走 hn_rt 装载路径后,
+     <link rel="stylesheet"> 在 daemon 下同样内联生效 —— 本页只写 link,
+     不再内联 ui-kit 子集兜底(应用壳样式仍留在页内, 它们不是 ui-kit 的一部分)。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="720x860">
+<meta name="hn-title" content="DeepAgent · 流式会话">
+<meta name="hn-theme" content="dark">
+<link rel="stylesheet" href="ui-kit-head.html">
+<style>
+  /* ---- 应用壳: 头 / 流区 / 输入条 三段, 流区吃掉剩余高度 ---- */
+  .app { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+
+  .appbar { display: flex; align-items: center; gap: 10; padding: 14 18 12;
+            border-bottom: 1 solid var(--line); }
+  .dot-status { width: 9; height: 9; border-radius: 5;
+                background: var(--accent); box-shadow: 0 0 0 3 rgba(79,124,255,0.16); }
+  .dot-status.done { background: #3ecf6f; box-shadow: 0 0 0 3 rgba(62,207,111,0.16); }
+  .ab-text { display: flex; flex-direction: column; gap: 1; }
+  .ab-title { font-size: 14; font-weight: 700; color: var(--ink); }
+  .ab-sub { font-size: 11; color: var(--dim); }
+  .ab-badge { margin-left: auto; font-size: 10; font-weight: 700; color: var(--accent);
+              border: 1 solid rgba(79,124,255,0.35); border-radius: 999; padding: 2 9; }
+  .ab-badge.done { color: #3ecf6f; border-color: rgba(62,207,111,0.35); }
+
+  /* ---- 流区: hn-stream 契约 + 底部跟随惯用法(见文件头注释) ---- */
+  #stream { position: relative; overflow: hidden; flex: 1;
+            background: #12161e; border: 1 solid var(--line);
+            border-radius: 12; margin: 12 14 0; }
+  #transcript { position: absolute; left: 12; right: 12; bottom: 12;
+                display: flex; flex-direction: column; gap: 12; }
+
+  /* ---- 气泡内 hn-md 观感微调(直染后的 h3/code/blockquote 适配 78% 宽气泡) ---- */
+  .chat-ai h3 { font-size: 14; margin: 2 0 6; }
+  .chat-ai code { font-family: monospace; font-size: 11.5; color: #9db9ff;
+                  background: rgba(79,124,255,0.12); border-radius: 4; padding: 1 5; }
+  .chat-ai blockquote { margin: 6 0; padding: 2 0 2 10; border-left: 2 solid var(--line, #262e3d);
+                        color: var(--dim, #8a93a8); }
+
+  /* ---- 代码卡页内微调(ui-kit 给 .code-card 与 .code-card pre; 这里只补
+     会话窗内的宽度上限与行内注释色) ---- */
+  .msg .code-card { max-width: 78%; }
+  .cmt { color: var(--code-dim, #7d8aa3); }
+
+  /* ---- 打字中占位 / 完成态 ---- */
+  .typing { display: flex; align-items: center; gap: 5; }
+  .tdot { width: 6; height: 6; border-radius: 3; background: var(--dim, #8a93a8); }
+  .typing-txt { font-size: 12; color: var(--dim, #8a93a8); margin-left: 4; }
+  .done-row { display: flex; }
+  .done-tag { font-size: 10; font-weight: 700; color: #3ecf6f;
+              background: rgba(62,207,111,0.12); border: 1 solid rgba(62,207,111,0.35);
+              border-radius: 999; padding: 3 10; }
+
+  /* ---- 页尾输入条(装饰性, 展示形态) ---- */
+  .composer { display: flex; gap: 8; align-items: center; padding: 12 14 14; }
+  .composer input { flex: 1; }
+  .composer .btn { padding: 8 18; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- 页头: 标题 + 状态 dot(脚本第 5 步把状态切到完成) -->
+  <div class="appbar">
+    <div class="dot-status" id="status-dot"></div>
+    <div class="ab-text">
+      <div class="ab-title">DeepAgent</div>
+      <div class="ab-sub">html-native · 会话留档中</div>
+    </div>
+    <div class="ab-badge" id="status-badge">流式输出中</div>
+  </div>
+
+  <!-- 会话流区: hn-stream 声明即"自动跟随底部"; #transcript 为内容锚点 -->
+  <div id="stream" hn-stream>
+    <div id="transcript">
+
+      <!-- 第一轮: 用户提问 + AI 回答(hn-md 直染 markdown) + 工具调用卡 -->
+      <div class="msg end"><div class="chat-user">帮我把 agent 会话窗跑起来,顺便检查一下构建脚本还在不在。</div></div>
+
+      <div class="msg"><div class="chat-ai"><div hn-md>
+### 任务理解
+
+收到,分三步走:
+
+- **定位入口**: `dist/hn` CLI + `dist/hn-daemon` 常驻宿主
+- **渲染链路**: `hn-md` 直染回答、`hn-stream` 跟随底部
+- **留档**: 三个关键帧落 `screenshots/`
+
+> update 是整文档替换, 脚本会持有累积缓冲、每步整体推送。
+</div></div></div>
+
+      <div class="tool-card">
+        <div class="tool-head">
+          <span class="tool-name">fs.read_tree</span>
+          <span class="tool-arg">path="html-native"</span>
+          <span class="tool-state ok">完成 · 0.4s</span>
+        </div>
+        <div class="tool-body">rt/ · Sources/CHtmlNative/ · dist/ · examples/ · tools/  —  5 dirs, 38 files</div>
+      </div>
+
+      <!-- 第二轮: 用户追问,AI 回答由脚本流式追加到这里 -->
+      <div class="msg end"><div class="chat-user">好,那把构建也跑一遍,回答直接流式打出来。</div></div>
+
+    </div>
+  </div>
+
+  <!-- 页尾输入条: 装饰性 -->
+  <div class="composer">
+    <input id="ask" placeholder="随时插话或追加要求…">
+    <div class="btn">发送</div>
+  </div>
+
+</div>
+</body>
+</html>

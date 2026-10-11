@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<!-- examples/md-demo.html — Markdown 直染演示: "agent 报告窗"
+     ============================================================
+     agent 的母语是 markdown: 这里没有任何 <p>/<h2>/<table> 手写结构,
+     全部内容都在一个 <div hn-md> 里 —— 引擎装载时把 markdown 源替换成
+     普通 DOM 子树(h1/ul/table/pre/...), 之后样式/布局/绘制/交互全部走
+     既有管线, 零特例。语义元素的缺省观感由 UA 样式表提供(hn_style.c),
+     深色皮肤来自 <meta name="hn-theme" content="dark">(hn_theme.c)。
+
+     已验证渲染命令(实际执行, 产物见 screenshots/md-demo.png):
+       dist/hncore-macos-arm64 render examples/md-demo.html screenshots/md-demo.png 720 900
+
+     约束(见 Sources/CHtmlNative/hn_md.c 文件头): md 源顶格书写或统一
+     缩进即可(引擎按公共缩进剥层); 源内不要写 HTML 标签; 实体被 HTML
+     层解码一次(&amp; → &)。
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="720x900@80,60">
+<meta name="hn-title" content="md-demo · agent 报告窗">
+<meta name="hn-theme" content="dark">
+<style>
+  body { padding: 16; }
+  .shell { border: 1 solid var(--line); border-radius: 14; padding: 18 22;
+           background: var(--card); height: 100%; box-sizing: border-box;
+           overflow: scroll; }
+  .banner { display: flex; align-items: center; gap: 8; margin: 0 0 12; }
+  .dot { width: 8; height: 8; border-radius: 4; background: var(--accent); }
+  .banner .t { font-size: 11; font-weight: 700; letter-spacing: 1.2;
+               color: var(--dim); }
+  .banner .r { margin-left: auto; font-size: 10; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="banner">
+    <div class="dot"></div>
+    <div class="t">AGENT REPORT · HN-MD 直染</div>
+    <div class="r">deepStudio · 自动生成</div>
+  </div>
+
+  <div hn-md>
+# 深夜构建报告: deepStudio 渲染管线体检
+
+本次巡检覆盖 **C99 渲染核心** 的解析、级联、布局与绘制四段管线, 并抽样
+回归了 *三平台* 产物。总体结论: 核心指标全部在预算内, 有 **1 项** 待办
+需要排期。
+
+## 关键指标
+
+| 指标 | 本轮 | 预算 | 结论 |
+| --- | :---: | :---: | --- |
+| 首帧耗时 | 8ms | 16ms | 达标 |
+| 显示列表规模 | 1.2k 条 | 2k 条 | 达标 |
+| 内存占用 | 24MB | 48MB | 达标 |
+| 回归断言 | 214 项 | 全绿 | 达标 |
+
+## 亮点
+
+1. **Markdown 直染**落地: `&lt;div hn-md&gt;` 装载即变成普通 DOM, 引擎零特例。
+2. 表格走 flex 行等分, 对齐声明(`:---:`)映射到 text-align。
+3. 代码块保留字面排版, `data-lang` 挂在 code 节点上供后续高亮。
+
+## 抽样验证
+
+> 引擎不含网络与浏览器: 一份 HTML 描述, 三条平台运行时, 一条 C99 渲染管线。
+
+```python
+def pipeline(doc):
+    doc = parse(doc)        # hn 编码 → DOM
+    doc = cascade(doc)      # UA < 主题 < 作者
+    return layout(doc)      # 盒模型 + 显示列表
+```
+
+## 遗留与行动
+
+- [ ] 给 `a` 链接接上点击导航(下一轮)
+- [x] 修复表格分隔行识别
+- [ ] 行内代码高亮配色打磨
+- [x] md_probe 55 项确定性断言
+
+---
+
+细节请查 `docs/` 与 `tools/md_probe.py`; 本页即一份 markdown 的直渲染。
+  </div>
+</div>
+</body>
+</html>

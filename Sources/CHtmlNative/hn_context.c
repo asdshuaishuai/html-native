@@ -8,6 +8,7 @@
 
 const char *hn_ua_css(void); /* hn_style.c */
 static int anim_walk(hn_context *c, hn_node *n, float dt_ms);
+static void stream_anchor_walk(hn_node *n);   /* hn-stream 贴底/让出(定义在滚动节) */
 
 hn_context *hn_context_create(void) {
     hn_context *c = calloc(1, sizeof(hn_context));
@@ -40,11 +41,16 @@ void hn_context_set_doc(hn_context *c, hn_doc *doc) {
        (与 Lottie 缓存的清理纪律一致 —— compact 内部也走这里)。
        <canvas> 账本同口径: 账本属于 canvas **元素**生命周期, 元素随
        文档销毁 = 账本清空; 样式重算/重放不经过这里, 不丢账。 */
-    if (c->doc != doc) {
+    int replaced = (c->doc != doc);
+    if (replaced) {
         hn_media_sessions_clear(c);
         hn_canvas_dispose(c);
     }
     c->doc = doc;
+    /* Markdown 直染后处理: 在首次 layout 之前、<script> 执行之前
+       (运行时的 run_doc_scripts 在 open/render 之后才跑)把 hn-md 源
+       替换成普通 DOM 子树 —— md 一进来就变成 hn 编码。 */
+    if (replaced) hn_md_apply(c->doc);
     /* 主题是渲染语义: 声明了 hn-theme 就装载基座(所有平台一致) */
     hn_context_apply_theme(c);
 }
@@ -76,6 +82,7 @@ void hn_context_layout(hn_context *c, float width, float height,
        这是"持久开关"语义的关键一步(见 hn_context_strip_root_background)。 */
     if (c->transparent) hn_strip_root_background_now(c);
     hn_layout_root(c);
+    stream_anchor_walk(c->doc->root);   /* hn-stream: 贴底/让出锚定(绘制前) */
     hn_paint_root(c);
     c->dl.cmds = c->cmds;
     c->dl.count = c->n_cmds;
@@ -1246,6 +1253,41 @@ children:
 /* 推进过渡动画并写回样式; 返回 1 表示仍有动画在跑(dt_ms<0 → 仅初始化) */
 /* ---------------- 滚动 ---------------- */
 
+/* ---- hn-stream: 流式容器自动跟随底部 ----
+ *
+ * README 承诺的 hn-stream 语义(自 Swift 版移植): 声明 hn-stream 的
+ * overflow 容器, 内容增长时滚动偏移自动贴底(跟随); 用户上翻(离底
+ * > HN_STREAM_NEAR px)则让出不追; 用户滚回底部附近(≤ HN_STREAM_NEAR)
+ * 恢复跟随。实现挂在 hn_context_layout 尾部: 布局定稿后按让出状态
+ * 校正偏移, 再进绘制 —— 显示列表与位图直接反映锚定结果。
+ * 直接贴底, 不做平滑动画(平滑追上是后续优化)。
+ * 让出状态存节点上: 文档替换(节点重建)即回默认跟随; 同一容器内的
+ * swap 追加保持节点身份, 状态随之保留。 */
+#define HN_STREAM_NEAR 48.0f
+
+static int is_stream_container(hn_node *n) {
+    return n->kind == HN_ELEM && n->style.overflow != 0 &&
+           hn_node_attr(n, "hn-stream") != NULL;
+}
+
+/* layout 尾部遍历: 对所有 hn-stream 容器做贴底/让出校正(绘制前) */
+static void stream_anchor_walk(hn_node *n) {
+    if (n->kind != HN_ELEM) return;
+    if (is_stream_container(n)) {
+        float max_y = n->content_h - n->bh;
+        if (max_y < 0) max_y = 0;
+        if (n->stream_yield) {
+            /* 用户在看历史: 不追。仅钳制越界(内容变矮), 滚回底部附近
+               (≤ HN_STREAM_NEAR)则恢复跟随。 */
+            if (n->scroll_y > max_y) n->scroll_y = max_y;
+            if (max_y - n->scroll_y <= HN_STREAM_NEAR) n->stream_yield = 0;
+        }
+        if (!n->stream_yield)
+            n->scroll_y = max_y;        /* 跟随: 直接贴底 */
+    }
+    for (hn_node *ch = n->first; ch; ch = ch->next) stream_anchor_walk(ch);
+}
+
 /* 找点位下最深的 overflow 容器 */
 static hn_node *scroll_walk(hn_node *n, float x, float y) {
     if (n->kind == HN_ELEM && n->style.display == HN_DISP_NONE) return NULL;
@@ -1273,6 +1315,10 @@ int hn_node_scroll_by(hn_node *n, float dx, float dy) {
     if (ny < 0) ny = 0;
     if (ny > max_y) ny = max_y;
     (void)dx; (void)max_x;
+    /* hn-stream 容器: 滚动即更新"让出"状态 —— 离底 > 48px 视为用户在
+       看历史(布局不再贴底); 滚回底部附近(≤ 48px)恢复跟随 */
+    if (is_stream_container(n))
+        n->stream_yield = (max_y - ny > HN_STREAM_NEAR) ? 1 : 0;
     if (ny == n->scroll_y) return 0;
     n->scroll_y = ny;
     return 1;
@@ -1908,6 +1954,7 @@ int hn_doc_swap(hn_doc *doc, const char *target_id, hn_swap_mode mode,
     frag->tag = "fragment";
     if (html_src && len) hn_parse_into(doc, frag, html_src, len);
     splice_children(doc, frag, target, mode);
+    hn_md_apply(doc);   /* 片段里带入的 hn-md 同样先变成普通 DOM */
     return 1;
 }
 
@@ -1927,6 +1974,7 @@ void hn_context_render(hn_context *c, const char *html_src, size_t len) {
         root->last = frag->last;
     }
     /* 热更新可能改写了 hn-theme: 重新装载主题基座 */
+    hn_md_apply(c->doc);   /* 新内容里的 hn-md 同样先变成普通 DOM */
     hn_context_apply_theme(c);
 }
 

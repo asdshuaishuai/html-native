@@ -144,12 +144,21 @@ static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_ba
                     for (size_t k = i; k < j; k++)
                         if (s[k] == '\n' || s[k] == '\r') { has_nl = 1; break; }
                     if (has_nl) {
-                        iitem br;
-                        memset(&br, 0, sizeof(br));
-                        br.owner = n;
-                        br.st = st;
-                        br.forced_break = 1;
-                        iv_push(iv, br);
+                        /* 每个换行符一个强制断行: "\n\n"(空行)必须产生**两个**
+                           断行标记, 整串压成一个会让空行消失(pre 代码块里
+                           空行是常态)。做法与 <br> 一致: 发 forced_break 片段,
+                           行累加器已能处理。\r\n 算一个换行。 */
+                        for (size_t k = i; k < j; k++) {
+                            int is_nl = (s[k] == '\n' || s[k] == '\r');
+                            if (is_nl && s[k] == '\r' && k + 1 < j && s[k + 1] == '\n') continue;
+                            if (!is_nl) continue;
+                            iitem br;
+                            memset(&br, 0, sizeof(br));
+                            br.owner = n;
+                            br.st = st;
+                            br.forced_break = 1;
+                            iv_push(iv, br);
+                        }
                         i = j;
                         continue;
                     }
@@ -511,10 +520,18 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
     const int align = container->style.text_align;
 
     if (measuring) {
+        /* 行数统计: 与下方落盘路径同一口径 —— 每个"片段组"(被强制换行
+           隔开的连续片段)占一行; 空行(连续两个换行, 其后仍有内容)也占一行,
+           尾随换行不算。缺了这一步, white-space:pre 与 <br> 在度量模式下
+           只算一行 —— flex 容器按度量结果给子项定高(stretch 强制高),
+           多行代码块被裁得只剩一行(agent-chat 的 code-card 即此症状)。 */
+        int lines = 0, in_group = 0;
         float cur = 0, maxw = 0, maxh = 0, any = 0;
         for (int i = 0; i < iv.n; i++) {
             iitem *it = &iv.v[i];
             if (it->forced_break) {              /* <br>/换行: 首选宽取最长行 */
+                if (in_group) { lines++; in_group = 0; }
+                else if (i + 1 < iv.n) lines++;  /* 空行(后面还有内容才计) */
                 if (cur > maxw) maxw = cur;
                 cur = 0;
                 continue;
@@ -527,13 +544,16 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
             float lh = it->st->font_size * it->st->line_height;
             if (lh > maxh) maxh = lh;
             any = 1;
+            in_group = 1;
         }
+        if (in_group) lines++;
         if (out_pref_w) *out_pref_w = cur > maxw ? cur : maxw;
         /* 仅行内级元素由 run 汇总占位盒; 块级/flex 子项的盒由其父级摆放 */
         for (hn_node *ch = start; ch && ch != stop; ch = ch->next)
             if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_INLINE) collapse_node_box(ch);
         free(iv.v);
-        return any ? maxh : 0;
+        if (!any) return 0;
+        return maxh * (lines > 0 ? (float)lines : 1.0f);
     }
 
     /* line-clamp 状态: lines_done = 已落盘的行盒数; clamp_n > 0 时最多
@@ -564,6 +584,20 @@ static float layout_ifc(hn_context *c, hn_node *container, hn_node *start, hn_no
             }
             la_emit(&la, &iv, x, y + cur_y, max_w, align);
             if (la.n) { cur_y += la.lh; lines_done++; }
+            else if (i + 1 < iv.n) {
+                /* 空行也占一行(pre 代码块的空行 / <br><br>): 行高取其后最近
+                   片段的行盒(pre 空行两端同字号, 结果一致)。行首(本行无内容)
+                   且后面再无内容(尾随换行)不算 —— 与浏览器口径一致。 */
+                float elh = 0;
+                for (int k = i + 1; k < iv.n; k++) {
+                    if (!iv.v[k].st) continue;
+                    elh = iv.v[k].st->font_size * iv.v[k].st->line_height;
+                    break;
+                }
+                if (elh <= 0) elh = container->style.font_size * container->style.line_height;
+                cur_y += elh;
+                lines_done++;
+            }
             la_reset(&la);
             i++;
             continue;

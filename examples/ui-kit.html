@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x900">
+<meta name="hn-title" content="ui-kit · 智能 UI 组件预设">
+<meta name="hn-theme" content="dark">
+<!-- 预设样式表: 本页全部组件样式来自 ui-kit-head.html, 页面自身只写布局。
+     当前引擎装载路径用 link 内联(等价写法: <include src="examples/ui-kit-head.html">)。
+     本页为纯静态标记(无 sys:///hx-*/hn-stream), 两条渲染路径出图一致:
+       dist/hncore-macos-arm64 render examples/ui-kit.html screenshots/ui-kit.png 920 900
+       dist/hnapp-macos-arm64    examples/ui-kit.html --shot out.png 920 900  -->
+<link rel="stylesheet" href="ui-kit-head.html">
+<style>
+/* 本页自身的布局样式(组件样式全部来自 ui-kit-head.html)。
+   注意: body 横向 padding 会把内容推出右缘(引擎按全宽排子盒), 因此
+   横向留白用 .wrap 的 margin 实现 —— 这也是给 agent 的实践示范。 */
+body { padding: 20 0; }
+.wrap { margin: 0 24; }
+.hero-title { font-size: 19; font-weight: 700; color: var(--ink); margin: 0 0 3; }
+.hero-sub { font-size: 12; color: var(--dim); margin: 0 0 6; }
+.hero-code { font-size: 11; color: var(--dim); margin: 0 0 2; }
+.sec { margin: 17 0 11; }
+.cols { display: flex; gap: 16; align-items: flex-start; }
+.c-chat  { flex: 11; }
+.c-tool  { flex: 9; }
+.c-code  { flex: 12; }
+.c-metric{ flex: 9; display: flex; flex-direction: column; gap: 14; }
+.tool-stack { display: flex; flex-direction: column; gap: 8; }
+.cap-row { display: flex; align-items: baseline; gap: 8; margin: 0 0 6; }
+.cap { font-size: 11; color: var(--dim); font-weight: 700; letter-spacing: 0.4; }
+.cap-num { margin-left: auto; font-size: 11; color: var(--ink); font-weight: 700; }
+.chip-row { display: flex; align-items: center; gap: 8; }
+.skel-wrap { display: flex; flex-direction: column; }
+.foot { margin: 16 0 0; font-size: 10; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- 页首: 用法说明(这页同时是组件规范的活文档) -->
+<div class="hero-title">ui-kit · 智能 UI 组件预设</div>
+<div class="hero-sub">include 即得的 agent 组件库 · 只依赖 hn-theme 令牌, 换 dark/light 自动皮肤化 · 组件样式 100% 来自 ui-kit-head.html, 本页只写布局</div>
+<div class="hero-code">&lt;link rel="stylesheet" href="examples/ui-kit-head.html"&gt; &nbsp;或&nbsp; &lt;include src="examples/ui-kit-head.html"&gt;</div>
+
+<!-- 一段模拟的 agent 会话 -->
+
+<div class="divider-label sec"><i></i><span>对话 · 工具调用</span><i></i></div>
+<div class="cols">
+  <div class="c-chat chat">
+    <div class="msg"><div class="chat-ai">
+      <p>已定位渲染管线热点: <strong>布局级联</strong>在每帧重复执行, 建议按文档版本缓存样式结果, 只在失效时重算。</p>
+      <ul>
+        <li>缓存键用 <code>doc.rev()</code>, 热更新即失效</li>
+        <li>预计帧时间 <strong>-38%</strong></li>
+      </ul>
+    </div></div>
+    <div class="msg end"><div class="chat-user">按方案二改, 改完跑一遍布局回归</div></div>
+    <div class="msg"><div class="chat-ai"><p>已建 3 个任务并开始执行, 完成后汇总指标。</p></div></div>
+  </div>
+  <div class="c-tool tool-stack">
+    <div class="tool-card">
+      <div class="tool-head">
+        <span class="tool-name">grep.codebase</span>
+        <span class="tool-state run"><span class="dot dot-run"></span>运行中</span>
+      </div>
+      <div class="tool-body">pattern="cascade" path="Sources/"</div>
+    </div>
+    <div class="tool-card">
+      <div class="tool-head">
+        <span class="tool-name">layout.probe</span>
+        <span class="tool-state ok">完成 · 1.2s</span>
+      </div>
+      <div class="tool-body">61 断言全绿 · 布局输出与基线逐字节一致</div>
+    </div>
+    <div class="tool-card folded">
+      <div class="tool-head">
+        <span class="tool-name">bench.render</span>
+        <span class="tool-state err">失败 · 3 项</span>
+      </div>
+      <div class="tool-body">folded 状态: 本体在标记里, 加 class="folded" 即收起</div>
+    </div>
+  </div>
+</div>
+
+<div class="divider-label sec"><i></i><span>代码 · 指标 · 进度</span><i></i></div>
+<div class="cols">
+  <div class="c-code code-card">
+    <div class="code-head">
+      <span class="dot dot-err"></span><span class="dot dot-warn"></span><span class="dot dot-ok"></span>
+      <span class="code-lang">RUST</span><span class="code-file">style.rs</span>
+    </div>
+    <pre>let mut cache = CascadeCache::new();
+if cache.hit(doc.rev()) {
+    return cache.layout();     // 命中: 跳过级联
+}
+let styled = cascade(doc, root);
+cache.store(doc.rev(), &amp;styled);
+// 失效路径: 热更新推高 rev, 下帧全量重算
+mark_dirty(doc); reroot(&amp;mut cache);</pre>
+  </div>
+  <div class="c-metric">
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-num">8.4ms</div>
+        <div class="stat-label">帧时间</div>
+        <div class="stat-delta up">-38% 较基线</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">98.2%</div>
+        <div class="stat-label">回归通过</div>
+        <div class="stat-delta up">+1.4 较上周</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">12.6s</div>
+        <div class="stat-label">构建耗时</div>
+        <div class="stat-delta down">+2.1 较上周</div>
+      </div>
+    </div>
+    <div>
+      <div class="cap-row"><span class="cap">重构进度</span><span class="cap-num">64%</span></div>
+      <div class="progress"><div class="progress-fill" style="width:64%"></div></div>
+    </div>
+    <div>
+      <div class="cap-row"><span class="cap">近 7 天渲染帧数</span><span class="cap-num">1.2M</span></div>
+      <div class="bar-mini">
+        <b style="height:32%"></b><b style="height:45%"></b><b style="height:38%"></b>
+        <b style="height:58%"></b><b class="hi" style="height:86%"></b><b style="height:64%"></b>
+        <b class="hi" style="height:100%"></b>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="divider-label sec"><i></i><span>标签 · 键帽 · 状态点</span><i></i></div>
+<div class="chip-row">
+  <span class="tag">默认</span>
+  <span class="tag-ok">通过</span>
+  <span class="tag-warn">警告</span>
+  <span class="tag-err">失败</span>
+  <span class="tag" style="margin-left:14">快捷键</span>
+  <span class="kbd">Ctrl</span><span class="kbd">Shift</span><span class="kbd">P</span>
+  <span class="tag" style="margin-left:14">服务</span>
+  <span class="dot dot-ok"></span><span class="tag-ok">正常</span>
+  <span class="dot dot-run"></span><span class="tag">运行中</span>
+  <span class="dot dot-err"></span><span class="tag-err">异常</span>
+</div>
+
+<div class="divider-label sec"><i></i><span>骨架屏(加载占位)</span><i></i></div>
+<div class="skel-wrap">
+  <div class="skeleton" style="width:420"></div>
+  <div class="skeleton" style="width:340"></div>
+  <div class="skeleton" style="width:250"></div>
+</div>
+
+<div class="foot">ui-kit v0.1 · 12 类组件 · 纯上层零引擎改动 · 渲染: dist/hncore-macos-arm64 render examples/ui-kit.html screenshots/ui-kit.png 920 900</div>
+
+</div>
+</body>
+</html>

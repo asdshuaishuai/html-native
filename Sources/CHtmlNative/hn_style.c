@@ -30,6 +30,19 @@ static const char *UA_CSS =
     "s, strike, del { text-decoration: line-through; }\n"
     "hr { display: block; border: 1 solid #c8c8c8; height: 0; margin: 10 0; }\n"
     "code, pre, kbd, samp, tt { font-family: monospace; }\n"
+    /* ---- Markdown 直染(hn-md)生成的语义结构: 浏览器惯例的缺省观感 ----
+       md 一进来就变成普通 DOM, 这些规则就是这些"普通元素"的 UA 皮肤;
+       主题表(hn-theme, 排在 UA 之后)与作者 CSS 按常规级联即可覆盖。
+       pre>code 用块级 + white-space:pre(代码块字面排版);
+       表格没有 table 布局引擎, 惯例落法是 tr:flex 行 + 单元格 flex:1 等分,
+       边框给半透明中性灰(带透明度, 深/浅底都可读), 主题可换 var(--line)。 */
+    "pre { margin: 10 0; }\n"
+    "pre code { display: block; white-space: pre; padding: 9 11; border-radius: 6;\n"
+    "  background: rgba(127,127,127,0.14); }\n"
+    "table { display: block; margin: 10 0; }\n"
+    "tr { display: flex; }\n"
+    "th, td { flex: 1 1 0; padding: 5 9; border: 1 solid rgba(127,127,127,0.28); }\n"
+    "th { font-weight: 700; }\n"
     /* 禁用态: 引擎级缺省观感(半透明)。伪类 :disabled/:enabled/:checked
        按属性匹配, 作者可覆盖。 */
     "input:disabled, textarea:disabled, button:disabled { opacity: 0.45; }\n";

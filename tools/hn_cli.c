@@ -166,6 +166,16 @@ int main(int argc, char **argv) {
         const char *op = !strcmp(cmd, "open") ? "open" : "update";
         snprintf(req, sizeof(req), "{\"op\":\"%s\",\"id\":\"%s\",\"html\":\"%s\"", op, id, esc);
         free(esc);
+        /* 源文件路径一并上送: daemon 据此把装载基准切到文档目录
+           (<link>/<include>/资产相对文档目录解析, 与 hn_app 同款) */
+        {
+            char *pe = json_esc(path);
+            if (pe) {
+                size_t l = strlen(req);
+                snprintf(req + l, sizeof(req) - l, ",\"path\":\"%s\"", pe);
+                free(pe);
+            }
+        }
         /* 可选参数 */
         for (int i = 4; i < argc; i++) {
             if (!strcmp(argv[i], "--css") && i + 1 < argc) {
@@ -231,8 +241,19 @@ int main(int argc, char **argv) {
             resp_field(r, "text", val, sizeof(val));
             printf("%s\n", val);
         } else if (!strcmp(cmd, "dump")) {
+            /* daemon 回数字形态("cmds":N); 老协议的字符串形态一并兼容 */
             char val[64];
             resp_field(r, "cmds", val, sizeof(val));
+            if (!val[0]) {
+                const char *p = strstr(r, "\"cmds\":");
+                if (p) {
+                    p += strlen("\"cmds\":");
+                    while (*p == ' ' || *p == '\t') p++;
+                    size_t i = 0;
+                    while (*p >= '0' && *p <= '9' && i + 1 < sizeof(val)) val[i++] = *p++;
+                    val[i] = 0;
+                }
+            }
             printf("cmds=%s\n", val);
         } else if (!strcmp(cmd, "shot")) {
             printf("已输出截图\n");

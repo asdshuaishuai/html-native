@@ -515,11 +515,20 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   卡 + `sys://` 系统卡, 四段各走一条后端; 样片 `examples/assets/demo.mp4`
   (320x180 H.264+AAC 4s)入库。无头验证: `hncore paint` 输出 `BITMAP/MEDIA`
   行, daemon `eval` op 驱动 JS 桥。
-- **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 即获得"自动跟随底部"语义
-  (运行时提供, 页面零脚本): 内容增长时平滑追上, 用户上翻时让出滚动条;
-  `hn-stream-loop="14"` 环形缓冲只保留最近 N 条 —— 内容可无限追加而内存与视觉收敛。
-  `sys://agent/step` 每次调用返回一条轨迹条目(思考/输出/工具调用/图片)演示循环滚动。
-  见 `examples/agent-stream.html`
+- **Markdown 直染(agent 母语)**: `<div hn-md>…markdown 源…</div>` 装载即替换成
+  普通 DOM 子树 —— 标题/列表(嵌套 2 层)/任务清单/围栏代码块(data-lang)/引用/
+  管道表格(对齐)/分隔线; 行内 **粗** *斜* `码` ~~删除~~ [链接](url) 与嵌套、
+  转义。之后样式/布局/绘制/交互零特例(标题走 h1-h6、代码块走 pre>code、
+  任务清单走既有 checkbox)。明确不做: 图片/HTML 内嵌/脚注/缩进式代码块。
+  见 `examples/md-demo.html`(agent 报告窗); 口径由 `tools/md_probe.c`
+  66 断言钉死
+- **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 的 overflow 容器即获得
+  "自动跟随底部"语义(引擎实现, 页面零脚本): 内容增长时滚动贴底, 用户上翻
+  (离底 >48px)让出不追, 滚回底部附近自动恢复跟随(`hn_node_scroll_by` 更新
+  让出状态; 平滑追上动画是后续优化)。整文档替换式流式推送的最简姿势:
+  脚本持有累积缓冲 + daemon `update` 整推 —— 完整演示 `tools/chat-stream.sh`
+  五步推流 + 三帧留档, 见 `examples/agent-chat.html` 与
+  `screenshots/chat-stream-{1,2,3}.png`
 - **动画与呈现**: 引擎按 t 求值 —— 过渡/@keyframes/Lottie/网格变形由
   `hn_context_anim_tick(dt)` 单一时钟推进, 壳的帧循环只负责喂 dt
   (Linux 壳: select 超时取"16ms 帧 / 最近 hx 轮询 / 无限阻塞"最小者,
@@ -557,8 +566,9 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   daemon 路径自动执行 `hx-trigger="load/every"`。`--ttl` 到期自毁、
   `hn-drag` 拖拽手柄、`hn-dismiss` 点外关闭在壳层路线图上。
 - **人类开发闭环**: 写 `app.html` → `hn_app`/`hn open` 即开(daemon `update`
-  热推送新文档, 窗口状态保持); `<include src=…>` 零构建组件(嵌套上限 6,
-  循环检测); `sys://store/get|set` 应用级 KV 持久化、`sys://clipboard/get|set`、
+  热推送新文档, 窗口状态保持); `<include src=…>` 零构建组件(装载期文本级
+  拼接, src 相对**包含它的文件**, 嵌套上限 6, 环检测/缺文件容错占位 ——
+  口径由 `tools/include_probe.c` 23 断言钉死); `sys://store/get|set` 应用级 KV 持久化、`sys://clipboard/get|set`、
   `sys://notify`、`sys://open` —— 全部本地, 无网络无服务进程。
   `hn new` 脚手架与 mtime 热重载(`hn dev`)在路线图上。
 - **交互**: 命中测试(冒泡找 id)、`hx-get/post/target/swap`、
@@ -576,6 +586,39 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   **M2 已落地**: 事件派发管道(点击/键盘/滚轮/hover, 三壳同构)
   与动画帧循环(过渡/@keyframes/Lottie/网格变形共用, 空闲零唤醒);
   新三层(`platform/hn_platform.h` + `app/hn_app.c`)是这些壳经验的收敛版。
+
+## 智能 UI 组件预设(上层, include 即得)
+
+这是 README 定位图里"上层: 组件库 / UX 规范"的第一块砖 —— 纯上层资产,
+零引擎改动。agent 现场生成 UI 时不必每次从零写样式: **include 一次, 写类名即可**。
+
+```html
+<meta name="hn-theme" content="dark">                       <!-- 或 light, 皮肤自动切换 -->
+<link rel="stylesheet" href="examples/ui-kit-head.html">    <!-- 当前装载路径 -->
+<include src="examples/ui-kit-head.html">                   <!-- 片段引入等价写法 -->
+```
+
+设计原则一句话: **只依赖 hn-theme 令牌(--accent/--bg/--card/--line/--ink/--dim),
+主题自动皮肤化; agent 生成时 include 一次, 写类名即可** —— 不写死任何主题色
+(唯一的扩展面是 ok/warn/err 状态色与代码底色, 以 `var(--ok, 缺省)` 形式提供,
+主题可覆盖)。组件清单(每个组件头部带"用途 + 最小 HTML 用法"注释, 可直接照抄):
+
+| 类名 | 用途 |
+|---|---|
+| `.chat` `.msg` `.msg.end` + `.chat-ai` / `.chat-user` | 对话气泡: AI 左侧强调色描边卡, 用户右侧实底渐变卡 |
+| `.tool-card`(`.folded` 折叠) + `.tool-head/.tool-name/.tool-body/.tool-state.ok/run/err` | agent 工具调用卡: 标题行 + 状态 chip + 可折叠体 |
+| `.code-card` + `.code-head/.code-lang/.code-file` + `<pre>` | 代码卡: 深底等宽 + 顶部语言标签 |
+| `.stats` + `.stat-card`(`.stat-num/.stat-label/.stat-delta.up/.down`) | 统计卡: 大数字 + 标签 + 环比小字, 三列网格 |
+| `.progress` + `.progress-fill` | 细进度条, 强调色渐变填充 |
+| `.bar-mini` + `<b>`(行内高度, `.hi` 高亮) | 迷你条形组(趋势/分布) |
+| `.tag` `.tag-ok` `.tag-warn` `.tag-err` | 小标签(中性 + 三档语义色) |
+| `.skeleton` | 骨架条(呼吸动画, 观感同主题 `.sk` 但只依赖 `--line`) |
+| `.divider-label` + 两根 `<i>` | 带文字的分隔线 |
+| `.kbd` | 键帽(等宽 + 细边 + 底部投影) |
+| `.dot` `.dot-ok/.dot-warn/.dot-err/.dot-run` | 状态圆点(运行中自带呼吸) |
+
+活文档: `examples/ui-kit.html`(920x900, 一段模拟的 agent 会话把上述组件全部
+真实排布一遍) —— 渲染命令与双路径出图见该页头注释。
 
 ## 已知简化与路线图
 

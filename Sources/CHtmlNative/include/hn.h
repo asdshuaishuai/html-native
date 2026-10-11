@@ -320,6 +320,13 @@ void hn_context_compact(hn_context *c, const char *html, size_t len);
 void hn_context_strip_root_background(hn_context *c);
 
 /* ---- 解析 ---- */
+/* <include> 装载通道: 告知引擎"正在解析的文档路径"。零构建组件在
+ * hn_parse_html 装载期做文本级拼接, src 相对**包含它的文件**所在目录解析
+ * (嵌套时基准随层级走)。设置一次只在下一次 hn_parse_html 生效, 之后自动
+ * 清空 —— 不给同进程后续的内存文档(热更新/流式推送)留旧基准。
+ * 不设置(纯内存文档)时相对路径按 cwd 解析; 任何失败(缺文件/环/超深)
+ * 都以注释占位, 装载绝不失败。 */
+void      hn_html_set_doc_path(const char *path);
 hn_doc   *hn_parse_html(const char *src, size_t len);
 hn_sheet *hn_parse_css(const char *src, size_t len);
 void      hn_doc_free(hn_doc *doc);

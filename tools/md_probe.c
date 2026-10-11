@@ -1,0 +1,597 @@
+/* md_probe.c — Markdown 直染验收(纯 C99, 离屏, 零 GUI 依赖)
+ *
+ * 管线与生产同一条: hn_context_set_doc(触发 hn_md pass: md 源 → 普通 DOM)
+ * → 级联 → 布局 → 绘制指令列表。断言分三层:
+ *   结构 —— DOM 里出现预期的语义标签/属性/文本(零样式依赖, 全确定);
+ *   渲染 —— 布局盒 + 显示列表: 代码块有背景矩形、表格有边框线、标题有 TEXT;
+ *   回归 —— 无 hn-md 的普通文档零影响(结构不变 + 布局健康)。
+ *
+ * 断言口径: 只断与文本度量无关的确定性结论(结构/属性/指令形态/几何相交),
+ * 不断具体像素宽度(FreeType 有无会改变排版宽度, 与 render_probe 同口径)。
+ *
+ * 用法(直接 cc, 无 SPM; 由 tools/md_probe.py 薄封装编译运行):
+ *   python3 tools/md_probe.py [已编译产物路径]
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "hn.h"
+/* hnsoft.h 不在 include/(对包外是模块私有), 但渲染断言必须用生产文本后端
+   与生产光栅器同源 —— 以相对路径包含引擎树内的同一份头(与 render_probe 同法)。 */
+#include "../Sources/CHtmlNative/hnsoft.h"
+
+static int g_pass = 0, g_fail = 0;
+
+static void check(int cond, const char *label) {
+    printf("%s %s\n", cond ? "  ✔" : "  ✘", label);
+    if (cond) g_pass++; else g_fail++;
+}
+
+static void check_int(long got, long want, const char *label) {
+    int ok = got == want;
+    printf("%s %s (got %ld want %ld)\n", ok ? "  ✔" : "  ✘", label, got, want);
+    if (ok) g_pass++; else g_fail++;
+}
+
+static void check_str(const char *got, const char *want, const char *label) {
+    int ok = got && want && !strcmp(got, want);
+    printf("%s %s (got %s want %s)\n", ok ? "  ✔" : "  ✘", label,
+           got ? got : "(null)", want ? want : "(null)");
+    if (ok) g_pass++; else g_fail++;
+}
+
+/* ---------- DOM 查询辅助 ---------- */
+
+static hn_node *find_tag(hn_node *n, const char *tag) {
+    if (!n) return NULL;
+    const char *t = hn_node_tag(n);
+    if (t && !strcmp(t, tag)) return n;
+    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c)) {
+        hn_node *r = find_tag(c, tag);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+static int count_tag(hn_node *n, const char *tag) {
+    if (!n) return 0;
+    int k = 0;
+    const char *t = hn_node_tag(n);
+    if (t && !strcmp(t, tag)) k++;
+    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
+        k += count_tag(c, tag);
+    return k;
+}
+
+static hn_node *child_tag(hn_node *n, const char *tag) {
+    if (!n) return NULL;
+    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c)) {
+        const char *t = hn_node_tag(c);
+        if (t && !strcmp(t, tag)) return c;
+    }
+    return NULL;
+}
+
+static int child_elem_count(hn_node *n) {
+    int k = 0;
+    if (!n) return 0;
+    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
+        if (hn_node_tag(c)) k++;
+    return k;
+}
+
+static size_t node_text(hn_node *n, char *out, size_t cap) {
+    if (!n) { if (cap) out[0] = 0; return 0; }
+    return hn_node_text_content(n, out, cap);
+}
+
+static int text_is(hn_node *n, const char *want) {
+    char buf[256];
+    node_text(n, buf, sizeof(buf));
+    return !strcmp(buf, want);
+}
+
+static hn_node *find_input(hn_node *n) { return find_tag(n, "input"); }
+
+/* 文档序遍历所有 li, 统计任务清单形态(li.task + checkbox/checked) */
+static void scan_tasks(hn_node *n, int *task, int *cb, int *checked) {
+    if (!n) return;
+    const char *t = hn_node_tag(n);
+    if (t && !strcmp(t, "li")) {
+        const char *cls = hn_node_attr(n, "class");
+        if (cls && strstr(cls, "task")) {
+            (*task)++;
+            for (hn_node *ch = hn_node_first_child(n); ch; ch = hn_node_next_sibling(ch)) {
+                const char *ct = hn_node_tag(ch);
+                if (ct && !strcmp(ct, "input")) {
+                    (*cb)++;
+                    if (hn_node_attr(ch, "checked")) (*checked)++;
+                }
+            }
+        }
+    }
+    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
+        scan_tasks(c, task, cb, checked);
+}
+
+/* DFS 找第一个"标签匹配且文本内容含 sub"的元素 */
+static hn_node *find_tag_with_text(hn_node *n, const char *tag, const char *sub) {
+    if (!n) return NULL;
+    const char *t = hn_node_tag(n);
+    if (t && !strcmp(t, tag)) {
+        char buf[512];
+        hn_node_text_content(n, buf, sizeof(buf));
+        if (strstr(buf, sub)) return n;
+    }
+    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c)) {
+        hn_node *r = find_tag_with_text(c, tag, sub);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* ---------- 装载辅助: 解析 + set_doc(触发 hn_md)+ 布局 ---------- */
+
+static float measure_cb(void *ctx, const hn_font_desc *font,
+                        const char *utf8, size_t len) {
+    (void)ctx;
+    return hnsoft_measure(font, utf8, len);
+}
+static void metrics_cb(void *ctx, const hn_font_desc *font,
+                       float *ascent, float *descent, float *leading) {
+    (void)ctx;
+    hnsoft_metrics(font, ascent, descent, leading);
+}
+
+#define VW 720.0f
+#define VH 900.0f
+
+/* context 生命周期: *doc 交给 context(销毁时随 context 释放) */
+static hn_context *load(const char *html, hn_doc **doc_out) {
+    hn_doc *doc = hn_parse_html(html, strlen(html));
+    if (!doc) return NULL;
+    hn_context *c = hn_context_create();
+    hn_context_set_doc(c, doc);            /* 这里触发 hn_md 后处理 pass */
+    hn_text_backend tb = { NULL, measure_cb, metrics_cb };
+    hn_context_layout(c, VW, VH, &tb);
+    if (doc_out) *doc_out = doc;
+    return c;
+}
+
+/* ---------- 用例一: 全量块级 + 行内子集 ---------- */
+
+static const char *MD_HTML =
+"<html><head>"
+"<meta name=\"hn-theme\" content=\"dark\">"
+"<meta name=\"hn-window\" content=\"720x900\">"
+"</head><body>"
+"<div class=\"card\"><div id=\"md-main\" hn-md>\n"
+"# 周报概述\n"
+"\n"
+"正文里有 **加粗强调**、*斜体注记*、`inline_cc`、~~删除内容~~ 与 [参考链接](https://example.com/report)。\n"
+"\n"
+"## 进展明细\n"
+"\n"
+"### 渲染管线\n"
+"\n"
+"1. 第一步甲\n"
+"2. 第二步乙\n"
+"3. 第三步丙\n"
+"\n"
+"- [ ] 待办事项一\n"
+"- [x] 已办事项二\n"
+"- 普通条目\n"
+"\n"
+"> 引用一行: 把应用开发的技术成本压到最低。\n"
+"\n"
+"---\n"
+"\n"
+"| 指标 | 数值 | 说明 |\n"
+"| --- | :---: | --- |\n"
+"| 首帧耗时 | 8ms | 快 |\n"
+"| 内存占用 | 24MB | 稳 |\n"
+"\n"
+"```python\n"
+"print(\"hello\")\n"
+"x = 42\n"
+"```\n"
+"</div></div></body></html>";
+
+static void test_structure(void) {
+    printf("== Markdown 直染: 结构 ==\n");
+    hn_doc *doc = NULL;
+    hn_context *c = load(MD_HTML, &doc);
+    check(c && doc, "装载成功(hn-md 源被转换)");
+    if (!c) return;
+    hn_node *root = hn_doc_root(doc);
+
+    /* 块级 */
+    hn_node *h3 = find_tag(root, "h3");
+    check(h3 && text_is(h3, "渲染管线"), "三级标题 → h3 且文本正确");
+    hn_node *h1 = find_tag(root, "h1");
+    check(h1 && text_is(h1, "周报概述"), "一级标题 → h1 且文本正确");
+    hn_node *ol = find_tag(root, "ol");
+    check(ol && child_elem_count(ol) == 3, "有序列表 3 项");
+    hn_node *li1 = ol ? hn_node_first_child(ol) : NULL;
+    check(li1 && text_is(li1, "第一步甲"), "有序列表首项文本正确");
+
+    hn_node *pre = find_tag(root, "pre");
+    hn_node *code = pre ? child_tag(pre, "code") : NULL;
+    check(pre && code, "代码块 pre>code");
+    check_str(code ? hn_node_attr(code, "data-lang") : NULL, "python", "代码块 data-lang=python");
+    char buf[256];
+    node_text(code, buf, sizeof(buf));
+    check(strstr(buf, "print(\"hello\")") && strstr(buf, "x = 42"),
+          "代码块内容原样保留(含换行)");
+
+    hn_node *table = find_tag(root, "table");
+    check(table != NULL, "表格 → table");
+    check_int(table ? count_tag(table, "tr") : 0, 3, "表格 3 行(表头 + 2 体行)");
+    hn_node *htr = table ? hn_node_first_child(table) : NULL;
+    check_int(htr ? child_elem_count(htr) : 0, 3, "表头行 3 列 th");
+    check(htr && hn_node_tag(hn_node_first_child(htr)) && !strcmp(hn_node_tag(hn_node_first_child(htr)), "th"),
+          "表头单元格是 th");
+    check_int(table ? count_tag(table, "td") : 0, 6, "体行共 6 个 td");
+    hn_node *td_first = find_tag(table, "td");
+    check(td_first && text_is(td_first, "首帧耗时"), "体行单元格文本正确");
+
+    /* 任务清单: 同一 ul 内 2 个任务项 + 1 个普通项 */
+    hn_node *ul = find_tag(root, "ul");
+    check(ul && child_elem_count(ul) == 3, "无序列表 3 项(2 任务 + 1 普通)");
+    int n_task = 0, n_cb = 0, n_checked = 0;
+    scan_tasks(root, &n_task, &n_cb, &n_checked);
+    check_int(n_task, 2, "任务清单 2 项(li.task)");
+    check_int(n_cb, 2, "任务清单 2 个 checkbox");
+    check_int(n_checked, 1, "任务清单其一 checked");
+
+    hn_node *bq = find_tag(root, "blockquote");
+    check(bq != NULL, "引用 → blockquote");
+    hn_node *bqp = bq ? child_tag(bq, "p") : NULL;
+    check(bqp && text_is(bqp, "引用一行: 把应用开发的技术成本压到最低。"), "引用内容成段");
+
+    hn_node *hr = find_tag(root, "hr");
+    check(hr != NULL, "分隔线 → hr");
+
+    /* 行内 */
+    hn_node *strong = find_tag(root, "strong");
+    check(strong && text_is(strong, "加粗强调"), "行内 **粗** → strong");
+    hn_node *em = find_tag(root, "em");
+    check(em && text_is(em, "斜体注记"), "行内 *斜* → em");
+    hn_node *s_el = find_tag(root, "s");
+    check(s_el && text_is(s_el, "删除内容"), "行内 ~~删除~~ → s");
+    hn_node *a = find_tag(root, "a");
+    check_str(a ? hn_node_attr(a, "href") : NULL, "https://example.com/report", "链接 href 存属性");
+    check(a && text_is(a, "参考链接"), "链接文本正确");
+    /* 行内码: 段落里的 code(文档序在 pre>code 之前) */
+    hn_node *p = find_tag(root, "p");
+    hn_node *icc = p ? child_tag(p, "code") : NULL;
+    check(icc && text_is(icc, "inline_cc"), "行内 `码` → code");
+
+    check_int(hn_doc_validate(doc, 0), 0, "md 转换后 DOM 结构自检零问题");
+    hn_context_destroy(c);
+}
+
+/* ---------- 用例二: 嵌套与转义 ---------- */
+
+static void test_inline_nesting(void) {
+    printf("== Markdown 直染: 嵌套与转义 ==\n");
+    const char *SRC =
+        "<html><body><div hn-md>\n"
+        "段一 **粗里有`码`** 收尾。\n"
+        "\n"
+        "段二 \\*不是斜体\\* 与 \\`不是码\\`。\n"
+        "</div></body></html>";
+    hn_doc *doc = NULL;
+    hn_context *c = load(SRC, &doc);
+    if (!c) { check(0, "嵌套用例装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    hn_node *strong = find_tag(root, "strong");
+    check(strong != NULL, "嵌套: strong 存在");
+    hn_node *inner_code = strong ? child_tag(strong, "code") : NULL;
+    check(inner_code && text_is(inner_code, "码"), "嵌套: **粗里有`码`** → strong>code");
+    hn_node *em = find_tag(root, "em");
+    check(em == NULL, "转义: \\*不产生 em");
+    /* 转义段: 文本里应出现字面的 * 与 ` */
+    hn_node *p2 = find_tag_with_text(root, "p", "不是斜体");
+    int found = 0;
+    if (p2) {
+        char buf[256];
+        node_text(p2, buf, sizeof(buf));
+        found = strstr(buf, "*不是斜体*") != NULL && strstr(buf, "`不是码`") != NULL;
+    }
+    check(found, "转义: \\* 与 \\` 输出字面字符");
+    check_int(hn_doc_validate(doc, 0), 0, "嵌套用例 DOM 自检");
+    hn_context_destroy(c);
+}
+
+static void test_nested_list(void) {
+    printf("== Markdown 直染: 嵌套列表 ==\n");
+    const char *SRC =
+        "<html><body><div hn-md>\n"
+        "- 外层甲\n"
+        "  - 内层一\n"
+        "  - 内层二\n"
+        "- 外层乙\n"
+        "</div></body></html>";
+    hn_doc *doc = NULL;
+    hn_context *c = load(SRC, &doc);
+    if (!c) { check(0, "嵌套列表装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    hn_node *outer = find_tag(root, "ul");
+    check(outer && child_elem_count(outer) == 2, "外层列表 2 项");
+    hn_node *li1 = outer ? hn_node_first_child(outer) : NULL;
+    hn_node *inner = li1 ? child_tag(li1, "ul") : NULL;
+    check(inner && child_elem_count(inner) == 2, "嵌套: li 内嵌 2 项子列表");
+    hn_node *sub1 = inner ? hn_node_first_child(inner) : NULL;
+    check(sub1 && text_is(sub1, "内层一"), "嵌套子项文本正确");
+    hn_context_destroy(c);
+}
+
+static void test_multi_container(void) {
+    printf("== Markdown 直染: 多容器 ==\n");
+    const char *SRC =
+        "<html><body>"
+        "<div hn-md>\n# 标题甲\n</div>"
+        "<p>中间夹一个普通段落</p>"
+        "<div hn-md>\n## 标题乙\n</div>"
+        "</body></html>";
+    hn_doc *doc = NULL;
+    hn_context *c = load(SRC, &doc);
+    if (!c) { check(0, "多容器装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    check_int(count_tag(root, "h1"), 1, "容器一转换成 h1");
+    check_int(count_tag(root, "h2"), 1, "容器二转换成 h2");
+    check_int(count_tag(root, "p"), 1, "夹在中间的普通段落不受影响");
+    hn_context_destroy(c);
+}
+
+/* ---------- 用例四: 渲染断言(布局盒 + 显示列表) ---------- */
+
+static int rect_intersects(float x1, float y1, float w1, float h1,
+                           float x2, float y2, float w2, float h2) {
+    return x1 < x2 + w2 && x2 < x1 + w1 && y1 < y2 + h2 && y2 < y1 + h1;
+}
+
+static void test_render(void) {
+    printf("== Markdown 直染: 渲染 ==\n");
+    hn_doc *doc = NULL;
+    hn_context *c = load(MD_HTML, &doc);
+    if (!c) { check(0, "渲染用例装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    const hn_display_list *dl = hn_context_display_list(c);
+    check(dl && dl->count > 0, "显示列表非空");
+
+    /* 代码块: pre>code 盒内必须有带填充的 RECT(背景) */
+    hn_node *pre = find_tag(root, "pre");
+    hn_node *code = pre ? child_tag(pre, "code") : NULL;
+    float cx, cy, cw, chh;
+    hn_node_box(code, &cx, &cy, &cw, &chh);
+    check(cw > 0 && chh > 0, "代码块布局盒非退化");
+    int bg = 0;
+    for (int i = 0; i < dl->count; i++) {
+        const hn_cmd *cmd = &dl->cmds[i];
+        if (cmd->kind != HN_CMD_RECT) continue;
+        if ((cmd->fill & 0xFF) == 0) continue;
+        if (rect_intersects(cmd->x, cmd->y, cmd->w, cmd->h, cx, cy, cw, chh)) { bg = 1; break; }
+    }
+    check(bg, "代码块有背景矩形指令");
+
+    /* 表格: 单元格盒内必须有描边 RECT(边框线) */
+    hn_node *td = find_tag(root, "td");
+    float tx, ty, tw, th;
+    hn_node_box(td, &tx, &ty, &tw, &th);
+    check(tw > 0 && th > 0, "单元格布局盒非退化");
+    int line = 0;
+    for (int i = 0; i < dl->count; i++) {
+        const hn_cmd *cmd = &dl->cmds[i];
+        if (cmd->kind != HN_CMD_RECT) continue;
+        if ((cmd->stroke & 0xFF) == 0 || cmd->stroke_w <= 0) continue;
+        if (rect_intersects(cmd->x, cmd->y, cmd->w, cmd->h, tx, ty, tw, th)) { line = 1; break; }
+    }
+    check(line, "表格单元格有边框线指令");
+
+    /* 标题: h3 盒内必须有内容为标题文本的 TEXT 指令 */
+    hn_node *h3 = find_tag(root, "h3");
+    float hx, hy, hw, hh;
+    hn_node_box(h3, &hx, &hy, &hw, &hh);
+    check(hw > 0 && hh > 0, "标题布局盒非退化");
+    int htext = 0;
+    const char *want = "渲染管线";
+    size_t want_n = strlen(want);
+    for (int i = 0; i < dl->count; i++) {
+        const hn_cmd *cmd = &dl->cmds[i];
+        if (cmd->kind != HN_CMD_TEXT || !cmd->text) continue;
+        if (cmd->text_len != want_n || memcmp(cmd->text, want, want_n)) continue;
+        if (cmd->tx >= hx - 1 && cmd->tx <= hx + hw &&
+            cmd->baseline >= hy && cmd->baseline <= hy + hh) { htext = 1; break; }
+    }
+    check(htext, "标题有 TEXT 指令(位置落在 h3 盒内)");
+
+    /* 任务清单 checkbox 有可见布局盒(既有控件语义参与行内流) */
+    hn_node *input = find_input(root);
+    float ix, iy, iw, ih;
+    hn_node_box(input, &ix, &iy, &iw, &ih);
+    check(iw > 0 && ih > 0, "任务清单 checkbox 有布局盒");
+    check(hn_node_is_checked(input) == 0, "第一个任务项未选中");
+
+    hn_context_destroy(c);
+}
+
+/* ---------- 用例四: 回归(普通 HTML 零影响) ---------- */
+
+static void test_regression(void) {
+    printf("== 回归: 无 hn-md 的普通文档 ==\n");
+    const char *SRC =
+        "<html><head><meta name=\"hn-theme\" content=\"dark\"></head><body>"
+        "<div class=\"card\">"
+        "<h1>普通标题</h1>"
+        "<p>普通段落</p>"
+        "<div class=\"chip\">块</div>"
+        "</div>"
+        "</body></html>";
+    hn_doc *doc = NULL;
+    hn_context *c = load(SRC, &doc);
+    if (!c) { check(0, "回归用例装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    check_int(count_tag(root, "pre"), 0, "无 hn-md 不引入 pre");
+    check_int(count_tag(root, "table"), 0, "无 hn-md 不引入 table");
+    check_int(count_tag(root, "blockquote"), 0, "无 hn-md 不引入 blockquote");
+    hn_node *h1 = find_tag(root, "h1");
+    check(h1 && text_is(h1, "普通标题"), "既有结构原样");
+    int n_div_children = 0;
+    for (hn_node *ch = hn_node_first_child(find_tag(root, "div")); ch; ch = hn_node_next_sibling(ch))
+        n_div_children++;
+    check_int(n_div_children, 3, "卡片子元素数量不变(h1/p/div)");
+    check_int(hn_doc_validate(doc, 0), 0, "DOM 自检零问题");
+    const hn_display_list *dl = hn_context_display_list(c);
+    check(dl && dl->count > 0, "布局与绘制正常");
+    hn_context_destroy(c);
+}
+
+/* ---------- 用例五: pre/<br> 测高(回归: 多行代码块不得被算成一行) ----------
+ *
+ * 背景: 布局的度量模式(measuring)曾对强制换行(<br>/pre 换行)不计数,
+ * white-space:pre 的代码块在 flex 容器里被按"一行高"强制定高(stretch),
+ * 底部被裁/下方内容重叠。断言口径:
+ *   - pre 盒高 ≥ 行数 × 行高(行高取 run 自带的行盒高, 与字体无关);
+ *   - 绘制行不超出盒底(不裁);
+ *   - pre 之后兄弟元素的 y ≥ pre 底(不被重叠);
+ *   - <br> 两行段落同断言。
+ */
+
+/* 从元素**直接子文本节点**收集"不同 y_top 的行数"与最大行盒高。
+   空行没有 run, 不计入 —— 总行数断言用源码行数另行给出。 */
+static int count_lines(hn_node *el, float *lh_out) {
+    float ys[256];
+    int n = 0;
+    float lh = 0;
+    for (hn_node *txt = hn_node_first_child(el); txt; txt = hn_node_next_sibling(txt)) {
+        if (hn_node_tag(txt)) continue;      /* 只看直接子文本节点 */
+        for (int i = 0; i < hn_node_run_count(txt) && n < 256; i++) {
+            float x, b, w, yt, h;
+            hn_node_run_at(txt, i, &x, &b, &w, &yt, &h);
+            if (h > lh) lh = h;
+            int seen = 0;
+            for (int k = 0; k < n; k++)
+                if (ys[k] == yt) { seen = 1; break; }
+            if (!seen) ys[n++] = yt;
+        }
+    }
+    if (lh_out) *lh_out = lh;
+    return n;
+}
+
+static void test_pre_br_height(void) {
+    printf("== Markdown 直染: pre/<br> 测高 ==\n");
+
+    /* 场景 A: md fence 代码块(4 行)+ 后续段落 */
+    const char *SRC_A =
+        "<html><body><div hn-md>\n"
+        "```c\n"
+        "int main() {\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "/* end */\n"
+        "```\n"
+        "\n"
+        "fence 之后的段落。\n"
+        "</div></body></html>";
+    hn_doc *doc = NULL;
+    hn_context *c = load(SRC_A, &doc);
+    if (!c) { check(0, "pre 测高用例装载"); return; }
+    hn_node *root = hn_doc_root(doc);
+    hn_node *pre = find_tag(root, "pre");
+    hn_node *code = pre ? child_tag(pre, "code") : NULL;
+    hn_node *txt = code ? hn_node_first_child(code) : NULL;
+    if (!txt) { check(0, "pre 测高: 找到 code 文本"); hn_context_destroy(c); return; }
+    float lh = 0;
+    int n_drawn = count_lines(code, &lh);   /* 空行无 run → 只数到非空行 */
+    check_int(n_drawn, 4, "fence 代码块绘制 4 个非空行(空行不产 run)");
+    check(lh > 0, "行盒高 > 0");
+    float px, py, pw, ph;
+    hn_node_box(code, &px, &py, &pw, &ph);
+    /* 源码 5 行(含 1 空行): 空行同样占一行盒 —— 盒高必须按 5 行算 */
+    check(ph >= 5.0f * lh - 1.0f,
+          "pre 盒高 ≥ 源码行数×行高(含空行, 容差 1px)");
+    /* 绘制行不得超出盒底(底部被裁的形态) */
+    float max_bottom = 0;
+    for (int i = 0; i < hn_node_run_count(txt); i++) {
+        float x, b, w, yt, h;
+        hn_node_run_at(txt, i, &x, &b, &w, &yt, &h);
+        if (yt + h > max_bottom) max_bottom = yt + h;
+    }
+    check(max_bottom <= py + ph + 1.0f, "绘制行不超出 pre 盒底");
+    /* pre 之后兄弟段落: 不被重叠 */
+    hn_node *after = find_tag_with_text(root, "p", "fence 之后的段落");
+    float ax, ay, aw, ah;
+    hn_node_box(after, &ax, &ay, &aw, &ah);
+    check(ay >= py + ph - 1.0f, "pre 之后兄弟 y ≥ pre 底(不被重叠)");
+    check_int(hn_doc_validate(doc, 0), 0, "pre 测高用例 DOM 自检");
+    hn_context_destroy(c);
+
+    /* 场景 B: <br> 两行段落 + 后续段落 */
+    const char *SRC_B =
+        "<html><body>"
+        "<p>first<br>second</p>"
+        "<p id=\"after\">AFTER-BR</p>"
+        "</body></html>";
+    doc = NULL;
+    c = load(SRC_B, &doc);
+    if (!c) { check(0, "br 测高用例装载"); return; }
+    root = hn_doc_root(doc);
+    hn_node *p1 = find_tag(root, "p");
+    lh = 0;
+    int nlines = count_lines(p1, &lh);
+    check_int(nlines, 2, "<br> 段落绘制 2 行");
+    float bx, by, bw2, bh2;
+    hn_node_box(p1, &bx, &by, &bw2, &bh2);
+    check(bh2 >= (float)nlines * lh - 1.0f, "<br> 段落盒高 ≥ 2×行高");
+    hn_node *after2 = hn_doc_find_by_id(doc, "after");
+    float ax2, ay2, aw2, ah2;
+    hn_node_box(after2, &ax2, &ay2, &aw2, &ah2);
+    check(ay2 >= by + bh2 - 1.0f, "<br> 段落之后兄弟不被重叠");
+    hn_context_destroy(c);
+
+    /* 场景 C: flex 容器里的 pre 代码块(stretch 强制高不得裁掉多行) */
+    const char *SRC_C =
+        "<html><head><style>"
+        ".row { display: flex; }"
+        ".card { overflow: hidden; border-radius: 10; }"
+        ".chead { padding: 7 12; }"
+        ".cbody { padding: 10 14; white-space: pre; font-family: monospace; font-size: 12; line-height: 1.5; }"
+        "</style></head><body>"
+        "<div class=\"row\"><div class=\"card\" id=\"card\">"
+        "<div class=\"chead\">HEAD</div>"
+        "<div class=\"cbody\" id=\"cbody\">L1\nL2\nL3\nL4</div>"
+        "</div></div>"
+        "</body></html>";
+    doc = NULL;
+    c = load(SRC_C, &doc);
+    if (!c) { check(0, "flex pre 用例装载"); return; }
+    hn_node *card = hn_doc_find_by_id(doc, "card");
+    hn_node *body_el = hn_doc_find_by_id(doc, "cbody");
+    lh = 0;
+    nlines = count_lines(body_el, &lh);
+    check_int(nlines, 4, "flex 内 pre 绘制 4 行");
+    float fx, fy, fw, fh;
+    hn_node_box(card, &fx, &fy, &fw, &fh);
+    /* 卡片高至少容纳 4 行 + 代码体内边距(20)+ 代码头一行 —— 即未被
+       stretch 按一行度量强制压扁 */
+    check(fh >= (float)nlines * lh + 20.0f + lh - 1.0f,
+          "flex 内 pre 卡片高容纳全部行(stretch 不裁底)");
+    hn_context_destroy(c);
+}
+
+int main(void) {
+    printf("md_probe: Markdown 直染验收(确定性断言)\n");
+    test_structure();
+    test_inline_nesting();
+    test_nested_list();
+    test_multi_container();
+    test_render();
+    test_pre_br_height();
+    test_regression();
+    printf("\nmd_probe: %d 项断言, 失败 %d\n", g_pass + g_fail, g_fail);
+    return g_fail ? 1 : 0;
+}

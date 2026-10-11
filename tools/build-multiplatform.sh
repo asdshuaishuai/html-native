@@ -33,6 +33,7 @@ WASM3_SRC=(vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c vendor/wasm3/m3_compile
 WASM_SRC=("${WASM3_SRC[@]}" Sources/CHtmlNative/hn_wasm.c)
 
 SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
+     Sources/CHtmlNative/hn_md.c \
      Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
      Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
      Sources/CHtmlNative/hn_media.c \
@@ -156,6 +157,7 @@ build "hncore-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
 # 接进来之后交叉编译立刻暴露它们。
 WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+        Sources/CHtmlNative/hn_md.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
         Sources/CHtmlNative/hn_media.c
@@ -178,6 +180,7 @@ echo
 # musl 静态 + 运行期 dlopen: 无 X 环境时壳退化为无头 probe/shot。
 LINUX_RT=(tools/hnweb_linux.c
           Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+        Sources/CHtmlNative/hn_md.c
           Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
           Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
           Sources/CHtmlNative/hn_media.c
@@ -203,6 +206,7 @@ build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
 # 与 hnweb-linux 目标同一理由)。
 MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+        Sources/CHtmlNative/hn_md.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
         Sources/CHtmlNative/hn_media.c
@@ -219,6 +223,7 @@ build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 # headless 在本机可跑(CI/agent 无显示环境), macOS 同样可跑。
 RT_SRC="rt/hn_rt.c"
 ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
+        Sources/CHtmlNative/hn_md.c
             Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
             Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
             Sources/CHtmlNative/hn_media.c

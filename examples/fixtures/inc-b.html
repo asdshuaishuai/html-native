@@ -1,0 +1,6 @@
+<!-- inc-b.html — 二级片段: 回引 inc-main.html 形成 A→B→A 环。
+     环检测按"当前包含链"判定: 本文已在链上, 再引即截断为注释占位;
+     而同一片段在文档里并列引两次(菱形)不是环, 仍然放行。 -->
+<div id="inc-b" style="padding:6px;background:#204060;border-radius:8px">inc-b-body
+  <include src="inc-main.html">
+</div>

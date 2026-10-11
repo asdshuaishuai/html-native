@@ -1,0 +1,14 @@
+<!-- inc-main.html — <include> 探针夹具(根文档)。
+     三条链条各验一件事:
+       inc-a.html → inc-b.html → 回引本文   环检测(应截断为注释占位)
+       ghost.html(不存在)                  缺文件容错(占位, 装载不失败)
+       sub/inc-c.html → inc-d.html          嵌套基准随层级走(引的是同目录文件)
+     被 tools/include_probe.c 断言, 也是"include 一次, 三层全展开"的最小样例。 -->
+<html><head><style>body{margin:0}</style></head>
+<body style="margin:0">
+  <h1 id="main-h" style="font-size:18px">inc-main-head</h1>
+  <include src="inc-a.html">
+  <include src="sub/inc-c.html">
+  <include src="ghost.html">
+  <p id="main-tail">inc-main-tail</p>
+</body></html>

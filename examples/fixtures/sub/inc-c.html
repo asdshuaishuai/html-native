@@ -1,0 +1,6 @@
+<!-- sub/inc-c.html — 嵌套基准夹具: 引的是**同目录**的 inc-d.html。
+     若基准错误地固定在文档根(examples/fixtures/), 这里会静默变成缺文件
+     占位 —— include_probe 断言 inc-d 必须出现, 守住"基准随包含层级走"。 -->
+<div id="inc-c">inc-c-body
+  <include src="inc-d.html">
+</div>

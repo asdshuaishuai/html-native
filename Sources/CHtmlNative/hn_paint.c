@@ -636,6 +636,12 @@ static void paint_check(hn_context *c, hn_node *n, const hn_style *st,
     box.radius = radio ? s * 0.5f : eff_radius(st, s, s);
     if (box.radius <= 0) box.radius = s * 0.18f;   /* 复选框缺省小圆角 */
     if ((st->background & 0xFFu)) box.fill = fill_color(st, st->background, alpha);
+    else if (!checked) {
+        /* 未选中且作者未声明背景: 给一圈淡灰轨道底色。1.5px 的描边在亚像素
+           相位不利时(paint_rect 环带覆盖把深入带内的像素 alpha 归零)会淡到
+           只剩一条边 —— 轨道底色保证未选中态在任何底色上都可辨识。 */
+        box.fill = mul_alpha(0x8A8A8A38u, alpha);
+    }
     if (checked) {
         /* 选中: 缺省强调色填充(作者声明了 background 则尊重作者),
            radio 保持描边 + 内点 */

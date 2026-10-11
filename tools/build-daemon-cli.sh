@@ -14,6 +14,7 @@ cd "$ROOT"
 mkdir -p "$OUT"
 
 ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
+     Sources/CHtmlNative/hn_md.c \
      Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
      Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
      Sources/CHtmlNative/hn_media.c \

@@ -314,6 +314,10 @@ struct hn_node {
     /* 滚动: 内容总高与当前偏移(overflow 容器) */
     float content_h;
     float scroll_x, scroll_y;
+    /* hn-stream 流式容器: 1 = 用户上翻让出跟随(离底 > 48px; 滚回底部
+       附近自动恢复)。存节点上: 文档替换(节点重建)即回默认跟随 —— 与
+       流式推送"新内容优先贴底"的直觉一致。 */
+    int stream_yield;
     /* 测量模式下收缩后的内容宽(shrink-to-fit); pref_h = flex 自然主轴高(定高被压缩前的内容需求) */
     float pref_w, pref_h;
     /* 行内排版结果(每次 layout 重建; 元素节点也会持有 — 输入控件用) */
@@ -362,6 +366,19 @@ typedef struct hn_media_session {
 
 /* 解析到既有 root(整文档用 <html> root, 片段用临时 root) */
 void hn_parse_into(hn_doc *doc, hn_node *root, const char *src, size_t len);
+
+/* ---------- DOM 构造(hn_html.c 实现; hn_md.c 复用同一口径) ----------
+ * tag 传入字面量小写标签(指针被节点直接持有, 不复制); 文本复制进 arena。
+ * 新节点带 anim.fresh 入场标记, 与 HTML 解析器产物完全一致。 */
+hn_node *hn_dom_elem(hn_arena *ar, const char *tag);
+hn_node *hn_dom_text(hn_arena *ar, const char *s, size_t n);
+void     hn_dom_append(hn_node *parent, hn_node *child);
+
+/* ---------- Markdown 直染(hn_md.c) ----------
+ * 把带 hn-md 属性的元素的文本内容(markdown 源)替换成普通 DOM 子树。
+ * 在装载序列里调用(首次 layout 之前、<script> 执行之前), 返回转换的
+ * 元素数量。之后样式/布局/绘制/交互全部走既有管线, 零特例。 */
+int hn_md_apply(hn_doc *doc);
 
 /* ---------- CSS AST ---------- */
 
