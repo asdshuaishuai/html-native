@@ -60,10 +60,17 @@ static char *read_all(const char *path, size_t *len) {
     return buf;
 }
 
+/* HiDPI 渲染缩放(开窗后解析一次: HN_RENDER_SCALE 覆盖 | 平台 backing,
+   cap 2.0)。热重载整文档换装时带进新 rt —— 否则重载一帧退回 1x。 */
+static float g_render_scale = 1.0f;
+
 static void blit_now(hn_rt *rt, hnp_window *w) {
+    /* 位图物理尺寸(= 逻辑 × scale; 1x 两者相同): blit 喂的是位图,
+       逻辑尺寸由平台侧的 NSImage 点尺寸表达(hnp_macos 的 HiDPI 口径)。 */
     const unsigned char *px = hn_rt_pixels(rt);
-    if (px) hnp_window_blit(w, px, hn_rt_width(rt), hn_rt_height(rt),
-                            (size_t)hn_rt_width(rt) * 4);
+    int bw = hn_rt_bitmap_width(rt), bh = hn_rt_bitmap_height(rt);
+    if (px && bw > 0 && bh > 0)
+        hnp_window_blit(w, px, bw, bh, (size_t)bw * 4);
 }
 
 /* ---------------- 媒体: 落盘前的确定性推进(--shot --advance MS) ---------------- */
@@ -164,6 +171,9 @@ static hn_rt *doc_reload(const char *path, int W, int H) {
     hn_rt_desc d = { "app", html, len, NULL, 0, W, H };
     hn_rt *rt = hn_rt_open(&d);
     free(html);
+    /* HiDPI: 新 rt 缺省 1x, 带上解析好的渲染缩放(hn_rt_set_scale 内部
+       立即按新缩放重出图) —— 热重载一帧都不退回 1x。 */
+    if (rt && g_render_scale != 1.0f) hn_rt_set_scale(rt, g_render_scale);
     return rt;
 }
 
@@ -322,6 +332,7 @@ int main(int argc, char **argv) {
     hn_media_platform_bind(rt);   /* 环境钮(静音/取消静音)在装载后施加 */
 
     if (probe) {
+        hn_rt_set_scale(rt, 1.0f);   /* 自检口径锚定 1x(与 HN_RENDER_SCALE 环境解耦) */
         printf("platform=%s cmds=%d w=%d h=%d media=%s\n",
                hnp_name(), hn_rt_cmd_count(rt), hn_rt_width(rt), hn_rt_height(rt),
                hn_media_platform_kind());
@@ -335,6 +346,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (shot) {
+        hn_rt_set_scale(rt, 1.0f);   /* --shot 恒 1x(探针确定性锚, 不随环境钮漂) */
         if (advance_ms > 0) advance_media(rt, advance_ms);
         int ok = hn_rt_shot(rt, argv[3]);
         printf("%s\n", ok ? "shot OK" : "shot 失败");
@@ -394,6 +406,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "窗口创建失败\n");
         hn_rt_close(rt); free(html);
         return 1;
+    }
+    /* ---- HiDPI(真窗 Retina 2x): 解析渲染缩放并落到 rt ----
+       HN_RENDER_SCALE=1|2 显式覆盖(探针/强制 1x 用), 缺省 = 平台 backing
+       scale(hnp_window_scale, Retina=2), 一律 cap 2.0。离屏/--shot 路径
+       不经过这里(上面已锚定 1x), 探针口径不破。hn_rt_set_scale 内部
+       立即按新缩放整幅重出图(文字 FreeType 2x 光栅)。 */
+    {
+        float rs = hnp_window_scale(w);
+        const char *e = getenv("HN_RENDER_SCALE");
+        if (e && *e) {
+            float v = (float)atof(e);
+            if (v >= 1.0f) rs = v;               /* 非法/0 → 平台 backing */
+        }
+        if (rs > 2.0f) rs = 2.0f;
+        if (rs < 1.0f) rs = 1.0f;
+        g_render_scale = rs;                     /* 热重载带进新 rt */
+        hn_rt_set_scale(rt, rs);
     }
     blit_now(rt, w);
 

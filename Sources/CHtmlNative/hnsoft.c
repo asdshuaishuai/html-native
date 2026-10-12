@@ -166,12 +166,15 @@ static float sd_rounded(float px, float py, float x, float y, float w, float h, 
    轴长口径 = CSS 渐变线长 |W·sinθ|+|H·cosθ|, 端点在中心 ± 轴长/2 ——
    盒沿轴向的极端点恰好落在渐变 0/1(此前多除一个 2, 两端只到 25%/75%)。
    与 cairo 后端 make_gradient 的轴端点定义逐式一致(两后端同口径)。
-   RECT 采样屏幕点, QUAD 采样**投影前的元素盒**角点 —— 同一条公式。 */
-static float grad_axis_t(const hn_cmd *c, float px, float py) {
+   RECT 采样屏幕点, QUAD 采样**投影前的元素盒**角点 —— 同一条公式。
+   scale = 绘制缩放(HiDPI): 盒中心/轴长随位图坐标同乘, 采到的点(px,py)
+   也已在物理像素域 —— 分子分母同倍率, 参数 t 与 1x 完全一致(scale=1.0
+   时乘 1.0 逐位不变, 既有探针的像素锚不动)。 */
+static float grad_axis_t(const hn_cmd *c, float px, float py, float scale) {
     float rad = c->grad_angle * 3.14159265f / 180.0f;
     float dx = sinf(rad), dy = -cosf(rad);
-    float cx = c->x + c->w * 0.5f, cy = c->y + c->h * 0.5f;
-    float half = fabsf(c->w * dx) + fabsf(c->h * dy);
+    float cx = (c->x + c->w * 0.5f) * scale, cy = (c->y + c->h * 0.5f) * scale;
+    float half = (fabsf(c->w * dx) + fabsf(c->h * dy)) * scale;
     float t = ((px - cx) * dx + (py - cy) * dy) / (half > 0 ? half : 1) + 0.5f;
     if (t < 0) t = 0; else if (t > 1) t = 1;
     return t;
@@ -181,23 +184,28 @@ static float grad_axis_t(const hn_cmd *c, float px, float py) {
    (gax0,gay0)→(gax1,gay1) 上的投影; grad_kind=2 radial = CSS
    createRadialGradient 双圆口径 —— 解 |P-(C0+t·ΔC)| = r0+t·Δr 取大根
    (|ΔC|≈|Δr| 时退化为线性, disc<0 = 锥外区按末 stop)。t 钳到 [0,1]。
-   与 hn_paint(ledger_grad_t)/hn_cairo(pattern 语义)同口径。 */
-static float grad_t_eval(const hn_cmd *c, float px, float py) {
+   与 hn_paint(ledger_grad_t)/hn_cairo(pattern 语义)同口径。
+   scale = 绘制缩放: 轴/圆端点先乘 scale 进物理像素域, 与采样点同域 ——
+   分子分母同倍率, t 不变(scale=1.0 逐位不变)。 */
+static float grad_t_eval(const hn_cmd *c, float px, float py, float scale) {
     if (c->grad_kind == 1) {
-        float dx = c->gax1 - c->gax0, dy = c->gay1 - c->gay0;
+        float ax0 = c->gax0 * scale, ay0 = c->gay0 * scale;
+        float dx = (c->gax1 - c->gax0) * scale, dy = (c->gay1 - c->gay0) * scale;
         float len2 = dx * dx + dy * dy;
         float t = len2 > 1e-6f
-                ? ((px - c->gax0) * dx + (py - c->gay0) * dy) / len2 : 0.0f;
+                ? ((px - ax0) * dx + (py - ay0) * dy) / len2 : 0.0f;
         if (t < 0) t = 0; else if (t > 1) t = 1;
         return t;
     }
     if (c->grad_kind == 2) {
-        float dx = c->gcx1 - c->gcx0, dy = c->gcy1 - c->gcy0;
-        float dr = c->gr1 - c->gr0;
-        float bx = px - c->gcx0, by = py - c->gcy0;
+        float cx0 = c->gcx0 * scale, cy0 = c->gcy0 * scale;
+        float dx = (c->gcx1 - c->gcx0) * scale, dy = (c->gcy1 - c->gcy0) * scale;
+        float dr = (c->gr1 - c->gr0) * scale;
+        float r0 = c->gr0 * scale;
+        float bx = px - cx0, by = py - cy0;
         float a = dx * dx + dy * dy - dr * dr;
-        float b = bx * dx + by * dy + c->gr0 * dr;
-        float cq = bx * bx + by * by - c->gr0 * c->gr0;
+        float b = bx * dx + by * dy + r0 * dr;
+        float cq = bx * bx + by * by - r0 * r0;
         float t;
         if (fabsf(a) < 1e-6f)
             t = fabsf(b) < 1e-6f ? 1.0f : cq / (2.0f * b);
@@ -212,7 +220,7 @@ static float grad_t_eval(const hn_cmd *c, float px, float py) {
         if (t < 0) t = 0; else if (t > 1) t = 1;
         return t;
     }
-    return grad_axis_t(c, px, py);      /* CSS 盒+角度模型(旧指令) */
+    return grad_axis_t(c, px, py, scale);      /* CSS 盒+角度模型(旧指令) */
 }
 
 /* 多 stop 分段线性插值(n>=2 用 stops 数组; 否则 from→to 两端 ——
@@ -249,17 +257,19 @@ static fcolor grad_color_at(const hn_cmd *c, float t) {
 }
 
 /* 单点取渐变色: 参数 t → 颜色(RECT/POLYGON 逐像素路径共用) */
-static fcolor grad_at(const hn_cmd *c, float px, float py) {
-    return grad_color_at(c, grad_t_eval(c, px, py));
+static fcolor grad_at(const hn_cmd *c, float px, float py, float scale) {
+    return grad_color_at(c, grad_t_eval(c, px, py, scale));
 }
 
 /* 面片渐变: 渐变画在**投影前的元素平面**上(cmd 的 x/y/w/h 装的正是投影前
    的元素盒, 见 hn_paint), 随面片一起被投影 —— 等效 CSS 的"渐变先画在
    元素上, 再整体 3D 变换"。角点 k 的渐变参数用 RECT 同一条 grad_axis_t
-   在局部盒坐标求出(角度/轴长口径与 RECT 逐式一致)。 */
-static float quad_grad_corner_t(const hn_cmd *c, int k) {
+   在局部盒坐标求出(角度/轴长口径与 RECT 逐式一致)。
+   scale: 采样点(元素盒角点)与盒中心/轴长同乘 —— 归一化参数 t 是
+   scale 不变量(HiDPI 下 3D 面片渐变与 1x 逐位同值)。 */
+static float quad_grad_corner_t(const hn_cmd *c, int k, float scale) {
     static const float fx[4] = { 0, 1, 1, 0 }, fy[4] = { 0, 0, 1, 1 };
-    return grad_axis_t(c, c->x + fx[k] * c->w, c->y + fy[k] * c->h);
+    return grad_axis_t(c, (c->x + fx[k] * c->w) * scale, (c->y + fy[k] * c->h) * scale, scale);
 }
 
 /* ---------------- 矩形(填充/渐变/描边) ---------------- */
@@ -284,7 +294,7 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
             if (cov <= 0) continue;
             if (cov > 1) cov = 1;
             fcolor col;
-            if (c->gradient || c->grad_kind) col = grad_at(c, fx, fy); else col = base;
+            if (c->gradient || c->grad_kind) col = grad_at(c, fx, fy, scale); else col = base;
             col.a *= cov;
             fb_blend(f, px, py, col);
             /* 描边: 内外 1px 环 */
@@ -343,7 +353,7 @@ static void paint_shadow(fb *f, const hn_cmd *c, float scale, float ox, float oy
    的重心权重插值渐变参数 t(颜色 = from→to 按 t 插值)。一般透视四边形
    不是仿射像, 两三角形在对角线处连续但有折角 —— 与 MESH 网格同一既定
    简化口径, 换来的是渐变轴随面片一起被投影(见 quad_grad_corner_t)。 */
-static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
+static void paint_quad(fb *f, const hn_cmd *c, float alpha, float scale) {
     fcolor col = unpack(c->fill);
     col.a *= alpha;
     fcolor gfrom, gto;
@@ -358,25 +368,29 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
     } else if (col.a <= 0.01f) {
         return;
     }
-    /* 角点渐变参数 + 两条三角形的重心分母(MESH 同款公式), 退化三角形跳过 */
+    /* 角点渐变参数 + 两条三角形的重心分母(MESH 同款公式), 退化三角形跳过。
+       scale(HiDPI): 投影后的角点在 paint 时乘 scale 进物理像素域 ——
+       3D 投影在引擎侧按逻辑 px 做, 均匀缩放与投影可交换, 语义是整幅放大。 */
     static const int TRI[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
+    float QX[4], QY[4];
+    for (int i = 0; i < 4; i++) { QX[i] = c->qx[i] * scale; QY[i] = c->qy[i] * scale; }
     float t4[4] = { 0, 0, 0, 0 };
     float den[2] = { 0, 0 };
     if (grad) {
-        for (int k = 0; k < 4; k++) t4[k] = quad_grad_corner_t(c, k);
+        for (int k = 0; k < 4; k++) t4[k] = quad_grad_corner_t(c, k, scale);
         for (int t = 0; t < 2; t++) {
             int a = TRI[t][0], b = TRI[t][1], d = TRI[t][2];
-            den[t] = (c->qy[b] - c->qy[d]) * (c->qx[a] - c->qx[d])
-                   + (c->qx[d] - c->qx[b]) * (c->qy[a] - c->qy[d]);
+            den[t] = (QY[b] - QY[d]) * (QX[a] - QX[d])
+                   + (QX[d] - QX[b]) * (QY[a] - QY[d]);
         }
     }
     /* 包围盒 */
-    float minx = c->qx[0], maxx = c->qx[0], miny = c->qy[0], maxy = c->qy[0];
+    float minx = QX[0], maxx = QX[0], miny = QY[0], maxy = QY[0];
     for (int i = 1; i < 4; i++) {
-        if (c->qx[i] < minx) minx = c->qx[i];
-        if (c->qx[i] > maxx) maxx = c->qx[i];
-        if (c->qy[i] < miny) miny = c->qy[i];
-        if (c->qy[i] > maxy) maxy = c->qy[i];
+        if (QX[i] < minx) minx = QX[i];
+        if (QX[i] > maxx) maxx = QX[i];
+        if (QY[i] < miny) miny = QY[i];
+        if (QY[i] > maxy) maxy = QY[i];
     }
     int y0 = (int)floorf(miny) - 1, y1 = (int)ceilf(maxy) + 1;
     for (int py = y0; py <= y1; py++) {
@@ -384,8 +398,8 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
         float xs[8];
         int nx = 0;
         for (int e = 0; e < 4; e++) {
-            float ax = c->qx[e], ay = c->qy[e];
-            float bx = c->qx[(e + 1) & 3], by = c->qy[(e + 1) & 3];
+            float ax = QX[e], ay = QY[e];
+            float bx = QX[(e + 1) & 3], by = QY[(e + 1) & 3];
             if ((ay <= fy && by > fy) || (by <= fy && ay > fy)) {
                 float t = (fy - ay) / (by - ay);
                 if (nx < 8) xs[nx++] = ax + t * (bx - ax);
@@ -414,9 +428,9 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
                 for (int ti = 0; ti < 2; ti++) {
                     if (fabsf(den[ti]) < 1e-6f) continue;
                     int a = TRI[ti][0], b = TRI[ti][1], d = TRI[ti][2];
-                    float x0c = c->qx[a], y0c = c->qy[a];
-                    float x1c = c->qx[b], y1c = c->qy[b];
-                    float x2c = c->qx[d], y2c = c->qy[d];
+                    float x0c = QX[a], y0c = QY[a];
+                    float x1c = QX[b], y1c = QY[b];
+                    float x2c = QX[d], y2c = QY[d];
                     float w0 = ((y1c - y2c) * (fx - x2c) + (x2c - x1c) * (fy - y2c)) / den[ti];
                     float w1 = ((y2c - y0c) * (fx - x2c) + (x0c - x2c) * (fy - y2c)) / den[ti];
                     float w2 = 1.0f - w0 - w1;
@@ -511,7 +525,7 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
                     if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
                     else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;
                     if (cov <= 0) continue;
-                    fcolor cc = grad ? grad_at(c, fx, fy) : fillc;
+                    fcolor cc = grad ? grad_at(c, fx, fy, scale) : fillc;
                     cc.a *= cov;
                     fb_blend(f, xx, s, cc);
                 }
@@ -573,12 +587,14 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
 
 /* ---------------- 网格变形贴图(重心坐标反查 UV) ---------------- */
 
-static void paint_mesh(fb *f, const hn_cmd *c, float alpha) {
+static void paint_mesh(fb *f, const hn_cmd *c, float alpha, float scale) {
     if (!c->mesh_verts || !c->mesh_uv || c->mesh_cols <= 0 || c->mesh_rows <= 0) return;
     int iw = 0, ih = 0;
     unsigned char *ipx = load_image_pixels(c->text ? c->text : "", &iw, &ih);
     float ga = (float)(c->fill & 0xFFu) / 255.0f * alpha;
     if (ga <= 0.004f) { if (ipx) free(ipx); return; }
+    /* scale(HiDPI): 网格顶点是屏幕坐标, paint 时乘 scale 进物理像素域;
+       UV 是归一化采样坐标, 与缩放无关 —— 源图照常采样, 只是落点更密。 */
     if (!ipx) {
         /* 无图像解码器: 画网格线示意, 让"网格变形"这层可见(而非静默空白) */
         int cols = c->mesh_cols, rows = c->mesh_rows;
@@ -586,8 +602,8 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha) {
         for (int r = 0; r <= rows; r++)
             for (int cc = 0; cc < cols; cc++) {
                 int i0 = r * (cols + 1) + cc, i1 = i0 + 1;
-                float x0 = c->mesh_verts[i0 * 2], y0 = c->mesh_verts[i0 * 2 + 1];
-                float x1 = c->mesh_verts[i1 * 2], y1 = c->mesh_verts[i1 * 2 + 1];
+                float x0 = c->mesh_verts[i0 * 2] * scale, y0 = c->mesh_verts[i0 * 2 + 1] * scale;
+                float x1 = c->mesh_verts[i1 * 2] * scale, y1 = c->mesh_verts[i1 * 2 + 1] * scale;
                 int ns = (int)(fabsf(x1 - x0) + fabsf(y1 - y0)) + 1;
                 if (ns > 400) ns = 400;
                 for (int s = 0; s <= ns; s++) {
@@ -598,8 +614,8 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha) {
         for (int cc = 0; cc <= cols; cc++)
             for (int r = 0; r < rows; r++) {
                 int i0 = r * (cols + 1) + cc, i1 = i0 + cols + 1;
-                float x0 = c->mesh_verts[i0 * 2], y0 = c->mesh_verts[i0 * 2 + 1];
-                float x1 = c->mesh_verts[i1 * 2], y1 = c->mesh_verts[i1 * 2 + 1];
+                float x0 = c->mesh_verts[i0 * 2] * scale, y0 = c->mesh_verts[i0 * 2 + 1] * scale;
+                float x1 = c->mesh_verts[i1 * 2] * scale, y1 = c->mesh_verts[i1 * 2 + 1] * scale;
                 int ns = (int)(fabsf(x1 - x0) + fabsf(y1 - y0)) + 1;
                 if (ns > 400) ns = 400;
                 for (int s = 0; s <= ns; s++) {
@@ -617,9 +633,9 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha) {
             int tri[2][3] = { { i00, i10, i01 }, { i10, i11, i01 } };
             for (int t = 0; t < 2; t++) {
                 int a = tri[t][0], b = tri[t][1], d = tri[t][2];
-                float x0 = c->mesh_verts[a * 2], y0 = c->mesh_verts[a * 2 + 1];
-                float x1 = c->mesh_verts[b * 2], y1 = c->mesh_verts[b * 2 + 1];
-                float x2 = c->mesh_verts[d * 2], y2 = c->mesh_verts[d * 2 + 1];
+                float x0 = c->mesh_verts[a * 2] * scale, y0 = c->mesh_verts[a * 2 + 1] * scale;
+                float x1 = c->mesh_verts[b * 2] * scale, y1 = c->mesh_verts[b * 2 + 1] * scale;
+                float x2 = c->mesh_verts[d * 2] * scale, y2 = c->mesh_verts[d * 2 + 1] * scale;
                 float u0 = c->mesh_uv[a * 2], v0 = c->mesh_uv[a * 2 + 1];
                 float u1 = c->mesh_uv[b * 2], v1 = c->mesh_uv[b * 2 + 1];
                 float u2 = c->mesh_uv[d * 2], v2 = c->mesh_uv[d * 2 + 1];
@@ -927,10 +943,11 @@ static void paint_bitmap(fb *f, const hn_cmd *c, float scale, float ox, float oy
 /* 局部清空(canvas clearRect 的矩形): 矩形内**就地回填渲染底色**
  * (SOURCE 语义, 不是 OVER —— 透明画布清出真透明)。裁剪栈照常生效:
  * 清空范围被钳在画布元素盒内。此前 clearRect 退化为全图清账, 局部
- * 清空会连矩形外的内容一起抹掉 —— 这里的就地回填才是正确口径。 */
-static void paint_clear_rect(fb *f, const hn_cmd *c) {
-    int x0 = (int)floorf(c->x), y0 = (int)floorf(c->y);
-    int x1 = (int)ceilf(c->x + c->w), y1 = (int)ceilf(c->y + c->h);
+ * 清空会连矩形外的内容一起抹掉 —— 这里的就地回填才是正确口径。
+ * scale(HiDPI): 矩形坐标随位图同乘。 */
+static void paint_clear_rect(fb *f, const hn_cmd *c, float scale) {
+    int x0 = (int)floorf(c->x * scale), y0 = (int)floorf(c->y * scale);
+    int x1 = (int)ceilf((c->x + c->w) * scale), y1 = (int)ceilf((c->y + c->h) * scale);
     fcolor b = unpack(f->bg);
     unsigned char br = (unsigned char)(b.r * 255.0f + 0.5f);
     unsigned char bg = (unsigned char)(b.g * 255.0f + 0.5f);
@@ -946,12 +963,15 @@ static void paint_clear_rect(fb *f, const hn_cmd *c) {
 
 /* ---------------- 主渲染 ---------------- */
 
-unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, hn_color bg) {
+unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int height,
+                                    hn_color bg, float scale) {
     /* cmds == NULL 且 count == 0 是**合法的空显示列表**(文档没有任何可见
        指令, 如只有空白 canvas 的页面): 仍要产出底色位图 —— 否则"首帧为空"
        的文档会被运行时判成渲染失败, <script> 驱动的页面(canvas 2D 账本)
        根本活不到脚本执行。 */
     if (!dl || width <= 0 || height <= 0) return NULL;
+    /* scale 缺省/非法按 1.0(hnsoft_render 的既有口径, 逐位一致) */
+    float rs = (scale >= 0.5f) ? scale : 1.0f;
     fb f;
     fb_init(&f, width, height, bg);
 
@@ -961,33 +981,35 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, h
         case HN_CMD_RECT:
             if (c->shadow) {
                 /* 有阴影先画阴影(在填充之下) */
-                paint_shadow(&f, c, 1.0f, 0, 0, 1.0f);
+                paint_shadow(&f, c, rs, 0, 0, 1.0f);
             }
-            paint_rect(&f, c, 1.0f, 0, 0, 1.0f);
+            paint_rect(&f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_TEXT:
-            paint_text(&f, c, 1.0f, 0, 0, 1.0f);
+            /* 文本: 字号 ×rs 后走 FreeType —— 真 2x 字形光栅, 不是拉伸 */
+            paint_text(&f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_IMAGE:
-            paint_image(&f, c, 1.0f, 0, 0, 1.0f);
+            paint_image(&f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_BITMAP:
-            paint_bitmap(&f, c, 1.0f, 0, 0, 1.0f);
+            paint_bitmap(&f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_CLEAR_RECT:
-            paint_clear_rect(&f, c);
+            paint_clear_rect(&f, c, rs);
             break;
         case HN_CMD_CLIP_PUSH:
-            fb_push_clip(&f, c->x, c->y, c->x + c->w, c->y + c->h, c->radius);
+            fb_push_clip(&f, c->x * rs, c->y * rs,
+                         (c->x + c->w) * rs, (c->y + c->h) * rs, c->radius * rs);
             break;
         case HN_CMD_QUAD:
-            paint_quad(&f, c, 1.0f);
+            paint_quad(&f, c, 1.0f, rs);
             break;
         case HN_CMD_POLYGON:
-            paint_polygon(&f, c, 1.0f, 0, 0, 1.0f);
+            paint_polygon(&f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_MESH:
-            paint_mesh(&f, c, 1.0f);
+            paint_mesh(&f, c, 1.0f, rs);
             break;
         case HN_CMD_CLIP_POP:
             fb_pop_clip(&f);
@@ -995,6 +1017,10 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, h
         }
     }
     return f.px;
+}
+
+unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, hn_color bg) {
+    return hnsoft_render_scaled(dl, width, height, bg, 1.0f);
 }
 
 /* ---------------- PNG 编码(存储型 deflate) ---------------- */

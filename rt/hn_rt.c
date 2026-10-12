@@ -37,6 +37,9 @@
 struct hn_rt {
     hn_context *ctx;
     int w, h;
+    float scale;                /* HiDPI 设备缩放(位图 = 逻辑 × scale; 布局/
+                                   命中/窗口表面恒逻辑 px; 缺省 1.0 —— 不设置
+                                   时离屏/shot 路径与旧版逐位一致) */
     int transparent;
     unsigned char *bgra;        /* 预乘 BGRA(平台 blit 的直接输入) */
     hn_node *hover;
@@ -606,14 +609,49 @@ static void run_load_actions(hn_rt *rt) {
 
 /* ---------------- 渲染 ---------------- */
 
-/* 光栅段(全路径/ambient 轻路径共用): 显示列表 → RGBA → 预乘 BGRA */
+/* 当前渲染缩放与位图物理尺寸(逻辑 × scale; 缺省/非法回落 1.0) */
+static float rt_scale(const hn_rt *rt) {
+    return (rt && rt->scale >= 0.5f) ? rt->scale : 1.0f;
+}
+static int rt_bitmap_w(const hn_rt *rt) {
+    if (!rt) return 0;
+    int v = (int)((float)rt->w * rt_scale(rt) + 0.5f);
+    return v > 0 ? v : 1;
+}
+static int rt_bitmap_h(const hn_rt *rt) {
+    if (!rt) return 0;
+    int v = (int)((float)rt->h * rt_scale(rt) + 0.5f);
+    return v > 0 ? v : 1;
+}
+
+/* HN_RENDER_TRACE=1: 渲染口径变化时打一行(与 [media] trace 同风格,
+   验收脚本观测点) —— [render] scale=2 bmp=720x720。首帧打一次, 之后只在
+   scale 变化(hn_rt_set_scale)时再打 —— 真窗壳"开窗 1x → 抬到 backing"
+   的两步各留一行, 探针 grep 末态。未设环境钮时零输出(读一次 getenv 即封口)。 */
+static void render_trace(int bw, int bh, float scale) {
+    static int inited = 0;
+    static float last_scale = -1.0f;
+    if (inited && scale == last_scale) return;
+    inited = 1;
+    last_scale = scale;
+    const char *e = getenv("HN_RENDER_TRACE");
+    if (!e || !*e || !strcmp(e, "0")) return;
+    printf("[render] scale=%g bmp=%dx%d\n", (double)scale, bw, bh);
+    fflush(stdout);
+}
+
+/* 光栅段(全路径/ambient 轻路径共用): 显示列表 → RGBA → 预乘 BGRA。
+   HiDPI: 位图按 (逻辑 × scale) 出图, 显示列表坐标在 paint 时乘 scale
+   (hnsoft_render_scaled), 文本随字号 ×scale 走 FreeType —— 真 2x 光栅。 */
 static int rt_raster(hn_rt *rt) {
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
+    float scale = rt_scale(rt);
+    int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);
     hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
-    unsigned char *rgba = hnsoft_render(dl, rt->w, rt->h, bg);
+    unsigned char *rgba = hnsoft_render_scaled(dl, bw, bh, bg, scale);
     if (!rgba) return 0;
-    int n = rt->w * rt->h;
+    int n = bw * bh;
     free(rt->bgra);
     rt->bgra = (unsigned char *)malloc((size_t)n * 4);
     if (!rt->bgra) { free(rgba); return 0; }
@@ -624,6 +662,7 @@ static int rt_raster(hn_rt *rt) {
         rt->bgra[i * 4] = b; rt->bgra[i * 4 + 1] = g; rt->bgra[i * 4 + 2] = r; rt->bgra[i * 4 + 3] = a;
     }
     free(rgba);
+    render_trace(bw, bh, scale);
     return 1;
 }
 
@@ -700,6 +739,7 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     snprintf(rt->id, sizeof(rt->id), "%s", d->id ? d->id : "default");
     rt->w = d->w > 0 ? d->w : 480;
     rt->h = d->h > 0 ? d->h : 700;
+    rt->scale = 1.0f;   /* HiDPI: 真窗壳开窗后经 hn_rt_set_scale 抬到 backing */
 
     hn_doc *doc = hn_parse_html(d->html, d->html_len);
     if (!doc) { free(rt); return NULL; }
@@ -1871,6 +1911,20 @@ const unsigned char *hn_rt_pixels(hn_rt *rt) { return rt ? rt->bgra : NULL; }
 int hn_rt_width(hn_rt *rt) { return rt ? rt->w : 0; }
 int hn_rt_height(hn_rt *rt) { return rt ? rt->h : 0; }
 
+/* ---- HiDPI(hn_rt.h 契约): 设缩放并立即重渲染; 位图尺寸访问器 ---- */
+void hn_rt_set_scale(hn_rt *rt, float scale) {
+    if (!rt) return;
+    float s = (scale >= 0.5f) ? scale : 1.0f;
+    if (s > 8.0f) s = 8.0f;              /* 防呆上限(调用方另 cap 2.0) */
+    if (rt->scale == s) return;          /* 同值幂等: 不做无谓重渲染 */
+    rt->scale = s;
+    rt_render(rt);                       /* 新缩放整幅重出图, 调用方直接 blit */
+}
+
+float hn_rt_scale(const hn_rt *rt) { return rt_scale(rt); }
+int hn_rt_bitmap_width(const hn_rt *rt) { return rt_bitmap_w(rt); }
+int hn_rt_bitmap_height(const hn_rt *rt) { return rt_bitmap_h(rt); }
+
 static double now_s(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -2167,15 +2221,22 @@ int hn_rt_synthetic(hn_rt *rt, const char *kind, const char *target) {
     return 0;
 }
 
+/* 渲染为 PNG 落盘(--shot / daemon shot op)。
+   口径: 跟随 rt 的渲染缩放 —— 缺省 1.0, 所以既有探针(hnapp --shot /
+   hncore render / pet_probe 等)的 360x360 确定性锚不变; 只有显式
+   hn_rt_set_scale(2) 的路径(真窗壳 / hidpi_probe 离屏单测)才出 2x PNG。 */
 int hn_rt_shot(hn_rt *rt, const char *path) {
     if (!rt || !path) return 0;
     rt_render(rt);
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
-    unsigned char *rgba = hnsoft_render(dl, rt->w, rt->h, rt->transparent ? 0x00000000u : 0x0B0E13FFu);
+    int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);
+    unsigned char *rgba = hnsoft_render_scaled(dl, bw, bh,
+                                               rt->transparent ? 0x00000000u : 0x0B0E13FFu,
+                                               rt_scale(rt));
     if (!rgba) return 0;
     size_t pn = 0;
-    unsigned char *png = hnsoft_encode_png(rgba, rt->w, rt->h, &pn);
+    unsigned char *png = hnsoft_encode_png(rgba, bw, bh, &pn);
     free(rgba);
     if (!png) return 0;
     FILE *f = fopen(path, "wb");

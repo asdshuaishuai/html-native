@@ -419,6 +419,9 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   见 `examples/pet.html`(hn-mesh 摆动立绘 + keyframes 错相气泡轮播 + 状态 dot),
   离屏取帧 `screenshots/pet.png`, 口径由 `tools/pet_probe.sh` 钉死(四角 alpha=0/
   headless 收下新字段/真窗口 3 秒冒烟)。
+  **HiDPI(Retina 2x)**: 真窗按平台 backing scale 渲染(位图 720x720 进 360x360
+  点视图, 文字 FreeType 2x 光栅), `HN_RENDER_SCALE=1|2` 可调(cap 2.0);
+  `--shot`/离屏探针恒 1x, 口径由 `tools/hidpi_probe.sh` 钉死。
 - **透明背景层**: 引擎剥离 `html/body` 底色 + 绘制后端的真逐像素 alpha
   (cairo 直通、hnsoft 非预乘 source-over) + 平台窗口透明背板。光栅层上的历史 bug 都在
   `tools/hnsoft_alpha_probe.c` 与 css 探针的端到端断言里守着:

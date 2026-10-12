@@ -267,7 +267,14 @@ void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int b
         (size_t)bw, (size_t)bh, 8, 32, stride, cs, 2u | 8192u, prov, NULL, 0, 0);
     if (!cg) return;
     obj_t nsimg = MSG0(obj_t, o_getClass("NSImage"), "alloc");
-    CGSize sz = { (double)bw, (double)bh };
+    /* HiDPI 口径(真窗 2x 渲染的关键一环): NSImage 的**点尺寸**取窗口内容区
+       逻辑尺寸, 位图像素照实(bw×bh 可为逻辑的 2 倍) —— AppKit 在 Retina 上
+       把 720x720 物理像素画进 360x360 点的视图 = 1:1 物理像素, 不经系统
+       放大(1x 屏 bw==w->w, 与旧版行为逐位一致)。拿不到逻辑尺寸时回退
+       位图尺寸(探针喂任意位图的防御)。 */
+    int lw = w->w > 0 ? w->w : bw;
+    int lh = w->h > 0 ? w->h : bh;
+    CGSize sz = { (double)lw, (double)lh };
     nsimg = ((obj_t (*)(obj_t, sel_t, CGImageRef, CGSize))o_msgSend)(
         nsimg, o_sel("initWithCGImage:size:"), cg, sz);
     MSG1(void, w->iv, "setImage:", nsimg);
@@ -304,6 +311,17 @@ int hnp_window_origin(hnp_window *w, int *x, int *y) {
     *x = hn_round_d(f.origin.x);
     *y = hn_round_d(hn_primary_screen_height() - f.origin.y - f.size.h);
     return 1;
+}
+
+/* 设备像素比: NSWindow.backingScaleFactor(10.7+; 返回 CGFloat=double,
+   arm64 走 d0 寄存器 —— 必须按 double 收, 按 float 收会读到垃圾)。
+   Retina = 2.0; 普通屏 = 1.0。NaN/异常值(<1)钳回 1.0 —— HiDPI 拿不到
+   就退 1x, 行为与旧版逐位一致(离屏/shot 的 1x 锚不依赖本函数)。 */
+float hnp_window_scale(hnp_window *w) {
+    if (!w || !w->win) return 1.0f;
+    double s = ((double (*)(obj_t, sel_t))o_msgSend)(w->win, o_sel("backingScaleFactor"));
+    if (!(s >= 1.0)) s = 1.0;   /* NaN/0/负 → 1x */
+    return (float)s;
 }
 
 static hnp_key mac_keycode_to_hnp(unsigned short kc) {

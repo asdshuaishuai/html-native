@@ -481,6 +481,13 @@ int hnp_window_origin(hnp_window *w, int *x, int *y) {
     return 1;
 }
 
+/* 设备像素比: X11 没有统一的 backing scale 概念(HiDPI 靠 Xft.dpi/缩放
+   由 WM/工具包各自为政), 恒 1.0 —— 位图与窗口像素 1:1, 语义不变。 */
+float hnp_window_scale(hnp_window *w) {
+    (void)w;
+    return 1.0f;
+}
+
 static hnp_key keysym_to_hnp(unsigned long ks) {
     switch (ks) {
     case 0xFF1B: return HNP_KEY_ESCAPE;

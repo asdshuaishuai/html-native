@@ -18,6 +18,18 @@
 unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height,
                              hn_color bg);
 
+/* 同上, 但带**绘制缩放** scale(HiDPI/Retina 2x 的光栅入口):
+ *   - width/height 是**位图物理尺寸**(调用方给 逻辑尺寸×scale);
+ *   - 显示列表坐标仍是逻辑 px, paint 时统一 ×scale 落到物理像素;
+ *   - 文本字号 ×scale 后走 FreeType 光栅 —— 真 2x 字形, 不是 1x 拉伸
+ *     (这是高清化的意义所在; 字形缓存按 (码点, 物理字号) 分键);
+ *   - 3D 投影面片(QUAD)/网格(MESH)/canvas 账本坐标同乘 scale, 语义是
+ *     整幅均匀放大, 与"布局恒逻辑 px"的正交关系不破。
+ * scale = 1.0 时与 hnsoft_render 逐位一致(既有探针的确定性锚不动)。
+ * hnsoft_render 即本函数 scale=1.0 的薄封装。 */
+unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int height,
+                                    hn_color bg, float scale);
+
 /* 把 RGBA 缓冲编码为 PNG(存储型 deflate, 无压缩但格式合法)。
  * 返回 malloc 的 PNG 数据, *out_len 写出长度; 失败返回 NULL。 */
 unsigned char *hnsoft_encode_png(const unsigned char *rgba, int w, int h,

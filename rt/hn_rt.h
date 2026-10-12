@@ -51,6 +51,26 @@ const unsigned char *hn_rt_pixels(hn_rt *rt);
 int hn_rt_width(hn_rt *rt);
 int hn_rt_height(hn_rt *rt);
 
+/* ---------------- HiDPI(真窗 Retina 2x 渲染) ----------------
+ * 尺寸语义保持两套: hn_rt_width/height 恒为**逻辑 px**(CSS px, 布局/
+ * 命中/窗口表面都用它); 位图物理尺寸 = 逻辑 × scale(blit/像素统计用
+ * bitmap_* 访问器)。缺省 scale = 1.0 —— 不设置时全链路与旧版逐位一致,
+ * 离屏/--shot 探针的 1x 确定性锚由此保住。 */
+
+/* 设置设备渲染缩放并**立即重渲染**(位图按新尺寸重出, 调用方直接 blit)。
+ * 文本随 scale 走 FreeType 光栅(真 2x 字形, 非 1x 拉伸)。scale < 0.5
+ * 按 1.0 处理; 建议取值 = hnp_window_scale()(cap 由调用方管)。
+ * 平台壳在开窗后调用一次(hn_app: HN_RENDER_SCALE 环境钮覆盖);
+ * 热重载新建 rt 后需重新设置(doc 路径已在 hn_app 内处理)。 */
+void hn_rt_set_scale(hn_rt *rt, float scale);
+
+/* 当前渲染缩放(缺省 1.0; 诊断/日志用) */
+float hn_rt_scale(const hn_rt *rt);
+
+/* 位图物理尺寸(hn_rt_pixels 的宽高 = 逻辑 × scale, 与 blit stride 配套) */
+int hn_rt_bitmap_width(const hn_rt *rt);
+int hn_rt_bitmap_height(const hn_rt *rt);
+
 /* ---------------- 帧步进(动画/轮询) ---------------- */
 
 /* 推进动画时钟并按需重渲染; 轮询到期触发 hx。

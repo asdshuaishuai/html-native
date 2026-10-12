@@ -75,6 +75,13 @@ int hnp_window_origin(hnp_window *w, int *x, int *y) {
     return 0;
 }
 
+/* 设备像素比: 无头平台没有屏, 恒 1.0(离屏/shot 的 1x 确定性口径不破;
+   HiDPI 只在真窗平台物化, 见 hn_platform.h 的 hnp_window_scale 注释)。 */
+float hnp_window_scale(hnp_window *w) {
+    (void)w;
+    return 1.0f;
+}
+
 int hnp_pump(hnp_event *ev, int timeout_ms) {
     if (!ev) return 0;
     ev->kind = HNP_EV_NONE;

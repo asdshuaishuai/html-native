@@ -139,6 +139,15 @@ void hnp_window_set_click_through(hnp_window *w, int on);
    让调用方整体跳过记忆。NULL 安全。 */
 int hnp_window_origin(hnp_window *w, int *x, int *y);
 
+/* 读窗口所在屏的设备像素比(backing scale; Retina = 2.0)。
+   HiDPI 渲染的查询口: 真窗壳用它把 hn_rt 的渲染缩放设成平台倍率
+   (hn_rt_set_scale), 位图按 (逻辑尺寸 × scale) 出图、文字按 ×scale 走
+   FreeType 光栅, blit 时平台按"视图尺寸=逻辑点、位图=物理像素"呈现 ——
+   Retina 上 1:1 物理像素, 文字/图形明显更锐。缺省(非 Retina/拿不到/
+   headless/Linux)返回 1.0 —— 全链路行为与 1x 完全一致。NULL 安全。
+   上限(caps)由调用方管(hn_app cap 2.0; 环境钮 HN_RENDER_SCALE 可覆盖)。 */
+float hnp_window_scale(hnp_window *w);
+
 /* ---------------- 事件 ---------------- */
 
 typedef enum {

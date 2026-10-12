@@ -30,6 +30,11 @@ fi
 
 HN_SOURCES=("$HN_TOOLS_DIR/media_probe.c" "$HN_REPO_ROOT/platform/hnp_media_macos.c")
 
+# hn_platform.h 在 platform/ 下(media_probe.c 引号包含, 不在源文件同目录)
+# —— 此前 HN_INCS 从未设置, 全新编译必撞 file not found, 只靠旧产物缓存
+# 蒙混; HiDPI 轮改动 hn_platform.h 使缓存失效后暴露, 这里补上编译口径。
+HN_INCS=(-I "$HN_REPO_ROOT/platform")
+
 hn_sources_check ${HN_SOURCES[@]+"${HN_SOURCES[@]}"} || exit 1
 
 # 参数二进制: 可执行且带探针 banner → 复用; 否则本机编译(带缓存)
