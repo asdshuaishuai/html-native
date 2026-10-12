@@ -129,6 +129,10 @@ int hnp_init(int argc, char **argv) {
     (void)argc; (void)argv;
     if (!dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW)) return 0;
     dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_NOW);
+    /* QuartzCore(CALayer/CATransaction): AppKit 依赖链里本就有, 显式装载
+       供视频图层段用(o_getClass("CATransaction") 的 flush 提交)。缺席不致命
+       —— 图层段对类缺失逐点优雅降级。 */
+    dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
     o_getClass = (obj_t (*)(const char *))dlsym(RTLD_DEFAULT, "objc_getClass");
     o_sel = (sel_t (*)(const char *))dlsym(RTLD_DEFAULT, "sel_registerName");
     o_msgSend = (obj_t (*)(obj_t, sel_t, ...))dlsym(RTLD_DEFAULT, "objc_msgSend");
@@ -146,7 +150,59 @@ const char *hnp_name(void) { return "macos"; }
 struct hnp_window {
     obj_t win, iv, img;
     int w, h, transparent;
+    int layered;   /* contentView 已 setWantsLayer:YES(视频图层挂载时置位) */
 };
+
+/* ---- 原生视频图层: 与媒体后端的对接口 + (win, id) → 子图层 表 ----
+ * (实现与坐标/提交细节见文件尾"原生视频图层"段; 表声明在此 ——
+ * hnp_window_close 的摘层清理要用。) */
+
+/* 媒体后端查询口(定义在 platform/hnp_media_macos.c)。**弱定义桩**:
+   本文件会被 pet_probe/hidpi_probe **单独**链接(不经 hnapp 目标, 无媒体
+   后端) —— 那里落空到本文件的弱桩(NULL/无操作), 图层 API 如实返回
+   "不支持", 探针照常编译运行; hnapp 目标里媒体后端的**强定义**覆盖弱桩,
+   图层查询直达注册表。(weak_import/弱引用声明在 ld64 静态链接下仍报
+   未定义, 实测; 弱定义+强定义覆盖是 Mach-O/ELF 通吃的口径。) */
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+void *hnp_media_player_for_src(const char *src) {
+    (void)src;
+    return NULL;
+}
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+void hnp_media_set_layer_mode(const char *src, int on) {
+    (void)src; (void)on;
+}
+
+/* 进程窗口数少(hn_app 一进程一窗), 定长表足够; 满表时 attach 返回 0
+   (该会话优雅退 CPU 逐帧)。lx..lh = 最近应用到图层的 frame(同帧跳过
+   setFrame + CA flush 的白耗)。 */
+#define HN_VL_CAP 8
+static struct {
+    hnp_window *win; char id[256]; obj_t layer;
+    float lx, ly, lw, lh;
+} g_vl[HN_VL_CAP];
+static int g_vl_n;
+static int g_vl_ready;   /* 首帧可呈现诊断已打过(进程一次) */
+
+static int vl_find(hnp_window *w, const char *id) {
+    for (int i = 0; i < g_vl_n; i++)
+        if (g_vl[i].win == w && strcmp(g_vl[i].id, id) == 0) return i;
+    return -1;
+}
+
+/* 诊断行开关(与引擎媒体 trace 同一环境钮; 记忆化) */
+static int vl_trace(void) {
+    static int t = -1;
+    if (t < 0) {
+        const char *e = getenv("HN_MEDIA_TRACE");
+        t = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return t;
+}
 
 /* 可打印字符的缓冲(单事件生命周期, 调用方在下次 pump 前消费) */
 static char g_utf8[8];
@@ -260,6 +316,17 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
 
 void hnp_window_close(hnp_window *w) {
     if (!w) return;
+    /* 该窗的视频图层先摘(图层强引用着 AVPlayer, 不摘会拖住已 close 的媒体);
+       同时撤帧早退标志 —— 否则比窗活得久的会话会陷入"无图层又无 CPU 帧" */
+    for (int i = 0; i < g_vl_n; i++) {
+        if (g_vl[i].win == w) {
+            if (g_vl[i].layer) MSG0(void, g_vl[i].layer, "release");
+            hnp_media_set_layer_mode(g_vl[i].id, 0);
+            g_vl[i] = g_vl[g_vl_n - 1];
+            g_vl_n--;
+            i--;
+        }
+    }
     if (w->img) MSG0(void, w->img, "release");
     if (w->win) { MSG0(void, w->win, "close"); MSG0(void, w->win, "release"); }
     free(w);
@@ -348,6 +415,136 @@ float hnp_window_scale(hnp_window *w) {
     double s = ((double (*)(obj_t, sel_t))o_msgSend)(w->win, o_sel("backingScaleFactor"));
     if (!(s >= 1.0)) s = 1.0;   /* NaN/0/负 → 1x */
     return (float)s;
+}
+
+/* ---------------- 原生视频图层(AVPlayerLayer GPU 合成直通) ----------------
+ * "GPU 分担渲染"第一击: 真窗 <video> 不再把解码帧拉回 CPU(NV12/BGRA→RGBA
+ * 转换 → HN_CMD_BITMAP 软件光栅), 而是 AVPlayer 解码、AVPlayerLayer 经系统
+ * 合成器(WindowServer)直接合成进窗口 —— 像素不过 CPU。
+ *
+ * 与媒体后端的对接(platform/hnp_media_macos.c): player 存在该文件的会话里,
+ * 经上方两个**弱定义查询口**拿(无媒体后端的链接里落空到弱桩)。
+ *
+ * 坐标口径: 调用方给引擎盒(逻辑 px, 左上原点); NSImageView 缺省不翻转
+ * (isFlipped=NO), 其 layer 的子层坐标系原点在左下 —— y 按内容区高度翻转。
+ * 提交时机: 本壳自管事件循环, CA 事务不随 runloop 自动 flush —— 每次图层
+ * 变更后显式 [CATransaction flush], 帧位置/播放画面立即上屏(真窗手动验收
+ * "拖动窗口/滚动页面盒子跟随"的确定性挂点)。 */
+
+/* CATransaction flush(QuartzCore; 类缺失时静默 —— 降级为依赖 runloop 提交) */
+static void vl_flush(void) {
+    obj_t cls = o_getClass("CATransaction");
+    if (cls) MSG0(void, cls, "flush");
+}
+
+/* 引擎盒(左上原点) → 图层 frame(左下原点): layer_y = H − (y + fh)。
+   尺寸非正的盒子直接跳过(元素还没布局/被布局成 0)。 */
+static void vl_apply_frame(obj_t layer, hnp_window *w,
+                           float x, float y, float fw, float fh) {
+    if (fw <= 0 || fh <= 0) return;
+    CGRect f = { { (double)x, (double)w->h - ((double)y + (double)fh) },
+                 { (double)fw, (double)fh } };
+    ((void (*)(obj_t, sel_t, CGRect))o_msgSend)(layer, o_sel("setFrame:"), f);
+}
+
+int hnp_video_layer_attach(hnp_window *w, const char *player_id,
+                           float x, float y, float fw, float fh) {
+    if (!w || !w->win || !w->iv || !player_id || !*player_id) return 0;
+    /* 弱符号缺席(本文件被探针单独链接、无媒体后端): 图层不支持 */
+    if (!hnp_media_player_for_src || !hnp_media_set_layer_mode) return 0;
+    obj_t player = hnp_media_player_for_src(player_id);
+    if (!player) return 0;   /* 会话未 open/open 失败: 保持 CPU/占位路径 */
+    obj_t pool = pool_push();
+    int ok = 0;
+    /* contentView 图层化(一次): AVPlayerLayer 必须挂在 CALayer 树上。
+       NSImageView 进 layer-backed 模式后 setImage: 的呈现走同一棵层树,
+       位图内容在自身 backing, 子层(AVPlayerLayer)叠加其上。 */
+    if (!w->layered) {
+        MSGI(void, w->iv, "setWantsLayer:", 1);
+        w->layered = 1;
+    }
+    obj_t root = MSG0(obj_t, w->iv, "layer");
+    if (root) {
+        int i = vl_find(w, player_id);
+        if (i < 0 && g_vl_n < HN_VL_CAP) {
+            /* AVPlayerLayer +layer(类方法, autoreleased)→ setPlayer → 挂树。
+               resize = "resize" 拉伸铺满: 与 CPU 路径的位图拉伸语义一致
+               (AVLayerVideoGravityResize; 缺省 aspect-fit 会信箱化, 观感
+               与引擎路径不同)。 */
+            obj_t cls = o_getClass("AVPlayerLayer");
+            obj_t lay = cls ? MSG0(obj_t, cls, "layer") : NULL;
+            if (lay) {
+                MSG1(void, lay, "setPlayer:", player);
+                MSG1(void, lay, "setVideoGravity:", nsstr("resize"));
+                MSG1(void, root, "addSublayer:", lay);
+                MSG0(void, lay, "retain");   /* 表持有, detach 时 release 配平 */
+                i = g_vl_n++;
+                g_vl[i].win = w;
+                snprintf(g_vl[i].id, sizeof(g_vl[i].id), "%s", player_id);
+                g_vl[i].layer = lay;
+            }
+        } else if (i >= 0) {
+            /* 已挂(热重载同 src 重开很常见): player 换血(旧会话已 close,
+               层里还引用着已释放的 AVPlayer —— 换成注册表里的新实例)。 */
+            MSG1(void, g_vl[i].layer, "setPlayer:", player);
+        }
+        if (i >= 0) {
+            vl_apply_frame(g_vl[i].layer, w, x, y, fw, fh);
+            g_vl[i].lx = x; g_vl[i].ly = y; g_vl[i].lw = fw; g_vl[i].lh = fh;
+            hnp_media_set_layer_mode(player_id, 1);   /* 帧不再外送(置早退) */
+            vl_flush();
+            if (vl_trace())
+                fprintf(stderr, "[video-layer] attach id=%s box=%.0f,%.0f %.0fx%.0f\n",
+                        player_id, (double)x, (double)y, (double)fw, (double)fh);
+            ok = 1;
+        }
+    }
+    pool_pop(pool);
+    return ok;
+}
+
+void hnp_video_layer_frame(hnp_window *w, const char *player_id,
+                           float x, float y, float fw, float fh) {
+    if (!w || !player_id) return;
+    int i = vl_find(w, player_id);
+    if (i < 0) return;   /* 未 attach 过: 静默(调用方时序差异的防御) */
+    /* 内容就绪诊断(一次性): AVPlayerLayer.isReadyForDisplay=YES = 第一帧
+       视频已可呈现(图层上真的有画面 —— 无截屏权限环境下的验收代理信号)。
+       就绪前每拍读一次(便宜的布尔查询), 翻 YES 后永久停。 */
+    if (!g_vl_ready) {
+        signed char ready = ((signed char (*)(obj_t, sel_t))o_msgSend)(
+            g_vl[i].layer, o_sel("isReadyForDisplay"));
+        if (ready && vl_trace()) {
+            g_vl_ready = 1;
+            fprintf(stderr, "[video-layer] ready id=%s(首帧可呈现)\n", player_id);
+        } else if (ready) {
+            g_vl_ready = 1;
+        }
+    }
+    /* 同帧跳过: 盒没变就不动图层(setFrame + CA flush 每拍白打 60 次是
+       纯浪费; 未变时画面由系统合成器自行推进) */
+    if (g_vl[i].lx == x && g_vl[i].ly == y && g_vl[i].lw == fw && g_vl[i].lh == fh)
+        return;
+    g_vl[i].lx = x; g_vl[i].ly = y; g_vl[i].lw = fw; g_vl[i].lh = fh;
+    obj_t pool = pool_push();
+    vl_apply_frame(g_vl[i].layer, w, x, y, fw, fh);
+    vl_flush();
+    pool_pop(pool);
+}
+
+void hnp_video_layer_detach(hnp_window *w, const char *player_id) {
+    if (!w || !player_id) return;
+    int i = vl_find(w, player_id);
+    if (i < 0) return;   /* 幂等 */
+    obj_t pool = pool_push();
+    MSG0(void, g_vl[i].layer, "removeFromSuperlayer");
+    MSG0(void, g_vl[i].layer, "release");
+    /* 撤早退标志(会话还在 → CPU 拉帧路径恢复; 已 close → 查表无果, 无妨) */
+    if (hnp_media_set_layer_mode) hnp_media_set_layer_mode(player_id, 0);
+    g_vl[i] = g_vl[g_vl_n - 1];
+    g_vl_n--;
+    vl_flush();
+    pool_pop(pool);
 }
 
 static hnp_key mac_keycode_to_hnp(unsigned short kc) {

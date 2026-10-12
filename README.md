@@ -644,6 +644,17 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   (梯度帧假时钟); 平台宿主缺席或单文件 open 失败时降级为 poster/深底占位
   (hn_paint 占位 RECT, 不静默空白)。窗口内 `m` 键切媒体静音;
   `HN_MEDIA_TRACE=1` 打会话状态行, 验收见 `tools/media_window_probe.sh`。
+  **视频双呈现路径(GPU 分担渲染第一击)**: 真窗模式下 `<video>` 缺省走
+  **AVPlayerLayer 原生图层直通** —— `hnp_video_layer_attach/frame/detach`
+  (`platform/hnp_macos.c`)把 AVPlayerLayer 挂进窗口图层树, 解码帧由系统
+  合成器直接合成, **像素不过 CPU**(CPU 逐帧路径的解码拷贝+NV12→RGBA
+  转换+软件光栅整链归零, 真窗 10s CPU 从 ~34% 降到个位数~低两位数;
+  `HN_MEDIA_LAYER=0` 退回 CPU 逐帧)。图层模式下帧不进 `HN_CMD_BITMAP`,
+  引擎照常画占位 RECT 被原生图层盖住; 元素盒(布局/滚动/resize)由壳每拍
+  同步给图层, 热重载/关闭即 detach。**离屏 = CPU 拉帧**: `--shot`/
+  `--advance` 探针路径不经图层(确定性口径不破), 合成宿主/`hncore` 同旧。
+  验收: `media_window_probe.sh`(图层模式 CPU<60% + 截图帧差视觉证据 +
+  回退档对照)。
 - **WASM 运行时(wasm3, 纯计算导出)**: 内嵌 **wasm3**(MIT, vendor 快照最小
   11 源 + LICENSE, `-std=c99` 零警告零外部依赖, 三平台无条件编入)。引擎封装
   `hn_wasm_load/call/free` + 实例表 `hn_wasm_install/by_id/unload`(id 1..32);

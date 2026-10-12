@@ -9,6 +9,12 @@
  * AVPlayerItemVideoOutput 拉取 CVPixelBuffer, 本文件做 NV12→RGBA 转换后
  * 拷给调用方。
  *
+ * 原生视频图层(真窗 GPU 合成, hn_media_platform/hn_app 接线): open/close
+ * 维护 src→player 注册表, hnp_video_layer_*(实现在 hnp_macos.c, 本文件的
+ * 会话私有成员经 hnp_media_player_for_src / set_layer_mode / layer_mode
+ * 三个最小查询口暴露)把 AVPlayerLayer 挂进窗口图层树 —— 图层模式下
+ * hnp_media_frame 早退, CPU 拉帧/转换整链归零(见 layer_mode 字段注释)。
+ *
  * 实机验证过的坑(docs/media-design.md §10, 实现逐条照办, 别再踩):
  *  1) dlsym 必须用 RTLD_DEFAULT(= (void*)-2), 不是 NULL(macOS 上
  *     dlsym(NULL,…) 恒失败);
@@ -173,9 +179,65 @@ struct hnp_media {
     int last_w, last_h, has_dims;  /* 最近一帧尺寸(frame 返回 0 时仍须写出) */
     double stall_pos;              /* 卡死自愈: 上一次 position 采样值 */
     int stall_cnt;                 /* 同值连续采样计数(playing 态专用) */
+    int layer_mode;                /* 1 = 原生 AVPlayerLayer 直出(帧不再外送,
+                                      hnp_media_frame 早退 —— CPU 拉帧/转换归零) */
 };
 
 int hnp_media_supported(void) { return 1; }
+
+/* ---- src → 会话注册表(原生视频图层的查询口) ----
+   open 成功登记(url 原串为键 —— 引擎会话传给 open 的 src 与 <video src>
+   属性同串, app 侧 walk 即可用属性值寻到同一 player), close 摘除。
+   容量 16(页面同时可播的视频数; 满则新开不入表 —— 图层模式对该会话
+   优雅退 CPU 逐帧, 行为与 HN_MEDIA_LAYER=0 一致)。单线程使用。 */
+#define HN_MEDIA_REG_CAP 16
+static struct { char *src; hnp_media *m; } g_reg[HN_MEDIA_REG_CAP];
+static int g_reg_n;
+
+static void reg_add(const char *url, hnp_media *m) {
+    if (g_reg_n >= HN_MEDIA_REG_CAP) return;
+    size_t n = strlen(url);
+    char *cp = (char *)malloc(n + 1);
+    if (!cp) return;
+    memcpy(cp, url, n + 1);
+    g_reg[g_reg_n].src = cp;
+    g_reg[g_reg_n].m = m;
+    g_reg_n++;
+}
+
+static void reg_del(const hnp_media *m) {
+    for (int i = 0; i < g_reg_n; i++) {
+        if (g_reg[i].m == m) {
+            free(g_reg[i].src);
+            g_reg[i] = g_reg[g_reg_n - 1];
+            g_reg_n--;
+            i--;
+        }
+    }
+}
+
+/* 查注册表返回该 src 的 AVPlayer(未登记/open 失败/已 close 返回 NULL)。
+   消费方: hnp_macos.c 的 hnp_video_layer_attach(原生图层直通挂载)。 */
+void *hnp_media_player_for_src(const char *src) {
+    if (!src || !*src) return NULL;
+    for (int i = 0; i < g_reg_n; i++)
+        if (strcmp(g_reg[i].src, src) == 0) return g_reg[i].m->player;
+    return NULL;
+}
+
+/* 按 src 置/清图层模式(attach 置 1 / detach 清 0)。未知 src 静默忽略
+   (会话可能已被 close —— 热重载顺序里注册表摘除先于图层摘除)。 */
+void hnp_media_set_layer_mode(const char *src, int on) {
+    if (!src || !*src) return;
+    for (int i = 0; i < g_reg_n; i++)
+        if (strcmp(g_reg[i].src, src) == 0) { g_reg[i].m->layer_mode = on ? 1 : 0; return; }
+}
+
+/* 该会话是否图层直出(pf_frame 的早退问询; 帧不外送 → CPU 链归零) */
+int hnp_media_layer_mode(const void *m) {
+    const hnp_media *s = (const hnp_media *)m;
+    return s ? s->layer_mode : 0;
+}
 
 hnp_media *hnp_media_open(const char *url, char *err, size_t err_cap) {
     if (err && err_cap) err[0] = '\0';
@@ -241,11 +303,13 @@ hnp_media *hnp_media_open(const char *url, char *err, size_t err_cap) {
     MSG0(void, player, "retain");  /* playerWithURL: 便利构造是 autoreleased,
                                       自己 +1(池已 drain), close 时 release 配平 */
     m->player = player; m->item = item; m->output = out;
+    reg_add(url, m);   /* 图层模式查询口(见 g_reg 注释); 满表时静默不入 */
     return m;
 }
 
 void hnp_media_close(hnp_media *m) {
     if (!m) return;   /* 幂等; NULL 安全 */
+    reg_del(m);       /* 图层注册表先摘(app 侧下一拍 walk 即 detach 图层) */
     if (g_once > 0 && m->player) {
         obj_t pool = ns_alloc_init(o_getClass("NSAutoreleasePool"));
         MSG0(void, m->player, "pause");
@@ -509,6 +573,13 @@ int hnp_media_frame(hnp_media *m, unsigned char *rgba, size_t cap,
     if (h) *h = 0;
     if (pts_sec) *pts_sec = 0.0;
     if (!m || !m->player || !m->output || g_once <= 0) return -1;
+    if (m->layer_mode) {
+        /* 图层直出: 像素由 AVPlayerLayer 经系统合成器上屏, CPU 拉帧/
+           NV12→RGBA 转换整链跳过(连 media_pump 都不跑 —— 真窗 runloop
+           由事件泵与 position 的既有节拍兜着)。-1 = 无帧, 引擎照常对
+           该元素画占位 RECT(被图层盖住, 视觉无感)。 */
+        return -1;
+    }
     media_pump();
     CMTime t = ((CMTime (*)(obj_t, sel_t))o_msgSend)(m->player, o_sel("currentTime"));
     int has = ((int (*)(obj_t, sel_t, CMTime))o_msgSend)(

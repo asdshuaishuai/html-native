@@ -584,3 +584,19 @@ void hnp_set_cursor(hnp_window *w, hnp_cursor c) { (void)w; (void)c; /* M1: 未�
    本平台路径对媒体零符号依赖(不走 hn_platform.h 里的 static inline
    兜底: 那会把真实实现静默遮蔽成 0, 属于坑)。 */
 int hnp_media_supported(void) { return 0; }
+
+/* 原生视频图层: Linux 无媒体实现(也就没有 player 可挂), 且 X11 合成路径
+   本轮不做 —— 空实现, attach 返回 0 = 不支持, app 侧保持 CPU 逐帧路径
+   (与媒体 ABI 的"声明照常通过, 物化看平台"同一口径)。 */
+int hnp_video_layer_attach(hnp_window *w, const char *player_id,
+                           float x, float y, float fw, float fh) {
+    (void)w; (void)player_id; (void)x; (void)y; (void)fw; (void)fh;
+    return 0;
+}
+void hnp_video_layer_frame(hnp_window *w, const char *player_id,
+                           float x, float y, float fw, float fh) {
+    (void)w; (void)player_id; (void)x; (void)y; (void)fw; (void)fh;
+}
+void hnp_video_layer_detach(hnp_window *w, const char *player_id) {
+    (void)w; (void)player_id;
+}

@@ -254,6 +254,28 @@ int  hnp_media_state(hnp_media *m, int *ready, int *ended);
 int  hnp_media_frame(hnp_media *m, unsigned char *rgba, size_t cap,
                      int *w, int *h, double *pts_sec);
 
+/* ---------------- 原生视频图层(GPU 合成直通) ----------------
+ * 真窗模式下 <video> 的第二呈现路径: 引擎帧不再走 "NV12/BGRA 解码拷贝 →
+ * RGBA 转换 → HN_CMD_BITMAP 软件光栅", 而是 AVPlayer 解码后由系统合成器
+ * (WindowServer)把 AVPlayerLayer 直接合成进窗口 —— 像素不过 CPU。
+ * 语义(与窗口表面同参照系):
+ *   - player_id: 媒体 src(与 hnp_media_open 收到的 url 同串; 平台侧以
+ *     open/close 维护 src→player 注册表, attach 时查到才有图层);
+ *   - x/y/fw/fh: 元素盒的**逻辑点坐标**(CSS px, 左上原点, y 向下 ——
+ *     与引擎显示列表/命中测试同口径), 平台内部自行翻到 AppKit 坐标;
+ *   - 图层添加为 contentView layer 的 sublayer, 层级在位图图层之上。
+ * 返回: attach 1 = 图层已挂(调用方此后每帧调 frame 同步盒位置/尺寸,
+ *   会话关闭/元素消失时调 detach); 0 = 本平台不支持或该 src 没有 player
+ *   (调用方保持 CPU 逐帧路径, 优雅降级)。frame/detach 幂等, NULL 安全。
+ * 非 macOS 平台为空实现(声明照常通过, 物化看平台 —— 与媒体 ABI 同一口径)。 */
+int  hnp_video_layer_attach(hnp_window *w, const char *player_id,
+                            float x, float y, float fw, float fh);
+/* 每帧同步元素盒(布局/滚动/resize 后跟随)。未 attach 过的 id 静默忽略。 */
+void hnp_video_layer_frame(hnp_window *w, const char *player_id,
+                           float x, float y, float fw, float fh);
+/* 摘除图层(元素关闭/热重载换文档/回退 CPU 模式)。 */
+void hnp_video_layer_detach(hnp_window *w, const char *player_id);
+
 #ifdef __cplusplus
 }
 #endif

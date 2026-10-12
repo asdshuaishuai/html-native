@@ -64,6 +64,12 @@ static char *read_all(const char *path, size_t *len) {
    cap 2.0)。热重载整文档换装时带进新 rt —— 否则重载一帧退回 1x。 */
 static float g_render_scale = 1.0f;
 
+/* 真窗视频图层同步(app/hn_media_platform.c 提供; 原型就地声明 —— 壳头
+   文件本轮不动)。每拍把"会话已开"的 <video> 盒同步给原生 AVPlayerLayer
+   (GPU 合成直通, CPU 拉帧归零); 仅真窗主循环调用 —— --shot/--advance
+   离屏自检不经过这里, 探针确定性口径不破。HN_MEDIA_LAYER=0 退回 CPU。 */
+void hn_media_platform_video_layers(hnp_window *w, hn_rt *rt);
+
 static void blit_now(hn_rt *rt, hnp_window *w) {
     /* 位图物理尺寸(= 逻辑 × scale; 1x 两者相同): blit 喂的是位图,
        逻辑尺寸由平台侧的 NSImage 点尺寸表达(hnp_macos 的 HiDPI 口径)。 */
@@ -388,7 +394,9 @@ int main(int argc, char **argv) {
         if (ct && *ct) wd.click_through = atoi(ct) ? 1 : 0;
     }
     /* ---- 几何记忆读回(必须赶在开窗前 —— 位置随 desc 进开窗调用) ----
-       manifest 显式 @x,y 时作者声明优先; 否则读回上次会话的摆放。
+       manifest 显式 @x,y 时作者声明优先(此前只拿它挡记忆、从未赋给
+       wd.x/wd.y —— 多屏机器上窗口落到"键盘焦点屏"的居中点, 随机漂;
+       现已按声明落位); 否则读回上次会话的摆放。
        只有 w/h 记进文件备查: 开窗尺寸仍按 manifest/CLI 口径(daemon 每次
        都显式传 W H, 记忆尺寸不掺和)。 */
     {
@@ -396,7 +404,10 @@ int main(int argc, char **argv) {
         geo_stem(base, stem, sizeof(stem));
         geo_path(stem, gpath, sizeof(gpath));
         geo_rect mem;
-        if (man.x == 0 && man.y == 0 && geo_load(gpath, &mem)) {
+        if (man.x != 0 || man.y != 0) {
+            wd.x = (int)man.x;
+            wd.y = (int)man.y;
+        } else if (geo_load(gpath, &mem)) {
             wd.x = mem.x;
             wd.y = mem.y;
         }
@@ -558,6 +569,10 @@ int main(int argc, char **argv) {
         int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
         if (repaint) blit_now(rt, w);
+        /* ---- 视频图层同步(真窗 GPU 合成): <video> 盒跟随布局/滚动/resize,
+           首拍 attach(此后该会话 pf_frame 早退, CPU 拉帧归零), 元素消失/
+           热重载换文档时 detach。离屏路径(--shot/--advance)不到这里。 ---- */
+        hn_media_platform_video_layers(w, rt);
         /* ---- 几何记忆: ~2s 轮询 origin; 变了 → 滑动 debounce 2s 后落盘 ----
            拖动中不断顺延(停手 2s 才写, 一场拖动最多落一次盘);
            SIGTERM/正常关闭走出口处的补写, 不等 debounce。 */

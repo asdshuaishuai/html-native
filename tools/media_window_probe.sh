@@ -16,8 +16,16 @@
 #      不崩(open 失败 → IDLE + 占位 RECT + stderr 一行, 不静默空白)。
 #   ⑦⑧⑨ 2026-10 事故硬断言(RSS 有界 / CPU 有界 / 非绿屏):
 #      真窗播 10s 的 RSS 差 < 300MB(事故②逐帧泄漏 22MB/s → 24.5GB 假死)、
-#      10s CPU 平均 < 250%(事故期 800%, 内存压缩抖动连带)、--shot 解码帧
-#      video 盒饱和纯绿占比 < 30%(事故①NV12 色度行距推错的雪花指纹)。
+#      真窗**图层模式**(AVPlayerLayer GPU 合成, 缺省)播 10s CPU 平均 < 60%
+#      (CPU 逐帧路径实测 ~34% 全在解码拷贝+转换+软光栅; 图层直通后像素
+#      不过 CPU, 应降到个位数~低两位数)、⑧b 对照档 HN_MEDIA_LAYER=0(CPU
+#      逐帧回退路径)< 250%(旧口径, 回退路径不锈)、--shot 解码帧 video 盒
+#      饱和纯绿占比 < 30%(事故①NV12 色度行距推错的雪花指纹)。
+#   ⑪ GPU 合成视觉证据: 真窗图层模式播 <video>, CGWindowList 按属主 PID
+#      定位窗口 → screencapture 截屏两帧(间隔 1s)→ video 盒区域帧差断言
+#      (>50% 采样像素不同 = 图层合成下画面仍在动); 同时 trace 行
+#      带 layer 尾标、无 [media-pb](CPU 帧转换痕迹)—— 双证据钉死"真的走
+#      了 GPU 合成, 不是悄悄退回 CPU"。
 #   ⑩ 收口自查: 无 hnapp 孤儿残留。
 #
 # 用法: bash tools/media_window_probe.sh [dist_dir]
@@ -190,6 +198,9 @@ int main(int argc, char **argv) {
     unsigned char *A = load(argv[1], &wa, &ha), *B = load(argv[2], &wb, &hb);
     if (!A || !B || wa != wb || ha != hb) { fprintf(stderr, "load/size mismatch\n"); return 2; }
     int x0 = atoi(argv[3]), y0 = atoi(argv[4]), x1 = atoi(argv[5]), y1 = atoi(argv[6]);
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;   /* 负坐标(窗在主屏之外)钳 0 防 OOB */
+    if (x1 > wa) x1 = wa; if (y1 > ha) y1 = ha;
+    if (x1 <= x0 || y1 <= y0) { fprintf(stderr, "empty rect\n"); return 2; }
     long diff = 0, tot = 0;
     for (int y = y0; y < y1 && y < ha; y += 4)
         for (int x = x0; x < x1 && x < wa; x += 4) {
@@ -270,40 +281,67 @@ fi
 # 2026-10 事故②: 真窗 media-demo 逐帧泄 CA 背衬(壳主循环无 autorelease
 # 池), 22MB/s → 24.5GB 假死。修后 RSS 必须有界: 起播稳定后(2s)与 12s 各
 # 采一次, 差 < 300MB(10s × 旧泄漏率 22MB/s = 220MB, 有界口径取 300MB)。
-# ---------- ⑧ 事故硬断言⑤: CPU 有界(同窗口 10s 平均 < 250%) ----------
-# AVFoundation 解码线程的合法占用留量到 250%; 事故期的 800% 来自内存
-# 压缩抖动(24.5GB 连带), 泄漏修掉后实测 ~30%。
+# ---------- ⑧ CPU 收紧: 真窗**图层模式**(GPU 合成, 缺省)10s 平均 < 60% ----------
+# CPU 逐帧路径实测 ~34%(AVFoundation 解码拷贝 + NV12/BGRA→RGBA 转换 +
+# 软件光栅重画); AVPlayerLayer 直通后像素不过 CPU, 应降到个位数~低两位数。
+# ---------- ⑧b 对照档: HN_MEDIA_LAYER=0(CPU 逐帧回退)10s < 250% ----------
+# 旧口径保底 —— 回退路径不能因图层模式引入而锈掉; 同时验 trace 无 layer
+# 尾标、[media-pb] 在场(CPU 帧转换痕迹 = 真的还在走 CPU)。
 if [ -x "$HN_APP" ]; then
-    LOG="$SBX/bounded-win.log"
-    (cd "$ROOT/examples" && exec env HN_MEDIA_TRACE=1 HN_MEDIA_MUTE=1 "$HN_APP" media-demo.html 520 820) >"$LOG" 2>&1 &
-    WPID=$!
-    sleep 2
-    R0=$(ps -o rss= -p "$WPID" 2>/dev/null | tr -d ' ')
-    C0=$(ps -o cputime= -p "$WPID" 2>/dev/null | tr -d ' ')
-    sleep 10
-    R1=$(ps -o rss= -p "$WPID" 2>/dev/null | tr -d ' ')
-    C1=$(ps -o cputime= -p "$WPID" 2>/dev/null | tr -d ' ')
-    ALIVE=0
-    kill -0 "$WPID" 2>/dev/null && ALIVE=1
-    kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null; WPID=""
-    if [ -n "$R0" ] && [ -n "$R1" ] && [ "$ALIVE" = "1" ]; then
-        DRSS=$((R1 - R0))
-        [ "$DRSS" -lt 0 ] && DRSS=0   # 回落不算增长
+    cpu_sample() { # cpu_sample <log> <env...> — 起真窗 12s, 打 "RSS差 CPU均值"
+        local log="$1"; shift
+        (cd "$ROOT/examples" && exec env HN_MEDIA_TRACE=1 HN_MEDIA_MUTE=1 "$@" \
+            "$HN_APP" media-demo.html 520 820) >"$log" 2>&1 &
+        WPID=$!
+        sleep 2
+        local r0 c0 r1 c1 alive=0
+        r0=$(ps -o rss= -p "$WPID" 2>/dev/null | tr -d ' ')
+        c0=$(ps -o cputime= -p "$WPID" 2>/dev/null | tr -d ' ')
+        sleep 10
+        r1=$(ps -o rss= -p "$WPID" 2>/dev/null | tr -d ' ')
+        c1=$(ps -o cputime= -p "$WPID" 2>/dev/null | tr -d ' ')
+        kill -0 "$WPID" 2>/dev/null && alive=1
+        kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null; WPID=""
+        [ "$alive" = "1" ] || { echo "DEAD - -"; return; }
+        local drss=0
+        if [ -n "$r0" ] && [ -n "$r1" ]; then
+            drss=$((r1 - r0)); [ "$drss" -lt 0 ] && drss=0
+        fi
+        awk -v a="$c0" -v b="$c1" -v d="$drss" 'BEGIN {
+            split(a, x, ":"); split(b, y, ":")
+            s0 = x[1]*60 + x[2]; s1 = y[1]*60 + y[2]
+            printf "%.3f %d\n", (s1 - s0) / 10.0, d
+        }'
+    }
+    CPU_L=$(cpu_sample "$SBX/bounded-win.log")            # 图层模式(缺省)
+    CPU_C=$(cpu_sample "$SBX/cpu-win.log" HN_MEDIA_LAYER=0)  # CPU 对照档
+    CL=$(printf '%s' "$CPU_L" | awk '{print $1}')
+    DRSS=$(printf '%s' "$CPU_L" | awk '{print $2}')
+    CC=$(printf '%s' "$CPU_C" | awk '{print $1}')
+    if [ "$CL" != "" ] && [ "$CL" != "DEAD" ]; then
         [ "$DRSS" -lt 307200 ] && CK_RSS=1 || CK_RSS=0
         ck "⑦ 真窗播 10s RSS 有界(Δ=$((DRSS / 1024))MB < 300MB)" "$CK_RSS"
+        ck "⑧ 图层模式 10s CPU 平均 <60%(实测 ${CL} cores; CPU 档 ${CC})" \
+           "$(awk -v c="$CL" 'BEGIN { print (c < 0.6) ? 1 : 0 }')"
     else
         ck "⑦ 真窗播 10s RSS 有界(采样失败)" 0
+        ck "⑧ 图层模式 10s CPU 平均 <60%(采样失败)" 0
     fi
-    if [ -n "$C0" ] && [ -n "$C1" ] && [ "$ALIVE" = "1" ]; then
-        SEC0=$(awk -F: -v s="$C0" 'BEGIN { split(s, a, ":"); printf "%.3f", a[1]*60 + a[2] }')
-        SEC1=$(awk -F: -v s="$C1" 'BEGIN { split(s, a, ":"); printf "%.3f", a[1]*60 + a[2] }')
-        ck "⑧ 真窗播 10s CPU 平均 <250% | core0=$C0 core10=$C1" \
-           "$(awk -v a="$SEC0" -v b="$SEC1" 'BEGIN { print ((b - a) / 10.0 < 2.5) ? 1 : 0 }')"
+    if [ "$CC" != "" ] && [ "$CC" != "DEAD" ]; then
+        ck "⑧b CPU 回退档(HN_MEDIA_LAYER=0)10s CPU <250%(实测 ${CC})" \
+           "$(awk -v c="$CC" 'BEGIN { print (c < 2.5) ? 1 : 0 }')"
+        # 回退路径行为钉死: trace 无 layer 尾标 + [media-pb] 在场(CPU 转换痕迹)
+        grep -q " layer$" "$SBX/cpu-win.log" \
+            && ck "⑧b 回退档 trace 无 layer 尾标" 0 \
+            || ck "⑧b 回退档 trace 无 layer 尾标" 1
+        grep -q "media-pb" "$SBX/cpu-win.log" \
+            && ck "⑧b 回退档 CPU 帧转换在场([media-pb])" 1 \
+            || ck "⑧b 回退档 CPU 帧转换在场([media-pb])" 0
     else
-        ck "⑧ 真窗播 10s CPU 平均 <250%(采样失败)" 0
+        ck "⑧b CPU 回退档 10s CPU <250%(采样失败)" 0
     fi
 else
-    echo "  (跳过 ⑦⑧: 无真窗二进制)"
+    echo "  (跳过 ⑦⑧⑧b: 无真窗二进制)"
 fi
 
 # ---------- ⑨ 事故硬断言⑥: 非绿屏(video 盒饱和纯绿占比 < 30%) ----------
@@ -360,6 +398,133 @@ else
     echo "  (跳过 ⑨: 无真窗二进制)"
 fi
 
+# ---------- ⑪ GPU 合成视觉证据: 图层模式下画面仍在动(截图帧差) ----------
+# 软件证据(trace layer 尾标 / pf_frame 早退)之外要**像素证据**: 真窗图层
+# 模式播 3s 后, CGWindowList 按属主 PID 定位窗口(参照 winfind 手法,
+# kCGWindowBounds 与全局左上原点坐标系), screencapture 截屏两帧(间隔 1s)
+# → video 盒区域帧差 —— 图层合成下画面在动, 两帧必须不同。
+# 环境防线(实测本机两坑): ① 显示器睡眠时 screencapture 全黑帧 → 截屏前
+# caffeinate -u 唤醒; ② 调用方无"屏幕录制"权限时 screencapture 只含壁纸
+# (-R 区域截取更是恒失败)→ 用"窗口开/关各截一张, 窗口矩形无差 = 截图
+# 根本看不见窗口"甄别, 此时如实报环境跳过(绝不拿壁纸当视频充数); 在
+# 交互会话(终端已授录屏权限)上它是硬断言。
+if [ -x "$HN_APP" ]; then
+    LOG="$SBX/layer-win.log"
+    caffeinate -u -t 3 >/dev/null 2>&1; sleep 1   # 先唤醒再开窗(合成/窗口记录稳定)
+    (cd "$ROOT/examples" && exec env HN_MEDIA_TRACE=1 HN_MEDIA_MUTE=1 "$HN_APP" media-demo.html 520 820) >"$LOG" 2>&1 &
+    WPID=$!
+    sleep 3
+    cat > "$SBX/winrect.c" <<'CEOF'
+/* winrect — CGWindowListCopyWindowInfo 按属主 PID 找最大窗口, 打印
+   "wx wy ww wh screenw"(窗口 bounds + 主屏逻辑宽; 全局左上原点) */
+#include <stdio.h>
+#include <stdlib.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <CoreFoundation/CoreFoundation.h>
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    int pid = atoi(argv[1]);
+    CFArrayRef list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    if (!list) return 1;
+    double best = 0; CGRect br = CGRectNull;
+    for (CFIndex i = 0; i < CFArrayGetCount(list); i++) {
+        CFDictionaryRef d = (CFDictionaryRef)CFArrayGetValueAtIndex(list, i);
+        CFNumberRef owner = (CFNumberRef)CFDictionaryGetValue(d, kCGWindowOwnerPID);
+        int opid = 0;
+        if (!owner || !CFNumberGetValue(owner, kCFNumberIntType, &opid) || opid != pid) continue;
+        CFDictionaryRef b = (CFDictionaryRef)CFDictionaryGetValue(d, kCGWindowBounds);
+        CGRect r;
+        if (!b || !CGRectMakeWithDictionaryRepresentation(b, &r)) continue;
+        double area = r.size.width * r.size.height;
+        if (area > best && r.size.width >= 50 && r.size.height >= 50) { best = area; br = r; }
+    }
+    if (CGRectIsNull(br)) { CFRelease(list); return 1; }
+    CGRect screen = CGDisplayBounds(CGMainDisplayID());
+    printf("%d %d %d %d %d\n", (int)br.origin.x, (int)br.origin.y,
+           (int)br.size.width, (int)br.size.height, (int)screen.size.width);
+    CFRelease(list);
+    return 0;
+}
+CEOF
+    if cc -O2 "$SBX/winrect.c" -o "$SBX/winrect" \
+           -framework CoreGraphics -framework CoreFoundation 2>/dev/null \
+       && WRECT=$("$SBX/winrect" "$WPID" 2>&1) && [ -n "$WRECT" ]; then
+        read -r WX WY WW WH SW <<< "$WRECT"
+        if [ "$WX" -lt 0 ] || [ "$WY" -lt 0 ] || [ "$((WX + WW))" -gt "$SW" ]; then
+            ck "⑪ 视频盒两帧不同(窗口不在主屏: $WRECT, 截图只含主屏)" 0
+            VL_ALIVE=0
+        else
+            F0="$SBX/win-f0.png"; F1="$SBX/win-f1.png"; F2="$SBX/win-f2.png"
+            screencapture -x "$F0" 2>/dev/null
+            sleep 1
+            screencapture -x "$F1" 2>/dev/null
+            VL_ALIVE=0; kill -0 "$WPID" 2>/dev/null && VL_ALIVE=1
+            kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null; WPID=""
+            caffeinate -u -t 2 >/dev/null 2>&1; sleep 0.5
+            screencapture -x "$F2" 2>/dev/null
+            if [ ! -x "$SBX/pngdiff" ]; then
+                cc -O2 -I "$ROOT/Sources/CHtmlNative/include" -I "$ROOT/Sources/CHtmlNative" \
+                   "$SBX/pngdiff.c" "$ROOT/Sources/CHtmlNative/hn_png.c" -o "$SBX/pngdiff" 2>/dev/null
+            fi
+            if [ "$VL_ALIVE" = "1" ] && [ -s "$F0" ] && [ -s "$F1" ] && [ -s "$F2" ] \
+               && [ -x "$SBX/pngdiff" ] \
+               && [ "$(stat -f%z "$F0")" -gt 300000 ] && [ "$(stat -f%z "$F1")" -gt 300000 ]; then
+                # video 盒窗口内逻辑取框(与 ③ 同一矩形); CGWindowBounds 是
+                # 外框(含标题条), 内容上沿 = wy + (WH − 820)
+                read -r RX0 RY0 RX1 RY1 WTX0 WTY0 WTX1 WTY1 <<< "$(awk \
+                    -v wx="$WX" -v wy="$WY" -v ww="$WW" -v wh="$WH" -v sw="$SW" \
+                    -v pw="$(sips -g pixelWidth "$F0" 2>/dev/null | awk '/pixelWidth/{print $2}')" \
+                    'BEGIN { s = (sw > 0) ? pw / sw : 1; tb = wh - 820
+                             printf "%d %d %d %d %d %d %d %d",
+                                    int((wx + 60)*s), int((wy + tb + 80)*s),
+                                    int((wx + 460)*s), int((wy + tb + 290)*s),
+                                    int(wx*s), int((wy + tb)*s),
+                                    int((wx + ww)*s), int((wy + wh)*s) }')"
+                # 甄别: 关窗前后窗口矩形无差 = 截图看不见窗口(无录屏权限, 只截到壁纸)
+                "$SBX/pngdiff" "$F0" "$F2" "$WTX0" "$WTY0" "$WTX1" "$WTY1" >/dev/null 2>&1
+                SEEN=$?
+                if [ "$SEEN" = "0" ]; then
+                    REPORT=$("$SBX/pngdiff" "$F0" "$F1" "$RX0" "$RY0" "$RX1" "$RY1" 2>&1)
+                    if [ $? -eq 0 ] && [ -n "$REPORT" ]; then
+                        ck "⑪ 视频盒两帧不同(图层合成画面在动) | win=$WX,$WY,$WW,$WH rect=$RX0,$RY0-$RX1,$RY1 | $REPORT" 1
+                    else
+                        ck "⑪ 视频盒两帧不同(图层合成画面在动) | win=$WX,$WY,$WW,$WH | $REPORT" 0
+                    fi
+                else
+                    ck "⑪ 视频盒两帧不同 ⏸ 环境跳过: 截图不含窗口(无录屏权限, 只截到壁纸) — layer/media-pb 两证照常钉" 1
+                fi
+            else
+                ck "⑪ 视频盒两帧不同(截图不可用: 落盘失败/黑帧=显示器睡眠或无录屏权限)" 0
+            fi
+        fi
+    else
+        ck "⑪ 视频盒两帧不同(CGWindowList 定位失败)" 0
+        VL_ALIVE=0
+    fi
+    # 尾部共用: 存活/layer 尾标/无 [media-pb](主路径已在帧差后收窗, 幂等)
+    local_alive="$VL_ALIVE"
+    if [ -n "${WPID:-}" ]; then
+        kill -0 "$WPID" 2>/dev/null && local_alive=1
+        kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null; WPID=""
+    fi
+    ck "⑪ 图层模式真窗 6 秒仍存活(未崩)" "$local_alive"
+    grep -q "video-layer\] attach" "$LOG" \
+        && ck "⑪ 图层已挂载(attach 行)" 1 \
+        || ck "⑪ 图层已挂载(attach 行)" 0
+    grep -q "video-layer\] ready" "$LOG" \
+        && ck "⑪ 图层首帧可呈现(AVPlayerLayer.isReadyForDisplay)" 1 \
+        || ck "⑪ 图层首帧可呈现(AVPlayerLayer.isReadyForDisplay)" 0
+    grep -q " layer$" "$LOG" \
+        && ck "⑪ trace 带 layer 尾标(图层模式生效)" 1 \
+        || ck "⑪ trace 带 layer 尾标(图层模式生效)" 0
+    grep -q "media-pb" "$LOG" \
+        && ck "⑪ 无 CPU 帧转换痕迹(日志无 [media-pb])" 0 \
+        || ck "⑪ 无 CPU 帧转换痕迹(日志无 [media-pb])" 1
+    grep -q "state=PLAYING" "$LOG" || sed 's/^/      /' "$LOG" | head -6
+else
+    echo "  (跳过 ⑪: 无真窗二进制)"
+fi
 # ---------- ⑩ 收口自查: 无 hnapp 孤儿残留 ----------
 # 本脚本启动的 hnapp 全部带"探针特有文档名"参数 —— 按同模式 pgrep,
 # 有命中即说明收口漏了(exec 替换 + trap kill 的完整链路失效)。

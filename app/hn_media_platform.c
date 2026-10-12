@@ -54,6 +54,9 @@
  * ==================================================================== */
 #ifdef HN_MEDIA_PLATFORM_AVFOUNDATION
 
+/* hnp_media_macos.c 的会话私有问询(本文件私有声明; 定义见该文件) */
+extern int hnp_media_layer_mode(const void *m);
+
 static void *pf_open(void *ctx, const char *url, char *err, size_t err_cap) {
     (void)ctx;
     return hnp_media_open(url, err, err_cap);
@@ -75,6 +78,11 @@ static int  pf_state(void *ctx, void *m, int *ready, int *ended) { (void)ctx; re
 static int  pf_frame(void *ctx, void *m, unsigned char *rgba, size_t cap,
                      int *w, int *h, double *pts_sec) {
     (void)ctx;
+    /* 图层直出的会话(hnp_video_layer_attach 挂过原生 AVPlayerLayer):
+       像素由 AVPlayer 解码、系统合成器上屏, CPU 拉帧/NV12→RGBA 转换整链
+       跳过 —— 返回 -1 = 无帧, 引擎照常对该元素画占位 RECT(被原生图层
+       盖住, 视觉无感; HN_CMD_BITMAP 不再产生, 软件光栅少一遍大拷贝)。 */
+    if (hnp_media_layer_mode(m)) return -1;
     return hnp_media_frame((hnp_media *)m, rgba, cap, w, h, pts_sec);
 }
 
@@ -224,6 +232,121 @@ void hn_media_platform_bind(hn_rt *rt) {
     }
 }
 
+/* ---- 真窗视频图层同步(GPU 合成直通; hn_app 主循环每拍调用) ----
+ *
+ * 双路径口径(本函数是切换点):
+ *   真窗(HN_MEDIA_LAYER != "0", 缺省开)—— 对每个"会话已开"的 <video>:
+ *     attach(原生 AVPlayerLayer 挂进窗口, 图层模式置位 → pf_frame 早退,
+ *     CPU 拉帧/位图绘制归零) + 每拍 frame 同步元素盒(布局/滚动/resize 跟随)。
+ *   离屏(--shot/--advance/--probe)不经本函数(hn_app 只在真窗主循环调)
+ *     —— 确定性探针口径不破; HN_MEDIA_LAYER=0 时只摘不挂, 等价退回 CPU 逐帧。
+ *
+ * 元素盒的**视口坐标**取法: 引擎每次 repaint 都会给无帧 <video> 发占位 RECT
+ * (深底 0x14171E + 边框 0x3A4150 是引擎硬编码色, 不走页面样式), 其几何 =
+ * 元素盒经绘制变换(祖先滚动偏移/缩放/3D)后的最终视口坐标 —— 比
+ * hn_node_box(布局盒, 未减祖先滚动)更准, 页面滚动时图层跟着走全靠它。
+ * 按文档序与 <video> 列表 1:1 配对; 配不齐/几何对不上(页面作者恰用了同款
+ * 配色等)退回布局盒(滚动跟随降级, 播放不受影响)。 */
+
+#define HN_VLW_CAP 8   /* 同走查/平台图层表的容量口径(会话数超出的元素留 CPU 路径) */
+
+static struct { char src[256]; } g_vl_attached[HN_VLW_CAP];
+static int g_vl_attached_n;
+
+static int vl_attached_find(const char *src) {
+    for (int i = 0; i < g_vl_attached_n; i++)
+        if (strcmp(g_vl_attached[i].src, src) == 0) return i;
+    return -1;
+}
+
+/* HN_MEDIA_LAYER 开关(环境钮, 记忆化读): 缺省开; "0" = 退回 CPU 逐帧 */
+static int video_layers_enabled(void) {
+    static char memo[8] = "\x01";
+    static int on = 1;
+    const char *e = getenv("HN_MEDIA_LAYER");
+    const char *cur = e ? e : "";
+    if (strcmp(cur, memo) != 0) {
+        snprintf(memo, sizeof(memo), "%s", cur);
+        on = !(e && strcmp(e, "0") == 0);
+    }
+    return on;
+}
+
+/* 文档序收集"会话已开"(state != IDLE)的 <video src=…>; 返回数量 */
+static int vl_collect(hn_node *n, hn_context *c, hn_node **out, const char **srcs, int cap) {
+    if (!n) return 0;
+    int cnt = 0;
+    const char *tag = hn_node_tag(n);
+    if (tag && !strcmp(tag, "video")) {
+        const char *src = hn_node_attr(n, "src");
+        if (src && *src && hn_media_state(c, n) != HN_MEDIA_IDLE && cnt < cap) {
+            out[cnt] = n;
+            srcs[cnt] = src;
+            cnt++;
+        }
+    }
+    for (hn_node *ch = hn_node_first_child(n); ch; ch = hn_node_next_sibling(ch))
+        cnt += vl_collect(ch, c, out + cnt, srcs + cnt, cap - cnt);
+    return cnt;
+}
+
+void hn_media_platform_video_layers(hnp_window *w, hn_rt *rt) {
+    if (!w || !rt) return;
+    hn_context *c = hn_rt_context(rt);
+    hn_doc *doc = hn_rt_doc(rt);
+    if (!c || !doc) return;
+    hn_node *want[HN_VLW_CAP];
+    const char *srcs[HN_VLW_CAP];
+    int nwant = vl_collect(hn_doc_root(doc), c, want, srcs, HN_VLW_CAP);
+
+    /* 占位 RECT 扫描(视口坐标源, 见段注释): 引擎硬编码深底色 + 1px 边框 */
+    const hn_display_list *dl = hn_context_display_list(c);
+    hn_cmd rects[HN_VLW_CAP];
+    int nrect = 0;
+    if (dl) {
+        for (int i = 0; i < dl->count && nrect < HN_VLW_CAP; i++) {
+            const hn_cmd *cm = &dl->cmds[i];
+            if (cm->kind != HN_CMD_RECT ||
+                cm->fill != 0x14171EFFu || cm->stroke != 0x3A4150FFu ||
+                cm->stroke_w != 1.0f || cm->gradient || cm->shadow ||
+                cm->text || cm->poly || cm->bitmap) continue;
+            rects[nrect++] = *cm;
+        }
+    }
+    for (int i = 0; i < nwant; i++) {
+        /* 盒: 配对成功用视口坐标, 否则退布局盒(几何粗校 ±2x 防误配) */
+        float x, y, bw, bh;
+        hn_node_box(want[i], &x, &y, &bw, &bh);
+        if (nrect == nwant && rects[i].w > 0 && rects[i].h > 0 &&
+            rects[i].w > bw * 0.5f && rects[i].w < bw * 2.0f &&
+            rects[i].h > bh * 0.5f && rects[i].h < bh * 2.0f) {
+            x = rects[i].x; y = rects[i].y; bw = rects[i].w; bh = rects[i].h;
+        }
+        /* 每拍都调 frame(): 位置/尺寸跟随布局与滚动, 平台侧对"盒未变"自跳
+           (setFrame + CA flush 不做白工), 并顺手轮询图层首帧就绪诊断 */
+        hnp_video_layer_frame(w, srcs[i], x, y, bw, bh);
+        if (vl_attached_find(srcs[i]) < 0 && video_layers_enabled() &&
+            hnp_video_layer_attach(w, srcs[i], x, y, bw, bh)) {
+            if (g_vl_attached_n < HN_VLW_CAP) {
+                snprintf(g_vl_attached[g_vl_attached_n].src,
+                         sizeof(g_vl_attached[0].src), "%s", srcs[i]);
+                g_vl_attached_n++;
+            }
+        }
+    }
+    /* 摘除不在当前 want 集里的(会话关闭/元素移除/热重载换文档) */
+    for (int i = g_vl_attached_n - 1; i >= 0; i--) {
+        int still = 0;
+        for (int k = 0; k < nwant; k++)
+            if (strcmp(g_vl_attached[i].src, srcs[k]) == 0) { still = 1; break; }
+        if (!still) {
+            hnp_video_layer_detach(w, g_vl_attached[i].src);
+            g_vl_attached[i] = g_vl_attached[g_vl_attached_n - 1];
+            g_vl_attached_n--;
+        }
+    }
+}
+
 /* ---- 会话状态行(HN_MEDIA_TRACE=1; 真窗口与验收脚本的观测点) ---- */
 
 static const char *state_name(int st) {
@@ -240,11 +363,14 @@ static void trace_walk(hn_node *n, hn_context *c) {
             const char *id = hn_node_attr(n, "id");
             /* app_mute = 本壳静音开关的当前态(m 键/环境钮; -1 = 未动过,
                以元素声明为准)。引擎无 muted 读回口(写入口 ABI), 这是
-               验收脚本能观测"静音开关真的动过"的唯一真源。 */
-            printf("[media] id=%s tag=%s state=%s t=%.3f dur=%.3f app_mute=%d\n",
+               验收脚本能观测"静音开关真的动过"的唯一真源。
+               尾标 layer = 该会话当前由原生 AVPlayerLayer 直出(GPU 合成,
+               CPU 拉帧已停) —— 真窗图层模式的验收观测点。 */
+            printf("[media] id=%s tag=%s state=%s t=%.3f dur=%.3f app_mute=%d%s\n",
                    id ? id : "-", tag, state_name(hn_media_state(c, n)),
                    hn_media_time(c, n), hn_media_duration(c, n),
-                   g_mute_state);
+                   g_mute_state,
+                   (tag[0] == 'v' && vl_attached_find(src) >= 0) ? " layer" : "");
         }
     }
     for (hn_node *ch = hn_node_first_child(n); ch; ch = hn_node_next_sibling(ch))
