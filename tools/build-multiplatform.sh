@@ -333,6 +333,13 @@ if "$HOST_BIN" verify "$ROOT/examples/dashboard.html" 480 700 | sed 's/^/  /'; t
 fi
 
 echo
+# 跳过开关: 本检查要在 Rosetta 下执行 x86_64 产物。macOS 的 Rosetta
+# 转译层偶发楔死(进程进入不可中断 U 态, kill -9 无效, 只能重启清掉),
+# 且会逐次累积拖垮系统 —— 机器出现假死时先查 ps aux | grep x86_64 | grep " U "。
+# NEB_SKIP_XARCH=1 跳过本检查(其余自检不受影响); 门禁用完请恢复。
+if [ "${NEB_SKIP_XARCH:-0}" = "1" ]; then
+    echo "跨架构确定性: NEB_SKIP_XARCH=1 跳过(Rosetta 环境异常时使用)"
+else
 echo "跨架构确定性(同 HN_NO_TEXT 口径, 布局输出须逐字节一致):"
 # 注意口径: 发布用的 macos-arm64 带 FreeType(真实字形测量), 与无文本产物
 # 的排版结果本就不同。要验的是"同一份引擎代码在不同架构上算出的几何一致",
@@ -372,6 +379,7 @@ if [ "$det_bad" -gt 0 ]; then
     exit 1
 fi
 echo "  ✓ $det_ok 个文档跨架构一致"
+fi  # NEB_SKIP_XARCH
 
 echo
 echo "产物清单:"

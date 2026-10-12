@@ -13,7 +13,9 @@
  * 不支持: 1/2/4 位深、APNG 动图(取第一帧)、色彩管理(按 sRGB)。
  *
  * inflate 是自带的(存储 / 固定哈夫曼 / 动态哈夫曼), 因为 zlib 不是标准 C 库 ——
- * 这也是本文件大半代码的来源。
+ * 这也是本文件大半代码的来源。它以 hn_inflate 的名义导出(raw deflate,
+ * RFC 1951): dotLottie 的 ZIP 条目(method=8)是同一裸码流, 复用这一份
+ * 实现 —— 解压算法不复制两份。
  */
 #include "hn_png.h"
 #include <stdlib.h>
@@ -185,7 +187,7 @@ static void dyn_tables(inf *s, huff *lh, huff *dh) {
     if (!huff_build(dh, lengths + hlit, hdist)) { s->overrun = 1; return; }
 }
 
-static unsigned char *inflate_raw(const unsigned char *src, size_t n, size_t *out_len) {
+unsigned char *hn_inflate(const unsigned char *src, size_t n, size_t *out_len) {
     inf s;
     memset(&s, 0, sizeof(s));
     s.src = src;
@@ -399,7 +401,7 @@ unsigned char *hn_png_decode(const unsigned char *data, size_t n, int *w, int *h
 
     size_t zlen = idat_n > 2 ? idat_n - 2 : 0;      /* 前 2 字节是 zlib 头 */
     size_t raw_n = 0;
-    unsigned char *raw = inflate_raw(idat + 2, zlen, &raw_n);
+    unsigned char *raw = hn_inflate(idat + 2, zlen, &raw_n);
     free(idat);
     if (!raw) return NULL;
 

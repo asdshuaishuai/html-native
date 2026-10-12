@@ -9,6 +9,13 @@
 # 路径变形关键帧 / 渐变填充 gf(扁平与 [{t,s}] 编码、0..1 与 0..100 量纲) /
 # 渐变描边 gs / 径向退化 / mask 最小版(CLIP+/CLIP- 配对、反相不裁、路径关键帧)。
 #
+# **dotLottie(.lottie ZIP)段**: 引擎内建最小 ZIP 读取器后新增 —
+#   C 级(tools/lottie_probe.c): 真实 CDN 包加载/尺寸 500x690/时长/帧推进/
+#     fit 四档/存储法小包/manifest 优先/回退/坏包;
+#   管线级(本脚本): <img src=x.lottie hn-lottie> 经 hncore paint 的真元素
+#     路径 —— zip 加载出内容 / HN_CLOCK 帧推进 / contain 缺省下画面完全
+#     落在元素盒内(夹具 = examples/assets/dotlottie/TVFEMLriby.lottie 真文件)。
+#
 # 用法: bash tools/lottie_probe.sh [hncore 路径]
 #
 # 门禁口径: 有失败断言 → exit 1(与其它探针一致; 原 python 版末尾漏了
@@ -34,6 +41,95 @@ ck() {  # ck <名> <0|1> [现场详情] — 即时打印, 失败记账
     FAILED_NAMES+=("$name")
   fi
 }
+
+# ---- [Z] dotLottie zip 段: 先跑 C 级探针, 再跑 hncore 管线断言 ----
+
+echo "== dotLottie(.lottie)zip 段 =="
+
+# Z1) C 级探针(引擎源 + lottie_probe.c, 产物缓存于 $TMPDIR)
+LOT_BIN="${TMPDIR:-/tmp}/lottie_probe_bin"
+hn_sources_core
+HN_SOURCES=("$HN_TOOLS_DIR/lottie_probe.c" ${HN_SOURCES[@]+"${HN_SOURCES[@]}"})
+FT_INC=""; FT_LIB=()
+if [ -d /opt/homebrew/include/freetype2 ]; then
+  FT_INC="-I/opt/homebrew/include/freetype2"; FT_LIB=(-L/opt/homebrew/lib -lfreetype)
+elif [ -d /usr/include/freetype2 ]; then
+  FT_INC="-I/usr/include/freetype2"; FT_LIB=(-lfreetype)
+fi
+lot_compile() {
+  local tag="$1"; shift
+  echo "  编译$tag: $HN_CC -O2 -std=c99 -I $HN_ENG/include -I $HN_ENG $*" \
+       "${HN_SOURCES[@]}" -lm -o "$LOT_BIN"
+  local errlog
+  errlog="$(mktemp "${TMPDIR:-/tmp}/hncc-XXXXXX")"
+  if "$HN_CC" -O2 -std=c99 -I "$HN_ENG/include" -I "$HN_ENG" "$@" \
+       ${HN_SOURCES[@]+"${HN_SOURCES[@]}"} -lm -o "$LOT_BIN" 2>"$errlog"; then
+    rm -f "$errlog"; return 0
+  fi
+  echo "  编译失败$tag" >&2
+  [ -s "$errlog" ] && tail -c 3000 "$errlog" >&2
+  rm -f "$errlog"; return 1
+}
+if [ ! -x "$LOT_BIN" ] || ! hn_up_to_date "$LOT_BIN" ${HN_SOURCES[@]+"${HN_SOURCES[@]}"}; then
+  if [ -n "$FT_INC" ]; then
+    lot_compile "(带 FreeType)" "$FT_INC" ${FT_LIB[@]+"${FT_LIB[@]}"} || \
+      lot_compile "(HN_NO_TEXT)" -DHN_NO_TEXT || { echo "lottie_probe.c 编译失败"; exit 1; }
+  else
+    lot_compile "(HN_NO_TEXT)" -DHN_NO_TEXT || { echo "lottie_probe.c 编译失败"; exit 1; }
+  fi
+else
+  echo "  C 探针缓存命中, 跳过编译"
+fi
+( cd "$HN_REPO_ROOT" && "$LOT_BIN" ) || { echo "C 级 zip 探针失败"; exit 1; }
+
+# Z2) 管线级: 真实 .lottie 经 <img hn-lottie> 元素 + hncore paint。
+#     元素盒 340x470 @ (30,25), 画布 400x520 —— 就是发现 fit 缺陷的场景
+#     (500x690 的画布装进 340x470 的盒, contain 缺省必须 letterbox 居中)。
+#     资产路径按"文档目录相对"解析(hncore 口径), HTML 在临时目录里,
+#     所以这里内联仓库绝对路径。
+#     二进制解析: 显式参数 → 用之(/tmp/hncore 可能是旧构建, zip 段对引擎
+#     版本敏感); 未给参数 → 优先 dist 正式产物(门禁先 build 后 probe),
+#     再退回 $HN。
+HNZ="$HN"
+if [ -z "${1:-}" ]; then
+  for cand in dist/hncore-macos-arm64 dist/hncore-linux-x86_64 dist/hncore-windows-x86_64.exe; do
+    if [ -x "$cand" ]; then HNZ="$cand"; break; fi
+  done
+fi
+echo "  管线二进制: $HNZ"
+ZHTML="$D/zip.html"
+cat > "$ZHTML" <<HTML
+<html><head><style>html,body{margin:0;width:100%;height:100%;background:#000}
+.lot{position:absolute;left:30;top:25;width:340;height:470}</style></head><body>
+<img class="lot" src="$HN_REPO_ROOT/examples/assets/dotlottie/TVFEMLriby.lottie" hn-lottie>
+</body></html>
+HTML
+zpaint() { ( cd "$HN_REPO_ROOT" && HN_CLOCK="$1" "$HNZ" paint "$ZHTML" 400 520 ) || true; }
+# 内容 bbox: 所有 POLY 行的外接盒
+zbbox() {  # zbbox <paint 输出> → "x0 y0 x1 y1" 或空
+  printf '%s\n' "$1" | grep '^POLY' | sed -n 's/.*bbox=\[\([^]]*\)\].*/\1/p' | awk '
+    { x=$1; y=$2; w=$3; h=$4
+      if (NR == 1) { mnx=x; mny=y; mxx=x+w; mxy=y+h }
+      if (x < mnx) mnx = x
+      if (y < mny) mny = y
+      if (x + w > mxx) mxx = x + w
+      if (y + h > mxy) mxy = y + h
+    } END { if (NR > 0) printf "%.1f %.1f %.1f %.1f", mnx, mny, mxx, mxy }'
+}
+z0="$(zpaint 0)"
+z400="$(zpaint 400)"
+n_poly0="$(printf '%s\n' "$z0" | grep -c '^POLY' || true)"
+ck "zip 加载: <img src=x.lottie hn-lottie> 出多边形内容" \
+  "$([ "${n_poly0:-0}" -ge 1 ] && echo 1 || echo 0)" "POLY 数 = ${n_poly0:-0}"
+bb0="$(zbbox "$z0")"
+bb400="$(zbbox "$z400")"
+ck "zip 帧推进: HN_CLOCK=0 与 400 的画面不同" \
+  "$([ -n "$bb0" ] && [ -n "$bb400" ] && [ "$bb0" != "$bb400" ] && echo 1 || echo 0)" \
+  "($bb0 | $bb400)"
+ck "contain 缺省: 画面完全落在元素盒内(x 30..370, y 25..495)" \
+  "$(printf '%s' "$bb0" | awk '{ exit !($1 >= 29.4 && $2 >= 24.4 && $3 <= 370.6 && $4 <= 495.6) }' \
+     && echo 1 || echo 0)" "$bb0"
+echo
 
 # render <lottie 文件>; html 固定 100x100 元素 / 120x120 画布(与原版一致)
 render() {

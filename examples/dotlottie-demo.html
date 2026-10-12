@@ -1,0 +1,65 @@
+<html><head>
+<!-- dotlottie-demo — dotLottie(.lottie ZIP 容器)引擎接入
+     ==========================================================
+     渲染的是**原版 .lottie 文件**(ZIP: manifest.json + animations/*.json),
+     引擎内建最小 ZIP 读取器(EOCD → 中央目录 → manifest 选动画 → 复用
+     hn_png 的 hn_inflate 解裸 deflate), 解出的 Lottie JSON 走同一求值管线。
+     不用解包 JSON 替代 —— 测的就是 zip 形态。
+
+     素材来源(用户提供的真实 CDN 样例):
+       https://lottie.host/TVFEMLriby.lottie  (原文件, Lottie 5.9.0,
+       500x690 @24fps, IP=0 OP=26, 1 预合成层 + 1 资源)
+     本地: assets/dotlottie/TVFEMLriby.lottie(6KB)
+
+     渲染命令(在 examples/ 目录执行; HN_CLOCK 双帧逐字节不同):
+       (cd examples && HN_CLOCK=0   ../dist/hncore-macos-arm64 render dotlottie-demo.html ../screenshots/dotlottie.png    420 560)
+       (cd examples && HN_CLOCK=500 ../dist/hncore-macos-arm64 render dotlottie-demo.html ../screenshots/dotlottie-f2.png 420 560)
+
+     fit 断言: 500x690 的画布装进 340x470 的盒 —— contain 缺省必须
+     letterbox 居中(修复前预合成内容堆在原点, 画到盒外)。
+     门禁: tools/lottie_probe.sh(16 C 级断言 + 3 管线断言)。
+-->
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="420x560">
+<meta name="hn-title" content="dotLottie .lottie">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: #0e1117; }
+  .title { position: absolute; left: 30; top: 14; width: 360;
+           font-size: 15; color: #e8eaf0; }
+  .sub   { position: absolute; left: 30; top: 36; width: 360;
+           font-size: 10; color: #6b7386; }
+  /* 主角: 原版 .lottie(ZIP 形态), 340x470 盒 + 红色描边勾出元素盒边界,
+     contain 缺省 = letterbox 居中且完全在盒内(fit 修复的可视证据) */
+  .hero  { position: absolute; left: 30; top: 56; width: 340; height: 470;
+           border: 1 solid rgba(255, 90, 90, 0.65); border-radius: 8; }
+  .hero img { width: 340; height: 470; }
+  /* 对照: 同一动画的解包 JSON 形态(引擎此前已支持), 小窗 2 倍速 */
+  .mini  { position: absolute; left: 30; top: 56; width: 80; height: 110;
+           border: 1 solid rgba(120, 200, 255, 0.5); border-radius: 8; }
+  .mini img { width: 80; height: 110; }
+  .mini-k { position: absolute; left: 31; top: 137; width: 78; text-align: center;
+            font-size: 8; color: #9db8d8; background: rgba(10, 14, 22, 0.72); }
+  .tag   { position: absolute; left: 122; top: 498; width: 248;
+           font-size: 10; color: #9aa3b5; }
+  .src   { position: absolute; left: 30; top: 522; width: 360;
+           font-size: 9; color: #556070; }
+</style>
+</head><body>
+  <div class="title">dotLottie(.lottie)· ZIP 容器直读</div>
+  <div class="sub">原版 .lottie(ZIP)→ 内建最小 ZIP 读取器 → 解出动画 JSON → 同一 Lottie 求值管线</div>
+
+  <!-- 原版 .lottie: 用户提供的真实文件, 340x470 盒, contain 缺省 -->
+  <div class="hero">
+    <img src="assets/dotlottie/TVFEMLriby.lottie" hn-lottie>
+  </div>
+
+  <!-- 对照: 解包 JSON 形态(同一动画, 2 倍速), 证明两种形态同管线 -->
+  <div class="mini">
+    <img src="assets/dotlottie/anim.json" hn-lottie hn-lottie-speed="2">
+  </div>
+  <div class="mini-k">解包 JSON(对照)</div>
+
+  <div class="tag">ZIP: EOCD → 中央目录 → manifest 首个动画 → hn_inflate(deflate)→ 求值</div>
+  <div class="src">来源: lottie.host/TVFEMLriby.lottie · 500x690@24fps · 26 帧 · 预合成 1+1 · 渲染命令见文件头注释</div>
+</body></html>

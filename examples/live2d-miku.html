@@ -1,0 +1,102 @@
+<html><head>
+<!-- live2d-miku — Live2D 运行时包接入(moc3 边界诚实)
+     ==========================================================
+     素材: 官方 Miku 样例(docs/miku_ja.zip)的 runtime, 已入库
+     examples/assets/miku/miku_pro/runtime/:
+       model3.json   FileReferences: Moc/Textures/Physics/DisplayInfo/
+                     Motions[Idle/Tap/Flick/FlickUp]
+       cdi3.json     59 参数(日文显示名: 角度 X 等)
+       physics3.json 13 设置 / 37 输入 / 51 输出 / 71 顶点
+       motion/*.motion3.json ×8(v2.4, 各 26 曲线, 标准参数集)
+       miku_sample_t04.2048/texture_00.png(2048 贴图)
+     **moc3 = 专有二进制, 不解析**(需 Cubism SDK 商业授权, 既有契约)。
+     Neb 的替代口径: 引擎解析上述公开 JSON, 采样官方 motion3 曲线
+     (Idle 组 miku_01: 转头/眨眼/体摆), 驱动自有 hn-mesh rig ——
+     立绘动起来靠的是 Live2D 官方动作数据, 网格变形是引擎原语。
+
+     渲染命令(在 examples/ 目录执行; 官方 motion 驱动, 双帧逐字节不同):
+       (cd examples && HN_CLOCK=0   ../dist/hncore-macos-arm64 render live2d-miku.html ../screenshots/live2d-miku.png    420 560)
+       (cd examples && HN_CLOCK=600 ../dist/hncore-macos-arm64 render live2d-miku.html ../screenshots/live2d-miku-f2.png 420 560)
+
+     门禁: tools/live2d_probe.sh(44 断言: 包解析/四段型求值器/rig 顶点接线)。
+-->
+<meta charset="utf-8">
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="420x560">
+<meta name="hn-title" content="Live2D runtime · Neb">
+<meta name="hn-transparent" content="1">
+<meta name="hn-frameless" content="1">
+<meta name="hn-level" content="floating">
+<meta name="hn-spaces" content="all">
+<meta name="hn-shadow" content="0">
+<meta name="hn-draggable" content="1">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; }
+
+  /* 标题 */
+  .title { position: absolute; left: 20; top: 12; width: 380;
+           font-size: 14; color: #e8eaf0; text-align: center;
+           text-shadow: 0 1 6 rgba(0, 0, 0, 0.6); }
+
+  /* 诚实信息面板: 解析计数全部来自引擎真实解析(探针钉值) */
+  .panel { position: absolute; left: 16; top: 40; width: 388; box-sizing: border-box;
+           padding: 8 12; font-size: 9.5; line-height: 1.65; color: #aab4c8;
+           background: rgba(16, 20, 32, 0.82);
+           border: 1 solid rgba(120, 150, 220, 0.35); border-radius: 10; }
+  .panel b { color: #dfe6f5; font-weight: normal; }
+  .ok   { color: #57e08f; }
+  .no   { color: #ff7a7a; }
+  .moc  { color: #ffd28a; }
+
+  /* rig 舞台: avatar-a.png(hn-mesh 16x14)+ 官方 Idle motion 驱动。
+     无 sway/idle/breath —— 形变全部来自 motion 曲线(官方数据),
+     HN_CLOCK 推进 ext_clock → 引擎按 t 采样 motion3 驱动通道:
+     AngleY→look_y(点头) / AngleZ→body_x(体摆) / EyeL+R→eye(眨眼)。 */
+  .stage { position: absolute; left: 70; top: 208; width: 280; height: 280; }
+  .stage img { width: 280; height: 280; }
+  .stage-k { position: absolute; left: 70; top: 492; width: 280; text-align: center;
+             font-size: 9; color: rgba(200, 214, 240, 0.66); }
+
+  /* 2048 贴图卡(证明大贴图解码): texture_00.png 缩略 */
+  .tex { position: absolute; left: 16; top: 208; width: 46; height: 46;
+         border: 1 solid rgba(120, 150, 220, 0.45); border-radius: 6; }
+  .tex img { width: 46; height: 46; }
+  .tex-k { position: absolute; left: 8; top: 258; width: 62; text-align: center;
+           font-size: 8; color: rgba(200, 214, 240, 0.6); }
+
+  /* 落地阴影(呼吸感由 CSS keyframes, 与 motion 时钟独立) */
+  .shadow { position: absolute; left: 120; top: 492; width: 180; height: 10;
+            background: rgba(0, 0, 0, 0.28); border-radius: 50%; }
+
+  .foot { position: absolute; left: 16; top: 528; width: 388; text-align: center;
+          font-size: 8.5; color: rgba(140, 155, 185, 0.62); }
+</style>
+</head><body>
+  <div class="title">Live2D 运行时包 · motion 数据驱动 Neb rig</div>
+
+  <div class="panel">
+    <b>miku_sample_t04(官方样例 runtime)解析事实</b><br>
+    <span class="ok">✔</span> model3.json:FileReferences 完整 —— Textures <b>1</b>(2048 atlas)/ Physics / DisplayInfo / Motions <b>4</b> 组 <b>8</b> 文件<br>
+    <span class="ok">✔</span> cdi3.json:<b>59</b> 参数, 日文显示名(ParamAngleX = 「角度 X」)<br>
+    <span class="ok">✔</span> physics3.json:<b>13</b> 设置 / <b>37</b> 输入 / <b>51</b> 输出 / <b>71</b> 顶点(仅计数, v1 不做仿真)<br>
+    <span class="ok">✔</span> motion3.json ×8(v2.4):<b>8 × 26 = 208</b> 曲线, 线性/贝塞尔/阶梯求值器<br>
+    <span class="moc">▶ rig 驱动 = Idle(miku_01):AngleY→look_y · AngleZ→body_x · EyeL/R→eye</span><br>
+    <span class="no">✘</span> <b>moc3 网格变形渲染 ❌ 专有格式</b>, Neb 以 motion 数据驱动自有 rig 替代
+  </div>
+
+  <!-- 2048 贴图: 官方 atlas 真解码 -->
+  <div class="tex"><img src="assets/miku/miku_pro/runtime/miku_sample_t04.2048/texture_00.png"></div>
+  <div class="tex-k">texture_00<br>2048²</div>
+
+  <!-- rig: 官方 Idle motion 数据驱动(hn-live2d 声明 model3.json) -->
+  <div class="stage">
+    <img src="assets/avatar-a.png"
+         hn-mesh="16x14"
+         hn-live2d="assets/miku/miku_pro/runtime/miku_sample_t04.model3.json"
+         hn-live2d-motion="Idle" hn-live2d-index="0">
+  </div>
+  <div class="stage-k">rig: assets/avatar-a.png ← miku_01.motion3.json(官方数据)</div>
+  <div class="shadow"></div>
+
+  <div class="foot">moc3(290KB 专有二进制)不解析 · motion 采样在引擎 C 侧(hn_lottie.c)· 渲染命令见文件头</div>
+</body></html>

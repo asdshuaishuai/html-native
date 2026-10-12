@@ -549,6 +549,16 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   可选 `hn-lottie-speed`(倍速)、`hn-lottie-fit`(contain/cover/fill/none)。
   **明确不支持**(跳过而非报错): 预合成层(会展开)、文本层、表达式、特效、
   轨道遮罩、merge paths、时间重映射、径向渐变的形状化、多蒙版布尔组合
+- **dotLottie(.lottie)ZIP 容器直读**: `<img src="a.lottie" hn-lottie>` 直接播
+  行业标准 .lottie 包(文件头 PK 魔数识别)。引擎内建**最小 ZIP 读取器**
+  (零依赖, 不落盘): EOCD 尾部定位 → 中央目录遍历 → 按 manifest.json 的
+  animations[0] 选动画(缺 manifest 回退 animations/ 首个 .json)→ 条目解压
+  (method 0 存储 / method 8 复用 hn_png 自带 inflate 的 `hn_inflate` 导出
+  —— PNG IDAT 与 ZIP 条目同是 RFC 1951 裸 deflate, 一份实现), 解出的
+  Lottie JSON 走同一求值管线。从简不做: ZIP64/加密/分卷/CRC 校验。
+  真实样例(500x690 装进 340x470 盒, contain 缺省 letterbox 居中)见
+  `examples/dotlottie-demo.html`, 口径由 `tools/lottie_probe.sh` 钉死
+  (C 级 16 断言 + hncore 管线 3 断言)
 - **网格变形贴图(Live2D 类效果的原语)**: `<img src="c.png" hn-mesh="12x10"
   hn-mesh-sway="6" hn-mesh-anchor="bottom">` —— 把贴图映射到可变形网格,
   顶点按正弦形变(固定端不动, 形成波浪)。这与 Live2D 让立绘"活起来"是
@@ -558,6 +568,21 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   "网格 + 贴图"的合成, rig 逻辑属于应用层。
   ⚠️ **Live2D 的 `.moc3` 是专有格式**, 解码需要其 Cubism SDK(商业授权),
   本项目不自研解码器; 交付的是同技术的开放原语
+- **Live2D 运行时包接入(moc3 边界诚实)**: `<img src="rig.png" hn-mesh="16x14"
+  hn-live2d="<model3.json>" hn-live2d-motion="Idle" hn-live2d-index="0">` ——
+  引擎解析运行时包里**全部公开 JSON**: model3.json(FileReferences:
+  Moc 声明/Textures/Physics/DisplayInfo/Motions 组)、cdi3.json(参数清单,
+  日文显示名)、physics3.json(Meta 计数, v1 不做仿真)、motion3.json(v2.4
+  曲线: 段类型 0=线性/1=贝塞尔(x 单调反解)/2=阶梯(保持前值)/3=反阶梯,
+  Meta.Loop 回绕), 然后**按 ext_clock 采样官方动作曲线, 叠加到 hn-mesh
+  形变通道**: ParamAngleX/Y→look_x/look_y、ParamAngleZ→body_x、
+  ParamMouthOpenY→mouth、(ParamEyeLOpen+ParamEyeROpen)/2→**eye 闭眼压缩**
+  (hn-mesh 上带向下睑方向压合, hnMeshParam 的 "eye" 传开合度 1=睁眼)。
+  **moc3 网格变形渲染 ❌ 不做**(专有格式) —— 立绘动起来靠的是官方 motion
+  数据驱动自有 rig, 模型加载带进程级 4 槽 LRU 缓存(每帧采样不复解)。
+  官方 Miku 样例(runtime 全套 + 2048 贴图)见 `examples/live2d-miku.html`,
+  口径由 `tools/live2d_probe.sh`(44 断言: 包解析/四段型求值器/rig 顶点
+  接线/中性位零漂移)钉死
 - **透明背板**: `<meta name="hn-transparent" content="1">` 让窗口**无底色**
   (逐像素 alpha, 桌面/下层窗口从透明处透出), 配合 `hn-shadow`(投影开关)、
   `hn-draggable`(空白区拖动开关)。引擎在每次样式重算后都重新剥离 html/body

@@ -21,7 +21,13 @@
  *                          剪切+平移幅度(头带权重最高);
  *   hn-mesh-idle="1"       待机双正弦 sin(t*0.9)+0.5*sin(t*2.3) 叠加;
  *   JS 桥 hnMeshParam(id, name, v) 写节点的形变参数(hn_node_set_mesh_param),
- *   求值时叠加 look_x/look_y(偏移)/mouth(上带局部张开)/body_x/body_y(整体摆)。
+ *   求值时叠加 look_x/look_y(偏移)/mouth(上带局部张开)/body_x/body_y(整体摆)
+ *   /eye(闭眼: 上带向下睑方向压合)。
+ *   **官方动作数据接线**: hn-live2d="<model3.json>" + hn-live2d-motion="<组>"
+ *   声明 Live2D 运行时包 → 引擎采样 motion3 曲线(标准参数 ParamAngleX/Y/Z、
+ *   ParamMouthOpenY、ParamEyeLOpen/ROpen)叠加到上述通道 —— rig 动起来靠
+ *   官方动作数据, 网格变形是引擎自己的原语(moc3 专有格式不解析, 见
+ *   hn_lottie.c 尾部的包解析与求值器)。
  *
  * 更复杂的装配(骨骼/物理/口型同步)由脚本逐帧调用
  * hn_node_set_mesh_verts() 写入顶点 —— 引擎只做"网格 + 贴图"的合成,
@@ -94,6 +100,9 @@ typedef struct {
     float look_amp_x, look_amp_y, look_x, look_y;
     /* JS 参数桥(hnNodeSetMeshParam 写入, 已钳 -1..1) */
     float p_look_x, p_look_y, p_mouth, p_body_x, p_body_y;
+    /* 闭眼压缩量 0..1(0=睁眼缺省; 来自 hnMeshParam "eye" 或 Live2D
+       EyeLOpen/EyeROpen 均值的反相 —— 语义与钳制见 hn_node_set_mesh_param) */
+    float p_eye;
 } mesh_drive;
 
 /* 顶点网格在元素盒内的基础位置 + 全部程序化形变。
@@ -138,6 +147,9 @@ static void base_verts(hn_arena *a, int cols, int rows, float bw, float bh,
     /* 整体摆(JS 桥): 5% 盒尺寸上限的均匀平移 */
     float body_px = d->p_body_x * 0.05f * bw;
     float body_py = d->p_body_y * 0.05f * bh;
+    /* 闭眼压缩: 上带(眼线 v≈0.62 上方 0.09 带宽)向下睑方向压合,
+       全闭行程 2.5% 盒高 —— 幅度小但逐顶点可断言(探针钉住)。 */
+    float eye_px = d->p_eye * 0.025f * bh;
     for (int r = 0; r <= rows; r++) {
         for (int c = 0; c <= cols; c++) {
             int i = r * (cols + 1) + c;
@@ -203,6 +215,16 @@ static void base_verts(hn_arena *a, int cols, int rows, float bw, float bh,
                 if (kv > 0.0f && ku > 0.0f) {
                     float open = mouth_px * kv * kv * kv * ku * ku * ku;
                     y += dv > 0.0f ? open : -open;
+                }
+            }
+            if (eye_px > 0.0f) {
+                /* 闭眼: 眼线(v≈0.62)上带压缩 —— 带内顶点(眼线上方至
+                   v≈0.71)向下睑方向压合, 核与口型同款(Wyvill, 紧支集);
+                   眼线处行程最大、带下缘为零 → 整段向下"压扁"即闭眼。 */
+                float dv = (v - 0.62f) / 0.09f;
+                if (dv > 0.0f) {
+                    float kv = 1.0f - dv * dv;
+                    if (kv > 0.0f) y += eye_px * kv * kv * kv;
                 }
             }
             x += body_px;
@@ -307,6 +329,53 @@ void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
         d.p_mouth  = n->mesh_param_mouth;
         d.p_body_x = n->mesh_param_body_x;
         d.p_body_y = n->mesh_param_body_y;
+        d.p_eye    = n->mesh_param_eye;
+        /* Live2D 运行时包接线: hn-live2d 声明 model3.json → 采样官方
+           motion3 曲线, 叠加到既有形变通道(实时窗口走 4 槽 LRU 缓存,
+           每帧采样不复解)。标准参数 → 通道映射(量纲: Live2D 角度 ±30
+           归一到 -1..1):
+             ParamAngleX   → look_x(转头水平)
+             ParamAngleY   → look_y(抬头/点头)
+             ParamAngleZ   → body_x(身体 Z 摆)
+             ParamMouthOpenY → mouth(口型, 0..1 原值)
+             (EyeLOpen+EyeROpen)/2 → eye 闭眼量 = 1 - 开合度
+           解析失败/曲线缺失 → 对应分量为 0, 静默退回程序化形变(不崩)。 */
+        const char *l2p = hn_node_attr(n, "hn-live2d");
+        if (l2p && *l2p) {
+            struct hn_live2d *l2 = hn_live2d_acquire(c, l2p);
+            if (l2) {
+                const char *grp = hn_node_attr(n, "hn-live2d-motion");
+                const char *ixs = hn_node_attr(n, "hn-live2d-index");
+                int idx = hn_live2d_motion_pick(l2, grp, ixs && *ixs ? atoi(ixs) : 0);
+                if (idx >= 0) {
+                    float t = (float)(n->ext_clock * 0.001);
+                    float v = 0.0f;
+                    if (hn_live2d_motion_sample(l2, idx, "ParamAngleX", t, &v))
+                        d.p_look_x += v / 30.0f;
+                    if (hn_live2d_motion_sample(l2, idx, "ParamAngleY", t, &v))
+                        d.p_look_y += v / 30.0f;
+                    if (hn_live2d_motion_sample(l2, idx, "ParamAngleZ", t, &v))
+                        d.p_body_x += v / 30.0f;
+                    if (hn_live2d_motion_sample(l2, idx, "ParamMouthOpenY", t, &v))
+                        d.p_mouth += v;
+                    float el = 1.0f, er = 1.0f;
+                    int has_el = hn_live2d_motion_sample(l2, idx, "ParamEyeLOpen", t, &el);
+                    int has_er = hn_live2d_motion_sample(l2, idx, "ParamEyeROpen", t, &er);
+                    if (has_el || has_er) {
+                        float open = ((has_el ? el : 1.0f) + (has_er ? er : 1.0f)) * 0.5f;
+                        if (open < 0.0f) open = 0.0f;
+                        else if (open > 1.0f) open = 1.0f;
+                        d.p_eye += 1.0f - open;
+                    }
+                }
+                /* 通道统一钳 -1..1 / 0..1(eye 闭眼量非负), 与桥同口径 */
+                if (d.p_look_x < -1.0f) d.p_look_x = -1.0f; else if (d.p_look_x > 1.0f) d.p_look_x = 1.0f;
+                if (d.p_look_y < -1.0f) d.p_look_y = -1.0f; else if (d.p_look_y > 1.0f) d.p_look_y = 1.0f;
+                if (d.p_mouth  < -1.0f) d.p_mouth  = -1.0f; else if (d.p_mouth  > 1.0f) d.p_mouth  = 1.0f;
+                if (d.p_body_x < -1.0f) d.p_body_x = -1.0f; else if (d.p_body_x > 1.0f) d.p_body_x = 1.0f;
+                if (d.p_eye    <  0.0f) d.p_eye    =  0.0f; else if (d.p_eye    > 1.0f) d.p_eye    = 1.0f;
+            }
+        }
         base_verts(a, cols, rows, bw, bh, anchor, &d, verts, uv);
     }
 
@@ -331,7 +400,9 @@ void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
 }
 
 /* 数字人参数桥引擎侧(hnMeshParam 的落点): 参数存节点字段, 下一次网格
-   求值生效。未知名静默忽略(桥不抛异常); 值统一钳 -1..1。 */
+   求值生效。未知名静默忽略(桥不抛异常); 值统一钳 -1..1。
+   "eye" 传**开合度**(1=睁眼 0=闭眼, 与 Live2D EyeLOpen/EyeROpen 同量纲),
+   节点字段存的是闭眼压缩量(1-v) —— 字段零缺省必须对应"无形变(睁眼)"。 */
 void hn_node_set_mesh_param(hn_node *n, const char *name, float value) {
     if (!n || n->kind != HN_ELEM || !name || !*name) return;
     if (value < -1.0f) value = -1.0f;
@@ -341,4 +412,8 @@ void hn_node_set_mesh_param(hn_node *n, const char *name, float value) {
     else if (!strcmp(name, "mouth"))   n->mesh_param_mouth = value;
     else if (!strcmp(name, "body_x"))  n->mesh_param_body_x = value;
     else if (!strcmp(name, "body_y"))  n->mesh_param_body_y = value;
+    else if (!strcmp(name, "eye")) {
+        float open = value < 0.0f ? 0.0f : value;
+        n->mesh_param_eye = 1.0f - open;
+    }
 }

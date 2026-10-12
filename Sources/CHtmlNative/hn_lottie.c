@@ -18,10 +18,12 @@
  *   径向渐变的形状化 / 蒙版的反相·相减·相交模式。
  */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "hn_internal.h"
 #include "hn_json.h"
+#include "hn_png.h"          /* hn_inflate: ZIP 条目的裸 deflate 解压 */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -561,6 +563,180 @@ static int parse_items(hn_arena *a, const hn_json *arr, lshape **out) {
     return n;
 }
 
+/* ---------------- dotLottie(.lottie)ZIP 包 ----------------
+ *
+ * .lottie 是 ZIP 容器(dotLottie 规范 v1: manifest.json 声明元信息,
+ * animations/<id>.json 是各动画本体)。这里做**最小 ZIP 读取**:
+ * 不落盘、不建临时文件、零外部依赖 —— 解压复用 hn_png.c 的 hn_inflate
+ * (PNG IDAT 与 ZIP method=8 都是 RFC 1951 裸 deflate, 同一份实现)。
+ *
+ * 结构(APPNOTE.TXT):
+ *   [本地文件头 PK\x03\x04 + 数据] ... [中央目录 PK\x01\x02 ...] [EOCD PK\x05\x06]
+ * 读取顺序与写入相反: 从尾部扫 EOCD → 拿中央目录位置/条目数 → 遍历中央
+ * 目录拿各条目的名字/压缩方法/尺寸/本地头偏移 → 按需从本地头取数据。
+ * 不做的(从简且与规范无冲突): ZIP64(单动画 JSON 远小于 4GB)、加密、
+ * 分卷、数据描述符依赖(中央目录里的尺寸是权威值)。
+ */
+
+#define HN_ZIP_EOCD_SIG  0x06054b50u
+#define HN_ZIP_CDIR_SIG  0x02014b50u
+#define HN_ZIP_LFH_SIG   0x04034b50u
+
+static unsigned rd_le16(const unsigned char *p) { return p[0] | ((unsigned)p[1] << 8); }
+static unsigned rd_le32(const unsigned char *p) {
+    return p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+/* ZIP 中央目录条目(只留取动画需要的字段) */
+typedef struct {
+    const char *name;        /* 指向包内字节(不 NUL 结尾, 用 name_len) */
+    unsigned    name_len;
+    unsigned    method;      /* 0=存储 8=deflate */
+    unsigned    comp_size;
+    unsigned    lfh_off;     /* 本地文件头在包内的偏移 */
+} zip_entry;
+
+typedef struct {
+    const unsigned char *buf;
+    size_t               n;
+    zip_entry           *ents;      /* malloc 数组, hn_zip_free 释放 */
+    int                  n_ents;
+} zip_file;
+
+/* 释放中央目录条目表。zip_file 本体是调用方的栈变量, 这里只 dispose 它
+   持有的堆数组(不能连 z 一起 free —— 那是栈指针) */
+static void hn_zip_free(zip_file *z) {
+    if (!z) return;
+    free(z->ents);
+    z->ents = NULL;
+    z->n_ents = 0;
+}
+
+/* EOCD 定位: 从尾部倒扫签名(注释区最长 65535, 扫 22+65535 字节足够) */
+static int hn_zip_open(const unsigned char *buf, size_t n, zip_file *z) {
+    memset(z, 0, sizeof(*z));
+    if (n < 22) return 0;
+    size_t scan_max = n - 22;
+    size_t scan_floor = scan_max > 65557 ? scan_max - 65557 : 0;
+    size_t e = scan_max + 1;
+    while (e-- > scan_floor) {
+        if (rd_le32(buf + e) == HN_ZIP_EOCD_SIG) break;
+    }
+    if (e < scan_floor || rd_le32(buf + e) != HN_ZIP_EOCD_SIG) return 0;
+    int total = (int)rd_le16(buf + e + 10);         /* 全部条目数 */
+    size_t cd_off = rd_le32(buf + e + 16);
+    size_t cd_size = rd_le32(buf + e + 12);
+    if (cd_off + (size_t)cd_size > n || total <= 0) return 0;
+    z->buf = buf; z->n = n;
+    z->ents = (zip_entry *)calloc((size_t)total, sizeof(zip_entry));
+    if (!z->ents) return 0;
+    size_t p = cd_off, end = cd_off + cd_size;
+    for (int i = 0; i < total && p + 46 <= end; i++) {
+        if (rd_le32(buf + p) != HN_ZIP_CDIR_SIG) break;
+        zip_entry *e2 = &z->ents[z->n_ents++];
+        e2->method    = rd_le16(buf + p + 10);
+        e2->comp_size = rd_le32(buf + p + 20);
+        e2->lfh_off   = rd_le32(buf + p + 42);
+        e2->name_len  = rd_le16(buf + p + 28);
+        e2->name      = (const char *)buf + p + 46;
+        p += 46 + e2->name_len + rd_le16(buf + p + 30) + rd_le16(buf + p + 32);
+    }
+    return z->n_ents > 0;
+}
+
+static int ent_is(const zip_entry *e, const char *name) {
+    size_t l = strlen(name);
+    return e->name_len == l && !memcmp(e->name, name, l);
+}
+
+/* 提取条目内容(malloc, 调用方 free)。失败返回 NULL。 */
+static unsigned char *hn_zip_extract(const zip_file *z, const zip_entry *e,
+                                     size_t *out_len) {
+    *out_len = 0;
+    if (e->lfh_off + 30 > z->n) return NULL;
+    const unsigned char *lfh = z->buf + e->lfh_off;
+    if (rd_le32(lfh) != HN_ZIP_LFH_SIG) return NULL;
+    /* 数据区 = 本地头 30 + 名字 + 额外字段(本地头的 extra 可能与中央
+       目录不同, 以本地头自己的字段为准) */
+    size_t name_len = rd_le16(lfh + 26), extra_len = rd_le16(lfh + 28);
+    size_t data_off = e->lfh_off + 30 + name_len + extra_len;
+    if (data_off + e->comp_size > z->n) return NULL;
+    const unsigned char *data = z->buf + data_off;
+    if (e->method == 0) {                           /* 存储 */
+        unsigned char *out = (unsigned char *)malloc(e->comp_size + 1);
+        if (!out) return NULL;
+        memcpy(out, data, e->comp_size);
+        out[e->comp_size] = 0;
+        *out_len = e->comp_size;
+        return out;
+    }
+    if (e->method != 8) return NULL;                /* 其它方法不支持 */
+    unsigned char *out = hn_inflate(data, e->comp_size, out_len);
+    if (out) {                                      /* 补 NUL 便于直接当字符串解析 */
+        unsigned char *n2 = (unsigned char *)realloc(out, *out_len + 1);
+        if (!n2) { free(out); *out_len = 0; return NULL; }
+        out = n2;
+        out[*out_len] = 0;
+    }
+    return out;
+}
+
+/* 选出要播的动画 JSON:
+   1) 有 manifest.json → 解析, 取 animations[0].id → "animations/<id>.json"
+      (dotLottie 规范: manifest.animations[] 的次序就是播放次序, 首个为
+      缺省动画; hn-lottie-index 多选一暂不做 —— 最简口径是恒取首个)。
+   2) 无 manifest(或解析失败) → 回退为第一个 animations/ 目录下的 .json 条目。 */
+static int hn_zip_pick_animation(const zip_file *z, int *idx_out) {
+    *idx_out = -1;
+    int fallback = -1;
+    for (int i = 0; i < z->n_ents; i++) {
+        const zip_entry *e = &z->ents[i];
+        if (ent_is(e, "manifest.json")) {
+            size_t mn = 0;
+            unsigned char *mb = hn_zip_extract(z, e, &mn);
+            if (mb) {
+                void *ja = NULL;
+                hn_json *root = hn_json_parse((char *)mb, mn, &ja);
+                const hn_json *anims = root ? hn_json_obj_get(root, "animations") : NULL;
+                if (anims && anims->kind == HN_JSON_ARR && anims->count > 0) {
+                    const hn_json *a0 = hn_json_at(anims, 0);
+                    const char *id = hn_json_str(hn_json_obj_get(a0, "id"), NULL);
+                    /* 目录名固定 "animations/"(规范 §Structure); id 即文件名 */
+                    if (id && *id) {
+                        char want[160];
+                        snprintf(want, sizeof(want), "animations/%s.json", id);
+                        for (int k = 0; k < z->n_ents; k++)
+                            if (ent_is(&z->ents[k], want)) { *idx_out = k; break; }
+                    }
+                }
+                hn_json_free(ja);
+                free(mb);
+                if (*idx_out >= 0) return 1;
+            }
+        }
+        /* 最短合法名 = "animations/"(11) + 文件名(≥1) + ".json"(5) = 17;
+           前后缀判据在这里, 长度只做下限保护 */
+        if (fallback < 0 && e->name_len >= 17 &&
+            !memcmp(e->name, "animations/", 11) &&
+            !memcmp(e->name + e->name_len - 5, ".json", 5))
+            fallback = i;
+    }
+    if (fallback >= 0) { *idx_out = fallback; return 1; }
+    return 0;
+}
+
+/* .lottie 字节 → 动画 JSON 文本(malloc, 调用方 free)。非 ZIP 返回 NULL。 */
+static char *hn_dotlottie_json(const unsigned char *buf, size_t n, size_t *json_len) {
+    zip_file z;
+    if (!hn_zip_open(buf, n, &z)) return NULL;
+    char *json = NULL;
+    int idx = -1;
+    if (hn_zip_pick_animation(&z, &idx) && idx >= 0)
+        json = (char *)hn_zip_extract(&z, &z.ents[idx], json_len);
+    hn_zip_free(&z);
+    return json;
+}
+
 /* ---------------- 加载 ---------------- */
 
 struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
@@ -571,19 +747,32 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
     const char *bytes = ab->load(ab->ctx, path, &len);
     if (!bytes || len == 0) return NULL;
 
-    char *buf = (char *)malloc(len + 1);      /* 就地解析会覆盖原字节 */
-    if (!buf) return NULL;
-    memcpy(buf, bytes, len);
-    buf[len] = 0;
-
+    /* dotLottie(.lottie): ZIP 容器 → 解出动画 JSON 后走同一 JSON 管线。
+       识别靠**文件头 PK 魔数**(规范并允许任意扩展名, 魔数比后缀更可靠);
+       失败(坏包/无动画)返回 NULL, 调用方落到占位路径让问题可见。 */
+    char *buf = NULL;
+    char *zjson = NULL;
     void *ja = NULL;
-    hn_json *root = hn_json_parse(buf, len, &ja);
-    if (!root) { free(buf); return NULL; }
+    hn_json *root = NULL;
+    if (len >= 4 && !memcmp(bytes, "PK\x03\x04", 4)) {
+        size_t zjn = 0;
+        zjson = hn_dotlottie_json((const unsigned char *)bytes, len, &zjn);
+        if (!zjson) return NULL;
+        root = hn_json_parse(zjson, zjn, &ja);
+        if (!root) { free(zjson); return NULL; }
+    } else {
+        buf = (char *)malloc(len + 1);      /* 就地解析会覆盖原字节 */
+        if (!buf) return NULL;
+        memcpy(buf, bytes, len);
+        buf[len] = 0;
+        root = hn_json_parse(buf, len, &ja);
+        if (!root) { free(buf); return NULL; }
+    }
 
     struct hn_lottie *l = (struct hn_lottie *)calloc(1, sizeof(*l));
-    if (!l) { hn_json_free(ja); free(buf); return NULL; }
+    if (!l) { hn_json_free(ja); free(zjson); free(buf); return NULL; }
     l->json_arena = ja;
-    l->json_buf = buf;
+    l->json_buf = zjson ? zjson : buf;   /* 两者只有一个非 NULL, free() 统一释放 */
     l->w = (float)hn_json_num(hn_json_obj_get(root, "w"), 0);
     l->h = (float)hn_json_num(hn_json_obj_get(root, "h"), 0);
     float fr = (float)hn_json_num(hn_json_obj_get(root, "fr"), 60);
@@ -1239,7 +1428,22 @@ static void emit_group(hn_context *c, hn_arena *a, const lshape *items, int n,
             vbuf *v = bag_new(bag);
             if (v) path_points(a, s, t, v);
         } else if (s->kind == L_GROUP) {
-            emit_group(c, a, s->kids, s->n_kids, t, gm, galpha, sx, sy, f, bag, depth + 1);
+            /* **组自身的变换必须先作用**。预合成展开(parse_precomp)把内层
+               图层的 ks(a/p/s/r/o)存进 L_GROUP 自身字段 —— 这里若只传父矩阵,
+               内层图层的位置/锚点/缩放就整体丢失: 内容全部按局部坐标堆在
+               画布原点附近, 表现为"contain 装盒后画到盒外/顶角"(实测
+               500x690 的 emoji 装进 340x470 只剩原点附近一团)。
+               常规组(gr)的变换是子项里的 L_TRANSFORM(下方统一处理),
+               自身字段为零 → lm_from 恒等 → 两种来源在此自然汇合。
+               合成顺序与 L_TRANSFORM 一致: 先本组, 后父级。 */
+            lmat sm = lm_from(&s->anchor, &s->tpos, &s->scale, &s->rot, t);
+            lmat cm = lm_mul(sm, gm);
+            float galpha2 = galpha;
+            float gov[4];
+            lprop_at(&s->opacity, t, gov);
+            if (s->opacity.ncomp || s->opacity.n_kf) galpha2 *= norm_op(gov[0]);
+            emit_group(c, a, s->kids, s->n_kids, t, cm, galpha2, sx, sy, f, bag,
+                       depth + 1);
         }
     }
     /* trim path: 组内的 tm 项作用于**本组全部路径**。多个 tm 取第一个
@@ -1415,5 +1619,546 @@ void hn_lottie_emit(hn_context *c, struct hn_lottie *l, float clock_ms,
             cp.kind = HN_CMD_CLIP_POP;
             hn_paint_push(c, &cp);
         }
+    }
+}
+
+/* ================= Live2D 运行时包(moc3 边界的诚实接入) =================
+ *
+ * Live2D 的 .moc3 是专有二进制(需要 Cubism SDK 商业授权, 既有契约: 不解),
+ * 但它的**运行时包**里所有外围资源都是公开 JSON:
+ *   model3.json  FileReferences: Moc/Textures/Physics/DisplayInfo/Motions 组
+ *   cdi3.json    DisplayInfo: 参数清单(Id + 日文显示名)
+ *   physics3.json  物理设置(Meta 计数; v1 只解析计数, 不做仿真)
+ *   motion3.json   动作曲线(v2.4: Curves[].Id + Segments)
+ * Neb 的做法: 解析这些公开数据, 把 motion3 曲线**采样后喂给自有 rig**
+ * (hn_mesh 的形变通道) —— 立绘动起来靠的是官方动作数据, 网格变形是
+ * 引擎自己的原语。moc3 网格变形渲染不做, 也如实声明不做。
+ *
+ * motion3 求值器(Live2D Cubism 规范 Motion 文档 v2.4):
+ *   Curves[i].Segments = [x0,y0, (type, 点...)*]
+ *   段类型: 0=线性(1 点) / 1=贝塞尔(3 点: c1,c2,终点) /
+ *           2=阶梯(1 点: 保持前值到终点才跳变) / 3=反阶梯(1 点: 立即跳到新值)
+ *   贝塞尔按参数 u 求 x(u)=t 的反解(x 单调, AreBeziersRestricted 保证),
+ *   再取 y(u) —— 二分 28 次, 确定性闭式迭代(无 libm 依赖)。
+ *   Meta.Loop=true 时采样时间对 Duration 取模回绕。
+ */
+
+typedef struct {
+    char  *id;                 /* 曲线参数 Id(ParamAngleX 等) */
+    int    n_pts;              /* 端点数(含首点) */
+    float *px, *py;            /* 端点(x=秒, y=值) */
+    unsigned char *seg_type;   /* 段 i 连接端点 i→i+1, 类型 0/1/2/3 */
+    float *bx, *by;            /* 贝塞尔段控制点(每段 2 个, 非贝塞尔段为 0) */
+} l2_curve;
+
+typedef struct {
+    char    *file;             /* 相对 model3.json 的路径(诊断用) */
+    float    duration;         /* Meta.Duration(秒) */
+    int      loop;             /* Meta.Loop */
+    l2_curve *curves;
+    int      n_curves;
+} l2_motion;
+
+typedef struct l2_group {
+    char *name;                /* Motions 组名(Idle/Tap/...) */
+    int   base, count;         /* motions[] 里的区间 [base, base+count) */
+    struct l2_group *next;
+} l2_group;
+
+struct hn_live2d {
+    char *model3_path;         /* 缓存键(规范化路径) */
+    char *json_buf;            /* model3.json 的解析缓冲 —— hn_json 是就地解析,
+                                  字符串值指向缓冲内, 必须与结构体同生命周期 */
+    /* FileReferences 各字段的"已声明/已解析"事实(诚实面板的数据源) */
+    int   has_moc;             /* Moc 已声明 —— moc3 本体不解析(专有) */
+    int   textures;            /* 贴图数 */
+    char *texture_paths[8];
+    int   has_physics;
+    int   physics_settings, physics_inputs, physics_outputs, physics_vertices;
+    int   has_display_info;
+    int   cdi3_params;         /* cdi3.json 参数条数 */
+    char **cdi3_id, **cdi3_name;   /* 参数 Id → 显示名(前 64 条, 探针用) */
+    int   cdi3_stored;
+    l2_motion *motions;
+    int   n_motions;
+    l2_group *groups;
+    int   n_groups;
+};
+
+#define L2_CDI3_MAX 64
+
+static char *l2_strdup(const char *s) {
+    if (!s) return NULL;
+    size_t n = strlen(s);
+    char *p = (char *)malloc(n + 1);
+    if (p) memcpy(p, s, n + 1);
+    return p;
+}
+
+/* 目录拼接: dir 是 model3.json 所在目录(含尾 '/' 或为空), rel 是包内相对路径 */
+static char *l2_join(const char *dir, const char *rel) {
+    if (!dir) dir = "";
+    size_t dn = strlen(dir), rn = strlen(rel);
+    char *p = (char *)malloc(dn + rn + 1);
+    if (!p) return NULL;
+    memcpy(p, dir, dn);
+    memcpy(p + dn, rel, rn + 1);
+    return p;
+}
+
+/* 取路径的目录前缀(含尾 '/'; 无 '/' 返回空串堆块) */
+static char *l2_dirname(const char *path) {
+    const char *slash = strrchr(path, '/');
+    size_t n = slash ? (size_t)(slash - path + 1) : 0;
+    char *p = (char *)malloc(n + 1);
+    if (!p) return NULL;
+    memcpy(p, path, n);
+    p[n] = 0;
+    return p;
+}
+
+static void l2_free_motion(l2_motion *mo) {
+    if (!mo) return;
+    free(mo->file);
+    for (int i = 0; i < mo->n_curves; i++) {
+        free(mo->curves[i].id);
+        free(mo->curves[i].px);
+        free(mo->curves[i].py);
+        free(mo->curves[i].seg_type);
+        free(mo->curves[i].bx);
+        free(mo->curves[i].by);
+    }
+    free(mo->curves);
+}
+
+void hn_live2d_free(struct hn_live2d *m) {
+    if (!m) return;
+    free(m->model3_path);
+    free(m->json_buf);
+    for (int i = 0; i < m->textures && i < 8; i++) free(m->texture_paths[i]);
+    for (int i = 0; i < m->cdi3_stored; i++) { free(m->cdi3_id[i]); free(m->cdi3_name[i]); }
+    free(m->cdi3_id);
+    free(m->cdi3_name);
+    for (int i = 0; i < m->n_motions; i++) l2_free_motion(&m->motions[i]);
+    free(m->motions);
+    for (l2_group *g = m->groups; g; ) {
+        l2_group *nx = g->next;
+        free(g->name);
+        free(g);
+        g = nx;
+    }
+    free(m);
+}
+
+/* 解析一条 motion3 曲线的 Segments 平面数组 */
+static int l2_parse_segments(hn_arena *a_unused, const hn_json *segs, l2_curve *cv) {
+    (void)a_unused;
+    if (!segs || segs->kind != HN_JSON_ARR || segs->count < 2) return 0;
+    int cap = segs->count / 2 + 2;
+    cv->px = (float *)calloc((size_t)cap, sizeof(float));
+    cv->py = (float *)calloc((size_t)cap, sizeof(float));
+    cv->seg_type = (unsigned char *)calloc((size_t)cap, sizeof(unsigned char));
+    cv->bx = (float *)calloc((size_t)cap * 2, sizeof(float));
+    cv->by = (float *)calloc((size_t)cap * 2, sizeof(float));
+    if (!cv->px || !cv->py || !cv->seg_type || !cv->bx || !cv->by) return 0;
+    cv->px[0] = (float)hn_json_num(hn_json_at(segs, 0), 0);
+    cv->py[0] = (float)hn_json_num(hn_json_at(segs, 1), 0);
+    int npts = 1, si = 2;
+    while (si < segs->count) {
+        int type = (int)hn_json_num(hn_json_at(segs, si), -1);
+        int need = (type == 1) ? 7 : 3;          /* 段标记 + 点(贝塞尔 3 点) */
+        if (si + need > segs->count) break;      /* 截断段: 丢弃(容错不崩) */
+        cv->px[npts] = (float)hn_json_num(hn_json_at(segs, si + need - 2), 0);
+        cv->py[npts] = (float)hn_json_num(hn_json_at(segs, si + need - 1), 0);
+        cv->seg_type[npts - 1] = (unsigned char)type;
+        if (type == 1) {
+            cv->bx[(npts - 1) * 2]     = (float)hn_json_num(hn_json_at(segs, si + 1), 0);
+            cv->by[(npts - 1) * 2]     = (float)hn_json_num(hn_json_at(segs, si + 2), 0);
+            cv->bx[(npts - 1) * 2 + 1] = (float)hn_json_num(hn_json_at(segs, si + 3), 0);
+            cv->by[(npts - 1) * 2 + 1] = (float)hn_json_num(hn_json_at(segs, si + 4), 0);
+        }
+        npts++;
+        si += need;
+    }
+    cv->n_pts = npts;
+    return npts >= 2;
+}
+
+/* 加载并解析一个 motion3.json(失败返回 0, mo 保持可安全释放的状态) */
+static int l2_load_motion(hn_context *c, const char *dir, const char *rel,
+                          l2_motion *mo) {
+    const hn_asset_backend *ab = hn_context_assets(c);
+    if (!ab || !ab->load) return 0;
+    char *path = l2_join(dir, rel);
+    if (!path) return 0;
+    size_t len = 0;
+    const char *bytes = ab->load(ab->ctx, path, &len);
+    mo->file = l2_strdup(rel);
+    if (!bytes || len == 0) { free(path); return 0; }
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) { free(path); return 0; }
+    memcpy(buf, bytes, len);
+    buf[len] = 0;
+    void *ja = NULL;
+    hn_json *root = hn_json_parse(buf, len, &ja);
+    free(path);
+    if (!root) { free(buf); return 0; }
+    const hn_json *meta = hn_json_obj_get(root, "Meta");
+    mo->duration = (float)hn_json_num(hn_json_obj_get(meta, "Duration"), 0);
+    mo->loop = hn_json_bool(hn_json_obj_get(meta, "Loop"), 1);
+    const hn_json *curves = hn_json_obj_get(root, "Curves");
+    int n = (curves && curves->kind == HN_JSON_ARR) ? curves->count : 0;
+    mo->curves = (l2_curve *)calloc((size_t)(n > 0 ? n : 1), sizeof(l2_curve));
+    if (!mo->curves) { hn_json_free(ja); free(buf); return 0; }
+    int ok = 0;
+    for (int i = 0; i < n; i++) {
+        hn_json *cj = hn_json_at(curves, i);
+        const char *id = hn_json_str(hn_json_obj_get(cj, "Id"), NULL);
+        if (!id) continue;
+        l2_curve *cv = &mo->curves[mo->n_curves];
+        memset(cv, 0, sizeof(*cv));
+        cv->id = l2_strdup(id);
+        if (!cv->id) continue;
+        if (!l2_parse_segments(NULL, hn_json_obj_get(cj, "Segments"), cv)) {
+            free(cv->id);
+            continue;
+        }
+        mo->n_curves++;
+        ok = 1;
+    }
+    hn_json_free(ja);
+    free(buf);
+    return ok && mo->duration > 0;
+}
+
+struct hn_live2d *hn_live2d_load(hn_context *c, const char *model3_path) {
+    if (!c || !model3_path || !*model3_path) return NULL;
+    const hn_asset_backend *ab = hn_context_assets(c);
+    if (!ab || !ab->load) return NULL;
+    size_t len = 0;
+    const char *bytes = ab->load(ab->ctx, model3_path, &len);
+    if (!bytes || len == 0) return NULL;
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) return NULL;
+    memcpy(buf, bytes, len);
+    buf[len] = 0;
+    void *ja = NULL;
+    hn_json *root = hn_json_parse(buf, len, &ja);
+    if (!root) { free(buf); return NULL; }
+
+    struct hn_live2d *m = (struct hn_live2d *)calloc(1, sizeof(*m));
+
+    if (!m) { hn_json_free(ja); free(buf); return NULL; }
+    m->json_buf = buf;         /* 就地解析: 字符串指向 buf 内, 随结构体释放 */
+    m->model3_path = l2_strdup(model3_path);
+    m->cdi3_id = (char **)calloc(L2_CDI3_MAX, sizeof(char *));
+    m->cdi3_name = (char **)calloc(L2_CDI3_MAX, sizeof(char *));
+    if (!m->model3_path || !m->cdi3_id || !m->cdi3_name) {
+        hn_live2d_free(m);
+        hn_json_free(ja);
+        return NULL;
+    }
+    char *dir = l2_dirname(model3_path);
+
+    const hn_json *fr = hn_json_obj_get(root, "FileReferences");
+    const hn_json *moc = hn_json_obj_get(fr, "Moc");
+    if (moc && moc->kind == HN_JSON_STR && moc->str && *moc->str)
+        m->has_moc = 1;                    /* 只记声明; moc3 本体不解析 */
+    const hn_json *tex = hn_json_obj_get(fr, "Textures");
+    if (tex && tex->kind == HN_JSON_ARR)
+        for (int i = 0; i < tex->count && m->textures < 8; i++) {
+            const char *tp = hn_json_str(hn_json_at(tex, i), NULL);
+            if (!tp) continue;
+            m->texture_paths[m->textures++] = l2_join(dir, tp);
+        }
+    const hn_json *phy = hn_json_obj_get(fr, "Physics");
+    const char *phy_rel = hn_json_str(phy, NULL);
+    if (phy_rel && *phy_rel) {
+        char *pp = l2_join(dir, phy_rel);
+        size_t pl = 0;
+        const char *pb = pp ? ab->load(ab->ctx, pp, &pl) : NULL;
+        if (pb && pl > 0) {
+            char *pbuf = (char *)malloc(pl + 1);
+            if (pbuf) {
+                memcpy(pbuf, pb, pl);
+                pbuf[pl] = 0;
+                void *pja = NULL;
+                hn_json *proot = hn_json_parse(pbuf, pl, &pja);
+                if (proot) {
+                    const hn_json *pm = hn_json_obj_get(proot, "Meta");
+                    /* physics3 v1 只解析计数(渲染不用物理 —— 如实口径) */
+                    m->physics_settings = (int)hn_json_num(hn_json_obj_get(pm, "PhysicsSettingCount"), 0);
+                    m->physics_inputs   = (int)hn_json_num(hn_json_obj_get(pm, "TotalInputCount"), 0);
+                    m->physics_outputs  = (int)hn_json_num(hn_json_obj_get(pm, "TotalOutputCount"), 0);
+                    m->physics_vertices = (int)hn_json_num(hn_json_obj_get(pm, "VertexCount"), 0);
+                    m->has_physics = 1;
+                    hn_json_free(pja);
+                }
+                free(pbuf);
+            }
+        }
+        free(pp);
+    }
+    const hn_json *di = hn_json_obj_get(fr, "DisplayInfo");
+    const char *di_rel = hn_json_str(di, NULL);
+    if (di_rel && *di_rel) {
+        char *dp = l2_join(dir, di_rel);
+        size_t dl = 0;
+        const char *db = dp ? ab->load(ab->ctx, dp, &dl) : NULL;
+        if (db && dl > 0) {
+            char *dbuf = (char *)malloc(dl + 1);
+            if (dbuf) {
+                memcpy(dbuf, db, dl);
+                dbuf[dl] = 0;
+                void *dja = NULL;
+                hn_json *droot = hn_json_parse(dbuf, dl, &dja);
+                if (droot) {
+                    const hn_json *ps = hn_json_obj_get(droot, "Parameters");
+                    if (ps && ps->kind == HN_JSON_ARR) {
+                        m->cdi3_params = ps->count;
+                        for (int i = 0; i < ps->count && m->cdi3_stored < L2_CDI3_MAX; i++) {
+                            hn_json *e = hn_json_at(ps, i);
+                            const char *pid = hn_json_str(hn_json_obj_get(e, "Id"), NULL);
+                            const char *nm = hn_json_str(hn_json_obj_get(e, "Name"), NULL);
+                            if (!pid) continue;
+                            m->cdi3_id[m->cdi3_stored] = l2_strdup(pid);
+                            m->cdi3_name[m->cdi3_stored] = l2_strdup(nm);
+                            if (m->cdi3_id[m->cdi3_stored]) m->cdi3_stored++;
+                        }
+                        m->has_display_info = 1;
+                    }
+                    hn_json_free(dja);
+                }
+                free(dbuf);
+            }
+        }
+        free(dp);
+    }
+    /* Motions 组: 每组一个文件数组, 逐个解析 motion3 */
+    const hn_json *motions = hn_json_obj_get(fr, "Motions");
+    if (motions && motions->kind == HN_JSON_OBJ) {
+        m->motions = (l2_motion *)calloc((size_t)(motions->count > 0 ? motions->count : 1),
+                                         sizeof(l2_motion));
+        if (m->motions) {
+            int cap = 0;
+            for (int g = 0; g < motions->count; g++) {
+                /* OBJ 的子节点走 items[](hn_json_at 只认 ARR —— 与
+                   hn_json_obj_get 同一访问路径) */
+                hn_json *ge = (g >= 0 && g < motions->count) ? motions->items[g] : NULL;
+                if (!ge || ge->kind != HN_JSON_ARR || !ge->key) continue;
+                l2_group *grp = (l2_group *)calloc(1, sizeof(l2_group));
+                if (!grp) continue;
+                grp->name = l2_strdup(ge->key);
+                grp->base = m->n_motions;
+                for (int i = 0; i < ge->count; i++) {
+                    hn_json *fe = hn_json_at(ge, i);
+                    const char *rel = hn_json_str(hn_json_obj_get(fe, "File"), NULL);
+                    if (!rel) continue;
+                    if (cap <= m->n_motions) {
+                        int nc = cap ? cap * 2 : motions->count;
+                        l2_motion *nm2 = (l2_motion *)realloc(m->motions,
+                                                              sizeof(l2_motion) * (size_t)nc);
+                        if (!nm2) break;
+                        m->motions = nm2;
+                        cap = nc;
+                    }
+                    l2_motion *mo = &m->motions[m->n_motions];
+                    memset(mo, 0, sizeof(*mo));
+                    if (l2_load_motion(c, dir, rel, mo)) m->n_motions++;
+                    else l2_free_motion(mo);
+                }
+                grp->count = m->n_motions - grp->base;
+                if (grp->count > 0) {
+                    grp->next = m->groups;
+                    m->groups = grp;       /* 头插: 顺序与 JSON 逆序, 无碍(按键查) */
+                    m->n_groups++;
+                } else {
+                    free(grp->name);
+                    free(grp);
+                }
+            }
+        }
+    }
+    hn_json_free(ja);
+    free(dir);
+    if (m->n_motions == 0) { hn_live2d_free(m); return NULL; }
+    return m;
+}
+
+/* ---------------- motion3 求值 ---------------- */
+
+/* 三次贝塞尔 B(u): 端点 p0,p3 与控制点 p1,p2(标量分量) */
+static float l2_bez(float p0, float p1, float p2, float p3, float u) {
+    float mu = 1.0f - u;
+    return mu * mu * mu * p0 + 3.0f * mu * mu * u * p1 +
+           3.0f * mu * u * u * p2 + u * u * u * p3;
+}
+
+/* 曲线在 t 秒的值。段语义(规范):
+   线性=两端点插值; 阶梯=保持段起点值(到终点才跳);
+   反阶梯=进入段即取终点值; 贝塞尔=反解 x(u)=t 后取 y(u)。 */
+static int l2_curve_at(const l2_curve *cv, float t, float *out) {
+    if (!cv || cv->n_pts < 2) return 0;
+    if (t <= cv->px[0]) { *out = cv->py[0]; return 1; }
+    int last = cv->n_pts - 1;
+    if (t >= cv->px[last]) { *out = cv->py[last]; return 1; }
+    for (int i = 0; i < last; i++) {
+        /* 半开区间 [px[i], px[i+1]): 恰在关键帧时刻取后一段 —— 阶梯段
+           的跳变发生在终点时刻(新值生效), 与 Cubism 关键帧语义一致;
+           连续段(线性/贝塞尔)在共享端点两侧同值, 不受影响。 */
+        if (t < cv->px[i] || t >= cv->px[i + 1]) continue;
+        float x0 = cv->px[i], x1 = cv->px[i + 1];
+        switch (cv->seg_type[i]) {
+        case 2:                                    /* 阶梯: 前值保持 */
+            *out = cv->py[i];
+            return 1;
+        case 3:                                    /* 反阶梯: 立即跳到新值 */
+            *out = cv->py[i + 1];
+            return 1;
+        case 1: {                                  /* 贝塞尔: x 单调反解 */
+            float c1x = cv->bx[i * 2],     c1y = cv->by[i * 2];
+            float c2x = cv->bx[i * 2 + 1], c2y = cv->by[i * 2 + 1];
+            float lo = 0.0f, hi = 1.0f, u = 0.5f;
+            for (int k = 0; k < 28; k++) {         /* 28 次二分: 1e-8 级, 确定性 */
+                u = (lo + hi) * 0.5f;
+                float xu = l2_bez(x0, c1x, c2x, x1, u);
+                if (xu < t) lo = u; else hi = u;
+            }
+            *out = l2_bez(cv->py[i], c1y, c2y, cv->py[i + 1], u);
+            return 1;
+        }
+        default: {                                 /* 0 = 线性 */
+            float f = x1 - x0 > 0.000001f ? (t - x0) / (x1 - x0) : 0.0f;
+            *out = cv->py[i] + (cv->py[i + 1] - cv->py[i]) * f;
+            return 1;
+        }
+        }
+    }
+    *out = cv->py[last];
+    return 1;
+}
+
+int hn_live2d_motion_sample(const struct hn_live2d *m, int motion_idx,
+                            const char *param, float t_sec, float *out) {
+    if (!m || motion_idx < 0 || motion_idx >= m->n_motions || !param || !out)
+        return 0;
+    const l2_motion *mo = &m->motions[motion_idx];
+    float t = t_sec;
+    if (mo->loop && mo->duration > 0) {            /* Loop=true: 对时长取模回绕 */
+        t = fmodf(t, mo->duration);
+        if (t < 0) t += mo->duration;
+    } else if (mo->duration > 0 && t > mo->duration) {
+        t = mo->duration;                          /* 不循环: 钳到末帧 */
+    }
+    for (int i = 0; i < mo->n_curves; i++)
+        if (!strcmp(mo->curves[i].id, param))
+            return l2_curve_at(&mo->curves[i], t, out);
+    return 0;
+}
+
+/* ---------------- 包信息(诚实面板/探针断言面) ---------------- */
+
+void hn_live2d_get_info(const struct hn_live2d *m, hn_live2d_info *info) {
+    if (!info) return;
+    memset(info, 0, sizeof(*info));
+    if (!m) return;
+    info->has_moc           = m->has_moc;
+    info->textures          = m->textures;
+    info->has_physics       = m->has_physics;
+    info->physics_settings  = m->physics_settings;
+    info->physics_inputs    = m->physics_inputs;
+    info->physics_outputs   = m->physics_outputs;
+    info->physics_vertices  = m->physics_vertices;
+    info->has_display_info  = m->has_display_info;
+    info->cdi3_params       = m->cdi3_params;
+    info->motion_groups     = m->n_groups;
+    info->motions           = m->n_motions;
+    for (int i = 0; i < m->n_motions; i++) {
+        info->curves_total += m->motions[i].n_curves;
+        if (m->motions[i].duration > info->duration_max)
+            info->duration_max = m->motions[i].duration;
+    }
+}
+
+int hn_live2d_motion_count(const struct hn_live2d *m) { return m ? m->n_motions : 0; }
+
+const char *hn_live2d_cdi3_name(const struct hn_live2d *m, const char *param_id) {
+    if (!m || !param_id) return NULL;
+    for (int i = 0; i < m->cdi3_stored; i++)
+        if (m->cdi3_id[i] && !strcmp(m->cdi3_id[i], param_id))
+            return m->cdi3_name[i];
+    return NULL;
+}
+
+/* 按组名 + 组内序号选 motion; 组缺省时回退第一个 motion(缺省动画口径) */
+int hn_live2d_motion_pick(const struct hn_live2d *m, const char *group, int index) {
+    if (!m || m->n_motions <= 0) return -1;
+    if (group && *group) {
+        /* 组已声明却未命中 → -1(声明驱动: 宁可不驱动也不静默换动作) */
+        for (const l2_group *g = m->groups; g; g = g->next)
+            if (!strcmp(g->name, group)) {
+                if (index >= 0 && index < g->count) return g->base + index;
+                return -1;
+            }
+        return -1;
+    }
+    return 0;                                      /* 未声明组 → 第一个 motion */
+}
+
+const char *hn_live2d_motion_file(const struct hn_live2d *m, int motion_idx) {
+    if (!m || motion_idx < 0 || motion_idx >= m->n_motions) return NULL;
+    return m->motions[motion_idx].file;
+}
+
+float hn_live2d_motion_duration(const struct hn_live2d *m, int motion_idx) {
+    if (!m || motion_idx < 0 || motion_idx >= m->n_motions) return 0;
+    return m->motions[motion_idx].duration;
+}
+
+/* ---------------- 进程级模型缓存 ----------------
+ * 实时窗口每帧都要采样 motion(rig 驱动), 每次 emit 重解 ~90KB JSON 不可
+ * 接受; hn_context.c 的按路径缓存不归本文件管(纪律: 不碰), 因此在文件内
+ * 做固定 4 槽 LRU。语义与 Lottie/GIF 缓存一致: 键 = 路径, 不追踪文件热
+ * 更新; 探针可用 hn_live2d_cache_clear() 复位。 */
+typedef struct {
+    char *path;
+    struct hn_live2d *model;
+    unsigned last_use;
+} l2_cache_slot;
+
+static l2_cache_slot g_l2_cache[4];
+static unsigned g_l2_clock;
+
+struct hn_live2d *hn_live2d_acquire(hn_context *c, const char *model3_path) {
+    if (!model3_path || !*model3_path) return NULL;
+    g_l2_clock++;
+    int free_slot = -1, lru_slot = 0;
+    for (int i = 0; i < 4; i++) {
+        if (g_l2_cache[i].model && g_l2_cache[i].path &&
+            !strcmp(g_l2_cache[i].path, model3_path)) {
+            g_l2_cache[i].last_use = g_l2_clock;
+            return g_l2_cache[i].model;
+        }
+        if (!g_l2_cache[i].model && free_slot < 0) free_slot = i;
+        else if (g_l2_cache[i].last_use < g_l2_cache[lru_slot].last_use) lru_slot = i;
+    }
+    struct hn_live2d *m = hn_live2d_load(c, model3_path);
+    if (!m) return NULL;
+    int slot = free_slot >= 0 ? free_slot : lru_slot;
+    free(g_l2_cache[slot].path);
+    hn_live2d_free(g_l2_cache[slot].model);
+    g_l2_cache[slot].path = l2_strdup(model3_path);
+    g_l2_cache[slot].model = m;
+    g_l2_cache[slot].last_use = g_l2_clock;
+    return m;
+}
+
+void hn_live2d_cache_clear(void) {
+    for (int i = 0; i < 4; i++) {
+        free(g_l2_cache[i].path);
+        hn_live2d_free(g_l2_cache[i].model);
+        g_l2_cache[i].path = NULL;
+        g_l2_cache[i].model = NULL;
+        g_l2_cache[i].last_use = 0;
     }
 }

@@ -1,0 +1,1 @@
+{"Version":3,"Meta":{"Duration":3.5,"Fps":30,"Loop":true,"AreBeziersRestricted":true,"CurveCount":1,"TotalSegmentCount":4,"TotalPointCount":6,"UserDataCount":0,"TotalUserDataSize":0},"Curves":[{"Target":"Parameter","Id":"ParamTest","Segments":[0,10, 0,1,20, 2,2,0, 1,2.25,0,2.75,40,3,40, 3,3.5,0]}]}

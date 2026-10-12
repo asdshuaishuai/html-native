@@ -361,6 +361,11 @@ struct hn_node {
     float  mesh_param_look_x, mesh_param_look_y;   /* 视线: 水平/竖直偏移 */
     float  mesh_param_mouth;                       /* 口型: 上带局部张开 */
     float  mesh_param_body_x, mesh_param_body_y;   /* 整体摆 */
+    /* 闭眼压缩量 0..1(0=睁眼缺省 → 无形变; 1=全闭)。注意 hnMeshParam 的
+       "eye" 传的是**开合度**(1=睁眼), 引擎侧取 1-v 存这里 —— 字段零缺省
+       必须对应"无形变"。Live2D motion 接线(EyeLOpen/EyeROpen 均值)同样
+       以闭眼量写入。 */
+    float  mesh_param_eye;
 };
 
 struct hn_doc {
@@ -645,6 +650,41 @@ const char *hn_node_gif_src(hn_node *n);
 /* 网格变形(hn_mesh.c): 发射 MESH 指令 */
 void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
                   float bw, float bh, float sx, float sy, float alpha);
+
+/* ---------- Live2D 运行时包(hn_lottie.c 尾部; moc3 边界诚实接入) ----------
+ * 解析 model3.json(FileReferences/Motions 组)、cdi3.json(参数清单)、
+ * physics3.json(Meta 计数)与 motion3.json(v2.4 曲线求值器)。
+ * moc3 本体是专有二进制 —— 不解析, 引擎以 motion 数据驱动自有 rig
+ * (hn_mesh 形变通道)替代, 事实经 hn_live2d_get_info 如实暴露。 */
+typedef struct {
+    int has_moc;             /* FileReferences.Moc 已声明(本体不解析) */
+    int textures;            /* 贴图数 */
+    int has_physics;         /* physics3.json 已解析 */
+    int physics_settings, physics_inputs, physics_outputs, physics_vertices;
+    int has_display_info;    /* cdi3.json 已解析 */
+    int cdi3_params;         /* 参数清单条数 */
+    int motion_groups;       /* Motions 组数 */
+    int motions;             /* motion3 文件数(解析成功) */
+    int curves_total;        /* 全部 motion 的曲线总数 */
+    float duration_max;      /* 最长 motion 时长(秒) */
+} hn_live2d_info;
+
+struct hn_live2d *hn_live2d_load(hn_context *c, const char *model3_path);
+void hn_live2d_free(struct hn_live2d *m);
+/* 带进程级 4 槽 LRU 缓存的加载(实时窗口每帧采样不复解); hn_live2d_cache_clear 复位 */
+struct hn_live2d *hn_live2d_acquire(hn_context *c, const char *model3_path);
+void hn_live2d_cache_clear(void);
+void hn_live2d_get_info(const struct hn_live2d *m, hn_live2d_info *info);
+int hn_live2d_motion_count(const struct hn_live2d *m);
+/* 按组名 + 组内序号取 motion 下标; 组缺省 → 第一个; 未命中 → -1 */
+int hn_live2d_motion_pick(const struct hn_live2d *m, const char *group, int index);
+/* motion3 求值: 取 motion_idx 在 t_sec 秒的 param 曲线值; 无该曲线 → 0 */
+int hn_live2d_motion_sample(const struct hn_live2d *m, int motion_idx,
+                            const char *param, float t_sec, float *out);
+const char *hn_live2d_motion_file(const struct hn_live2d *m, int motion_idx);
+float hn_live2d_motion_duration(const struct hn_live2d *m, int motion_idx);
+/* cdi3.json 里参数 Id 的显示名(如 ParamAngleX → "角度 X"); 无 → NULL */
+const char *hn_live2d_cdi3_name(const struct hn_live2d *m, const char *param_id);
 
 /* ---------- 动画活跃类别(性能治理: 帧节拍分级) ----------
  * hn_context_anim_tick_ex 的类别出口。hn_rt 据此合成唤醒节拍与渲染路径:

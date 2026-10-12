@@ -279,8 +279,14 @@ void  hn_lottie_size(struct hn_lottie *l, float *w, float *h);
  *   hn-mesh-look="0-100"    视线/头部跟随指针(引擎存最近指针坐标, 节点上
  *                           一阶滞后平滑, 幅度按强度缩放)
  *   hn-mesh-idle="1"        待机: 叠加双正弦 sin(t*0.9)+0.5*sin(t*2.3)
- * JS 桥 hnMeshParam(id, name, v)(name ∈ look_x/look_y/mouth/body_x/body_y,
- * 值 -1..1)在求值时叠加对应形变 —— 数字人脚本可直接驱动口型/体摆。
+ *   hn-live2d="<model3.json>"  hn-live2d-motion="<组>" [hn-live2d-index="n"]
+ *                           官方 Live2D 运行时包接线: 引擎解析 model3/cdi3/
+ *                           physics3/motion3(公开 JSON), 采样 motion3 曲线
+ *                           (ParamAngleX/Y/Z、ParamMouthOpenY、ParamEyeL/R Open)
+ *                           驱动本网格形变通道; moc3 专有本体不解析
+ * JS 桥 hnMeshParam(id, name, v)(name ∈ look_x/look_y/mouth/body_x/body_y/eye,
+ * 值 -1..1; eye 传开合度 1=睁眼)在求值时叠加对应形变 —— 数字人脚本可直接
+ * 驱动口型/体摆/眨眼。
  * 更复杂的骨骼/物理可由脚本通过 hn_node_set_mesh_verts() 逐帧驱动 ——
  * 引擎只提供网格与贴图合成, 装配逻辑(即 Live2D 的 rig)属于应用层。
  */
