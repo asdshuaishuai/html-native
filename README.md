@@ -517,9 +517,17 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   fillRect/strokeRect/clearRect、fillText/strokeText、drawImage。
   **状态机在 JS 层**(与 CanvasKit htmlcanvas 同构的语义参照), 坐标经 CTM
   变换后以已解析原语落账本, 绘制期翻译成同一条显示列表(RECT 渐变/POLYGON/
-  QUAD/TEXT/IMAGE/CLIP)—— 无 Skia、无 WebGL。画智能 UI 仪表盘/折线图/
-  圆弧仪表开箱即用, 见 `examples/canvas-demo.html`
-  (口径由 `tools/canvas_probe.c` 61 断言钉死)
+  QUAD/TEXT/IMAGE/CLIP)—— 无 Skia、无 WebGL。
+  v2 补全:**径向渐变**(CSS 双圆全口径, hnsoft 逐像素闭式解 / cairo
+  pattern 同语义)、**渐变多 stop + 路径渐变填充**(折线多边形不再回落
+  纯色)、曲线族(二次/三次贝塞尔/椭圆/arcTo 折线化)、setLineDash、
+  textAlign/textBaseline + measureText(走引擎文本测量)、clearRect 局部化
+  (不再退化为全清)、shadow 四属性(fillRect)。
+  **JS 定时器与 RAF**(setTimeout/setInterval/requestAnimationFrame, 帧
+  驱动, 节拍与动画/轮询统一合成)—— canvas 连续动画与气泡轮播在真窗
+  自主运行。画智能 UI 仪表盘/折线图/圆弧仪表开箱即用,
+  见 `examples/canvas-demo.html`(口径由 `tools/canvas_probe.c` 95 断言 +
+  `tools/timer_probe.c` 37 断言钉死)
 - **Lottie 矢量动画**: `<img src="a.json" hn-lottie>` 直接播 Lottie/bodymovin
   文件 —— 引擎解析 JSON、按时间轴求值, 产出**多边形绘制指令(POLYGON)**,
   所以不必为每个平台写一遍播放器, 也不需要 WebView。支持形状层
@@ -569,6 +577,18 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   走**同一条布局绘制管线** —— 与 HTML 写的完全等价; daemon 的 `eval` op
   即由此求值。runtime 与进程同生命周期(daemon 本就常驻, 规避 GC 断言)。
   无 `<script>` 且无 eval 时零开销(不创建 JS 上下文)
+- **JS 定时器与 RAF(`setTimeout`/`setInterval`/`requestAnimationFrame`)**:
+  标准 JS 定时语义落地为**帧驱动**(QuickJS 没有后台事件线程,
+  `hn_rt_frame` 每帧推进一张 rt 级定时器表, 上限 64; RAF = 下一帧开头
+  按注册序执行一次)。时钟随 dt 步进 —— 真窗壳喂真实间隔即单调钟,
+  探针喂固定 16ms 即可对"第 4 帧触发"做**确定性断言**。回调纪律:
+  单帧最多 8 个(超出顺延, 不饿死主循环)、异常吞掉打 stderr、
+  回调里调 `hnSetText`/`hnCanvas2D` 走既有 repaint 管道落像素。
+  节拍合成取最小者: **RAF 待决→16 / 定时器表非空→min(16, 最近到期) /
+  动画→16 / hx 轮询→期限 / 全无→-1**(空闲零空转口径不变)。
+  桌宠自己换句、canvas 折线自己滚 —— `examples/pet.html`(气泡 3s 轮播 +
+  `hnMeshParam` 眨眼)与 `examples/canvas-demo.html`(500ms 实时折线);
+  口径由 `tools/timer_probe.py` 37 断言钉死
 - **媒体元素(`<video>`/`<audio>`, 解码委托平台)**: 元素解析照常, 语义是仿
   HTMLMediaElement 的**六态状态机**(IDLE/LOADING/READY/PLAYING/PAUSED/ENDED),
   声明属性即语义(`src`/`autoplay`/`loop`/`muted`/`volume`, seek 钳制到

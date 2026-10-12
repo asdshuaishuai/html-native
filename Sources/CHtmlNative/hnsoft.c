@@ -73,6 +73,8 @@ static void blend(unsigned char *px, fcolor c) {
 typedef struct {
     unsigned char *px;    /* RGBA8, 自上而下 */
     int w, h;
+    hn_color bg;          /* 渲染底色(HN_CMD_CLEAR_RECT 就地回填它 ——
+                             "局部清空 = 露出画布底"而非全图重置) */
     /* 裁剪栈(轴对齐交叠 + 圆角半径; radius>0 时按 SDF 精确判内 ——
        clip-path: circle 借 CLIP_PUSH 的圆角方盒表达, 帧缓冲必须认半径,
        否则方盒四角漏出, 圆形头像/圆形按钮裁不动)。 */
@@ -85,6 +87,7 @@ static float sd_rounded(float px, float py, float x, float y, float w, float h, 
 
 static void fb_init(fb *f, int w, int h, hn_color bg) {
     f->w = w; f->h = h; f->clip_n = 0;
+    f->bg = bg;
     f->px = (unsigned char *)malloc((size_t)w * h * 4);
     fcolor b = unpack(bg);
     unsigned char r = (unsigned char)(b.r * 255 + 0.5f);
@@ -174,15 +177,80 @@ static float grad_axis_t(const hn_cmd *c, float px, float py) {
     return t;
 }
 
-static fcolor grad_at(const hn_cmd *c, float px, float py) {
-    fcolor from = unpack(c->grad_from), to = unpack(c->grad_to);
-    float t = grad_axis_t(c, px, py);
+/* 显式渐变(canvas 2D 口径)的参数 t: grad_kind=1 线性 = 点在绝对轴
+   (gax0,gay0)→(gax1,gay1) 上的投影; grad_kind=2 radial = CSS
+   createRadialGradient 双圆口径 —— 解 |P-(C0+t·ΔC)| = r0+t·Δr 取大根
+   (|ΔC|≈|Δr| 时退化为线性, disc<0 = 锥外区按末 stop)。t 钳到 [0,1]。
+   与 hn_paint(ledger_grad_t)/hn_cairo(pattern 语义)同口径。 */
+static float grad_t_eval(const hn_cmd *c, float px, float py) {
+    if (c->grad_kind == 1) {
+        float dx = c->gax1 - c->gax0, dy = c->gay1 - c->gay0;
+        float len2 = dx * dx + dy * dy;
+        float t = len2 > 1e-6f
+                ? ((px - c->gax0) * dx + (py - c->gay0) * dy) / len2 : 0.0f;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        return t;
+    }
+    if (c->grad_kind == 2) {
+        float dx = c->gcx1 - c->gcx0, dy = c->gcy1 - c->gcy0;
+        float dr = c->gr1 - c->gr0;
+        float bx = px - c->gcx0, by = py - c->gcy0;
+        float a = dx * dx + dy * dy - dr * dr;
+        float b = bx * dx + by * dy + c->gr0 * dr;
+        float cq = bx * bx + by * by - c->gr0 * c->gr0;
+        float t;
+        if (fabsf(a) < 1e-6f)
+            t = fabsf(b) < 1e-6f ? 1.0f : cq / (2.0f * b);
+        else {
+            float disc = b * b - a * cq;
+            if (disc < 0) t = 1.0f;
+            else {
+                /* 大根: a>0 取 (b+√)/a, a<0 取 (b-√)/a(除负翻转) */
+                t = (b + (a > 0 ? sqrtf(disc) : -sqrtf(disc))) / a;
+            }
+        }
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        return t;
+    }
+    return grad_axis_t(c, px, py);      /* CSS 盒+角度模型(旧指令) */
+}
+
+/* 多 stop 分段线性插值(n>=2 用 stops 数组; 否则 from→to 两端 ——
+   与 hn_paint 的 ledger_grad_color 同一口径)。 */
+static fcolor grad_color_at(const hn_cmd *c, float t) {
+    fcolor a, b;
+    if (c->gn_stops >= 2) {
+        const hn_grad_stop *s = c->gstops;
+        if (t <= s[0].t) return unpack(s[0].c);
+        for (int i = 1; i < c->gn_stops; i++) {
+            if (t <= s[i].t) {
+                float span = s[i].t - s[i - 1].t;
+                float f = span > 1e-6f ? (t - s[i - 1].t) / span : 0.0f;
+                a = unpack(s[i - 1].c);
+                b = unpack(s[i].c);
+                fcolor r;
+                r.r = a.r + (b.r - a.r) * f;
+                r.g = a.g + (b.g - a.g) * f;
+                r.b = a.b + (b.b - a.b) * f;
+                r.a = a.a + (b.a - a.a) * f;
+                return r;
+            }
+        }
+        return unpack(s[c->gn_stops - 1].c);
+    }
+    a = unpack(c->grad_from);
+    b = unpack(c->grad_to);
     fcolor r;
-    r.r = from.r + (to.r - from.r) * t;
-    r.g = from.g + (to.g - from.g) * t;
-    r.b = from.b + (to.b - from.b) * t;
-    r.a = from.a + (to.a - from.a) * t;
+    r.r = a.r + (b.r - a.r) * t;
+    r.g = a.g + (b.g - a.g) * t;
+    r.b = a.b + (b.b - a.b) * t;
+    r.a = a.a + (b.a - a.a) * t;
     return r;
+}
+
+/* 单点取渐变色: 参数 t → 颜色(RECT/POLYGON 逐像素路径共用) */
+static fcolor grad_at(const hn_cmd *c, float px, float py) {
+    return grad_color_at(c, grad_t_eval(c, px, py));
 }
 
 /* 面片渐变: 渐变画在**投影前的元素平面**上(cmd 的 x/y/w/h 装的正是投影前
@@ -216,7 +284,7 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
             if (cov <= 0) continue;
             if (cov > 1) cov = 1;
             fcolor col;
-            if (c->gradient) col = grad_at(c, fx, fy); else col = base;
+            if (c->gradient || c->grad_kind) col = grad_at(c, fx, fy); else col = base;
             col.a *= cov;
             fb_blend(f, px, py, col);
             /* 描边: 内外 1px 环 */
@@ -279,7 +347,7 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
     fcolor col = unpack(c->fill);
     col.a *= alpha;
     fcolor gfrom, gto;
-    int grad = c->gradient != 0;
+    int grad = (c->gradient || c->grad_kind) != 0;
     if (grad) {
         /* 渐变元素的 background 解析为 0(渐变即底色) → fill 常是全透明,
            门禁看两端色而不是 fill(否则渐变面片被当成透明整块跳过) */
@@ -357,10 +425,10 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha) {
                     break;
                 }
                 if (t < 0) t = 0; else if (t > 1) t = 1;
-                cc.r = gfrom.r + (gto.r - gfrom.r) * t;
-                cc.g = gfrom.g + (gto.g - gfrom.g) * t;
-                cc.b = gfrom.b + (gto.b - gfrom.b) * t;
-                cc.a = gfrom.a + (gto.a - gfrom.a) * t;
+                /* 颜色统一走 stops 插值器(多 stop QUAD 免费获得; 无 stops
+                   时即 from→to 两端, 与旧口径逐位一致); 组透明度在此补上 */
+                cc = grad_color_at(c, t);
+                cc.a *= alpha;
             } else {
                 cc = col;
             }
@@ -381,6 +449,9 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
     fillc.a *= alpha;
     fcolor strokec = unpack(c->stroke);
     strokec.a *= alpha;
+    /* 显式渐变(canvas gpath): 逐像素按 grad_t_eval/stops 插值取色 ——
+       fill() 遇渐变不再回落纯色。门禁仍看首 stop 色(cmd.fill)。 */
+    int grad = c->grad_kind != 0;
     int do_fill = fillc.a > 0.004f;
     int do_stroke = c->stroke_w > 0.05f && strokec.a > 0.004f;
     if (!do_fill && !do_stroke) return;
@@ -440,7 +511,8 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
                     if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
                     else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;
                     if (cov <= 0) continue;
-                    fcolor cc = fillc; cc.a *= cov;
+                    fcolor cc = grad ? grad_at(c, fx, fy) : fillc;
+                    cc.a *= cov;
                     fb_blend(f, xx, s, cc);
                 }
             }
@@ -852,6 +924,26 @@ static void paint_bitmap(fb *f, const hn_cmd *c, float scale, float ox, float oy
                x0, y0, w, h, alpha);
 }
 
+/* 局部清空(canvas clearRect 的矩形): 矩形内**就地回填渲染底色**
+ * (SOURCE 语义, 不是 OVER —— 透明画布清出真透明)。裁剪栈照常生效:
+ * 清空范围被钳在画布元素盒内。此前 clearRect 退化为全图清账, 局部
+ * 清空会连矩形外的内容一起抹掉 —— 这里的就地回填才是正确口径。 */
+static void paint_clear_rect(fb *f, const hn_cmd *c) {
+    int x0 = (int)floorf(c->x), y0 = (int)floorf(c->y);
+    int x1 = (int)ceilf(c->x + c->w), y1 = (int)ceilf(c->y + c->h);
+    fcolor b = unpack(f->bg);
+    unsigned char br = (unsigned char)(b.r * 255.0f + 0.5f);
+    unsigned char bg = (unsigned char)(b.g * 255.0f + 0.5f);
+    unsigned char bb = (unsigned char)(b.b * 255.0f + 0.5f);
+    unsigned char ba = (unsigned char)(b.a * 255.0f + 0.5f);
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            if (!fb_clip_ok(f, x, y)) continue;
+            unsigned char *p = &f->px[(y * f->w + x) * 4];
+            p[0] = br; p[1] = bg; p[2] = bb; p[3] = ba;
+        }
+}
+
 /* ---------------- 主渲染 ---------------- */
 
 unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, hn_color bg) {
@@ -881,6 +973,9 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, h
             break;
         case HN_CMD_BITMAP:
             paint_bitmap(&f, c, 1.0f, 0, 0, 1.0f);
+            break;
+        case HN_CMD_CLEAR_RECT:
+            paint_clear_rect(&f, c);
             break;
         case HN_CMD_CLIP_PUSH:
             fb_push_clip(&f, c->x, c->y, c->x + c->w, c->y + c->h, c->radius);

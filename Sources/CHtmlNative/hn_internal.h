@@ -473,16 +473,22 @@ hn_keyframes *hn_sheet_find_kf(hn_sheet *sh, const char *name);
  * clearRect(op=clear)/文档替换(元素销毁)清空 —— 样式重算与重放不动它。
  * 定长上限 + 溢出标志: 账本满后新 op 被丢弃(不崩溃, 标志可内省)。 */
 typedef enum {
-    HN_CV_FILL_RECT = 1,   /* frect: 矩形填充(x,y,w,h + color) */
+    HN_CV_FILL_RECT = 1,   /* frect: 矩形填充(x,y,w,h + color; 可带 shadow 字段) */
     HN_CV_STROKE_PATH,     /* spath: 开放折线描边(pts + color + stroke_w +
-                              cap_round); 每段展开成 QUAD, 端/交点补圆 */
+                              cap_round); 每段展开成 QUAD, 端/交点补圆。
+                              带渐变(stops)时按"每段取中点色画纯色 QUAD"
+                              的分段近似(与光栅器无逐段 pattern 的取舍一致) */
     HN_CV_FILL_PATH,       /* fpath: 闭合多边形填充(pts, 隐式闭合) */
-    HN_CV_GRAD_RECT,       /* grect: 矩形线性渐变(轴两端 gx0,gy0→gx1,gy1,
-                              两端色 color→color2) */
+    HN_CV_GRAD_RECT,       /* grect: 矩形渐变(轴两端 gx0,gy0→gx1,gy1 或
+                              radial 双圆 gx0=cx0..gr1, 形态看 grad_radial;
+                              颜色 = 首末两端色 color→color2 或 stops 数组) */
+    HN_CV_GRAD_PATH,       /* gpath: 闭合多边形渐变填充(几何同 fpath,
+                              渐变字段同 grect —— fill() 遇渐变不再回落纯色) */
     HN_CV_CLIP_PUSH,       /* clip: 矩形裁剪入栈(x,y,w,h) */
     HN_CV_CLIP_POP,        /* cpop: 裁剪出栈(JS save/restore 栈配平) */
     HN_CV_TEXT,            /* text: str 在 (x, y) 基线处, 字号 font_px + color */
-    HN_CV_IMAGE            /* image: src 图片画到 (x,y,w,h) */
+    HN_CV_IMAGE,           /* image: src 图片画到 (x,y,w,h) */
+    HN_CV_CLEAR_RECT       /* clear_rect: 局部清空(x,y,w,h; 绘制期填渲染底色) */
 } hn_canvas_op_kind;
 
 typedef struct hn_canvas_op {
@@ -494,7 +500,16 @@ typedef struct hn_canvas_op {
     int   cap_round;       /* 1 = 圆头/圆交点 */
     float *pts;            /* 折线/多边形顶点(x,y 交替; malloc, clear/销毁释放) */
     int    n_pts;
-    float gx0, gy0, gx1, gy1;   /* 渐变轴两端点 */
+    float gx0, gy0, gx1, gy1;   /* 渐变: linear = 轴两端; radial = 圆心 (cx0,cy0)/(cx1,cy1) */
+    float gr0, gr1;             /* radial 双圆半径(createRadialGradient 口径, 双圆全支持) */
+    unsigned char grad_radial;  /* 渐变形态: 0 = linear 1 = radial */
+    hn_grad_stop *stops;        /* 多 stop 色标(malloc 数组; op_free 释放; 可 NULL = 首末两端) */
+    int    n_stops;
+    /* fillRect 系(frect/grect)的阴影(canvas shadowColor/Blur/OffsetX/Y;
+       路径填充/描边暂不带影 —— 注释即契约) */
+    unsigned char shadow;
+    hn_color sh_color;
+    float sh_ox, sh_oy, sh_blur;
     char  *str;            /* text 文本 / image 路径(malloc 副本) */
     float font_px;
 } hn_canvas_op;

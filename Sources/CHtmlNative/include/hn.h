@@ -63,9 +63,17 @@ typedef enum hn_cmd_kind {
     HN_CMD_QUAD = 6,      /* 任意四边形(3D 投影结果); qx/qy 为四个顶点 */
     HN_CMD_POLYGON = 7,   /* 任意多边形(矢量路径/Lottie 形状层); 顶点数可变 */
     HN_CMD_MESH = 8,      /* 网格变形贴图(Live2D 类: 顶点网格 + UV 采样源图) */
-    HN_CMD_BITMAP = 9     /* 内存位图(媒体当前帧), 覆盖 rect */
+    HN_CMD_BITMAP = 9,    /* 内存位图(媒体当前帧), 覆盖 rect */
+    HN_CMD_CLEAR_RECT = 10/* 局部清空: rect 内整体填渲染底色(canvas clearRect
+                             的局部口径; 全画布 clearRect 在账本侧已退化为
+                             清账, 不产生本指令) */
 
 } hn_cmd_kind;
+
+/* 渐变色标(canvas 2D createLinearGradient/createRadialGradient 的 addColorStop;
+   CSS linear-gradient 的多 stop 同用)。数组由引擎临时区分配,
+   生命周期 = 本次显示列表。 */
+typedef struct { float t; hn_color c; } hn_grad_stop;
 
 typedef struct hn_cmd {
     hn_cmd_kind kind;
@@ -79,6 +87,17 @@ typedef struct hn_cmd {
     unsigned char gradient;
     hn_color grad_from, grad_to;
     float    grad_angle;   /* CSS 角度: 0deg=向上, 90deg=向右 */
+    /* ---- 显式渐变(canvas 2D 口径; grad_kind != 0 时优先于上面的 CSS 模型) ----
+       轴/圆参数是**绝对坐标**(不再从盒+角度推导): 1 = linear(gax0..gay1
+       为轴两端), 2 = radial(双圆 gcx0,gcy0,gr0 → gcx1,gcy1,gr1,
+       即 CSS createRadialGradient 的 (x0,y0,r0,x1,y1,r1) 全口径 ——
+       逐像素解 |P-(C0+t·ΔC)| = r0+t·Δr 取大根, 逐式与光栅器一致)。
+       颜色: gstops(n>=2)为完整色标数组(分段线性插值), 缺省回退
+       grad_from→grad_to 两端 —— 旧指令(未填 grad_kind/stops)行为逐位不变。 */
+    unsigned char grad_kind;  /* 0=无 1=linear 2=radial */
+    float gax0, gay0, gax1, gay1;              /* linear 轴两端(绝对坐标) */
+    float gcx0, gcy0, gr0, gcx1, gcy1, gr1;    /* radial 双圆 */
+    const hn_grad_stop *gstops; int gn_stops;  /* 多 stop(临时区; 可 NULL) */
     /* RECT 阴影(box-shadow: ox oy blur color) */
     unsigned char shadow;
     hn_color shadow_color;
@@ -687,6 +706,10 @@ int  hn_canvas_clear(hn_context *c, const char *canvas_id);
 int  hn_canvas_count(hn_context *c, const char *canvas_id);
 /* 账本是否曾溢出(达上限后 op 被丢弃); 画布不存在返回 -1 */
 int  hn_canvas_overflow(hn_context *c, const char *canvas_id);
+/* canvas measureText 的测量缝: 走 context 文本后端(与布局排版同源 ——
+   同一字体/同一字形 advance 口径); 无后端构建回退 字节数×字号×0.55
+   (与引擎无后端的排版估算同口径)。 */
+float hn_canvas_measure(hn_context *c, float size_px, const char *utf8, size_t len);
 
 #ifdef __cplusplus
 }

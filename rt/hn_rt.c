@@ -44,6 +44,25 @@ struct hn_rt {
     struct { hn_node *node; double due, sec; } polls[16];
     int poll_n;
     int poll_built;
+#ifdef HN_HAVE_QUICKJS
+    /* JS 时钟(虚拟单调毫秒): 每帧 += dt_ms。真窗壳喂真实间隔 ⇒ 与单调钟
+       一致; 探针喂固定 16 ⇒ 定时器语义可确定性断言(不受真实睡眠抖动影响)。 */
+    double clock_ms;
+    /* 定时器表(setTimeout/setInterval 共用; 上限 64) */
+    struct {
+        int id;              /* 句柄(>0; 0 = 空槽) */
+        double due;          /* 到期时刻(clock_ms 域的绝对值) */
+        double interval_ms;  /* >0 = 周期定时器; 0 = 单次 */
+        JSValue func;        /* 回调(持有引用; hn_rt_close 统一释放) */
+        JSValue args;        /* 附加参数(JS Array; JS_UNDEFINED = 无) */
+    } timers[64];
+    int timer_n;             /* 占用槽位数(0 = 表空) */
+    int timer_seq;           /* 句柄发号器 */
+    /* requestAnimationFrame 队列: 下一帧开头按注册序执行一次 */
+    struct { int id; JSValue cb; } raf_q[64];
+    int raf_n;
+    int raf_seq;
+#endif
 };
 
 /* ---------------- 文件读取 / 资产后端 ---------------- */
@@ -253,6 +272,10 @@ static int clip_get(char *, size_t);
 static int sys_open_url(const char *);
 /* 文档内联 <script> 执行(QuickJS 有实现; 无 JS 引擎时是 no-op stub) */
 static void run_doc_scripts(hn_rt *rt);
+/* JS 定时器/RAF 宿主绑定与帧驱动(QuickJS 有实现; 无 JS 构建为 no-op stub) */
+static void js_scope_bind_rt(hn_rt *rt);
+static void js_scope_unbind_rt(hn_rt *rt);
+static int js_timers_drain(hn_rt *rt, int *repaint);
 
 char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *store_id) {
     if (!url || strncmp(url, "sys://", 6)) return NULL;
@@ -685,6 +708,9 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
         free(css);
     }
     if (!rt_render(rt)) { hn_rt_close(rt); return NULL; }
+    /* 定时器/RAF 的宿主绑定先于文档脚本: 装载期 setTimeout 就要把回调
+       记到本 rt 的表上(桥函数只有 JSContext*, 经 opaque 里的 rt 反查) */
+    js_scope_bind_rt(rt);
     run_doc_scripts(rt);   /* 文档内联 <script>: canvas 2D 等纯 JS 页面的驱动 */
     run_load_actions(rt);
     rt_render(rt);
@@ -698,8 +724,9 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
 #ifdef HN_HAVE_QUICKJS
 
 /* 桥函数经 opaque 取用的环境(契约 §6: 从 hn_doc* 扩为 {doc, ctx})。
-   实例挂在 js_scopes 槽位上(生命周期同 JS 上下文), opaque 存其指针。 */
-typedef struct { hn_doc *doc; hn_context *ctx; } js_bridge;
+   实例挂在 js_scopes 槽位上(生命周期同 JS 上下文), opaque 存其指针。
+   rt = 定时器/RAF 的宿主(hn_rt_open 时绑定; setTimeout 经它落到 rt 的表)。 */
+typedef struct { hn_doc *doc; hn_context *ctx; hn_rt *rt; } js_bridge;
 
 static void js_rt_free(hn_rt *rt) {
     if (rt->js_ctx) { JS_FreeContext((JSContext *)rt->js_ctx); rt->js_ctx = NULL; }
@@ -916,21 +943,57 @@ static JSValue js_hn_canvas_2d(JSContext *ctx, JSValueConst, int argc, JSValueCo
     return JS_NewInt32(ctx, n);
 }
 
+/* __hnMeasureText(deviceFontSizePx, text) → 宽度 px(canvas measureText 的
+ * 测量缝)。走 hn_canvas_measure —— 引擎 context 的文本后端(与布局排版
+ * 同一测量入口); 无后端构建 = 字节数×字号×0.55 估算, 与引擎同口径。
+ * 字号按 glue 现值传入(canvas font 只解析字号, 缺省 400/无衬线)。 */
+static JSValue js_hn_measure_text(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_context *c = b ? (b->ctx ? b->ctx : doc_ctx_find(b->doc)) : NULL;
+    double px = 10.0;
+    if (argc > 0) JS_ToFloat64(ctx, &px, argv[0]);
+    float w = 0;
+    if (argc > 1 && JS_IsString(argv[1])) {
+        size_t len = 0;
+        const char *s = JS_ToCStringLen(ctx, &len, argv[1]);
+        if (s) w = hn_canvas_measure(c, (float)px, s, len);
+        if (s) JS_FreeCString(ctx, s);
+    }
+    return JS_NewFloat64(ctx, w);
+}
+
 /* ---------------- <canvas> 2D glue(JS 层状态机) ----------------
  * 标准 2D context 的方法面全部在此实现, 汇到 hnCanvas2D:
- *   fillRect/strokeRect/beginPath/moveTo/lineTo/arc/closePath/fill/stroke/
- *   clip/save/restore/translate/scale/rotate/setTransform/transform/
- *   resetTransform/fillText/strokeText/createLinearGradient/clearRect/
- *   drawImage + fillStyle/strokeStyle/lineWidth/lineCap/font 属性。
+ *   fillRect/strokeRect/beginPath/moveTo/lineTo/arc/ellipse/quadraticCurveTo/
+ *   bezierCurveTo/arcTo/closePath/fill/stroke/clip/save/restore/translate/
+ *   scale/rotate/setTransform/transform/resetTransform/fillText/strokeText/
+ *   measureText/createLinearGradient/createRadialGradient/clearRect/
+ *   drawImage/setLineDash/getLineDash
+ *   + fillStyle/strokeStyle/lineWidth/lineCap/font/lineDashOffset/textAlign/
+ *     textBaseline/shadowColor/shadowBlur/shadowOffsetX/shadowOffsetY 属性。
  * 简化口径(注释即契约):
- *   - arc 以 Math.cos/sin 折线化, 15° 一段(与账本 op 的折线模型一致);
- *   - clearRect = 清账本(引擎没有离屏位图, "账本即画面"; 全画布清除
- *     是主要用法, 局部清除退化为全清);
+ *   - arc/ellipse 以 Math.cos/sin 折线化, 15° 一段(与账本 op 的折线模型
+ *     一致); 二次曲线固定 16 段、三次曲线固定 24 段(恒定段数, 段内直线
+ *     近似 —— 与折线模型同档, 不做自适应细分);
+ *   - arcTo 用切点/圆心闭式解; 退化输入(半径非正/共线/折返)退化为
+ *     lineTo 到拐点 —— 不崩溃是第一契约;
+ *   - clearRect 记录 clear_rect op(绘制期矩形内回填渲染底色); 覆盖整块
+ *     画布的清空由引擎识别为清账("清账重录"动画循环保持 op 有界);
  *   - clip() 取当前路径包围盒(矩形裁剪);
- *   - 渐变对象只取首末两个 stop(协议 grect 是两端色模型);
- *   - fill()/stroke() 遇渐变回退为首末 stop 的中点纯色(保形状优先);
+ *   - 渐变: createLinearGradient/createRadialGradient 全部 stop 按扁平数组
+ *     下送(引擎分段线性插值); radial 为 CSS createRadialGradient 双圆口径;
+ *     fill()/stroke() 遇渐变下送 gpath/带渐变 spath(不再回落纯色);
+ *   - setLineDash 在 stroke 落账前按折线累计弧长切段(每段一个 spath;
+ *     单次 stroke 上限 512 段, 到顶截断防失控路径灌爆账本);
+ *   - textAlign(left/center/right)按 measureText 宽度修正锚点; textBaseline
+ *     (top/middle/alphabetic)按 0.8/0.3×字号 的比例修正基线(与引擎无
+ *     后端回退口径一致);
+ *   - measureText 走 __hnMeasureText 原生桥(引擎文本后端同源测量;
+ *     无后端构建 = 字节数×字号×0.55);
+ *   - shadow 仅随 fillRect 系(frect/grect)下送(路径填充/描边暂不带影);
+ *     引擎阴影按 blur>0 生效, blur=0 的硬阴影不支持;
  *   - 线宽/字号随 CTM 按sqrt(|det|) 均匀近似(折线模型的既定简化);
- *   - 文字 y = 基线(canvas textBaseline 缺省 alphabetic)。
+ *   - 文字 y 缺省 = 基线(textBaseline 缺省 alphabetic)。
  * 入口: hnGet2D(id) 直接返回 context; 宿主没有 document 时补一个仅支持
  * canvas 的最小 getElementById(形如标准用法的替代入口)。 */
 static const char *CANVAS_GLUE_JS =
@@ -1005,7 +1068,9 @@ static const char *CANVAS_GLUE_JS =
 "      return parseColor(style);"
 "    }"
 "    var st={fill:[0,0,0,255],stroke:[0,0,0,255],fillSrc:'#000000',strokeSrc:'#000000',"
-"            lw:1,cap:'butt',fontPx:10,fontSrc:'10px sans-serif',m:[1,0,0,1,0,0],clips:0};"
+"            lw:1,cap:'butt',fontPx:10,fontSrc:'10px sans-serif',m:[1,0,0,1,0,0],clips:0,"
+"            dash:[],dashOff:0,align:'left',base:'alphabetic',"
+"            shSrc:'rgba(0,0,0,0)',shC:[0,0,0,0],shX:0,shY:0,shB:0};"
 "    var stack=[],subs=[],cur=null;"
 "    function xf(x,y){var m=st.m;return [m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];}"
 "    function mul(n){var m=st.m;"
@@ -1016,33 +1081,65 @@ static const char *CANVAS_GLUE_JS =
 "    function ensure(){if(!cur){cur=[];subs.push({p:cur,closed:false});}}"
 "    function cloneState(s){return {fill:s.fill.slice(),stroke:s.stroke.slice(),"
 "      fillSrc:s.fillSrc,strokeSrc:s.strokeSrc,lw:s.lw,cap:s.cap,fontPx:s.fontPx,"
-"      fontSrc:s.fontSrc,m:s.m.slice(),clips:s.clips};}"
+"      fontSrc:s.fontSrc,m:s.m.slice(),clips:s.clips,dash:s.dash.slice(),dashOff:s.dashOff,"
+"      align:s.align,base:s.base,shSrc:s.shSrc,shC:s.shC.slice(),shX:s.shX,shY:s.shY,shB:s.shB};}"
+"    /* 渐变 op 公共字段: 轴/圆坐标经 CTM 变换(渐变坐标属 user space),"
+"       全部 stop 按 [t,rgba,...] 扁平数组下送(引擎分段线性插值)。 */"
+"    function gradOp(gd){"
+"      var ds=detScale(),s=stopsOf(gd);"
+"      if (!s.length) s=[{t:0,c:[0,0,0,255]},{t:1,c:[0,0,0,255]}];"
+"      var flat=[];"
+"      for (var i=0;i<s.length;i++) flat.push(s[i].t,rgba(s[i].c));"
+"      var o={radial:gd.radial?1:0,c0:rgba(s[0].c),c1:rgba(s[s.length-1].c),stops:flat};"
+"      if (gd.radial){"
+"        var q0=xf(gd.x0,gd.y0),q1=xf(gd.x1,gd.y1);"
+"        o.x0=q0[0];o.y0=q0[1];o.x1=q1[0];o.y1=q1[1];"
+"        o.r0=(gd.r0||0)*ds;o.r1=(gd.r1||0)*ds;"
+"      } else {"
+"        var p0=xf(gd.x0,gd.y0),p1=xf(gd.x1,gd.y1);"
+"        o.x0=p0[0];o.y0=p0[1];o.x1=p1[0];o.y1=p1[1];"
+"      }"
+"      return o;"
+"    }"
+"    /* 文本测量: __hnMeasureText 原生桥(设备字号, 串) → 宽 px;"
+"       桥缺失/异常时按 字符数×字号×0.55 估算(与引擎无后端口径一致)。 */"
+"    function measureW(s){"
+"      var w=0;"
+"      try{w=__hnMeasureText(st.fontPx*detScale(),s);}catch(e){}"
+"      return (typeof w==='number'&&isFinite(w)&&w>0)?w:String(s).length*st.fontPx*0.55;"
+"    }"
 "    function textOp(s,x,y,style){"
 "      var q=xf(x,y);"
-"      send({op:'text',s:String(s),x:q[0],y:q[1],px:st.fontPx*detScale(),col:rgba(solidOf(style))});"
+"      var px=st.fontPx*detScale();"
+"      if (st.align==='center') q[0]-=measureW(String(s))/2;"
+"      else if (st.align==='right') q[0]-=measureW(String(s));"
+"      if (st.base==='top') q[1]+=px*0.8;"
+"      else if (st.base==='middle') q[1]+=px*0.3;"
+"      send({op:'text',s:String(s),x:q[0],y:q[1],px:px,col:rgba(solidOf(style))});"
 "    }"
 "    function rectPts(x,y,w,h){return [x,y, x+w,y, x+w,y+h, x,y+h];}"
+"    function shadowOn(o){"
+"      if (st.shC[3]>0&&st.shB>0){o.shc=rgba(st.shC);o.shx=st.shX;o.shy=st.shY;o.shb=st.shB;}"
+"      return o;"
+"    }"
 "    function fillRectImpl(x,y,w,h){"
-"      var m=st.m,grad=(st.fill===null);"
-"      if (m[1]!==0||m[2]!==0){"
+"      var m=st.m,grad=(st.fill===null),rotated=(m[1]!==0||m[2]!==0),o,gg;"
+"      if (rotated){"
 "        var p=rectPts(x,y,w,h),t=[];"
 "        for (var i=0;i<8;i+=2){var q=xf(p[i],p[i+1]);t.push(q[0],q[1]);}"
-"        send({op:'fpath',pts:t,col:rgba(solidOf(st.fillSrc))});"
+"        if (grad){o={op:'gpath',pts:t};gg=gradOp(st.fillSrc);"
+"          for (var k in gg)o[k]=gg[k];}"
+"        else o={op:'fpath',pts:t,col:rgba(solidOf(st.fillSrc))};"
+"        send(shadowOn(o));"
 "        return;"
 "      }"
-"      var o=xf(x,y),tw=m[0]*w,th=m[3]*h;"
-"      if (tw<0){o[0]+=tw;tw=-tw;}"
-"      if (th<0){o[1]+=th;th=-th;}"
-"      if (grad){"
-"        var g=st.fillSrc,s=stopsOf(g);"
-"        var c0=s.length?s[0].c:[0,0,0,255];"
-"        var c1=s.length?s[s.length-1].c:c0;"
-"        var p0=xf(g.x0,g.y0),p1=xf(g.x1,g.y1);"
-"        send({op:'grect',x:o[0],y:o[1],w:tw,h:th,"
-"             x0:p0[0],y0:p0[1],c0:rgba(c0),x1:p1[0],y1:p1[1],c1:rgba(c1)});"
-"        return;"
-"      }"
-"      send({op:'frect',x:o[0],y:o[1],w:tw,h:th,col:rgba(st.fill)});"
+"      var q0=xf(x,y),tw=m[0]*w,th=m[3]*h;"
+"      if (tw<0){q0[0]+=tw;tw=-tw;}"
+"      if (th<0){q0[1]+=th;th=-th;}"
+"      if (grad){o={op:'grect',x:q0[0],y:q0[1],w:tw,h:th};"
+"        gg=gradOp(st.fillSrc);for (var k2 in gg)o[k2]=gg[k2];}"
+"      else o={op:'frect',x:q0[0],y:q0[1],w:tw,h:th,col:rgba(st.fill)};"
+"      send(shadowOn(o));"
 "    }"
 "    var api={};"
 "    Object.defineProperty(api,'fillStyle',{"
@@ -1060,6 +1157,22 @@ static const char *CANVAS_GLUE_JS =
 "      set:function(v){st.fontSrc=String(v);"
 "        var m=/([0-9.]+)\\s*px/.exec(st.fontSrc);"
 "        if (m) st.fontPx=parseFloat(m[1]);}});"
+"    Object.defineProperty(api,'lineDashOffset',{"
+"      get:function(){return st.dashOff;},set:function(v){st.dashOff=+v||0;}});"
+"    Object.defineProperty(api,'textAlign',{"
+"      get:function(){return st.align;},set:function(v){st.align=String(v);}});"
+"    Object.defineProperty(api,'textBaseline',{"
+"      get:function(){return st.base;},set:function(v){st.base=String(v);}});"
+"    Object.defineProperty(api,'shadowColor',{"
+"      get:function(){return st.shSrc;},"
+"      set:function(v){st.shSrc=String(v);st.shC=parseColor(v);}});"
+"    Object.defineProperty(api,'shadowBlur',{"
+"      get:function(){return st.shB;},"
+"      set:function(v){var b=+v;st.shB=(b>0)?b:0;}});"
+"    Object.defineProperty(api,'shadowOffsetX',{"
+"      get:function(){return st.shX;},set:function(v){st.shX=+v||0;}});"
+"    Object.defineProperty(api,'shadowOffsetY',{"
+"      get:function(){return st.shY;},set:function(v){st.shY=+v||0;}});"
 "    api.save=function(){stack.push(cloneState(st));};"
 "    api.restore=function(){"
 "      if (!stack.length) return;"
@@ -1067,6 +1180,8 @@ static const char *CANVAS_GLUE_JS =
 "      while (st.clips>s.clips){send({op:'cpop'});st.clips--;}"
 "      st.fill=s.fill;st.stroke=s.stroke;st.fillSrc=s.fillSrc;st.strokeSrc=s.strokeSrc;"
 "      st.lw=s.lw;st.cap=s.cap;st.fontPx=s.fontPx;st.fontSrc=s.fontSrc;st.m=s.m;"
+"      st.dash=s.dash;st.dashOff=s.dashOff;st.align=s.align;st.base=s.base;"
+"      st.shSrc=s.shSrc;st.shC=s.shC;st.shX=s.shX;st.shY=s.shY;st.shB=s.shB;"
 "    };"
 "    api.translate=function(x,y){mul([1,0,0,1,x,y]);};"
 "    api.scale=function(x,y){mul([x,0,0,y,0,0]);};"
@@ -1080,32 +1195,116 @@ static const char *CANVAS_GLUE_JS =
 "    };"
 "    api.moveTo=function(x,y){cur=[x,y];subs.push({p:cur,closed:false});};"
 "    api.lineTo=function(x,y){ensure();cur.push(x,y);};"
-"    api.arc=function(x,y,r,a0,a1,ccw){"
-"      if (!(r>0)) return;"
+"    /* 曲线族: 全部在落账前折线化(固定段数, 口径见文件头注释)。 */"
+"    function arcPts(x,y,rx,ry,rot,a0,a1,ccw){"
 "      var TAU=Math.PI*2,sweep=a1-a0;"
 "      if (ccw){while(sweep>0)sweep-=TAU;if(sweep===0)sweep=-TAU;}"
 "      else{while(sweep<0)sweep+=TAU;if(sweep===0)return;}"
 "      var n=Math.max(2,Math.ceil(Math.abs(sweep)/(Math.PI/12)));"
-"      var sx=x+r*Math.cos(a0),sy=y+r*Math.sin(a0);"
-"      if (cur&&cur.length>=2){cur.push(sx,sy);}"
-"      else{cur=[sx,sy];subs.push({p:cur,closed:false});}"
-"      for (var i=1;i<=n;i++){"
-"        var a=a0+sweep*i/n;"
-"        cur.push(x+r*Math.cos(a),y+r*Math.sin(a));"
-"      }"
+"      var co=Math.cos(rot||0),si=Math.sin(rot||0);"
+"      function pt(a){var ex=rx*Math.cos(a),ey=ry*Math.sin(a);"
+"        return [x+ex*co-ey*si, y+ex*si+ey*co];}"
+"      var s0=pt(a0);"
+"      if (cur&&cur.length>=2)cur.push(s0[0],s0[1]);"
+"      else{cur=[s0[0],s0[1]];subs.push({p:cur,closed:false});}"
+"      for (var i=1;i<=n;i++){var q2=pt(a0+sweep*i/n);cur.push(q2[0],q2[1]);}"
+"    }"
+"    api.arc=function(x,y,r,a0,a1,ccw){"
+"      if (!(r>0)) return;"
+"      arcPts(x,y,r,r,0,a0,a1,ccw);"
+"    };"
+"    api.ellipse=function(x,y,rx,ry,rot,a0,a1,ccw){"
+"      if (!(rx>0&&ry>0)) return;"
+"      arcPts(x,y,rx,ry,+rot||0,a0,a1,ccw);"
+"    };"
+"    api.quadraticCurveTo=function(cpx,cpy,x,y){"
+"      ensure();var l=cur.length,p0x=cur[l-2],p0y=cur[l-1],n=16;"
+"      for (var i=1;i<=n;i++){var t=i/n,u=1-t;"
+"        cur.push(u*u*p0x+2*u*t*cpx+t*t*x, u*u*p0y+2*u*t*cpy+t*t*y);}"
+"    };"
+"    api.bezierCurveTo=function(c1x,c1y,c2x,c2y,x,y){"
+"      ensure();var l=cur.length,p0x=cur[l-2],p0y=cur[l-1],n=24;"
+"      for (var i=1;i<=n;i++){var t=i/n,u=1-t;"
+"        cur.push(u*u*u*p0x+3*u*u*t*c1x+3*u*t*t*c2x+t*t*t*x,"
+"                 u*u*u*p0y+3*u*u*t*c1y+3*u*t*t*c2y+t*t*t*y);}"
+"    };"
+"    /* arcTo: 与两条切线相切的圆弧(切点/圆心闭式解); 退化输入(半径非正/"
+"       共线/折返)退化为 lineTo 到拐点。 */"
+"    api.arcTo=function(x1,y1,x2,y2,r){"
+"      ensure();var l=cur.length,p0x=cur[l-2],p0y=cur[l-1];"
+"      var v1x=p0x-x1,v1y=p0y-y1,v2x=x2-x1,v2y=y2-y1;"
+"      var l1=Math.sqrt(v1x*v1x+v1y*v1y),l2=Math.sqrt(v2x*v2x+v2y*v2y);"
+"      if(!(r>0)||l1<1e-9||l2<1e-9){cur.push(x1,y1);return;}"
+"      v1x/=l1;v1y/=l1;v2x/=l2;v2y/=l2;"
+"      var cosA=v1x*v2x+v1y*v2y;"
+"      if(cosA<=-0.99999||cosA>=0.99999){cur.push(x1,y1);return;}"
+"      var sinA=Math.sqrt(1-cosA*cosA);"
+"      var tLen=r*sinA/(1+cosA);"
+"      var t1x=x1+v1x*tLen,t1y=y1+v1y*tLen,t2x=x1+v2x*tLen,t2y=y1+v2y*tLen;"
+"      var bx=v1x+v2x,by=v1y+v2y,bl=Math.sqrt(bx*bx+by*by);"
+"      if(bl<1e-9){cur.push(x1,y1);return;}"
+"      var cd=r/Math.sqrt((1-cosA)/2);"
+"      var cx=x1+bx/bl*cd,cy=y1+by/bl*cd;"
+"      var a0=Math.atan2(t1y-cy,t1x-cx),a1=Math.atan2(t2y-cy,t2x-cx);"
+"      arcPts(cx,cy,r,r,0,a0,a1,(v1x*v2y-v1y*v2x)<0);"
 "    };"
 "    api.fill=function(){"
-"      var col=rgba(solidOf(st.fillSrc));"
-"      for (var i=0;i<subs.length;i++)"
-"        if (subs[i].p.length>=6) send({op:'fpath',pts:subs[i].p.slice(),col:col});"
+"      var grad=(st.fill===null);"
+"      for (var i=0;i<subs.length;i++){"
+"        var p=subs[i].p;"
+"        if (p.length<6) continue;"
+"        if (!grad) send({op:'fpath',pts:p.slice(),col:rgba(st.fill)});"
+"        else{var o={op:'gpath',pts:p.slice()};"
+"          var gg=gradOp(st.fillSrc);for (var k in gg)o[k]=gg[k];send(o);}"
+"      }"
 "    };"
+"    /* setLineDash: stroke 落账前按折线累计弧长切段(每段一个 spath;"
+"       单次 stroke 上限 512 段, 到顶截断)。 */"
+"    function dashSegs(p){"
+"      var pat=st.dash,off=+st.dashOff||0;"
+"      if(!pat||!pat.length)return [p];"
+"      var L=0,i;for(i=0;i<pat.length;i++){pat[i]=+pat[i];if(!(pat[i]>0))pat[i]=0;L+=pat[i];}"
+"      if(!(L>0))return [p];"
+"      var out=[],run=null,q=off%L;if(q<0)q+=L;"
+"      var idx=0,guard=0;"
+"      while(q>=pat[idx]&&guard++<4096){q-=pat[idx];idx=(idx+1)%pat.length;}"
+"      var on=(idx%2===0);"
+"      if(on)run=[p[0],p[1]];"
+"      var n=p.length/2;"
+"      for(i=1;i<n;i++){"
+"        var x0=p[(i-1)*2],y0=p[(i-1)*2+1],x1=p[i*2],y1=p[i*2+1];"
+"        var dx=x1-x0,dy=y1-y0,seg=Math.sqrt(dx*dx+dy*dy);"
+"        if(seg<1e-9)continue;"
+"        var t=0;"
+"        while(t<seg-1e-9){"
+"          var step=pat[idx]-q;if(step>seg-t)step=seg-t;"
+"          t+=step;q+=step;"
+"          var bx2=x0+dx*(t/seg),by2=y0+dy*(t/seg);"
+"          if(on)run.push(bx2,by2);"
+"          if(q>=pat[idx]-1e-9){"
+"            if(on&&run&&run.length>=4)out.push(run);"
+"            q=0;idx=(idx+1)%pat.length;on=(idx%2===0);"
+"            run=on?[bx2,by2]:null;"
+"          }"
+"        }"
+"      }"
+"      if(on&&run&&run.length>=4)out.push(run);"
+"      return out;"
+"    }"
 "    api.stroke=function(){"
-"      var col=rgba(solidOf(st.strokeSrc));"
+"      var grad=(st.stroke===null);"
+"      var col=grad?0:rgba(solidOf(st.strokeSrc));"
 "      var w=st.lw*detScale(),cap=(st.cap==='round');"
 "      for (var i=0;i<subs.length;i++){"
 "        var p=subs[i].p;"
 "        if (p.length<4) continue;"
-"        send({op:'spath',pts:p.slice(),col:col,w:w,cap:cap});"
+"        var segs=(st.dash&&st.dash.length)?dashSegs(p):[p];"
+"        var total=0;"
+"        for (var d=0;d<segs.length&&total<512;d++,total++){"
+"          var o={op:'spath',pts:segs[d],col:col,w:w,cap:cap};"
+"          if (grad){var gg=gradOp(st.strokeSrc);for (var k in gg)o[k]=gg[k];}"
+"          send(o);"
+"        }"
 "      }"
 "    };"
 "    api.clip=function(){"
@@ -1131,12 +1330,28 @@ static const char *CANVAS_GLUE_JS =
 "    };"
 "    api.fillText=function(s,x,y){textOp(s,x,y,st.fillSrc);};"
 "    api.strokeText=function(s,x,y){textOp(s,x,y,st.strokeSrc);};"
+"    api.measureText=function(s){return {width:measureW(String(s))};};"
 "    api.createLinearGradient=function(x0,y0,x1,y1){"
-"      return {__hngrad:true,x0:x0,y0:y0,x1:x1,y1:y1,stops:[],"
-"        addColorStop:function(t,color){this.stops.push({t:t,c:parseColor(color)});}};"
+"      return {__hngrad:true,x0:+x0||0,y0:+y0||0,x1:+x1||0,y1:+y1||0,stops:[],"
+"        addColorStop:function(t,color){this.stops.push({t:+t||0,c:parseColor(color)});}};"
 "    };"
-"    api.clearRect=function(){"
-"      send({op:'clear'});"
+"    api.createRadialGradient=function(x0,y0,r0,x1,y1,r1){"
+"      return {__hngrad:true,radial:true,x0:+x0||0,y0:+y0||0,r0:+r0||0,"
+"              x1:+x1||0,y1:+y1||0,r1:+r1||0,stops:[],"
+"        addColorStop:function(t,color){this.stops.push({t:+t||0,c:parseColor(color)});}};"
+"    };"
+"    api.setLineDash=function(a){"
+"      if(!a||!a.length){st.dash=[];return;}"
+"      var d=[];for(var i=0;i<a.length;i++)d.push(+a[i]||0);"
+"      st.dash=d;"
+"    };"
+"    api.getLineDash=function(){return st.dash.slice();};"
+"    api.clearRect=function(x,y,w,h){"
+"      if (w===undefined){send({op:'clear'});return;}"
+"      var m=st.m,q=xf(x,y),tw=m[0]*w,th=m[3]*h;"
+"      if (tw<0){q[0]+=tw;tw=-tw;}"
+"      if (th<0){q[1]+=th;th=-th;}"
+"      send({op:'clear_rect',x:q[0],y:q[1],w:tw,h:th});"
 "    };"
 "    api.drawImage=function(img,x,y,w,h){"
 "      var src=(typeof img==='string')?img:(img&&img.src?img.src:'');"
@@ -1151,9 +1366,10 @@ static const char *CANVAS_GLUE_JS =
 
 /* JS 运行时表(按 scope_key 隔离; daemon 的不同应用用不同 key)。
    bridge 槽随上下文持有(opaque 指向它), 每次 eval 按 doc/ctx 刷新;
-   glue_done = canvas 2D glue 已装入(每 scope 只装一次)。 */
+   glue_done/timer_glue_done = 各 glue 已装入(每 scope 只装一次)。 */
 #define JS_MAX_SCOPES 32
-static struct { char key[128]; JSRuntime *rt; JSContext *ctx; js_bridge bridge; int glue_done; } js_scopes[JS_MAX_SCOPES];
+static struct { char key[128]; JSRuntime *rt; JSContext *ctx; js_bridge bridge;
+                int glue_done, timer_glue_done; } js_scopes[JS_MAX_SCOPES];
 static int js_scope_n = 0;
 
 static JSContext *js_scope_get(const char *key) {
@@ -1169,10 +1385,270 @@ static JSContext *js_scope_get(const char *key) {
     js_scopes[js_scope_n].ctx = ctx;
     memset(&js_scopes[js_scope_n].bridge, 0, sizeof(js_bridge));
     js_scopes[js_scope_n].glue_done = 0;
+    js_scopes[js_scope_n].timer_glue_done = 0;
     JS_SetContextOpaque(ctx, &js_scopes[js_scope_n].bridge);
     js_scope_n++;
     return ctx;
 }
+
+/* 只查找不创建(hn_rt_frame 驱动定时器用 —— 帧路径不允许副作用建表) */
+static JSContext *js_scope_find(const char *key) {
+    for (int i = 0; i < js_scope_n; i++)
+        if (!strcmp(js_scopes[i].key, key)) return js_scopes[i].ctx;
+    return NULL;
+}
+
+/* rt ↔ scope 绑定: 桥函数(setTimeout 等)只有 JSContext*, 经 opaque 的
+   js_bridge.rt 反查到挂定时器表的 rt。hn_rt_open 绑定 / hn_rt_close 解绑;
+   同 key 的旧 rt 被新 rt 覆盖(后者接管此后注册的定时器 —— 每窗一进程,
+   同 key 双活不是真实场景)。 */
+static void js_scope_bind_rt(hn_rt *rt) {
+    if (!rt) return;
+    JSContext *ctx = js_scope_get(rt->id);   /* 惰性建 scope(与文档脚本同一上下文) */
+    if (!ctx) return;
+    for (int i = 0; i < js_scope_n; i++)
+        if (js_scopes[i].ctx == ctx) { js_scopes[i].bridge.rt = rt; return; }
+}
+
+static void js_scope_unbind_rt(hn_rt *rt) {
+    if (!rt) return;
+    for (int i = 0; i < js_scope_n; i++)
+        if (js_scopes[i].bridge.rt == rt) js_scopes[i].bridge.rt = NULL;
+}
+
+/* 释放 rt 定时器/RAF 表持有的全部 JSValue 引用(hn_rt_close 调; 必须在
+   JS 上下文消亡前 —— 上下文属 js_scopes 全局表, 生命周期长于任何 rt)。 */
+static void js_rt_release_timers(hn_rt *rt) {
+    JSContext *ctx = js_scope_find(rt->id);
+    if (ctx) {
+        for (int i = 0; i < 64; i++) {
+            if (!rt->timers[i].id) continue;
+            JS_FreeValue(ctx, rt->timers[i].func);
+            if (!JS_IsUndefined(rt->timers[i].args)) JS_FreeValue(ctx, rt->timers[i].args);
+            rt->timers[i].id = 0;
+        }
+        for (int i = 0; i < rt->raf_n; i++) JS_FreeValue(ctx, rt->raf_q[i].cb);
+        /* 顺手 GC: 回调闭包可能成环(自引用), 引用清零后让环可回收 */
+        for (int i = 0; i < js_scope_n; i++)
+            if (!strcmp(js_scopes[i].key, rt->id)) JS_RunGC(js_scopes[i].rt);
+    }
+    rt->timer_n = 0;
+    rt->raf_n = 0;
+}
+
+/* ---------------- JS 定时器与 RAF(帧驱动) ----------------
+ * QuickJS 没有后台事件线程 —— 标准定时语义由 hn_rt_frame 每帧驱动:
+ *   setTimeout/setInterval: 到期即调(hn_rt_frame 开头, 每帧一次扫描);
+ *   requestAnimationFrame: 下一帧开头执行一次(注册序, 不做时间对齐)。
+ * 时钟是 rt 的虚拟单调毫秒(clock_ms += dt): 真窗壳喂真实间隔 ⇒ 与单调钟
+ * 一致; 探针喂固定 16 ⇒ "3 帧×16ms 不触发, 第 4 帧触发"可确定性断言。
+ * 纪律(帧驱动定时器的通用约束):
+ *   - 单帧最多 8 个回调(RAF+到期定时器合计), 超出顺延下一帧 —— 回调
+ *     再狂也不饿死主循环;
+ *   - 单次定时器先摘槽再调用(回调里 clearTimeout 自身安全), 调用前
+ *     DupValue(回调里 clearInterval 自身安全);
+ *   - 回调异常吞掉打 stderr(与 hn_rt_eval 同口径), 不向上传播;
+ *   - 跑过回调即按"可能改了画面"处理: rt_render + repaint 置位, 桥改动
+ *     (hnSetText/hnCanvas2D)经既有管线落像素。
+ * C 原生走 __hn* 内部名, 标准签名由 TIMER_GLUE_JS 转接(可变参收敛为
+ * 参数数组)。无宿主 rt 的 eval(daemon 裸 scope)注册定时器返回 0 ——
+ * 定时器是帧驱动的, 帧属于 rt, 没有宿主就没有时钟。 */
+
+/* __hnTimer(fn, ms, argsArray, periodic) → 句柄(>0; 表满/无效 0) */
+static JSValue js_hn_timer(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_rt *rt = b ? b->rt : NULL;
+    if (!rt || argc < 2 || !JS_IsFunction(ctx, argv[0])) return JS_NewInt32(ctx, 0);
+    int slot = -1;
+    for (int i = 0; i < 64; i++)
+        if (!rt->timers[i].id) { slot = i; break; }
+    if (slot < 0) return JS_NewInt32(ctx, 0);          /* 表满: 句柄 0 */
+    double ms = 0;
+    JS_ToFloat64(ctx, &ms, argv[1]);
+    if (!(ms >= 0)) ms = 0;                            /* NaN/负数 → 0(浏览器同义) */
+    int periodic = 0;
+    if (argc > 3) { int32_t p = 0; JS_ToInt32(ctx, &p, argv[3]); periodic = p != 0; }
+    int id = ++rt->timer_seq;
+    rt->timers[slot].id = id;
+    rt->timers[slot].due = rt->clock_ms + ms;
+    rt->timers[slot].interval_ms = periodic ? ms : 0.0;
+    rt->timers[slot].func = JS_DupValue(ctx, argv[0]);
+    rt->timers[slot].args = (argc > 2 && JS_IsArray(ctx, argv[2]))
+                          ? JS_DupValue(ctx, argv[2]) : JS_UNDEFINED;
+    rt->timer_n++;
+    return JS_NewInt32(ctx, id);
+}
+
+/* __hnTimerClear(id): clearTimeout/clearInterval 共用(同一张表, 浏览器
+   也允许互换) */
+static JSValue js_hn_timer_clear(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_rt *rt = b ? b->rt : NULL;
+    if (!rt || argc < 1) return JS_UNDEFINED;
+    int32_t id = 0;
+    JS_ToInt32(ctx, &id, argv[0]);
+    if (id <= 0) return JS_UNDEFINED;                  /* 失效句柄: 静默 */
+    for (int i = 0; i < 64; i++) {
+        if (rt->timers[i].id != id) continue;
+        JS_FreeValue(ctx, rt->timers[i].func);
+        if (!JS_IsUndefined(rt->timers[i].args)) JS_FreeValue(ctx, rt->timers[i].args);
+        rt->timers[i].func = JS_UNDEFINED;
+        rt->timers[i].args = JS_UNDEFINED;
+        rt->timers[i].id = 0;
+        rt->timer_n--;
+        break;
+    }
+    return JS_UNDEFINED;
+}
+
+/* __hnRAF(cb) → 句柄; __hnRAFCancel(id)。挂进下一帧队列(本帧回调里
+   再挂的落到队尾 = 下下帧, 天然防重入) */
+static JSValue js_hn_raf(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_rt *rt = b ? b->rt : NULL;
+    if (!rt || argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_NewInt32(ctx, 0);
+    if (rt->raf_n >= 64) return JS_NewInt32(ctx, 0);   /* 队满: 丢弃 */
+    int id = ++rt->raf_seq;
+    rt->raf_q[rt->raf_n].id = id;
+    rt->raf_q[rt->raf_n].cb = JS_DupValue(ctx, argv[0]);
+    rt->raf_n++;
+    return JS_NewInt32(ctx, id);
+}
+
+static JSValue js_hn_raf_cancel(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_rt *rt = b ? b->rt : NULL;
+    if (!rt || argc < 1) return JS_UNDEFINED;
+    int32_t id = 0;
+    JS_ToInt32(ctx, &id, argv[0]);
+    if (id <= 0) return JS_UNDEFINED;
+    for (int i = 0; i < rt->raf_n; i++) {
+        if (rt->raf_q[i].id != id) continue;
+        JS_FreeValue(ctx, rt->raf_q[i].cb);
+        rt->raf_q[i].cb = JS_UNDEFINED;
+        memmove(&rt->raf_q[i], &rt->raf_q[i + 1],
+                (size_t)(rt->raf_n - i - 1) * sizeof(rt->raf_q[0]));   /* 保注册序 */
+        rt->raf_n--;
+        break;
+    }
+    return JS_UNDEFINED;
+}
+
+/* 统一回调调用: RAF 带时间戳(clock_ms, 仿 DOMHighResTimeStamp);
+   定时器展开参数数组(上限 8 个, 多余丢弃 —— 最小版可变参)。异常吞掉
+   打 stderr 不崩(与 hn_rt_eval 同一口径)。func/args 由调用方 Dup 过,
+   生命周期覆盖本次调用。 */
+static void js_invoke(JSContext *ctx, JSValue func, JSValue args,
+                      int with_ts, double ts) {
+    JSValue argv[8];
+    int na = 0;
+    if (with_ts) {
+        argv[na++] = JS_NewFloat64(ctx, ts);
+    } else if (!JS_IsUndefined(args)) {
+        JSValue jlen = JS_GetPropertyStr(ctx, args, "length");
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, jlen);
+        JS_FreeValue(ctx, jlen);
+        if (len > 8) len = 8;
+        for (; na < len; na++)
+            argv[na] = JS_GetPropertyUint32(ctx, args, (uint32_t)na);
+    }
+    JSValue r = JS_Call(ctx, func, JS_UNDEFINED, na, argv);
+    for (int i = 0; i < na; i++) JS_FreeValue(ctx, argv[i]);
+    if (JS_IsException(r)) {
+        JSValue e = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, e);
+        fprintf(stderr, "[timer] %s\n", msg ? msg : "exception");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, e);
+    }
+    JS_FreeValue(ctx, r);
+}
+
+/* hn_rt_frame 的回调驱动: RAF 队头 → 到期定时器, 合计 ≤8 个; 跑过至少
+   一个就 rt_render + repaint 置位。返回是否跑过回调。 */
+static int js_timers_drain(hn_rt *rt, int *repaint) {
+    if (rt->timer_n == 0 && rt->raf_n == 0) return 0;
+    JSContext *ctx = js_scope_find(rt->id);
+    if (!ctx) return 0;
+    /* 桥环境对准当前文档(hot reload 换 doc 后回调不悬空; 与 hn_rt_eval
+       每次的刷新同一份语义)。rt 槽不动 —— 归属关系不经帧改写。 */
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    for (int i = 0; i < js_scope_n; i++) {
+        if (js_scopes[i].ctx == ctx) {
+            js_scopes[i].bridge.doc = doc;
+            js_scopes[i].bridge.ctx = rt->ctx;
+            break;
+        }
+    }
+    int budget = 8, ran = 0;
+
+    /* RAF: 队头快照(注册序; 预算外留队, 下一帧优先)。先摘队再调用 ——
+       回调里挂新 RAF 追加到队尾, 不会被本帧重入。 */
+    int n = rt->raf_n < budget ? rt->raf_n : budget;
+    JSValue cbs[8];
+    for (int i = 0; i < n; i++) cbs[i] = JS_DupValue(ctx, rt->raf_q[i].cb);
+    if (n < rt->raf_n)
+        memmove(&rt->raf_q[0], &rt->raf_q[n],
+                (size_t)(rt->raf_n - n) * sizeof(rt->raf_q[0]));
+    rt->raf_n -= n;
+    for (int i = 0; i < n; i++) {
+        js_invoke(ctx, cbs[i], JS_UNDEFINED, 1, rt->clock_ms);
+        JS_FreeValue(ctx, cbs[i]);
+        budget--;
+        ran = 1;
+    }
+
+    /* 到期定时器: 单趟扫描(各限一次)。单次触发先摘槽再调用; 周期触发
+       due 顺延 interval(错过的帧不追发 —— 折叠为一次, 与浏览器掉帧语义
+       一致)。回调里 clearTimeout/clearInterval 自身都安全(func 已 Dup,
+       单次槽已摘)。 */
+    double now = rt->clock_ms;
+    for (int i = 0; i < 64 && budget > 0; i++) {
+        if (!rt->timers[i].id || rt->timers[i].due > now) continue;
+        JSValue func = JS_DupValue(ctx, rt->timers[i].func);
+        JSValue args = JS_UNDEFINED;
+        if (!JS_IsUndefined(rt->timers[i].args)) args = JS_DupValue(ctx, rt->timers[i].args);
+        int once = (rt->timers[i].interval_ms <= 0);
+        if (once) {
+            JS_FreeValue(ctx, rt->timers[i].func);
+            if (!JS_IsUndefined(rt->timers[i].args)) JS_FreeValue(ctx, rt->timers[i].args);
+            rt->timers[i].func = JS_UNDEFINED;
+            rt->timers[i].args = JS_UNDEFINED;
+            rt->timers[i].id = 0;
+            rt->timer_n--;
+        } else {
+            rt->timers[i].due = now + rt->timers[i].interval_ms;
+        }
+        js_invoke(ctx, func, args, 0, 0);
+        JS_FreeValue(ctx, func);
+        if (!JS_IsUndefined(args)) JS_FreeValue(ctx, args);
+        budget--;
+        ran = 1;
+    }
+
+    if (ran) { rt_render(rt); if (repaint) *repaint = 1; }
+    return ran;
+}
+
+/* 定时器/RAF 标准签名 glue: __hn* 内部桥 → 浏览器同款全局函数。
+   幂等(typeof 检查), 与 canvas glue 同一装载纪律(每 scope 一次)。 */
+static const char *TIMER_GLUE_JS =
+"(function(g){"
+"  if (typeof g.setTimeout === 'function') return;"
+"  g.setTimeout=function(fn,ms){"
+"    if (typeof fn!=='function') return 0;"
+"    return __hnTimer(fn,+ms||0,[].slice.call(arguments,2),0);};"
+"  g.setInterval=function(fn,ms){"
+"    if (typeof fn!=='function') return 0;"
+"    return __hnTimer(fn,+ms||0,[].slice.call(arguments,2),1);};"
+"  g.clearTimeout=function(id){__hnTimerClear(+id||0);};"
+"  g.clearInterval=function(id){__hnTimerClear(+id||0);};"
+"  g.requestAnimationFrame=function(cb){"
+"    if (typeof cb!=='function') return 0;"
+"    return __hnRAF(cb);};"
+"  g.cancelAnimationFrame=function(h){__hnRAFCancel(+h||0);};"
+"})(globalThis);";
 
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     JSContext *ctx = js_scope_get(scope_key ? scope_key : "default");
@@ -1214,6 +1690,17 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_wasm_call, "hnWasmCall", 2));
     JS_SetPropertyStr(ctx, global, "hnCanvas2D",
         JS_NewCFunction(ctx, js_hn_canvas_2d, "hnCanvas2D", 1));
+    JS_SetPropertyStr(ctx, global, "hnMeasureText",
+        JS_NewCFunction(ctx, js_hn_measure_text, "hnMeasureText", 2));
+    /* 定时器/RAF 内部桥(__hn*; 标准签名由 TIMER_GLUE_JS 转接) */
+    JS_SetPropertyStr(ctx, global, "__hnTimer",
+        JS_NewCFunction(ctx, js_hn_timer, "__hnTimer", 4));
+    JS_SetPropertyStr(ctx, global, "__hnTimerClear",
+        JS_NewCFunction(ctx, js_hn_timer_clear, "__hnTimerClear", 1));
+    JS_SetPropertyStr(ctx, global, "__hnRAF",
+        JS_NewCFunction(ctx, js_hn_raf, "__hnRAF", 1));
+    JS_SetPropertyStr(ctx, global, "__hnRAFCancel",
+        JS_NewCFunction(ctx, js_hn_raf_cancel, "__hnRAFCancel", 1));
     JS_FreeValue(ctx, global);
 
     /* canvas 2D glue(hnGet2D + 状态机): 每 scope 只装一次(幂等定义,
@@ -1228,6 +1715,23 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_FreeValue(ctx, gr);
         for (int i = 0; i < js_scope_n; i++)
             if (js_scopes[i].ctx == ctx) { js_scopes[i].glue_done = 1; break; }
+    }
+
+    /* 定时器/RAF glue(setTimeout/setInterval/requestAnimationFrame 标准
+       签名): 同样每 scope 一次 */
+    int timer_glue_loaded = 0;
+    for (int i = 0; i < js_scope_n; i++)
+        if (js_scopes[i].ctx == ctx) { timer_glue_loaded = js_scopes[i].timer_glue_done; break; }
+    if (!timer_glue_loaded) {
+        JSValue gr = JS_Eval(ctx, TIMER_GLUE_JS, strlen(TIMER_GLUE_JS),
+                             "<timer-glue>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(gr)) {
+            JSValue e = JS_GetException(ctx);
+            JS_FreeValue(ctx, e);
+        }
+        JS_FreeValue(ctx, gr);
+        for (int i = 0; i < js_scope_n; i++)
+            if (js_scopes[i].ctx == ctx) { js_scopes[i].timer_glue_done = 1; break; }
     }
 
     size_t len = strlen(js);
@@ -1295,8 +1799,13 @@ static void run_doc_scripts(hn_rt *rt) {
 }
 
 #else
-/* 无 QuickJS 构建: js_rt_free 空实现(hn_rt_close 的调用点无需知道差别) */
+/* 无 QuickJS 构建: 定时器/RAF 全套 no-op(hn_rt_open/close/frame 的调用点
+   无需知道差别 —— 表恒空, 帧节拍不含 JS 信号)。js_rt_free 空实现。 */
 static void js_rt_free(hn_rt *rt) { (void)rt; }
+static void js_rt_release_timers(hn_rt *rt) { (void)rt; }
+static void js_scope_bind_rt(hn_rt *rt) { (void)rt; }
+static void js_scope_unbind_rt(hn_rt *rt) { (void)rt; }
+static int js_timers_drain(hn_rt *rt, int *repaint) { (void)rt; (void)repaint; return 0; }
 
 /* 文档内联 <script> 执行同样依赖 QuickJS: 无 JS 引擎时不跑(eval 口径
    会如实报告"QuickJS 未编入本产物", 这里保持同一降级纪律)。 */
@@ -1313,6 +1822,8 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
 
 void hn_rt_close(hn_rt *rt) {
     if (!rt) return;
+    js_rt_release_timers(rt);   /* 定时器/RAF 持有的 JSValue 先还(上下文仍活着) */
+    js_scope_unbind_rt(rt);     /* 桥反查表里不悬空 —— 宿主没了定时器即失效 */
     js_rt_free(rt);
     if (rt->ctx) {
         doc_ctx_unbind_ctx(rt->ctx);   /* 悬空 ctx 不留在反查表里 */
@@ -1351,6 +1862,13 @@ static double now_s(void) {
 int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     if (!rt) return -1;
     if (repaint) *repaint = 0;
+#ifdef HN_HAVE_QUICKJS
+    rt->clock_ms += dt_ms > 0 ? (double)dt_ms : 0;   /* 虚拟单调钟: 随帧步进 */
+#endif
+    /* JS 定时器与 RAF 先行(帧开头语义): 到期回调、画布/文本改动在此
+       渲染并置 repaint。 */
+    js_timers_drain(rt, repaint);
+
     int anim = hn_context_anim_tick(rt->ctx, dt_ms);
     if (anim) { rt_render(rt); if (repaint) *repaint = 1; }
 
@@ -1386,11 +1904,38 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
         double wait = rt->polls[i].due - now;
         if (next < 0 || wait < next) next = wait;
     }
-    if (anim) return 16;                        /* 动画在跑: 16ms 一帧 */
-    if (next > 0) return (int)(next * 1000.0);  /* 下一个轮询 */
-    /* 空闲: -1 = 无事可睡。宿主(app/hn_app.c 的帧节拍接线)按自己的
-       空闲节奏低频醒来(热重载 watch 等), 事件到达即醒, 不空转 60fps。 */
-    return -1;
+
+    /* ---- 唤醒节拍合成(取各信号的最小者; -1 = 无事可睡) ----
+       RAF 待决        → 16 (活画面: 60fps 帧循环)
+       定时器表非空    → min(16, 最近到期-现在) (到期即先跑回调)
+       动画在跑        → 16 (过渡/keyframes/Lottie/媒体)
+       hx 轮询期限     → 距最近到期的毫秒数
+       全无            → -1 (宿主按自己的空闲节奏低频醒来) */
+    int beat = -1;
+#ifdef HN_HAVE_QUICKJS
+    if (rt->raf_n > 0) beat = 16;
+    if (rt->timer_n > 0) {
+        double dmin = -1;
+        for (int i = 0; i < 64; i++) {
+            if (!rt->timers[i].id) continue;
+            double d = rt->timers[i].due - rt->clock_ms;
+            if (d < 0) d = 0;                        /* 预算耗尽没跑成的: 立刻再约 */
+            if (dmin < 0 || d < dmin) dmin = d;
+        }
+        if (dmin >= 0) {
+            int tb = (int)dmin;
+            if (tb < 1) tb = 1;
+            if (tb > 16) tb = 16;
+            if (beat < 0 || tb < beat) beat = tb;
+        }
+    }
+#endif
+    if (anim && (beat < 0 || 16 < beat)) beat = 16;
+    if (next > 0) {
+        int pb = (int)(next * 1000.0);
+        if (beat < 0 || pb < beat) beat = pb;
+    }
+    return beat;
 }
 
 int hn_rt_pointer_move(hn_rt *rt, float x, float y) {

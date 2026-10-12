@@ -809,21 +809,131 @@ static void push_cmd(hn_context *c, hn_cmd *cmd) {
  * 显示列表指令 → CLIP_POP。账本 op 的坐标是画布属性坐标系(width/height
  * 属性, JS 侧 CTM 已在记录前应用), 这里按 盒/属性 的比例映射到元素盒 ——
  * 属性尺寸 = 盒尺寸时(最常见)是 1:1 平移。账本属于元素生命周期
- * (hn_canvas.c), 样式重算/重放不影响它; clearRect = 清账本。 */
+ * (hn_canvas.c), 样式重算/重放不影响它; clearRect 覆盖全画布 = 清账本,
+ * 局部矩形 = CLEAR_RECT 指令(绘制期填渲染底色)。 */
+
+/* ---- 账本渐变求值(画布属性坐标系) ----
+ * 线性: 点在轴 (gx0,gy0)→(gx1,gy1) 上的投影参数; radial: CSS
+ * createRadialGradient 双圆口径 —— 解 |P-(C0+t·ΔC)| = r0+t·Δr 取大根
+ * (a≈0 退化为线性, disc<0 = 永远够不到的锥外区按末 stop)。t 钳到 [0,1]。
+ * 与 hnsoft/hn_cairo 光栅侧的同一公式逐式一致(三处同口径)。 */
+static float ledger_grad_t(const hn_canvas_op *o, float px, float py) {
+    float dx = o->gx1 - o->gx0, dy = o->gy1 - o->gy0;
+    float bx = px - o->gx0, by = py - o->gy0;
+    float t;
+    if (o->grad_radial) {
+        float dr = o->gr1 - o->gr0;
+        float a = dx * dx + dy * dy - dr * dr;
+        float b = bx * dx + by * dy + o->gr0 * dr;
+        float cq = bx * bx + by * by - o->gr0 * o->gr0;
+        if (fabsf(a) < 1e-6f)
+            t = fabsf(b) < 1e-6f ? 1.0f : cq / (2.0f * b);
+        else {
+            float disc = b * b - a * cq;
+            if (disc < 0) t = 1.0f;
+            else
+                t = (b + (a > 0 ? sqrtf(disc) : -sqrtf(disc))) / a;   /* 大根 */
+        }
+    } else {
+        float len2 = dx * dx + dy * dy;
+        t = len2 > 1e-6f ? (bx * dx + by * dy) / len2 : 0.0f;
+    }
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    return t;
+}
+
+/* hn_color 通道插值(fill 帮手; 参数已钳好不用再钳) */
+static hn_color lerp_color(hn_color a, hn_color b, float f) {
+    unsigned ar = (a >> 24) & 0xFF, ag = (a >> 16) & 0xFF, ab = (a >> 8) & 0xFF, aa = a & 0xFF;
+    unsigned br = (b >> 24) & 0xFF, bg = (b >> 16) & 0xFF, bb = (b >> 8) & 0xFF, ba = b & 0xFF;
+    unsigned r = (unsigned)((float)ar + ((float)br - (float)ar) * f);
+    unsigned g = (unsigned)((float)ag + ((float)bg - (float)ag) * f);
+    unsigned bl = (unsigned)((float)ab + ((float)bb - (float)ab) * f);
+    unsigned al = (unsigned)((float)aa + ((float)ba - (float)aa) * f);
+    return (r << 24) | (g << 16) | (bl << 8) | al;
+}
+
+/* stop 分段线性插值(与 hnsoft/hn_cairo 的 stops 插值器同一口径;
+   n<2 回落 color→color2 两端)。账本 stops 不保证有序 —— 有序化是 JS 侧
+   的契约, 这里按到达顺序处理(t 单调假设被破坏时取到哪段算哪段)。 */
+static hn_color ledger_grad_color(const hn_canvas_op *o, float t) {
+    if (o->n_stops >= 2) {
+        const hn_grad_stop *s = o->stops;
+        if (t <= s[0].t) return s[0].c;
+        for (int i = 1; i < o->n_stops; i++) {
+            if (t <= s[i].t) {
+                float span = s[i].t - s[i - 1].t;
+                float f = span > 1e-6f ? (t - s[i - 1].t) / span : 0.0f;
+                return lerp_color(s[i - 1].c, s[i].c, f);
+            }
+        }
+        return s[o->n_stops - 1].c;
+    }
+    return lerp_color(o->color, o->color2, t);
+}
+
+/* 账本渐变 op → 显示列表的显式渐变字段(cmd 的 grad_kind / 轴端 ga* / 双圆
+ * gc* / gstops)。
+ * 坐标口径: 线性轴端与 radial 圆心按 (kx,ky) 各轴缩放(与顶点一致);
+ * radial 半径按 ks 均档 —— 非等比缩放下圆退化为椭圆, 光栅器不支持椭圆环,
+ * 取均值缩放(与线宽/字号同一既定口径)。stops 颜色乘组透明度后复制进
+ * tmp 区(生命周期 = 显示列表)。cmd->fill 装首 stop 色(渐变元素的
+ * alpha 门禁看它, 与 hnsoft POLYGON 的 do_fill 门禁对齐)。 */
+static void canvas_emit_grad(hn_context *c, hn_cmd *cmd, const hn_canvas_op *o,
+                             float ox, float oy, float kx, float ky, float ks,
+                             float alpha) {
+    hn_color first = o->n_stops >= 2 ? o->stops[0].c : o->color;
+    cmd->fill = mul_alpha(first, alpha);
+    cmd->grad_kind = o->grad_radial ? 2 : 1;
+    /* 首末两端色也装上(stops 缺失/临时区分配失败时, 光栅器按两端插值回落) */
+    cmd->grad_from = mul_alpha(o->color, alpha);
+    cmd->grad_to = mul_alpha(o->color2, alpha);
+    if (o->grad_radial) {
+        cmd->gcx0 = ox + o->gx0 * kx; cmd->gcy0 = oy + o->gy0 * ky;
+        cmd->gcx1 = ox + o->gx1 * kx; cmd->gcy1 = oy + o->gy1 * ky;
+        cmd->gr0 = o->gr0 * ks;
+        cmd->gr1 = o->gr1 * ks;
+    } else {
+        cmd->gax0 = ox + o->gx0 * kx; cmd->gay0 = oy + o->gy0 * ky;
+        cmd->gax1 = ox + o->gx1 * kx; cmd->gay1 = oy + o->gy1 * ky;
+    }
+    if (o->n_stops >= 2) {
+        hn_grad_stop *gs = (hn_grad_stop *)hn_arena_alloc(
+            c->tmp, sizeof(hn_grad_stop) * (size_t)o->n_stops);
+        if (gs) {
+            for (int i = 0; i < o->n_stops; i++) {
+                gs[i].t = o->stops[i].t;
+                gs[i].c = mul_alpha(o->stops[i].c, alpha);
+            }
+            cmd->gstops = gs;
+            cmd->gn_stops = o->n_stops;
+        }
+    }
+}
 
 /* 折线描边: 每段展开成垂直四边形(QUAD)。开放折线不闭合 —— 引擎的
-   POLYGON 描边总是闭合路径, 用 QUAD 逐段展开才能表达 canvas 的开放路径。 */
-static void canvas_stroke_polyline(hn_context *c, const float *pts, int n_pts,
-                                   hn_color col, float hw, float ox, float oy,
+   POLYGON 描边总是闭合路径, 用 QUAD 逐段展开才能表达 canvas 的开放路径。
+   带渐变的描边(stops >= 2): 每段取**中点**的渐变色画纯色 QUAD —— 逐段
+   pattern 在两后端都不可达, 分段纯色是既定近似口径(段密时与真渐变不可分)。 */
+static void canvas_stroke_polyline(hn_context *c, const hn_canvas_op *o,
+                                   float hw, float ox, float oy,
                                    float kx, float ky, float alpha) {
+    /* 门禁色: 纯色描边直接用 op 色(中点求值只对真渐变有意义 —— color2
+       缺省是透明黑, 拿它中点插值会把描边色折半) */
+    hn_color col = o->n_stops >= 2 ? ledger_grad_color(o, 0.5f) : o->color;
     if (hw <= 0.05f || (col & 0xFFu) == 0) return;
-    hn_color fc = mul_alpha(col, alpha);
-    for (int i = 0; i + 1 < n_pts; i++) {
-        float x1 = ox + pts[i * 2] * kx,         y1 = oy + pts[i * 2 + 1] * ky;
-        float x2 = ox + pts[(i + 1) * 2] * kx,   y2 = oy + pts[(i + 1) * 2 + 1] * ky;
+    int grad = o->n_stops >= 2;
+    for (int i = 0; i + 1 < o->n_pts; i++) {
+        float x1 = ox + o->pts[i * 2] * kx,         y1 = oy + o->pts[i * 2 + 1] * ky;
+        float x2 = ox + o->pts[(i + 1) * 2] * kx,   y2 = oy + o->pts[(i + 1) * 2 + 1] * ky;
         float ex = x2 - x1, ey = y2 - y1;
         float len = sqrtf(ex * ex + ey * ey);
         if (len < 1e-5f) continue;
+        hn_color fc = mul_alpha(grad ? ledger_grad_color(
+                        o, ledger_grad_t(o, (o->pts[i * 2] + o->pts[(i + 1) * 2]) * 0.5f,
+                                            (o->pts[i * 2 + 1] + o->pts[(i + 1) * 2 + 1]) * 0.5f))
+                    : col, alpha);
+        if ((fc & 0xFFu) == 0) continue;
         float nx = -ey / len * hw, ny = ex / len * hw;
         hn_cmd q;
         memset(&q, 0, sizeof(q));
@@ -918,25 +1028,38 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         switch (o->kind) {
-        case HN_CV_FILL_RECT:
+        case HN_CV_FILL_RECT: {
             cmd.kind = HN_CMD_RECT;
             cmd.x = ox + o->x * kx;
             cmd.y = oy + o->y * ky;
             cmd.w = o->w * kx;
             cmd.h = o->h * ky;
             cmd.fill = mul_alpha(o->color, alpha);
-            if ((cmd.fill & 0xFFu) == 0 || cmd.w <= 0 || cmd.h <= 0) continue;
+            /* canvas 阴影(fillRect 专用; alpha=0 的 shadowColor 自然关闸):
+               偏移/模糊随盒缩放各轴均档 —— 与引擎 RECT shadow 同一口径 */
+            if (o->shadow) {
+                cmd.shadow = 1;
+                cmd.shadow_color = mul_alpha(o->sh_color, alpha);
+                cmd.shadow_ox = o->sh_ox * ks;
+                cmd.shadow_oy = o->sh_oy * ks;
+                cmd.shadow_blur = o->sh_blur * ks;
+            }
+            if ((cmd.fill & 0xFFu) == 0 && !cmd.shadow) continue;
+            if (cmd.w <= 0 || cmd.h <= 0) continue;
             push_cmd(c, &cmd);
             break;
+        }
         case HN_CV_STROKE_PATH: {
             float hw = o->stroke_w * ks * 0.5f;
-            canvas_stroke_polyline(c, o->pts, o->n_pts, o->color, hw,
-                                   ox, oy, kx, ky, alpha);
+            canvas_stroke_polyline(c, o, hw, ox, oy, kx, ky, alpha);
             if (o->cap_round) {
-                for (int p2 = 0; p2 < o->n_pts; p2++)
+                for (int p2 = 0; p2 < o->n_pts; p2++) {
+                    /* 圆头颜色取该顶点处的渐变色(描边渐变的分段近似同款) */
+                    hn_color dc = ledger_grad_color(o, ledger_grad_t(o, o->pts[p2 * 2],
+                                                                     o->pts[p2 * 2 + 1]));
                     canvas_cap_dot(c, ox + o->pts[p2 * 2] * kx,
-                                   oy + o->pts[p2 * 2 + 1] * ky, hw,
-                                   o->color, alpha);
+                                   oy + o->pts[p2 * 2 + 1] * ky, hw, dc, alpha);
+                }
             }
             break;
         }
@@ -961,17 +1084,48 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
             cmd.y = oy + o->y * ky;
             cmd.w = o->w * kx;
             cmd.h = o->h * ky;
-            cmd.fill = mul_alpha(o->color, alpha);
-            cmd.gradient = 1;
-            cmd.grad_from = mul_alpha(o->color, alpha);
-            cmd.grad_to = mul_alpha(o->color2, alpha);
-            /* canvas 渐变轴 (x0,y0)→(x1,y1) → 引擎的 CSS 角度口径
-               (0deg=向上, 方向 = (sinθ, -cosθ)): θ = atan2(dx, -dy) */
-            float gdx = (o->gx1 - o->gx0) * kx, gdy = (o->gy1 - o->gy0) * ky;
-            cmd.grad_angle = atan2f(gdx, -gdy) * (180.0f / 3.14159265f);
+            /* 显式渐变(canvas createLinearGradient/createRadialGradient 口径):
+               轴/圆参数为绝对坐标, 不走 CSS 盒+角度模型 —— 双 stop 起即为
+               逐像素精确口径, 多 stop 由 stops 数组分段线性。 */
+            canvas_emit_grad(c, &cmd, o, ox, oy, kx, ky, ks, alpha);
+            if ((cmd.fill & 0xFFu) == 0 && !cmd.shadow) continue;
+            if (cmd.w <= 0 || cmd.h <= 0) continue;
+            if (o->shadow) {
+                cmd.shadow = 1;
+                cmd.shadow_color = mul_alpha(o->sh_color, alpha);
+                cmd.shadow_ox = o->sh_ox * ks;
+                cmd.shadow_oy = o->sh_oy * ks;
+                cmd.shadow_blur = o->sh_blur * ks;
+            }
             push_cmd(c, &cmd);
             break;
         }
+        case HN_CV_GRAD_PATH: {
+            /* fill() 遇渐变: 闭合多边形带显式渐变填充(不再回落纯色)。
+               POLYGON 逐像素求渐变(hnsoft)或 pattern 填充(cairo)。 */
+            if (o->n_pts < 3) break;
+            float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
+            if (!poly) break;
+            for (int p2 = 0; p2 < o->n_pts; p2++) {
+                poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
+                poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
+            }
+            cmd.kind = HN_CMD_POLYGON;
+            cmd.poly = poly;
+            cmd.poly_n = o->n_pts;
+            canvas_emit_grad(c, &cmd, o, ox, oy, kx, ky, ks, alpha);
+            if ((cmd.fill & 0xFFu) == 0) break;   /* alpha 门禁看首 stop */
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_CLEAR_RECT:
+            cmd.kind = HN_CMD_CLEAR_RECT;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            push_cmd(c, &cmd);
+            break;
         case HN_CV_CLIP_PUSH:
             cmd.kind = HN_CMD_CLIP_PUSH;
             cmd.x = ox + o->x * kx;

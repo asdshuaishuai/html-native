@@ -1,17 +1,20 @@
-<!-- canvas-demo — <canvas> 2D API 演示: "智能 UI 仪表盘"静态画面
+<!-- canvas-demo — <canvas> 2D API 演示: "智能 UI 仪表盘" + 实时折线
      ============================================================
      全部画面由脚本经 Canvas 2D API 绘制(状态机在 JS glue, 原语落引擎账本):
-     深色底 → 网格线(stroke 折线) → 渐变面积(createLinearGradient + fillRect)
-     → 指标折线(moveTo/lineTo/arc 圆点 + stroke) → 半圆仪表(arc 120° 段)
-     → 文字标签(fillText)。确定性: 无随机数/无时钟, 同一文档渲染结果逐像素一致。
-
-     渲染(离屏截图, 命令真实可跑; 输出路径相对**文档目录** —— hnapp 会
-     chdir 到文档目录解析资产, 与 <link>/图片同一口径):
+     深色底 → 网格线(stroke 折线) → 渐变面积(createLinearGradient **多 stop**)
+     → 指标折线(moveTo/lineTo/arc 圆点 + stroke) → 半圆仪表(createRadialGradient
+     **径向渐变表盘底** + arc 120° 段) → 光晕徽章(径向渐变多 stop 圆)
+     → 文字标签(fillText + textAlign center)。
+     **活的画面**: setInterval(500ms) 每 0.5s 推一个新数据点并整幅重绘 ——
+     引擎账本是"重录"模型, 每个 tick 全量重画(fillRect 盖底, 富余); 折线向左
+     滚动、读数随动。这是 canvas 连续动画在真窗口的首个实证:
+     **连续动画需真窗, 静态截图取首帧**(数据初值写死, 首帧确定):
+       dist/hnapp-macos-arm64 examples/canvas-demo.html            # 真窗: 折线自己滚
        dist/hnapp-macos-arm64 examples/canvas-demo.html --shot ../screenshots/canvas-demo.png 640 480
 
      说明: 引擎没有 DOM 桥, document.getElementById 是 glue 提供的 canvas
      替代入口(也可直接 hnGet2D('dash'))。hnapp 装载文档时自动执行内联
-     <script>(与浏览器"解析即执行"对齐), 因此离线 --shot 全链路可用。
+     <script>(与浏览器"解析即执行"对齐), setInterval 由 hn_rt_frame 帧驱动。
 -->
 <html>
 <head>
@@ -29,107 +32,153 @@ canvas { display: block; }
 var ctx = document.getElementById('dash').getContext('2d');
 var W = 640, H = 480;
 
-/* ---- 深色底 ---- */
-ctx.fillStyle = '#0b0e13';
-ctx.fillRect(0, 0, W, H);
-
-/* 面板卡片底(两块) */
-ctx.fillStyle = '#11151f';
-ctx.fillRect(24, 52, 380, 300);          /* 折线图面板 */
-ctx.fillRect(424, 52, 192, 300);         /* 仪表盘面板 */
-ctx.fillStyle = '#11151f';
-ctx.fillRect(24, 372, 592, 84);          /* 底部状态条 */
-
-/* ---- 网格线(折线 stroke: 每条线一个子路径) ---- */
-ctx.strokeStyle = 'rgba(96,112,150,0.30)';
-ctx.lineWidth = 1;
-ctx.beginPath();
-for (var gx = 44; gx <= 384; gx += 34) { ctx.moveTo(gx, 92); ctx.lineTo(gx, 332); }
-for (var gy = 92; gy <= 332; gy += 34) { ctx.moveTo(44, gy); ctx.lineTo(384, gy); }
-ctx.stroke();
-
-/* ---- 渐变面积(createLinearGradient: 首末 stop 两端色) ---- */
-var area = ctx.createLinearGradient(0, 140, 0, 332);
-area.addColorStop(0, 'rgba(79,124,255,0.50)');
-area.addColorStop(1, 'rgba(79,124,255,0.04)');
-ctx.fillStyle = area;
-ctx.fillRect(44, 140, 340, 192);
-
-/* ---- 指标折线(折线化路径 + 圆头) ---- */
-var pts = [
-  [ 44, 300], [ 78, 282], [112, 288], [146, 258], [180, 264],
-  [214, 232], [248, 240], [282, 205], [316, 182], [350, 168], [384, 148]
-];
-ctx.strokeStyle = '#7fdbca';
-ctx.lineWidth = 2.5;
-ctx.lineCap = 'round';
-ctx.beginPath();
-ctx.moveTo(pts[0][0], pts[0][1]);
-for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-ctx.stroke();
-/* 数据点(圆弧折线化: arc 全圆 24 段) */
-ctx.fillStyle = '#a8e6d5';
-for (var i = 0; i < pts.length; i++) {
-  ctx.beginPath();
-  ctx.arc(pts[i][0], pts[i][1], 3, 0, Math.PI * 2, false);
-  ctx.fill();
+/* ---- 实时数据环: 11 个点铺满折线区(x = 44 + 34*i), 首帧值写死(确定性),
+        之后每 500ms 右端推入新点、左端弹出 —— 折线即滚动 ---- */
+var pts = [300, 282, 288, 258, 264, 232, 240, 205, 182, 168, 148];
+var tick = 0;
+function nextY(t) {   /* 确定性"采样": 两个正弦叠加, 无随机数 */
+  return 240 + Math.sin(t * 0.9) * 55 + Math.sin(t * 0.37 + 1.3) * 30;
 }
-/* 当前值高亮点 */
-ctx.beginPath();
-ctx.arc(384, 148, 6, 0, Math.PI * 2, false);
-ctx.fillStyle = '#ffffff';
-ctx.fill();
 
-/* ---- 半圆仪表(arc 部分72°段 + 底弧) ---- */
-ctx.lineCap = 'butt';
-ctx.lineWidth = 12;
-ctx.strokeStyle = '#232c42';
-ctx.beginPath();
-ctx.arc(520, 250, 62, Math.PI, Math.PI * 2, false);   /* 底弧(半圆) */
-ctx.stroke();
-ctx.strokeStyle = '#ffb454';
-ctx.beginPath();
-ctx.arc(520, 250, 62, Math.PI, Math.PI * 1.72, false); /* 值弧: 72% */
-ctx.stroke();
-ctx.strokeStyle = '#4f7cff';
-ctx.lineWidth = 12;
-ctx.beginPath();
-ctx.arc(520, 250, 40, Math.PI, Math.PI * 1.5, false);  /* 内环: 另一指标 */
-ctx.stroke();
+function draw() {
+  var lastY = pts[pts.length - 1];
+  var req = Math.round((332 - lastY) * 7);   /* 读数与折线末端联动 */
 
-/* ---- 底部状态条(三枚指示块) ---- */
-ctx.fillStyle = '#2ecc71';
-ctx.fillRect(40, 400, 12, 12);
-ctx.fillStyle = '#f1c40f';
-ctx.fillRect(230, 400, 12, 12);
-ctx.fillStyle = '#e74c3c';
-ctx.fillRect(420, 400, 12, 12);
+  /* ---- 深色底(账本模型: 每 tick 全量重录) ---- */
+  ctx.fillStyle = '#0b0e13';
+  ctx.fillRect(0, 0, W, H);
 
-/* ---- 文字标签(y = 基线) ---- */
-ctx.fillStyle = '#e8eaf0';
-ctx.font = '20px sans-serif';
-ctx.fillText('智能 UI 仪表盘', 24, 34);
-ctx.font = '12px sans-serif';
-ctx.fillStyle = '#8b94ad';
-ctx.fillText('吞吐量 · 实时链路', 44, 116);
-ctx.fillStyle = '#7fdbca';
-ctx.font = '17px sans-serif';
-ctx.fillText('1,284 req/s', 286, 128);
-ctx.fillStyle = '#e8eaf0';
-ctx.font = '22px sans-serif';
-ctx.fillText('72%', 486, 246);
-ctx.font = '12px sans-serif';
-ctx.fillStyle = '#8b94ad';
-ctx.fillText('负载率', 496, 296);
-ctx.fillStyle = '#e8eaf0';
-ctx.fillText('53%', 496, 320);
-ctx.font = '12px sans-serif';
-ctx.fillStyle = '#9aa3b5';
-ctx.fillText('正常 · 节点 A/B/C', 60, 411);
-ctx.fillText('降级 · 队列重试', 250, 411);
-ctx.fillText('拥堵 · 区域 3', 440, 411);
-ctx.fillStyle = '#5b6478';
-ctx.fillText('html-native · canvas 2D(账本重放)', 24, 470);
+  /* 面板卡片底(两块) */
+  ctx.fillStyle = '#11151f';
+  ctx.fillRect(24, 52, 380, 300);          /* 折线图面板 */
+  ctx.fillRect(424, 52, 192, 300);         /* 仪表盘面板 */
+  ctx.fillStyle = '#11151f';
+  ctx.fillRect(24, 372, 592, 84);          /* 底部状态条 */
+
+  /* ---- 网格线(折线 stroke: 每条线一个子路径) ---- */
+  ctx.strokeStyle = 'rgba(96,112,150,0.30)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (var gx = 44; gx <= 384; gx += 34) { ctx.moveTo(gx, 92); ctx.lineTo(gx, 332); }
+  for (var gy = 92; gy <= 332; gy += 34) { ctx.moveTo(44, gy); ctx.lineTo(384, gy); }
+  ctx.stroke();
+
+  /* ---- 渐变面积(createLinearGradient **三 stop**: 引擎分段线性插值) ---- */
+  var area = ctx.createLinearGradient(0, 140, 0, 332);
+  area.addColorStop(0, 'rgba(79,124,255,0.55)');
+  area.addColorStop(0.55, 'rgba(79,124,255,0.20)');
+  area.addColorStop(1, 'rgba(79,124,255,0.03)');
+  ctx.fillStyle = area;
+  ctx.fillRect(44, 140, 340, 192);
+
+  /* ---- 指标折线(实时环: moveTo/lineTo 折线化路径) ---- */
+  ctx.strokeStyle = '#7fdbca';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(44, pts[0]);
+  for (var i = 1; i < pts.length; i++) ctx.lineTo(44 + 34 * i, pts[i]);
+  ctx.stroke();
+  /* 数据点(圆弧折线化: arc 全圆 24 段) */
+  ctx.fillStyle = '#a8e6d5';
+  for (var i = 0; i < pts.length; i++) {
+    ctx.beginPath();
+    ctx.arc(44 + 34 * i, pts[i], 3, 0, Math.PI * 2, false);
+    ctx.fill();
+  }
+  /* 当前值高亮点(永远在折线末端 = 最新采样) */
+  ctx.beginPath();
+  ctx.arc(384, lastY, 6, 0, Math.PI * 2, false);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+
+  /* ---- 半圆仪表: **径向渐变表盘底**(createRadialGradient 双圆口径,
+          内圆 r=6 → 外圆 r=86, 三 stop: 亮心 → 盘面 → 透明边) ---- */
+  var dial = ctx.createRadialGradient(520, 250, 6, 520, 250, 86);
+  dial.addColorStop(0, '#2e3a5c');
+  dial.addColorStop(0.62, '#1a2236');
+  dial.addColorStop(1, 'rgba(26,34,54,0)');
+  ctx.fillStyle = dial;
+  ctx.beginPath();
+  ctx.arc(520, 250, 86, 0, Math.PI * 2, false);
+  ctx.fill();
+  /* 值弧(底弧 + 72% 进度弧 + 内环) */
+  ctx.lineCap = 'butt';
+  ctx.lineWidth = 12;
+  ctx.strokeStyle = '#232c42';
+  ctx.beginPath();
+  ctx.arc(520, 250, 62, Math.PI, Math.PI * 2, false);   /* 底弧(半圆) */
+  ctx.stroke();
+  ctx.strokeStyle = '#ffb454';
+  ctx.beginPath();
+  ctx.arc(520, 250, 62, Math.PI, Math.PI * 1.72, false); /* 值弧: 72% */
+  ctx.stroke();
+  ctx.strokeStyle = '#4f7cff';
+  ctx.lineWidth = 12;
+  ctx.beginPath();
+  ctx.arc(520, 250, 40, Math.PI, Math.PI * 1.5, false);  /* 内环: 另一指标 */
+  ctx.stroke();
+
+  /* ---- 光晕徽章(createRadialGradient **多 stop**: 亮核 → 光晕 → 透明) ---- */
+  var glow = ctx.createRadialGradient(568, 84, 2, 568, 84, 30);
+  glow.addColorStop(0, '#ffe9b8');
+  glow.addColorStop(0.3, 'rgba(255,180,84,0.85)');
+  glow.addColorStop(0.65, 'rgba(255,140,60,0.28)');
+  glow.addColorStop(1, 'rgba(255,140,60,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(568, 84, 30, 0, Math.PI * 2, false);
+  ctx.fill();
+  ctx.fillStyle = '#fff7e0';
+  ctx.beginPath();
+  ctx.arc(568, 84, 6, 0, Math.PI * 2, false);
+  ctx.fill();
+
+  /* ---- 底部状态条(三枚指示块) ---- */
+  ctx.fillStyle = '#2ecc71';
+  ctx.fillRect(40, 400, 12, 12);
+  ctx.fillStyle = '#f1c40f';
+  ctx.fillRect(230, 400, 12, 12);
+  ctx.fillStyle = '#e74c3c';
+  ctx.fillRect(420, 400, 12, 12);
+
+  /* ---- 文字标签(y = 基线; 吞吐读数随折线末端实时更新;
+          72% 用 textAlign=center 锚点修正 —— measureText 原生桥供宽) ---- */
+  ctx.fillStyle = '#e8eaf0';
+  ctx.font = '20px sans-serif';
+  ctx.fillText('智能 UI 仪表盘', 24, 34);
+  ctx.font = '12px sans-serif';
+  ctx.fillStyle = '#8b94ad';
+  ctx.fillText('吞吐量 · 实时链路(setInterval 500ms)', 44, 116);
+  ctx.fillStyle = '#7fdbca';
+  ctx.font = '17px sans-serif';
+  ctx.fillText(req + ' req/s', 266, 128);
+  ctx.fillStyle = '#e8eaf0';
+  ctx.font = '22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('72%', 520, 246);
+  ctx.textAlign = 'left';
+  ctx.font = '12px sans-serif';
+  ctx.fillStyle = '#8b94ad';
+  ctx.fillText('负载率', 496, 296);
+  ctx.fillStyle = '#e8eaf0';
+  ctx.fillText('53%', 496, 320);
+  ctx.font = '12px sans-serif';
+  ctx.fillStyle = '#9aa3b5';
+  ctx.fillText('正常 · 节点 A/B/C', 60, 411);
+  ctx.fillText('降级 · 队列重试', 250, 411);
+  ctx.fillText('拥堵 · 区域 3', 440, 411);
+  ctx.fillStyle = '#5b6478';
+  ctx.fillText('html-native · canvas 2D(账本重放 · 定时器驱动)', 24, 470);
+}
+
+draw();   /* 首帧立即落账(静态截图即此帧) */
+setInterval(function () {
+  tick++;
+  pts.push(nextY(tick));
+  pts.shift();
+  draw();
+}, 500);
 </script>
 </body>
 </html>

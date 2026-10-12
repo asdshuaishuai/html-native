@@ -142,12 +142,32 @@ static void grad_axis_ends(const hn_cmd *c, double *ax0, double *ay0,
 }
 
 static cairo_pattern_t *make_gradient(const hn_cmd *c) {
-    double x0, y0, x1, y1;
-    grad_axis_ends(c, &x0, &y0, &x1, &y1);
-    fcolor a = unpack(c->grad_from), b = unpack(c->grad_to);
-    cairo_pattern_t *g = cairo_pattern_create_linear(x0, y0, x1, y1);
-    cairo_pattern_add_color_stop_rgba(g, 0, a.r, a.g, a.b, a.a);
-    cairo_pattern_add_color_stop_rgba(g, 1, b.r, b.g, b.b, b.a);
+    cairo_pattern_t *g;
+    if (c->grad_kind == 2) {
+        /* canvas createRadialGradient 双圆口径, cairo 的 radial pattern
+           语义一致(圆心/半径线性插值的圆族, 取大根) —— 直接映射。 */
+        double r0 = c->gr0 > 0 ? (double)c->gr0 : 0;
+        double r1 = c->gr1 > 0 ? (double)c->gr1 : 0;
+        g = cairo_pattern_create_radial(c->gcx0, c->gcy0, r0, c->gcx1, c->gcy1, r1);
+    } else if (c->grad_kind == 1) {
+        /* 显式线性轴(绝对坐标), 不走盒+角度推导 */
+        g = cairo_pattern_create_linear(c->gax0, c->gay0, c->gax1, c->gay1);
+    } else {
+        double x0, y0, x1, y1;
+        grad_axis_ends(c, &x0, &y0, &x1, &y1);
+        g = cairo_pattern_create_linear(x0, y0, x1, y1);
+    }
+    /* 多 stop(gstops, n>=2)优先; 否则首末两端(旧口径逐位一致) */
+    if (c->gn_stops >= 2) {
+        for (int i = 0; i < c->gn_stops; i++) {
+            fcolor s = unpack(c->gstops[i].c);
+            cairo_pattern_add_color_stop_rgba(g, c->gstops[i].t, s.r, s.g, s.b, s.a);
+        }
+    } else {
+        fcolor a = unpack(c->grad_from), b = unpack(c->grad_to);
+        cairo_pattern_add_color_stop_rgba(g, 0, a.r, a.g, a.b, a.a);
+        cairo_pattern_add_color_stop_rgba(g, 1, b.r, b.g, b.b, b.a);
+    }
     return g;
 }
 
@@ -630,7 +650,7 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             cairo_save(cr);
             cairo_new_path(cr);          /* 不清则 fill 会连带上一条指令的形状 */
             rounded_rect(cr, c->x, c->y, c->w, c->h, c->radius);
-            if (c->gradient) {
+            if (c->gradient || c->grad_kind) {
                 cairo_pattern_t *g = make_gradient(c);
                 cairo_set_source(cr, g);
                 cairo_fill_preserve(cr);
@@ -700,10 +720,19 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             cairo_close_path(cr);
             cairo_set_fill_rule(cr, c->even_odd ? CAIRO_FILL_RULE_EVEN_ODD
                                                 : CAIRO_FILL_RULE_WINDING);
-            fcolor f = unpack(c->fill);
-            if (f.a > 0.001f) {
-                cairo_set_source_rgba(cr, f.r, f.g, f.b, f.a);
+            /* 显式渐变(canvas gpath): pattern 一次填充(radial/多 stop 都
+               由 make_gradient 承接 —— 与 hnsoft 的逐像素插值同语义) */
+            if (c->grad_kind) {
+                cairo_pattern_t *g = make_gradient(c);
+                cairo_set_source(cr, g);
                 cairo_fill(cr);
+                cairo_pattern_destroy(g);
+            } else {
+                fcolor f = unpack(c->fill);
+                if (f.a > 0.001f) {
+                    cairo_set_source_rgba(cr, f.r, f.g, f.b, f.a);
+                    cairo_fill(cr);
+                }
             }
             cairo_restore(cr);
             break;
@@ -711,6 +740,21 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
         case HN_CMD_MESH:
             paint_mesh(cr, c);
             break;
+        case HN_CMD_CLEAR_RECT: {
+            /* 局部清空: 矩形内 SOURCE 回填渲染底色(与 hnsoft 的
+               paint_clear_rect 同一语义)。必须先 new_path —— 上一条
+               RECT 的 fill_preserve 会在 restore 后留下当前路径, 路径
+               不属于 save/restore 状态, 不清则清空矩形会连带重涂它。 */
+            fcolor b2 = unpack(bg);
+            cairo_save(cr);
+            cairo_new_path(cr);
+            cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+            cairo_set_source_rgba(cr, b2.r, b2.g, b2.b, b2.a);
+            cairo_rectangle(cr, c->x, c->y, c->w, c->h);
+            cairo_fill(cr);
+            cairo_restore(cr);
+            break;
+        }
         }
     }
 
