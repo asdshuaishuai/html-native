@@ -45,6 +45,30 @@
    推给常驻宿主, 系统里即刻出现信息窗口——
    不拉浏览器, 不装应用。
 
+### 与 WebView 的边界(宣言)
+
+把 HTML 画上屏的东西, 必然有解析/级联/布局/光栅/动画时钟——这一层与
+浏览器趋同是物理事实, 不是要回避的。分界线画在**产品契约**上:
+
+| 契约维度 | WebView | 本项目 |
+|---|---|---|
+| 兼容目标 | 任意网页, 与 Chrome 一致 | 自定义 hn 子集, 探针钉死(约百条断言即语言规范) |
+| 体积/依赖 | 数千万行, 运行时 100MB+ | ~1.5MB 单二进制, 零外部依赖 |
+| 确定性 | 不承诺跨版本一致 | 跨架构布局逐字节一致(构建门禁守着) |
+| 脚本面 | 完整 DOM/Web API | 小桥(hnSetText / hnGet2D / hnCanvas2D…) |
+| 网络 | 完整栈 + 安全沙箱 | 无(hx-* 注入 transport, sys:// 本地) |
+| 窗口语义 | 平台默认窗 | 一等公民: popup/layer/桌宠/鼠标穿透/幽灵模式/秒开秒毁 |
+
+由此两条纪律:
+
+1. **子集冻结**: "支持的子集" + 探针 = 语言规范。新能力只以 `hn-*` 扩展
+   身份进入, 且必须服务"agent 生成 UI"; 服务"渲染真实网页"的特性一律
+   视为范围蔓延 —— 走 `sys://open` 桥出, 不塞进引擎。
+2. **押注 WebView 做不好或不肯做的事**: 无头确定性(agent 视觉回归/CI 闭环)、
+   窗口即易变对象(秒开/胶囊/轻应用/桌宠/幽灵模式)、单二进制零安装、
+   面向 agent 的协议面(能力图 + 胶囊内操作指令)。渲染器只是地基,
+   这些才是产品。
+
 ## 快速开始
 
 ```bash
@@ -120,7 +144,8 @@ Sources/CHtmlNative/  引擎核心(C99, ~10900 行, 零依赖, 不含平台/UI/�
   hn_theme.c   hn-theme 设计令牌基底(暗/亮)
   hn_json.c    极简 JSON 解析(零依赖; Lottie 等公开格式需要)
   hn_png.c     PNG 解码(含自带 inflate; 让软件光栅后端真能显示图片)
-  hn_lottie.c  Lottie 求值 → 矢量指令(多边形/图片/矩形)
+  hn_gif.c     GIF87a/89a 动图解码(LZW/色表/帧间 disposal/透明索引/循环次数)
+  hn_lottie.c  Lottie 求值 → 矢量指令(多边形/图片/矩形/渐变/裁剪)
   hn_mesh.c    网格变形贴图 → MESH 指令(Live2D 类效果的原语)
   hn_context.c 会话: 布局编排/命中/hot-update/清单解析
   hn_cairo.c   **可选**绘制后端: 显示列表 → cairo(一份实现喂所有平台)
@@ -140,7 +165,7 @@ tools/hn_daemon.c      C99 常驻宿主(Unix socket JSON-lines, agent 入口)
 tools/hn_cli.c         C99 命令行客户端(与 daemon 配对)
 tools/build-multiplatform.sh  交叉构建(zig cc, 三平台产物 + 跨架构确定性门禁)
 tools/build-daemon-cli.sh     daemon/CLI 本机构建
-tools/*_probe.c/.py    探针(render/alpha/cairo/mesh/sysbridge/rt + 布局/CSS/HTML/Lottie)
+tools/*_probe.c/.py    探针(render/alpha/cairo/mesh/sysbridge/rt + 布局/CSS/HTML/Lottie/GIF)
 screenshots/           引擎效果截图
 ```
 
@@ -278,10 +303,16 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   `text-decoration(underline/line-through/overline)`; `list-style(none/square/circle)`;
   **Lottie**: 引擎求值(不是 WebView 播放器) → 平台无关指令, 三个后端同等支持。
   形状: 组(嵌套+自身变换)/矩形/椭圆/路径(**静态与变形关键帧都支持**)、
-  填充/描边、**trim path**(线/进度环/加载动画的核心)、**repeater**、
+  填充/描边、**多 stop 线性渐变填充(gf)与渐变描边(gs)**(扁平
+  `[pos,r,g,b,...]` 与新式 `[{t,s}]` 两种编码、0..1 与 0..100 两种量纲都吃下,
+  在形状局部空间切成色带后走既有多边形指令 —— 后端零改动; 径向 t=2 退化为
+  中位色, 如实写明)、**trim path**(线/进度环/加载动画的核心)、**repeater**、
   **预合成 precomp**(真实导出文件几乎必带)、图层混合、纯色层/图片层。
-  **明确不支持**: 文本层/表达式/特效/遮罩与轨道遮罩(蒙版形状不生效,
-  仅图层 `td` 有效)/merge paths/时间重映射。
+  **mask 最小版**: `masksProperties` 的单条加法蒙版(不带 inv)按其路径外接
+  矩形做 CLIP 裁剪, 支持蒙版路径关键帧 —— 矩形蒙版精确, 曲线蒙版是外接盒
+  近似; 反相/相减/相交等多蒙版语义不做。
+  **明确不支持**: 文本层/表达式/特效/轨道遮罩/merge paths/时间重映射/
+  径向渐变的形状化/多蒙版布尔组合。
   **变换引擎**:**非等比缩放**(`scale(x,y)` / `scaleX()` / `scaleY()` ——
   之前只取第一个参数, `scale(2,1)` 被当成等比 2, 图形纵向也被拉高一倍;
   `scale(2)` 等比形式只装等比一路, 与 `scale(2,2)` 同值 —— 旧实现两路
@@ -335,7 +366,21 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   `min/max-width/height` 约束、**完整 margin 简写正确展开 TRBL**(修复历史越界 bug)、
   `font-family(monospace/serif 系统设计, code 等默认等宽)**、默认行高 1.45、
   **窗口标题栏无缝**(透明标题条 + 底色跟随 body 背景 + 可拖拽空白区)
-- **图片**: `<img>`(尺寸回退链: 样式 > 属性 > 固有尺寸), 图片后端注入
+- **图片**: `<img>`(尺寸回退链: 样式 > 属性 > 固有尺寸), 图片后端注入;
+  **`object-fit: contain/cover/fill/none`**(替换元素的内容适配 —— 之前声明了
+  不生效也不报错, 所有图一律被拉伸)。固有尺寸优先问图片后端, 未注入时引擎
+  直接**嗅探文件头**(PNG IHDR / GIF 逻辑屏 / BMP biWidth-biHeight), 不引入
+  解码依赖; 未识别格式退回拉伸(旧口径)。
+- **GIF 动图**: `<img src="x.gif">`(src 以 .gif 结尾自动生效, 或 `hn-gif`
+  显式声明; `hn-gif-speed` 倍速)。解码器是引擎自带(hn_gif.c): GIF87a/89a、
+  **LZW**(标准增长规则, 与 PIL/giflib 逐像素对照过)、全局/局部色表、
+  **帧间 disposal 0/1/2/3**、透明色索引、NETSCAPE 循环次数、交织。产物是
+  **合成好的整幅 RGBA 帧序列** + 每帧 delay; 当前帧 = 时钟的**纯函数**(按
+  delay 累计取模, 有限循环播完停末帧)——与 Lottie/网格变形**共用同一帧时钟**
+  (节点 ext_clock, hn_context_anim_tick 推进), 所以真窗连续播放、HN_CLOCK
+  离屏取帧、循环回绕是同一套口径; 播放中节点标记活跃驱动帧循环。
+  单帧 GIF 走同一条路(等价静态图); 解码失败退到常规 img 路径(显式暴露而非静默空白)。
+  见 `examples/image-lab.html`(口径由 `tools/gif_probe.c` 61 断言钉死)。
 - **弱化存在感 / 小程序 · 插件形态**: 引擎默认"不像一个 App"。
   `hn-presence=ghost`(默认于 popup/layer)声明**不占系统身份** —— 不进 Dock、
   无图标、不进 Cmd+Tab 的应用切换(引擎解析声明并下发给壳, 物化语义由
@@ -343,6 +388,23 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   只有 `hn-surface=window`(或显式 `hn-presence=app`)才驻留 Dock。
   `hn-lifecycle="launch show hide destroy"` 声明关心哪些生命周期事件,
   未声明的页面一次都不打扰; 事件走**同一条统一事件管道**(JS 处理器与 hx 共用)。
+- **桌宠形态(无背景 + 悬浮桌面)**: 上一条是"不像一个 App", 这一条是"
+  **几乎不以窗口存在**"—— 没有标题栏、没有底色、没有投影, 画面上只剩角色与
+  气泡, 其余是真实桌面。一组 meta 声明即整个形态(macOS 已物化, 其余平台优雅忽略):
+  `hn-transparent="1"`(逐像素 alpha)、`hn-frameless="1"`(无标题栏无边框, 整窗
+  即内容)、`hn-level="floating|desktop|normal"`(悬浮于普通窗口之上 / 垫到桌面级
+  —— 值取 `NSFloatingWindowLevel=3` 与 `kCGDesktopWindowLevel`, 逐值抄 SDK 头)、
+  `hn-spaces="all"`(跟随所有空间, 含全屏空间旁)、`hn-shadow="0"`、`hn-click-through="1"`
+  (初始鼠标穿透)。与 `popup`/`layer` 的区别: 那两者是"存在感低的窗口"(仍有窗口
+  矩形、层级与标题条语义), 桌宠把窗口本体也抹掉 —— 无边框 + 逐像素透明 +
+  `hn-presence` 不占系统身份, 观感是"桌面上住着一个小东西"而非"开了一个窗口"。
+  无边框后内容就是唯一拖动面(壳层覆写 `mouseDownCanMoveWindow`, 立绘/空白均可拖);
+  **运行期穿透切换**走 `hnp_window_set_click_through(w, on)`(桌宠"幽灵模式":
+  穿透时点击落到桌面, 再点回来)—— 初始态由 `hn-click-through` 声明,
+  验收脚本可用环境钮 `HN_CLICK_THROUGH=0|1` 覆盖。
+  见 `examples/pet.html`(hn-mesh 摆动立绘 + keyframes 错相气泡轮播 + 状态 dot),
+  离屏取帧 `screenshots/pet.png`, 口径由 `tools/pet_probe.sh` 钉死(四角 alpha=0/
+  headless 收下新字段/真窗口 3 秒冒烟)。
 - **透明背景层**: 引擎剥离 `html/body` 底色 + 绘制后端的真逐像素 alpha
   (cairo 直通、hnsoft 非预乘 source-over) + 平台窗口透明背板。光栅层上的历史 bug 都在
   `tools/hnsoft_alpha_probe.c` 与 css 探针的端到端断言里守着:
@@ -444,11 +506,15 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 - **Lottie 矢量动画**: `<img src="a.json" hn-lottie>` 直接播 Lottie/bodymovin
   文件 —— 引擎解析 JSON、按时间轴求值, 产出**多边形绘制指令(POLYGON)**,
   所以不必为每个平台写一遍播放器, 也不需要 WebView。支持形状层
-  (组/矩形/椭圆/贝塞尔路径) / 填充 / 描边 / 纯色层 / 图片层, 以及
-  锚点·位置·缩放·旋转·不透明度与**路径变形**关键帧。
+  (组/矩形/椭圆/贝塞尔路径) / 填充 / 描边 / **多 stop 线性渐变填充 gf 与
+  渐变描边 gs**(两种 stop 编码、0..1 与 0..100 两种量纲; 形状局部空间切
+  色带, 后端零改动)/ 纯色层 / 图片层, 以及
+  锚点·位置·缩放·旋转·不透明度与**路径变形**关键帧; **mask 最小版**
+  (masksProperties 单条加法蒙版 → 路径外接矩形 CLIP 裁剪, 支持蒙版路径
+  关键帧)。
   可选 `hn-lottie-speed`(倍速)、`hn-lottie-fit`(contain/cover/fill/none)。
-  **明确不支持**(跳过而非报错): 预合成层、文本层、表达式、特效、
-  trim path、遮罩与轨道遮罩、repeater
+  **明确不支持**(跳过而非报错): 预合成层(会展开)、文本层、表达式、特效、
+  轨道遮罩、merge paths、时间重映射、径向渐变的形状化、多蒙版布尔组合
 - **网格变形贴图(Live2D 类效果的原语)**: `<img src="c.png" hn-mesh="12x10"
   hn-mesh-sway="6" hn-mesh-anchor="bottom">` —— 把贴图映射到可变形网格,
   顶点按正弦形变(固定端不动, 形成波浪)。这与 Live2D 让立绘"活起来"是
@@ -500,7 +566,13 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   测试双轨: hncore **合成宿主**(梯度帧+假时钟, 确定性)供
   `media_element_probe.py` 40 断言全绿; 真机 AVFoundation 由 `media_probe.py`
   实测(播放推进/seek 落位/pause 恒定/纯音频无帧/系统样例抽真帧,
-  18 ok 0 fail)。真机播放进窗口还差壳层媒体宿主接线(见"已知简化与路线图")。
+  18 ok 0 fail)。**真窗口播放已接线**: `app/hn_media_platform.c` 把平台
+  ABI(`hnp_media_*`)适配成 `hn_media_host` 交 `hn_rt_set_media` ——
+  hn_app = AVFoundation 平台宿主(视频解码进 `HN_CMD_BITMAP`、音频经
+  AVPlayer 直出), headless/Linux 目标与 hncore 探针 = 同语义合成宿主
+  (梯度帧假时钟); 平台宿主缺席或单文件 open 失败时降级为 poster/深底占位
+  (hn_paint 占位 RECT, 不静默空白)。窗口内 `m` 键切媒体静音;
+  `HN_MEDIA_TRACE=1` 打会话状态行, 验收见 `tools/media_window_probe.sh`。
 - **WASM 运行时(wasm3, 纯计算导出)**: 内嵌 **wasm3**(MIT, vendor 快照最小
   11 源 + LICENSE, `-std=c99` 零警告零外部依赖, 三平台无条件编入)。引擎封装
   `hn_wasm_load/call/free` + 实例表 `hn_wasm_install/by_id/unload`(id 1..32);
@@ -511,10 +583,14 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   wasm32-freestanding, `add.wasm` 已入库); `wasm_probe.py` 19 断言(装载/
   调用/签名转换/错误路径)全绿。
 - **媒体/WASM 端到端示例**: `examples/media-demo.html` —— `<video>` 播放区
-  (自绘控制条, 按钮走 JS 桥驱动引擎状态机)+ `hnWasmLoad`/`hnWasmCall` 计算
-  卡 + `sys://` 系统卡, 四段各走一条后端; 样片 `examples/assets/demo.mp4`
-  (320x180 H.264+AAC 4s)入库。无头验证: `hncore paint` 输出 `BITMAP/MEDIA`
-  行, daemon `eval` op 驱动 JS 桥。
+  (真窗口里 AVFoundation 真播, 自绘控制条 + 静音钮; 引擎不做浏览器控件 UI,
+  media-design §9)+ `hnWasmLoad`/`hnWasmCall` 计算卡 + `sys://` 系统卡,
+  四段各走一条后端; 样片 `examples/assets/demo.mp4`
+  (320x180 H.264+AAC 4s)入库。真窗验证:
+  `cd examples && HN_MEDIA_TRACE=1 ../dist/hnapp-macos-arm64 media-demo.html`
+  看 `[media] … state=PLAYING t=…` 前进(m 键切静音);
+  无头验证: `hncore paint` 输出 `BITMAP/MEDIA` 行, daemon `eval` op 驱动
+  JS 桥, `tools/media_window_probe.sh` 17 断言钉死整条链路。
 - **Markdown 直染(agent 母语)**: `<div hn-md>…markdown 源…</div>` 装载即替换成
   普通 DOM 子树 —— 标题/列表(嵌套 2 层)/任务清单/围栏代码块(data-lang)/引用/
   管道表格(对齐)/分隔线; 行内 **粗** *斜* `码` ~~删除~~ [链接](url) 与嵌套、
@@ -666,9 +742,13 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 - **媒体/WASM 收尾**: 引擎侧已落地(契约见 `docs/media-design.md`, 逐项实现
   状态标注在该文末) —— `<video>`/`<audio>` 六态状态机 + hncore 合成宿主 +
   `hnMedia*`/`hnWasm*` JS 桥、wasm3 内嵌 + `hnWasmLoad`/`hnWasmCall`、
-  三套探针全绿与 `examples/media-demo.html`。剩窗口壳收口: 媒体宿主接线
-  (`hnp_media_*` 直包 → `hn_rt_set_media` → `hnapp-*` 真机播放)与窗口内
-  `<script>` 自动求值(现入口是 daemon `eval` op)
+  三套探针全绿与 `examples/media-demo.html`。**窗口壳媒体宿主已接线**
+  (`app/hn_media_platform.c`: hnp_media_* → hn_media_host →
+  hn_rt_set_media; hnapp-macos-arm64 = AVFoundation 真解码/真出声,
+  hnapp-headless/linux = 合成替身), `tools/media_window_probe.sh` 17 断言
+  (真窗存活/PLAYING 且 t 前进/音频 dur 真解析/两帧像素不同/headless 降级/
+  open 失败降 IDLE 占位)全绿。剩: 窗口内 `<script>` 求值入口仍是
+  daemon `eval` op("点击→JS"未接线, 真窗静音走 m 键)
 - 弹窗原生交互: `hn-drag`(元素即拖拽手柄)、`hn-dismiss`(点击弹窗外自动关闭)
 - 中期: Windows 壳已有 `tools/hnwin.c`(Win32 + hnsoft, 纯 C99);
   **原生 Linux 运行时已落地**(`tools/hnweb_linux.c`: M1 窗口/渲染 +
