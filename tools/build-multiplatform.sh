@@ -32,7 +32,7 @@ WASM3_SRC=(vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c vendor/wasm3/m3_compile
            vendor/wasm3/m3_parse.c vendor/wasm3/m3_validate.c)
 WASM_SRC=("${WASM3_SRC[@]}" Sources/CHtmlNative/hn_wasm.c)
 
-SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
+SRC=(tools/hncore.c app/hn_media_synth.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
      Sources/CHtmlNative/hn_md.c \
      Sources/CHtmlNative/hn_fmt.c \
      Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
@@ -245,7 +245,9 @@ RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform 
 #   合成替身, 不引用任何 hnp_media_* —— hnp_headless.c/hnp_linux.c 只提供
 #   hnp_media_supported() 一个符号("其余 hnp_media_* 有意不提供"), 开了宏
 #   就会撞未定义符号(媒体验收: hnapp 三平台同源, 编入位不同)。
-MEDIA_SRC=app/hn_media_platform.c
+#   合成替身本体(app/hn_media_synth.c)是单一来源, hncore 与 hnapp 共用,
+#   两个清单都得带上。
+MEDIA_SRC="app/hn_media_platform.c app/hn_media_synth.c"
 
 # QuickJS(hn_rt 的 JS 引擎): 构建期可选 —— 本机探测到才定义 HN_HAVE_QUICKJS。
 # homebrew 的 quickjs 是 keg-only: 头文件在 <opt>/include/quickjs/ 子目录,

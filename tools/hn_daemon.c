@@ -38,8 +38,8 @@
  * **窗口即 UI**(daemon 接管开窗): open 带 "window":1 时 daemon 不建文档
  * (不占 headless 槽位), 而是 posix_spawn 平台壳子进程
  * `hnapp-macos-arm64 <path> [W H]` —— 每窗一进程, 关窗即退。回包
- * `{"ok":true,"id":..,"pid":N,"window":true,"w":..,"h":..}`; 非 macOS
- * 本机或平台壳二进制缺失 → 回退 headless 并标注 "fallback":"headless"。
+ * `{"ok":true,"id":..,"pid":N,"window":true,"w":..,"h":..}`; 本平台壳候选
+ * 全缺席(win_shell_path 探测表) → 回退 headless 并标注 "fallback":"headless"。
  * 文件路径口径与 hn_app 相同: 相对 daemon cwd 传给子进程, hn_app 自会
  * 读文件后 chdir 文档目录解析资产。daemon 退出(SIGINT/SIGTERM/SIGHUP)
  * 对存活窗口子进程统一 SIGTERM 收口, 不留孤儿窗口、不留 stale socket。
@@ -237,28 +237,56 @@ static void win_kill(dwin *w) {
     w->alive = 0;
 }
 
-/* 平台壳路径: 仅 macOS 本机接管开窗, 其余平台一律回退 headless。
- * 候选顺序: daemon 可执行文件同目录(dist/ 自包含) → 相对 cwd 的 dist/。 */
+/* 平台壳路径: **平台探测表** —— 按"编译目标 + 目标架构"给出候选序列,
+ * 逐个 access(X_OK), 全失败才回退 headless(响应照旧标 fallback)。
+ * 候选顺序:
+ *   macOS arm64 编译 → hnapp-macos-arm64 → hnapp-macos-x86_64(Rosetta 兜底);
+ *   macOS x86_64 编译 → 反序(Intel 机器原生优先, arm64 兜底);
+ *   Linux arm64/x86_64 → hnapp-linux-aarch64 / hnapp-linux-x86_64(本架构优先);
+ *   Windows → hnapp-windows-x86_64.exe → hnweb-windows-x86_64.exe
+ *             (dist/ 实际命名: hnapp-windows 尚未入列, hnweb-windows 在产)。
+ * 命令行契约各平台一致(app/hn_app.c 是同一份 main, `hnapp <path> [W H]`,
+ * 无任何 mac 特有参数), 因此换壳只换二进制名, spawn 参数零分支。
+ * 装载位(逐候选 × 逐位): daemon 可执行文件同目录(dist/ 自包含) → 相对 cwd 的 dist/。 */
 static int win_shell_path(char *out, size_t cap) {
-#if !defined(__APPLE__)
-    (void)out; (void)cap;
-    return 0;
+    const char *cand[2];
+    int ncand = 0;
+#if defined(_WIN32)
+    cand[ncand++] = "hnapp-windows-x86_64.exe";
+    cand[ncand++] = "hnweb-windows-x86_64.exe";
+#elif defined(__APPLE__)
+#if defined(__aarch64__) || defined(__arm64__)
+    cand[ncand++] = "hnapp-macos-arm64";
+    cand[ncand++] = "hnapp-macos-x86_64";   /* Rosetta 兜底 */
 #else
-    const char *name = "hnapp-macos-arm64";
-    if (g_argv0 && g_argv0[0]) {
-        char dir[1024];
-        snprintf(dir, sizeof(dir), "%s", g_argv0);
-        char *sl = strrchr(dir, '/');
-        if (sl) {
-            *sl = 0;
-            int n = snprintf(out, cap, "%s/%s", dir, name);
-            if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
-        }
-    }
-    int n = snprintf(out, cap, "dist/%s", name);
-    if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
-    return 0;
+    cand[ncand++] = "hnapp-macos-x86_64";
+    cand[ncand++] = "hnapp-macos-arm64";
 #endif
+#elif defined(__linux__)
+#if defined(__aarch64__) || defined(__arm64__)
+    cand[ncand++] = "hnapp-linux-aarch64";
+    cand[ncand++] = "hnapp-linux-x86_64";
+#else
+    cand[ncand++] = "hnapp-linux-x86_64";
+    cand[ncand++] = "hnapp-linux-aarch64";
+#endif
+#endif
+    (void)cand; (void)ncand;
+    for (int i = 0; i < ncand; i++) {
+        if (g_argv0 && g_argv0[0]) {
+            char dir[1024];
+            snprintf(dir, sizeof(dir), "%s", g_argv0);
+            char *sl = strrchr(dir, '/');
+            if (sl) {
+                *sl = 0;
+                int n = snprintf(out, cap, "%s/%s", dir, cand[i]);
+                if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
+            }
+        }
+        int n = snprintf(out, cap, "dist/%s", cand[i]);
+        if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
+    }
+    return 0;   /* 候选全缺席 → 调用方回退 headless */
 }
 
 /* posix_spawn 平台壳: hnapp <path> [W H](与手工 CLI 直开完全同参) */

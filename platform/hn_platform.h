@@ -70,17 +70,25 @@ typedef struct {
                               普通窗口之下 —— 桌面小组件语义)。
                               macOS: 1→setLevel: NSFloatingWindowLevel(NSWindow.h:194
                               = kCGFloatingWindowLevel = 3, CGWindowLevel.h:68);
-                              2→kCGDesktopWindowLevel(CGWindowLevel.h:64)。 */
+                              2→kCGDesktopWindowLevel(CGWindowLevel.h:64)。
+                              Linux: 1→_NET_WM_STATE_ABOVE、2→_NET_WM_STATE_BELOW
+                              (EWMH 最近似; 精确"壁纸之上"层为各 WM 私有协议,
+                              降级为 BELOW)。 */
     int no_shadow;          /* 关闭窗口投影(setHasShadow:NO)。窗口整块是内容时
-                              投影会勾出一个不存在的"窗口矩形", 桌宠必须关。 */
+                              投影会勾出一个不存在的"窗口矩形", 桌宠必须关。
+                              Linux: 无标准对应(compositor 私有, EWMH 未定义),
+                              优雅忽略 —— 平台能力矩阵的已知差异点。 */
     int click_through;      /* 初始鼠标穿透(事件落到下层窗口)。
                               macOS: setIgnoresMouseEvents:YES —— 幽灵模式初始态;
+                              Linux: XShape 输入形状置空(libXext 缺席时降级);
                               运行期切换见 hnp_window_set_click_through。 */
     int join_all_spaces;    /* 跟随所有空间(含全屏空间旁边)。
                               macOS: setCollectionBehavior: 含 CanJoinAllSpaces|
-                              Stationary|IgnoresCycle(CG/NSWindow.h 精确值见 hnp_macos.c)。 */
+                              Stationary|IgnoresCycle(CG/NSWindow.h 精确值见 hnp_macos.c)。
+                              Linux: _NET_WM_STATE_STICKY(所有桌面可见)。 */
     int borderless;         /* 无标题栏无边框(styleMask 不含 Titled/Closable/…)。
-                              frame/bounds 即内容区, 无标题条可点。 */
+                              frame/bounds 即内容区, 无标题条可点。
+                              Linux: _MOTIF_WM_HINTS decorations=0。 */
 
     /* ---- 位置记忆(几何持久化的开窗入参, 见 hnp_window_origin) ----
        左上原点屏幕坐标(与引擎坐标同口径); 双双 = HNP_WINDOW_POS_AUTO 时
@@ -118,15 +126,17 @@ void hnp_window_invalidate(hnp_window *w);
 void hnp_window_set_title(hnp_window *w, const char *utf8);
 
 /* 运行期切换鼠标穿透(桌宠"幽灵模式": 穿透时点击落到桌面/下层窗口,
-   再切回来重新接收事件)。macOS 走 setIgnoresMouseEvents:; 其余平台
+   再切回来重新接收事件)。macOS 走 setIgnoresMouseEvents:, Linux 走
+   XShape 输入形状(libXext 运行期 dlopen, 缺席时优雅降级); 其余平台
    空实现(声明照常通过, 物化看平台)。幂等; NULL 安全。 */
 void hnp_window_set_click_through(hnp_window *w, int on);
 
 /* 读窗口外框原点(屏幕坐标, 左上原点, y 向下 —— 与引擎/显示列表同口径)。
    几何记忆的采样口: hn_app 主循环 ~2s 轮询一次, 变了就 debounce 落盘
    ~/.html-native/geometry/<doc-stem>.json, 下次开窗经 hnp_window_desc.x/y
-   摆回原位。返回 1 = x/y 已写出; 0 = 平台拿不到(headless/linux 无对应
-   API, 返回 0 让调用方整体跳过记忆)。NULL 安全。 */
+   摆回原位。返回 1 = x/y 已写出; 0 = 平台拿不到(headless 无对应; macOS
+   读 NSWindow frame, Linux 用 XTranslateCoordinates 读根窗口坐标) 返回 0
+   让调用方整体跳过记忆。NULL 安全。 */
 int hnp_window_origin(hnp_window *w, int *x, int *y);
 
 /* ---------------- 事件 ---------------- */

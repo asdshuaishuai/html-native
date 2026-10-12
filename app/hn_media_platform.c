@@ -9,8 +9,9 @@
  *     视频帧由 hnp_media_frame 的 NV12→RGBA 转换交出来, 引擎经既有
  *     HN_CMD_BITMAP 指令路径画进 <video> 元素盒(与合成宿主同一消费点)。
  *   "synth" 合成替身: 平台无媒体实现(supported()==0, headless/Linux 交叉
- *     目标)时的回退 —— 梯度帧 + 假时钟, 与 tools/hncore.c 的 g_synth_media
- *     同一语义(逐条对齐, 契约 §8.1)。元素照常解析/布局/出图(确定性假帧),
+ *     目标)时的回退 —— 梯度帧 + 假时钟, **单一来源在 app/hn_media_synth.c**
+ *     (原先是本文件里的第二份实现, 与 tools/hncore.c 的 g_synth_media 重复,
+ *     已收敛; 逐语义保留, 契约 §8.1)。元素照常解析/布局/出图(确定性假帧),
  *     只是不出真声音、不解真码。这样三平台产物同源可跑, 探针确定性不破。
  *
  * 编译门(构建脚本按目标给; 见 tools/build-multiplatform.sh 的 hnapp 段):
@@ -27,228 +28,26 @@
  *   宿主表未装配(如 daemon 路径 / hnweb-* 壳) → 引擎 c->media==NULL:
  *        元素照常解析、布局走缺省尺寸、绘制走占位、JS 桥静默 no-op(契约 §6)。
  *
- * 环境钮(仅本壳; 引擎不读环境变量 —— 与 hncore 合成宿主的确定性开关同一纪律):
+ * 环境钮(仅本壳; 引擎不读环境变量 —— 与合成宿主的确定性开关同一纪律):
  *   HN_MEDIA_MUTE=1            绑定后全部媒体置静音(探针跑不吵人)
  *   HN_MEDIA_UNMUTE=1|all      绑定后全部取消静音(+音量 1; 对手工试听)
  *   HN_MEDIA_UNMUTE=id[,id…]   仅列出的元素取消静音
  *   HN_MEDIA_TRACE=1           真窗口每 ~500ms 打一行会话状态(验收观测点)
- *   HN_MEDIA_DURATION=s        synth 宿主全局时长覆盖(与 hncore 同名同义)
+ *   HN_MEDIA_DURATION=s        synth 宿主全局时长覆盖(单一来源在
+ *                              hn_media_synth.c, 与 hncore 同名同义)
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "hn_media_platform.h"
+#include "hn_media_synth.h"
 #include "hn_platform.h"   /* hnp_media_* ABI(仅 macro 构建下真正引用) */
 
 /* ====================================================================
- * 合成替身(平台无媒体实现时的回退宿主)
+ * 合成替身: 实现已收敛到 app/hn_media_synth.c(单一来源)。本文件只
+ * 在"平台真宿主缺席"时把它的宿主表装进选择器(见 hn_media_platform_host)。
  * ==================================================================== */
-
-typedef struct {
-    char   src[256];   /* open 时的 src(惰性解析 data-duration 用) */
-    double dur;        /* 时长(秒); <=0 = 未解析 */
-    double t;          /* 假时钟(秒): tick 是唯一时间来源 */
-    int    playing;
-    float  vol;
-    int    muted;
-    double last_pts;   /* frame() 判"新帧": pts 未变 → 0(内容未变) */
-} synth_media;
-
-#define SYNTH_FW 64    /* 梯度帧尺寸(与 hncore 合成宿主同口径) */
-#define SYNTH_FH 64
-
-/* bind 记下的运行时: synth 的 src→data-duration 表按需从这里查。 */
-static hn_rt *g_bound_rt;
-
-/* 绑定门: false 时 synth 报告"元数据未就绪"(state ready=0 / duration 未知)。
-   为什么需要: 引擎的 LOADING→READY 在**首次布局期的 anim_tick(0)** 就读
-   duration(hn_media.c), 而那发生在 hn_rt_open 内部 —— 即 bind(拿到 rt,
-   才能按 src 反查 data-duration)之前。报告未就绪把这次读推迟到 bind 后的
-   首个帧节拍, 时长按元素声明解析, 与 hncore 的权威口径一致(zero 引擎改动)。 */
-static int g_bound;
-
-static int    g_env_ready;
-static double g_env_dur = -1;      /* HN_MEDIA_DURATION(>0 时覆盖全部) */
-
-static void env_load(void) {
-    if (g_env_ready) return;
-    const char *d = getenv("HN_MEDIA_DURATION");
-    g_env_dur = (d && *d) ? atof(d) : -1;
-    g_env_ready = 1;
-}
-
-/* 布尔属性口径: 存在且不为 "false"/"0" 即为真(与引擎 flag_attr 一致) */
-static int attr_flag(const char *v) {
-    return v && strcmp(v, "false") != 0 && strcmp(v, "0") != 0;
-}
-
-static hn_node *find_media_by_src(hn_node *n, const char *src) {
-    if (!n) return NULL;
-    const char *tag = hn_node_tag(n);
-    if (tag && (!strcmp(tag, "video") || !strcmp(tag, "audio"))) {
-        const char *s = hn_node_attr(n, "src");
-        if (s && !strcmp(s, src)) return n;
-    }
-    for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c)) {
-        hn_node *hit = find_media_by_src(c, src);
-        if (hit) return hit;
-    }
-    return NULL;
-}
-
-/* 时长惰性解析(仅在 g_bound 后调用): 环境钮 > 元素 data-duration > 2.0 */
-static double synth_resolve_dur(synth_media *s) {
-    if (s->dur > 0) return s->dur;
-    env_load();
-    if (g_env_dur > 0) { s->dur = g_env_dur; return s->dur; }
-    hn_node *n = NULL;
-    if (g_bound_rt) {
-        hn_doc *doc = hn_rt_doc(g_bound_rt);
-        n = doc ? find_media_by_src(hn_doc_root(doc), s->src) : NULL;
-    }
-    const char *dd = n ? hn_node_attr(n, "data-duration") : NULL;
-    s->dur = (dd && *dd) ? atof(dd) : 2.0;
-    if (s->dur <= 0) s->dur = 2.0;
-    return s->dur;
-}
-static void *synth_open(void *ctx, const char *url, char *err, size_t err_cap) {
-    (void)ctx;
-    if (!url || !*url) {
-        if (err && err_cap) snprintf(err, err_cap, "空 src");
-        return NULL;
-    }
-    synth_media *m = (synth_media *)calloc(1, sizeof(*m));
-    if (!m) { if (err && err_cap) snprintf(err, err_cap, "oom"); return NULL; }
-    snprintf(m->src, sizeof(m->src), "%s", url);
-    m->dur = -1;          /* 未解析: 首次 duration()/state() 时查表 */
-    m->vol = 1.0f;
-    return m;
-}
-
-static void synth_close(void *ctx, void *m) {
-    (void)ctx;
-    free(m);   /* 幂等: free(NULL) 安全 */
-}
-
-static void synth_tick(void *ctx, void *m, float dt_ms) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s || !s->playing) return;
-    synth_resolve_dur(s);
-    s->t += dt_ms / 1000.0;
-    if (s->dur > 0 && s->t > s->dur) s->t = s->dur;   /* 停在末尾, ended 交引擎推导 */
-}
-
-static int synth_play(void *ctx, void *m) {
-    (void)ctx;
-    if (!m) return 0;
-    ((synth_media *)m)->playing = 1;
-    return 1;
-}
-
-static void synth_pause(void *ctx, void *m) {
-    (void)ctx;
-    if (m) ((synth_media *)m)->playing = 0;
-}
-
-static int synth_seek(void *ctx, void *m, double sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    synth_resolve_dur(s);
-    if (sec < 0) sec = 0;
-    if (s->dur > 0 && sec > s->dur) sec = s->dur;     /* 钳制(真宿主同款) */
-    s->t = sec;
-    return 1;
-}
-
-static void synth_set_volume(void *ctx, void *m, float vol) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return;
-    if (!(vol >= 0)) vol = 0;
-    if (vol > 1) vol = 1;
-    s->vol = vol;
-}
-
-static void synth_set_muted(void *ctx, void *m, int muted) {
-    (void)ctx;
-    if (m) ((synth_media *)m)->muted = muted ? 1 : 0;
-}
-
-static int synth_duration(void *ctx, void *m, double *sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    if (!g_bound) {              /* bind 前: 未知(见 g_bound 注释) */
-        if (sec) *sec = -1.0;
-        return 0;
-    }
-    if (sec) *sec = synth_resolve_dur(s);
-    return 1;
-}
-
-static int synth_position(void *ctx, void *m, double *sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    if (sec) *sec = s->t;
-    return 1;
-}
-
-static int synth_state(void *ctx, void *m, int *ready, int *ended) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    if (!g_bound) {              /* bind 前: 元数据未就绪(见 g_bound 注释) */
-        if (ready) *ready = 0;
-        if (ended) *ended = 0;
-        return 1;
-    }
-    synth_resolve_dur(s);
-    if (ready) *ready = 1;                            /* 元数据瞬时就绪 */
-    if (ended) *ended = (s->dur > 0 && s->t >= s->dur - 1e-3);
-    return 1;
-}
-
-/* 梯度帧(64x64): R=x*255/w, G=y*255/h, B=((int)(pts*10)*37)%256 ——
-   像素既验证几何又验证 pts 前进, 探针逐字节可断言(契约 §8.1)。
-   cap 不足时照真宿主契约写出实际尺寸并返回 -1(引擎按 meta 重分配后重试)。 */
-static int synth_frame(void *ctx, void *m, unsigned char *rgba, size_t cap,
-                       int *w, int *h, double *pts_sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return -1;
-    double p = synth_resolve_dur(s) > 0 && s->t > s->dur ? s->dur : s->t;
-    if (w) *w = SYNTH_FW;
-    if (h) *h = SYNTH_FH;
-    if (pts_sec) *pts_sec = p;
-    size_t need = (size_t)SYNTH_FW * SYNTH_FH * 4;
-    if (!rgba || cap < need) return -1;
-    if (p == s->last_pts) return 0;                   /* 内容未变(暂停在同一位置) */
-    int bucket = (int)(p * 10.0);
-    unsigned char b = (unsigned char)((bucket * 37) % 256);
-    for (int y = 0; y < SYNTH_FH; y++)
-        for (int x = 0; x < SYNTH_FW; x++) {
-            unsigned char *px = rgba + ((size_t)y * SYNTH_FW + x) * 4;
-            px[0] = (unsigned char)(x * 255 / SYNTH_FW);
-            px[1] = (unsigned char)(y * 255 / SYNTH_FH);
-            px[2] = b;
-            px[3] = 255;
-        }
-    s->last_pts = p;
-    return 1;
-}
-
-static const hn_media_host g_synth_host = {
-    NULL,
-    synth_open, synth_close, synth_tick,
-    synth_play, synth_pause, synth_seek,
-    synth_set_volume, synth_set_muted,
-    synth_duration, synth_position, synth_state,
-    synth_frame
-};
 
 /* ====================================================================
  * 平台真宿主(macOS AVFoundation; 仅 -DHN_MEDIA_PLATFORM_AVFOUNDATION 编入)
@@ -298,7 +97,7 @@ static const hn_media_host *g_chosen;
 
 const hn_media_host *hn_media_platform_host(void) {
     if (!g_chosen) {
-        const hn_media_host *h = &g_synth_host;
+        const hn_media_host *h = hn_media_synth_host();
 #ifdef HN_MEDIA_PLATFORM_AVFOUNDATION
         /* 不在 supported() 里猜能播: dlopen 失败由 open 的 err 如实报告
            (与 hnp_media_macos.c 的 supported 口径一致)。这里只决定"装哪张表"。 */
@@ -310,10 +109,15 @@ const hn_media_host *hn_media_platform_host(void) {
 }
 
 const char *hn_media_platform_kind(void) {
-    return hn_media_platform_host() == &g_synth_host ? "synth" : "platform";
+    return hn_media_platform_host() == hn_media_synth_host() ? "synth" : "platform";
 }
 
 /* ---- 媒体元素遍历: 静音/音量施加与状态行共用 ---- */
+
+/* 布尔属性口径: 存在且不为 "false"/"0" 即为真(与引擎 flag_attr 一致) */
+static int attr_flag(const char *v) {
+    return v && strcmp(v, "false") != 0 && strcmp(v, "0") != 0;
+}
 
 static hn_node *first_media_with_src(hn_node *n) {
     if (!n) return NULL;
@@ -386,9 +190,10 @@ int hn_media_platform_toggle_mute(hn_rt *rt) {
 }
 
 void hn_media_platform_bind(hn_rt *rt) {
-    g_bound_rt = rt;      /* synth 的时长表来源(见 g_bound_rt 注释) */
-    g_bound = 1;          /* 元数据就绪门开(此前 synth 报告未就绪, 见 g_bound) */
-    env_load();
+    /* 合成替身的绑定: 就绪门开 + src→data-duration 查表基准换成本文档
+       (门语义/热重载换基准见 hn_media_synth_bind_doc —— bind 前引擎在
+       hn_rt_open 内部读 duration, 被挡成"未就绪"推迟到首个帧节拍)。 */
+    hn_media_synth_bind_doc(rt ? hn_rt_doc(rt) : NULL);
     if (!rt) return;
     hn_context *c = hn_rt_context(rt);
     hn_doc *doc = hn_rt_doc(rt);

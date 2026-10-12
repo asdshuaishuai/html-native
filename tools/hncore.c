@@ -12,9 +12,10 @@
  *   hncore boxes  <file.html> [W H]      打印每个元素的绝对盒(机器可读)
  *   hncore verify <file.html> [W H]      自检: 布局不变量(重叠/越界/负尺寸)
  *
- * 媒体(docs/media-design.md §8.1): 内置一份**合成宿主** —— 梯度帧(按时间
- * 变色, 逐字节可断言)+ 假时钟(tick 是唯一时间来源), 是真宿主(AVFoundation)
- * 的规约测试替身, 让探针全平台确定性可跑。环境钮:
+ * 媒体(docs/media-design.md §8.1): 内置**合成宿主**(单一来源在
+ * app/hn_media_synth.c —— 梯度帧(按时间变色, 逐字节可断言)+ 假时钟
+ * (tick 是唯一时间来源), 是真宿主(AVFoundation)的规约测试替身, 让探针
+ * 全平台确定性可跑; app 壳的回退宿主同用这一份)。环境钮:
  *   HN_MEDIA_AUTOPLAY=1   给全部媒体元素补 autoplay 属性(引擎不读环境变量)
  *   HN_MEDIA_DURATION=s   覆盖全部会话时长(缺省读元素 data-duration, 再缺省 2.0)
  *   HN_MEDIA_SEEK=sec     帧循环后对每个媒体元素 seek(验钳制)
@@ -30,6 +31,9 @@
 #include <string.h>
 #include "hn.h"
 #include "hnsoft.h"
+/* 合成媒体宿主: 单一来源在 app/ 下(与 app 壳的回退宿主共用这一份,
+ * 见 hn_media_synth.h —— 原先 hncore 里的 g_synth_media 第二份实现已删)。 */
+#include "../app/hn_media_synth.h"
 /* cairo 绘制后端: 与 hnsoft 同签名, 编译时带 -DHN_USE_CAIRO 即启用。
    两份实现的差别正是"每个平台手写一份"与"一个跨平台框架"的差别 ——
    renderc 子命令用来对照同一份显示列表在两者下的输出。 */
@@ -256,160 +260,12 @@ static int verify_boxes(hn_node *n, int *checked) {
 }
 
 /* ---------------- 合成媒体宿主(契约 §8.1) ----------------
- * 真宿主(AVFoundation)的**规约测试替身**: state/duration/position 语义
- * 逐条对齐 —— 行为差异就是 bug。梯度帧逐字节可断言, 假时钟只认 tick。 */
-typedef struct {
-    double dur;        /* 时长(元素 data-duration, 缺省 2.0; 环境钮可覆盖) */
-    double t;          /* 假时钟(秒): tick 是唯一时间来源 */
-    int    playing;
-    float  vol;
-    int    muted;
-    double last_pts;   /* frame() 判"新帧": pts 未变 → 0(内容未变) */
-} synth_media;
-
-/* 元素 data-duration 查找: host.open 只拿到 url, hncore 在建 context 前
-   扫一遍 DOM 把 src → data-duration 记下(与真宿主"打开文件读元数据"
-   的时序同构: duration() 在 open 之后才可问)。 */
-static struct { char src[256]; double dur; } g_dur_tab[64];
-static int g_dur_n = 0;
-static double g_env_dur = -1;   /* HN_MEDIA_DURATION(>0 时覆盖全部) */
-
-/* 打开过的句柄按 src 记下: MEDIA 状态行的 vol/muted 从宿主侧回读,
-   验证"元素声明 → 引擎钳制 → 宿主落位"整条链。 */
-static struct { char src[256]; synth_media *m; } g_open_tab[64];
-static int g_open_n = 0;
-
-static synth_media *synth_by_src(const char *src) {
-    for (int i = 0; i < g_open_n; i++)
-        if (!strcmp(g_open_tab[i].src, src)) return g_open_tab[i].m;
-    return NULL;
-}
-
-static void *synth_open(void *ctx, const char *url, char *err, size_t err_cap) {
-    (void)ctx;
-    if (!url || !*url) {
-        if (err && err_cap) snprintf(err, err_cap, "空 src");
-        return NULL;
-    }
-    synth_media *m = (synth_media *)calloc(1, sizeof(synth_media));
-    if (!m) { if (err && err_cap) snprintf(err, err_cap, "oom"); return NULL; }
-    m->dur = 2.0;
-    for (int i = 0; i < g_dur_n; i++)
-        if (!strcmp(g_dur_tab[i].src, url)) { m->dur = g_dur_tab[i].dur; break; }
-    if (g_env_dur > 0) m->dur = g_env_dur;
-    m->vol = 1.0f;
-    if (g_open_n < 64) {
-        snprintf(g_open_tab[g_open_n].src, sizeof(g_open_tab[0].src), "%s", url);
-        g_open_tab[g_open_n].m = m;
-        g_open_n++;
-    }
-    return m;   /* 元数据瞬时就绪(state() ready=1), 首个 tick 推进状态机 */
-}
-
-static void synth_close(void *ctx, void *m) {
-    (void)ctx;
-    free(m);   /* 幂等: free(NULL) 安全 */
-}
-
-static void synth_tick(void *ctx, void *m, float dt_ms) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s || !s->playing) return;
-    s->t += dt_ms / 1000.0;
-    if (s->dur > 0 && s->t > s->dur) s->t = s->dur;   /* 停在末尾, ended 交引擎推导 */
-}
-
-static int synth_play(void *ctx, void *m) { (void)ctx; if (!m) return 0; ((synth_media *)m)->playing = 1; return 1; }
-static void synth_pause(void *ctx, void *m) { (void)ctx; if (m) ((synth_media *)m)->playing = 0; }
-
-static int synth_seek(void *ctx, void *m, double sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    if (sec < 0) sec = 0;
-    if (s->dur > 0 && sec > s->dur) sec = s->dur;     /* 钳制(真宿主同款) */
-    s->t = sec;
-    return 1;
-}
-
-static void synth_set_volume(void *ctx, void *m, float vol) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return;
-    if (vol < 0) vol = 0;
-    if (vol > 1) vol = 1;
-    s->vol = vol;
-}
-
-static void synth_set_muted(void *ctx, void *m, int muted) {
-    (void)ctx;
-    if (m) ((synth_media *)m)->muted = muted ? 1 : 0;
-}
-
-static int synth_duration(void *ctx, void *m, double *sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    if (sec) *sec = s->dur;
-    return 1;
-}
-
-static int synth_position(void *ctx, void *m, double *sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    if (sec) *sec = s->t;
-    return 1;
-}
-
-static int synth_state(void *ctx, void *m, int *ready, int *ended) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return 0;
-    if (ready) *ready = 1;
-    if (ended) *ended = (s->dur > 0 && s->t >= s->dur - 1e-3);
-    return 1;
-}
-
-/* 梯度帧(64x64): R=x*255/w, G=y*255/h, B=((int)(pts*10)*37)%256 ——
-   像素既验证几何又验证 pts 前进, 探针逐字节可断言(契约 §8.1)。 */
-#define SYNTH_FW 64
-#define SYNTH_FH 64
-
-static int synth_frame(void *ctx, void *m, unsigned char *rgba, size_t cap,
-                       int *w, int *h, double *pts_sec) {
-    (void)ctx;
-    synth_media *s = (synth_media *)m;
-    if (!s) return -1;
-    if (w) *w = SYNTH_FW;
-    if (h) *h = SYNTH_FH;
-    double p = (s->dur > 0 && s->t > s->dur) ? s->dur : s->t;
-    if (pts_sec) *pts_sec = p;
-    size_t need = (size_t)SYNTH_FW * SYNTH_FH * 4;
-    if (!rgba || cap < need) return -1;   /* 引擎按 meta 重分配后重试 */
-    if (p == s->last_pts) return 0;       /* 内容未变(暂停在同一位置) */
-    int bucket = (int)(p * 10.0);
-    unsigned char b = (unsigned char)((bucket * 37) % 256);
-    for (int y = 0; y < SYNTH_FH; y++)
-        for (int x = 0; x < SYNTH_FW; x++) {
-            unsigned char *px = rgba + ((size_t)y * SYNTH_FW + x) * 4;
-            px[0] = (unsigned char)(x * 255 / SYNTH_FW);
-            px[1] = (unsigned char)(y * 255 / SYNTH_FH);
-            px[2] = b;
-            px[3] = 255;
-        }
-    s->last_pts = p;
-    return 1;
-}
-
-static const hn_media_host g_synth_media = {
-    NULL,
-    synth_open, synth_close, synth_tick,
-    synth_play, synth_pause, synth_seek,
-    synth_set_volume, synth_set_muted,
-    synth_duration, synth_position, synth_state,
-    synth_frame
-};
+ * 实现**单一来源在 app/hn_media_synth.c**(原先这里有一份 static
+ * g_synth_media, 与 app 壳的 synth 段同一语义两份代码, 已收敛):
+ * 梯度帧逐字节可断言, 假时钟只认 tick, state/duration/position 语义
+ * 与真宿主逐条对齐。hncore 在建 context 前调 hn_media_synth_bind_doc
+ * 把查表基准钉到本文档 —— 时长解析(元素 data-duration / HN_MEDIA_
+ * DURATION)与旧"open 时读表"口径同效。 */
 
 /* 文档预处理: src → data-duration 表 + (环境钮)补 autoplay 属性。
    引擎不读环境变量 —— 确定性开关是测试宿主的职责(契约 §8.1)。 */
@@ -418,13 +274,6 @@ static int media_walk_prep(hn_node *n, int autoplay) {
     const char *tag = hn_node_tag(n);
     if (tag && (!strcmp(tag, "video") || !strcmp(tag, "audio"))) {
         count++;
-        const char *src = hn_node_attr(n, "src");
-        const char *dd = hn_node_attr(n, "data-duration");
-        if (src && *src && g_dur_n < 64) {
-            snprintf(g_dur_tab[g_dur_n].src, sizeof(g_dur_tab[0].src), "%s", src);
-            g_dur_tab[g_dur_n].dur = (dd && *dd) ? atof(dd) : 2.0;
-            g_dur_n++;
-        }
         if (autoplay && !hn_node_attr(n, "autoplay"))
             hn_node_set_attr(n, "autoplay", "");
     }
@@ -456,7 +305,8 @@ static void media_apply_env(hn_node *n, hn_context *ctx) {
 }
 
 /* MEDIA 状态行(paint 输出尾部, 供探针断言状态机)。t/dur 来自引擎 API
-   (cur_time 同步自宿主), vol/muted 从合成宿主句柄回读(验整条声明链)。 */
+   (cur_time 同步自宿主), vol/muted 从合成宿主句柄回读(验整条声明链;
+   共享宿主的 src 回读口见 hn_media_synth_query)。 */
 static void media_print_lines(hn_node *n, hn_context *ctx) {
     const char *tag = hn_node_tag(n);
     if (tag && (!strcmp(tag, "video") || !strcmp(tag, "audio"))) {
@@ -464,11 +314,13 @@ static void media_print_lines(hn_node *n, hn_context *ctx) {
         const char *src = hn_node_attr(n, "src");
         const char *lp = hn_node_attr(n, "loop");
         int loop = lp && strcmp(lp, "false") != 0 && strcmp(lp, "0") != 0;
-        synth_media *m = (src && *src) ? synth_by_src(src) : NULL;
+        float vol = 1.0f;
+        int muted = 0;
+        if (src && *src) hn_media_synth_query(src, &vol, &muted);
         printf("MEDIA   id=%s state=%s t=%.3f dur=%.3f vol=%.2f muted=%d loop=%d\n",
                id ? id : "-", media_state_name(hn_media_state(ctx, n)),
                hn_media_time(ctx, n), hn_media_duration(ctx, n),
-               m ? m->vol : 1.0f, m ? m->muted : 0, loop);
+               vol, muted, loop);
     }
     for (hn_node *c = hn_node_first_child(n); c; c = hn_node_next_sibling(c))
         media_print_lines(c, ctx);
@@ -526,14 +378,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 媒体预处理: src→时长表 + (HN_MEDIA_AUTOPLAY)补 autoplay 属性。
+    /* 媒体预处理: (HN_MEDIA_AUTOPLAY)补 autoplay 属性, 并把合成宿主的
+       src→data-duration 查表基准钉到本文档(在建 context 前绑 —— 引擎
+       首个 anim_tick(0) 读 duration 时表已就位, 与旧"open 时读表"同效)。
        引擎本身不读环境变量 —— 这是合成宿主侧的确定性开关(契约 §8.1)。 */
     {
         const char *ap = getenv("HN_MEDIA_AUTOPLAY");
         int autoplay = (ap && *ap && strcmp(ap, "0") != 0);
-        const char *ed = getenv("HN_MEDIA_DURATION");
-        if (ed && *ed) g_env_dur = atof(ed);
         has_media = media_walk_prep(hn_doc_root(doc), autoplay);
+        hn_media_synth_bind_doc(doc);
     }
 
     if (!strcmp(cmd, "parse")) {
@@ -555,8 +408,9 @@ int main(int argc, char **argv) {
     ab.ctx = NULL;
     ab.load = asset_load;
     hn_context_set_assets(ctx, &ab);
-    /* 合成媒体宿主(内置): 文档无媒体元素时整套代码路径零激活 */
-    hn_context_set_media(ctx, &g_synth_media);
+    /* 合成媒体宿主(单一来源 app/hn_media_synth.c): 文档无媒体元素时整套
+       代码路径零激活 */
+    hn_context_set_media(ctx, hn_media_synth_host());
     /* 文本后端: FreeType 真实测量(不注入则 CJK 按字节×字号×0.55 估算,
        偏宽 65%, 窄容器内文字被错误逐字换行; 与注入 CoreText 的
        macOS 运行时行为不一致) */

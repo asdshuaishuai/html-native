@@ -1,8 +1,13 @@
-/* hnp_linux.c — Linux 平台实现(dlopen X11, 零编译期依赖)
+/* hnp_linux.c — Linux 平台实现(dlopen X11/Xext, 零编译期依赖)
  *
  * hn_platform.h 的 Linux 实现。X11 经运行期 dlopen("libX11.so.6"),
  * 手工声明用到的最小 Xlib 函数/结构(ABI 布局依据与断言见 hnweb_linux.c,
  * 本文件复用同一套已验证的 stub)。
+ * 窗口形态/桌宠能力(层级/跨空间/无边框/鼠标穿透/位置记忆)与 macOS 侧
+ * 同契约: EWMH(_NET_WM_STATE)+ Motif(_MOTIF_WM_HINTS)+ XShape 输入形状,
+ * 全部 dlopen 运行期解析; 常量逐值抄录见下方常量块注释(同 hnp_macos.c
+ * 的"不凭记忆写常量"纪律)。libXext(XShape)缺席时 click_through 优雅
+ * 降级为无穿透(声明照常接受, 物化看平台)。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -87,6 +92,57 @@ typedef int (*fn_XLookupString_t)(void *, char *, int, xatom *, int *);
 typedef int (*fn_XConnectionNumber_t)(xdisplay *);
 typedef int (*fn_XGetWindowAttributes_t)(xdisplay *, xwindow, xwinattr_stub *);
 
+/* ---- 窗口形态/桌宠能力所需(与上面同一解析模式, 运行期 dlsym) ---- */
+typedef int (*fn_XMoveWindow_t)(xdisplay *, xwindow, int, int);
+typedef int (*fn_XTranslateCoordinates_t)(xdisplay *, xwindow, xwindow, int, int,
+                                          int *, int *, xwindow *);
+typedef int (*fn_XSendEvent_t)(xdisplay *, xwindow, int, long, xclient_stub *);
+typedef int (*fn_XChangeProperty_t)(xdisplay *, xwindow, xatom, xatom, int, int,
+                                    const unsigned char *, int);
+
+/* XShape 的矩形 —— X11/extensions/shape.h 的 XRectangle(short 字段) */
+typedef struct { short x, y; unsigned short width, height; } xrect_stub;
+typedef int (*fn_XShapeCombineRectangles_t)(xdisplay *, xwindow, int /*kind*/,
+                                            int /*x_off*/, int /*y_off*/,
+                                            xrect_stub * /*rects*/, int /*n*/,
+                                            int /*op*/, int /*ordering*/);
+
+/* ---------------- 窗口形态常量(逐值抄录, 不凭记忆 —— 同 hnp_macos.c 纪律) ----------------
+
+   EWMH(freedesktop.org《Extended Window Manager Hints》, _NET_WM_STATE 节):
+     _NET_WM_STATE 属性 = XA_ATOM 数组(规范原文 "type ATOM[]"; 注意不是
+     XA_WINDOW —— XA_WINDOW 用于 _NET_SUPPORTING_WM_CHECK 一族);
+     client message 动作: _NET_WM_STATE_REMOVE=0 / _NET_WM_STATE_ADD=1 /
+     _NET_WM_STATE_TOGGLE=2; data.l[3] = source indication, 1 = 普通应用。
+     原子一律 XInternAtom 按名字取(规范不定义原子数值 —— 写数字才是凭记忆)。
+
+   Motif WM hints(Xm/MwmUtil.h 逐值抄录; GTK 的 GdkWMHints 同一套):
+     MWM_HINTS_FUNCTIONS   = 1<<0
+     MWM_HINTS_DECORATIONS = 1<<1   ← borderless 开这一位
+     MWM_HINTS_INPUT_MODE  = 1<<2
+     MWM_HINTS_STATUS      = 1<<3
+   borderless = flags 只开 DECORATIONS + decorations 字段 = 0(GTK 的
+   gtk_window_set_decorated(FALSE) 即此法)。"decorations 开关在位 0"是
+   误记 —— 位 0 是 FUNCTIONS, 开它而 functions=0 的语义是"去掉全部
+   功能钮", 语义不是无装饰。
+
+   XShape(X11/extensions/shape.h 逐值抄录):
+     kind: ShapeBounding=0 / ShapeClip=1 / ShapeInput=2
+     op  : ShapeSet=0 / ShapeUnion=1 / ShapeIntersect=2 / ShapeSubtract=3 /
+           ShapeInvert=4
+     ordering: Unsorted=0 / YSorted=1 / YXSorted=2 / YXBanded=3
+
+   X.h 事件掩码(逐值抄录): SubstructureNotifyMask=1<<19,
+   SubstructureRedirectMask=1<<20(_NET_WM_STATE client message 发往根窗口
+   所需; 常规事件路由按 XE_* 枚举, 与上面 enum 不冲突)。 */
+#define X_PROP_REPLACE 0            /* PropModeReplace(X11/X.h) */
+#define HN_MWM_HINTS_DECORATIONS (1UL << 1)
+#define HN_XSHAPE_INPUT    2
+#define HN_XSHAPE_SET      0
+#define HN_XSHAPE_UNSORTED 0
+#define HN_SUBSTRUCT_NOTIFY   (1L << 19)
+#define HN_SUBSTRUCT_REDIRECT (1L << 20)
+
 static struct {
     void *lib;
     fn_XOpenDisplay_t XOpenDisplay;
@@ -112,10 +168,25 @@ static struct {
     fn_XFlush_t XFlush;
     fn_XLookupString_t XLookupString;
     fn_XConnectionNumber_t XConnectionNumber;
+    fn_XGetWindowAttributes_t XGetWindowAttributes;
+    fn_XMoveWindow_t XMoveWindow;
+    fn_XTranslateCoordinates_t XTranslateCoordinates;
+    fn_XSendEvent_t XSendEvent;
+    fn_XChangeProperty_t XChangeProperty;
     xdisplay *dpy;
     xatom wm_protocols, wm_delete_window;
+    /* 窗口形态原子(hnp_init 里按名字 intern; 0 = 不可用, 调用方跳过) */
+    xatom net_wm_state, net_wm_state_above, net_wm_state_below, net_wm_state_sticky;
+    xatom motif_wm_hints, atom_atom;
     int users;
 } x11;
+
+/* libXext(XShape): 独立句柄 + 独立装配 —— 缺席不连累 libX11 的窗口管线,
+   click_through 优雅降级(见 hnp_window_set_click_through 注释)。 */
+static struct {
+    void *lib;
+    fn_XShapeCombineRectangles_t XShapeCombineRectangles;
+} xshape;
 
 #define SYM(N, T) x11.N = (T)dlsym(x11.lib, #N); if (!x11.N) return 0
 
@@ -147,6 +218,11 @@ static int x11_load(void) {
     SYM(XFlush, fn_XFlush_t);
     SYM(XLookupString, fn_XLookupString_t);
     SYM(XConnectionNumber, fn_XConnectionNumber_t);
+    SYM(XGetWindowAttributes, fn_XGetWindowAttributes_t);
+    SYM(XMoveWindow, fn_XMoveWindow_t);
+    SYM(XTranslateCoordinates, fn_XTranslateCoordinates_t);
+    SYM(XSendEvent, fn_XSendEvent_t);
+    SYM(XChangeProperty, fn_XChangeProperty_t);
     return 1;
 }
 
@@ -161,6 +237,16 @@ int hnp_init(int argc, char **argv) {
     }
     x11.wm_protocols = x11.XInternAtom(x11.dpy, "WM_PROTOCOLS", 0);
     x11.wm_delete_window = x11.XInternAtom(x11.dpy, "WM_DELETE_WINDOW", 0);
+    /* 窗口形态原子(名字按 EWMH/Motif 规范; XInternAtom 的 exist_ok=0
+       会在缺席时创建, 因此这里不会拿到 None, 除非 X 分配失败 —— 失败给 0,
+       调用方按 0 跳过)。atom_atom = Xlib 预定义原子 XA_ATOM(=4, 经名字
+       "ATOM" 取, 不写数字)。 */
+    x11.atom_atom = x11.XInternAtom(x11.dpy, "ATOM", 0);
+    x11.net_wm_state = x11.XInternAtom(x11.dpy, "_NET_WM_STATE", 0);
+    x11.net_wm_state_above = x11.XInternAtom(x11.dpy, "_NET_WM_STATE_ABOVE", 0);
+    x11.net_wm_state_below = x11.XInternAtom(x11.dpy, "_NET_WM_STATE_BELOW", 0);
+    x11.net_wm_state_sticky = x11.XInternAtom(x11.dpy, "_NET_WM_STATE_STICKY", 0);
+    x11.motif_wm_hints = x11.XInternAtom(x11.dpy, "_MOTIF_WM_HINTS", 0);
     return 1;
 }
 
@@ -185,6 +271,63 @@ struct hnp_window {
 
 static hnp_window *g_windows[16];
 static int g_window_n;
+
+/* EWMH 状态切换的第二条生效路径(freedesktop.org《Extended Window Manager
+   Hints》_NET_WM_STATE 节逐值抄录):
+     message_type = _NET_WM_STATE, format = 32
+     data.l[0] = _NET_WM_STATE_ADD(1); data.l[1] = 状态原子; data.l[2] = 0
+     data.l[3] = source indication: 1 = 普通应用
+   发往根窗口, 事件掩码 = SubstructureNotify|SubstructureRedirect。
+   与 map 前写的 _NET_WM_STATE 属性构成双通道: 属性给"读属性"的 WM,
+   message 给"只响应运行期请求"的 WM —— 两条都走(见 hnp_window_open)。 */
+static void hn_ewmh_state_msg(xwindow win, xatom state_atom) {
+    if (!x11.dpy || !x11.XSendEvent || !x11.net_wm_state || !state_atom) return;
+    xevent_buf xb;
+    memset(&xb, 0, sizeof xb);          /* 整个 XEvent 缓冲清零再填, 合 ABI */
+    xclient_stub *cm = (xclient_stub *)&xb;
+    cm->type = XE_CLIENTMSG;
+    cm->window = win;
+    cm->message_type = x11.net_wm_state;
+    cm->format = 32;
+    cm->data_l[0] = 1;                  /* _NET_WM_STATE_ADD */
+    cm->data_l[1] = (long)state_atom;
+    cm->data_l[2] = 0;                  /* 无第二状态原子 */
+    cm->data_l[3] = 1;                  /* source = 普通应用 */
+    x11.XSendEvent(x11.dpy, x11.XDefaultRootWindow(x11.dpy), 0,
+                   HN_SUBSTRUCT_NOTIFY | HN_SUBSTRUCT_REDIRECT, cm);
+}
+
+/* XShape 输入形状装配: 独立于 libX11 的懒加载 —— libXext 找不到(或没有
+   XShapeCombineRectangles)返回 0, 调用方优雅降级(无穿透, 声明照常通过)。 */
+static int xshape_load(void) {
+    if (xshape.lib) return 1;
+    xshape.lib = dlopen("libXext.so.6", RTLD_NOW);
+    if (!xshape.lib) xshape.lib = dlopen("libXext.so", RTLD_NOW);
+    if (!xshape.lib) return 0;
+    xshape.XShapeCombineRectangles =
+        (fn_XShapeCombineRectangles_t)dlsym(xshape.lib, "XShapeCombineRectangles");
+    return xshape.XShapeCombineRectangles ? 1 : 0;
+}
+
+/* 输入形状切换(kind=ShapeInput): on=1 → 对输入区域组合**空矩形集**
+   (n_rects=0, op=ShapeSet)→ 输入区域为空, 整窗穿透(事件落到下层窗口/
+   桌面); on=0 → 重设整窗矩形恢复接收。XShape 不经 WM, 立即生效。
+   窗口尺寸取 w->w/h(≤65535,XRectangle 是 short 字段)。 */
+static void hn_apply_input_shape(hnp_window *w, int on) {
+    if (!w || !x11.dpy || !xshape_load()) return;
+    if (on) {
+        xshape.XShapeCombineRectangles(x11.dpy, w->xw, HN_XSHAPE_INPUT, 0, 0, NULL, 0,
+                                       HN_XSHAPE_SET, HN_XSHAPE_UNSORTED);
+    } else {
+        xrect_stub r;
+        r.x = 0; r.y = 0;
+        r.width = (unsigned short)w->w;
+        r.height = (unsigned short)w->h;
+        xshape.XShapeCombineRectangles(x11.dpy, w->xw, HN_XSHAPE_INPUT, 0, 0, &r, 1,
+                                       HN_XSHAPE_SET, HN_XSHAPE_UNSORTED);
+    }
+    x11.XFlush(x11.dpy);
+}
 
 hnp_window *hnp_window_open(const hnp_window_desc *d) {
     if (!d || !x11.dpy) return NULL;
@@ -212,10 +355,61 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
         xatom protos[1] = { x11.wm_delete_window };
         x11.XSetWMProtocols(x11.dpy, w->xw, protos, 1);
     }
+
+    /* ---- 桌宠形态: desc 字段消费(契约见 hn_platform.h 字段注释;
+       平台不支持时优雅忽略 —— 声明是意图, 物化看平台) ---- */
+
+    /* 层级 + 跨空间: _NET_WM_STATE(XA_ATOM 数组, EWMH 规范原文
+       "type ATOM[]")在 **map 前**写入 —— WM 首次管理窗口时读属性,
+       无中途跳层闪烁。floating(1)→ABOVE(悬浮于普通窗口之上);
+       desktop(2)→BELOW(EWMH 的最近似物, 普通窗口之下 —— 精确的
+       "壁纸之上/图标之下"桌面层是各 WM 私有协议, 见能力矩阵注释)。 */
+    xatom states[2];
+    int nstates = 0;
+    if (d->always_on_top == 1) states[nstates++] = x11.net_wm_state_above;
+    else if (d->always_on_top == 2) states[nstates++] = x11.net_wm_state_below;
+    if (d->join_all_spaces) states[nstates++] = x11.net_wm_state_sticky;
+    if (nstates && x11.XChangeProperty && x11.net_wm_state && x11.atom_atom)
+        x11.XChangeProperty(x11.dpy, w->xw, x11.net_wm_state, x11.atom_atom, 32,
+                            X_PROP_REPLACE, (unsigned char *)states, nstates);
+
+    /* borderless: _MOTIF_WM_HINTS —— 结构 = 5 个 long(flags/functions/
+       decorations/input_mode/status), format=32 按 long 数组写 5 元素;
+       属性类型就是 "_MOTIF_WM_HINTS" 原子本身(Motif 约定)。flags 只开
+       DECORATIONS 位, decorations 字段 = 0 = 不画任何装饰(无边框无
+       标题栏; 常量引证见文件头常量块)。 */
+    if (d->borderless && x11.XChangeProperty && x11.motif_wm_hints) {
+        unsigned long hints[5] = { 0 };
+        hints[0] = HN_MWM_HINTS_DECORATIONS;   /* flags: decorations 字段有效 */
+        /* hints[2] = decorations = 0(零初始化即无装饰) */
+        x11.XChangeProperty(x11.dpy, w->xw, x11.motif_wm_hints, x11.motif_wm_hints,
+                            32, X_PROP_REPLACE, (unsigned char *)hints, 5);
+    }
+
+    /* d->no_shadow: X11 无标准对应 —— 投影由 compositor 私有协议决定
+       (EWMH 未定义), macOS setHasShadow: 的对应物不存在。契约即"优雅
+       忽略"; 与 macOS 的差异记录在 hn_platform.h 平台能力注释。 */
+    (void)d->no_shadow;
+
+    /* x/y 摆位(几何记忆开窗入参): 内容区(client window)左上原点, 与
+       hnp_window_origin 读回同侧。双 AUTO = 维持现状(WM 自行摆位);
+       非 AUTO 时 XMoveWindow 两发: map 前(WM 尊重初始位置则不闪)+
+       map 后(ConfigureRequest, 复刻 WM 几乎必尊)。frame extents 容差:
+       x/y 是内容区口径, 与 macOS setFrame(外框口径)差 WM 装饰厚度;
+       记忆往返同侧取样(读回/摆回都是内容区), 误差不累积。 */
+    int move = (d->x != HNP_WINDOW_POS_AUTO || d->y != HNP_WINDOW_POS_AUTO);
+    if (move) x11.XMoveWindow(x11.dpy, w->xw, d->x, d->y);
+
     w->gc = x11.XCreateGC(x11.dpy, w->xw, 0, NULL);
     if (!w->gc) { x11.XDestroyWindow(x11.dpy, w->xw); free(w); return NULL; }
     w->w = d->width; w->h = d->height;
     x11.XMapWindow(x11.dpy, w->xw);
+    /* map 后补发: EWMH 状态第二条生效路径(不读属性的 WM) + 摆位的
+       ConfigureRequest(robust 路径) + 初始鼠标穿透(幽灵模式初始态;
+       运行期切换走 hnp_window_set_click_through)。 */
+    for (int i = 0; i < nstates; i++) hn_ewmh_state_msg(w->xw, states[i]);
+    if (move) x11.XMoveWindow(x11.dpy, w->xw, d->x, d->y);
+    if (d->click_through) hn_apply_input_shape(w, 1);
     x11.XFlush(x11.dpy);
     if (g_window_n < 16) g_windows[g_window_n++] = w;
     x11.users++;
@@ -262,17 +456,29 @@ void hnp_window_set_title(hnp_window *w, const char *utf8) {
     if (w && utf8) x11.XStoreName(x11.dpy, w->xw, utf8);
 }
 
-/* 运行期鼠标穿透: X11 的对应物是 XShape/XFixes 输入形状(shape input 置空),
-   需要额外 dlopen libXext/Xfixes —— M1 留位不实现(声明照常接受; 桌宠形态
-   在 Linux 的完整物化属于壳层路线图, 与 always_on_top 等 desc 字段一致)。 */
-void hnp_window_set_click_through(hnp_window *w, int on) { (void)w; (void)on; }
+/* 运行期鼠标穿透(桌宠幽灵模式): XShape 输入形状 —— on=1 整窗穿透,
+   on=0 重设整窗矩形恢复接收(实现见 hn_apply_input_shape; 常量引证见
+   文件头常量块)。libXext 缺席时优雅降级(无穿透, 声明照常通过)。
+   幂等(重复设同一形状无副作用); NULL 安全。 */
+void hnp_window_set_click_through(hnp_window *w, int on) {
+    hn_apply_input_shape(w, on ? 1 : 0);
+}
 
-/* 几何记忆采样口: XTranslateCoordinates 能拿到窗口绝对位置, 但需要
-   dlopen 附加符号 —— 与 click_through 同一批留位(声明照常接受, 返回 0
-   让 hn_app 整体跳过几何记忆, 桌宠位置记忆在 Linux 暂不生效)。 */
+/* 几何记忆采样口: XTranslateCoordinates 把窗口内容区 (0,0) 平移到根窗口
+   坐标, 即内容区左上原点的屏幕坐标(左上原点, y 向下 —— 与引擎/显示列表
+   和 macOS 读 frame 同口径)。有 WM 装饰时与外框原点差 _NET_FRAME_EXTENTS
+   (macOS 的 NSWindow frame 是外框口径); 读回与摆回同侧取样, 往返误差
+   不累积。返回 1 = x/y 已写出; 0 = 拿不到(调用方整体跳过记忆)。NULL 安全。 */
 int hnp_window_origin(hnp_window *w, int *x, int *y) {
-    (void)w; (void)x; (void)y;
-    return 0;
+    if (!w || !x || !y || !x11.dpy || !x11.XTranslateCoordinates) return 0;
+    int rx = 0, ry = 0;
+    xwindow child = 0;
+    if (!x11.XTranslateCoordinates(x11.dpy, w->xw, x11.XDefaultRootWindow(x11.dpy),
+                                   0, 0, &rx, &ry, &child))
+        return 0;
+    *x = rx;
+    *y = ry;
+    return 1;
 }
 
 static hnp_key keysym_to_hnp(unsigned long ks) {

@@ -208,6 +208,13 @@ CI/服务器同样可用; 真窗口由平台壳开(见上"快速开始"的 `hnap
   链接哪个 hnp_*.c 就是哪个平台的应用: `hnapp-macos-arm64`(真窗口)、
   `hnapp-macos-headless`(无 GUI 自检/CI)、`hnapp-linux-x86_64`(dlopen X11)。
   `hn_app file.html` 开窗, `--probe` 管线自检, `--shot out.png` 渲染落盘。
+  **Linux 桌宠形态对齐 macOS**(`hnp_linux.c`): 层级 `_NET_WM_STATE_ABOVE/BELOW`、
+  跨桌面 `_NET_WM_STATE_STICKY`、无边框 `_MOTIF_WM_HINTS`、鼠标穿透 XShape
+  输入形状(libXext 运行期 dlopen, 缺席降级)、位置记忆 XTranslateCoordinates
+  (`desc.x/y` 摆位 + origin 读回); 降级差异: `no_shadow` 无 X11 标准对应
+  (compositor 私有), 优雅忽略。对账门禁 `tools/linux_parity_check.sh`
+  (交叉编译 x86_64/aarch64 + 产物 strings 断言 + desc 字段消费对账;
+  行为级验证需 Linux+X11 主机)。
 - **M1+M2 窗口壳(保留)**: `tools/hnweb_macos.c`(dlopen AppKit/CoreGraphics)、
   `tools/hnweb_linux.c`(X11 运行期 dlopen + hnsoft)与 `tools/hnwin.c`(Win32)。
   M2 能力: **事件派发管道**(点击/键盘/滚轮/hover → 目标解析 → 带 id 冒泡 →
