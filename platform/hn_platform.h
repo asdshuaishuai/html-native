@@ -81,7 +81,16 @@ typedef struct {
                               Stationary|IgnoresCycle(CG/NSWindow.h 精确值见 hnp_macos.c)。 */
     int borderless;         /* 无标题栏无边框(styleMask 不含 Titled/Closable/…)。
                               frame/bounds 即内容区, 无标题条可点。 */
+
+    /* ---- 位置记忆(几何持久化的开窗入参, 见 hnp_window_origin) ----
+       左上原点屏幕坐标(与引擎坐标同口径); 双双 = HNP_WINDOW_POS_AUTO 时
+       自动居中(缺省行为不变)。桌宠/数字人"关了再开回到原位"由此落地:
+       hn_app 开窗前读 ~/.html-native/geometry/<doc-stem>.json 填进来。 */
+    int x, y;               /* -32768 = 自动居中(哨兵; 屏幕坐标到不了那里) */
 } hnp_window_desc;
+
+/* hnp_window_desc.x/y 的"自动居中"哨兵(几何记忆未命中时的缺省值) */
+#define HNP_WINDOW_POS_AUTO (-32768)
 
 /* 创建窗口。返回 NULL 失败(原因一行 stderr)。 */
 hnp_window *hnp_window_open(const hnp_window_desc *desc);
@@ -112,6 +121,13 @@ void hnp_window_set_title(hnp_window *w, const char *utf8);
    再切回来重新接收事件)。macOS 走 setIgnoresMouseEvents:; 其余平台
    空实现(声明照常通过, 物化看平台)。幂等; NULL 安全。 */
 void hnp_window_set_click_through(hnp_window *w, int on);
+
+/* 读窗口外框原点(屏幕坐标, 左上原点, y 向下 —— 与引擎/显示列表同口径)。
+   几何记忆的采样口: hn_app 主循环 ~2s 轮询一次, 变了就 debounce 落盘
+   ~/.html-native/geometry/<doc-stem>.json, 下次开窗经 hnp_window_desc.x/y
+   摆回原位。返回 1 = x/y 已写出; 0 = 平台拿不到(headless/linux 无对应
+   API, 返回 0 让调用方整体跳过记忆)。NULL 安全。 */
+int hnp_window_origin(hnp_window *w, int *x, int *y);
 
 /* ---------------- 事件 ---------------- */
 

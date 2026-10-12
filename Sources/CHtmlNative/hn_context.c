@@ -281,6 +281,17 @@ int hn_context_anim_tick(hn_context *c, float dt_ms) {
 void hn_context_set_hover(hn_context *c, hn_node *n) { c->hover_node = n; }
 void hn_context_set_active(hn_context *c, hn_node *n) { c->active_node = n; }
 
+/* 最近指针坐标(视口参照系): 运行时每次 pointer_move 喂入。网格变形的
+   look(视线/头部跟随)按"指针相对元素中心"取指向 —— 引擎此前不存坐标,
+   形变无从"看向"指针。未收到过事件时 has_pointer 保持 0, look 目标 = 回中。 */
+void hn_context_set_pointer(hn_context *c, float x, float y) {
+    if (!c) return;
+    c->pointer_x = x;
+    c->pointer_y = y;
+    c->has_pointer = 1;
+}
+
+
 void hn_context_set_focus(hn_context *c, hn_node *n) {
     /* 禁用的控件不可聚焦(与浏览器一致): 运行时点击命中也不改变焦点 */
     if (n && hn_node_is_disabled(n)) return;

@@ -852,12 +852,105 @@ static void test_text_deco_scale(void) {
     hn_context_destroy(ctx);
 }
 
+/* ==================================================================
+ * 用例 K: preserve-3d 子树的深度排序(画家算法)
+ * 文档序 A(近, translateZ+60)在前、B(远, translateZ−60)在后 —— 与深度序
+ * 相反的交错对。修复后: preserve-3d 容器的子级按面片中心视空间 z 从远
+ * 到近发射 → 绿(远)先于红(近); 交叠区像素也是红(近者遮挡远者)。
+ * 修复前: 文档序发射 → 绿被红压住错序(远卡压住近卡)。
+ * 对照组: 同布局同文档序的非 3D 交叠对(flat 容器)—— 仍按文档序发射,
+ * 2D 语义(含 z-index 稳定排序)不受深度排序影响。
+ * ================================================================== */
+static const char *K3D_HTML =
+"<style>\n"
+"html, body { margin: 0; }\n"
+".k3d { display: block; position: relative; width: 320; height: 200;\n"
+"       perspective: 500; transform-style: preserve-3d; }\n"
+".knear { position: absolute; left: 0; top: 40; width: 200; height: 120;\n"
+"         background: #ff2040; transform: translateZ(60px); }\n"
+".kfar  { position: absolute; left: 120; top: 40; width: 200; height: 120;\n"
+"         background: #20cc40; transform: translateZ(-60px); }\n"
+"</style>\n"
+"<body><div class=\"k3d\"><div class=\"knear\"></div><div class=\"kfar\"></div></div></body>";
+
+/* 对照组: 同布局同文档序, 但容器 flat(无 preserve-3d)、子级无 3D 变换 */
+static const char *K2D_HTML =
+"<style>\n"
+"html, body { margin: 0; }\n"
+".k2d  { display: block; position: relative; width: 320; height: 200; }\n"
+".a2d  { position: absolute; left: 0; top: 40; width: 200; height: 120;\n"
+"        background: #ff2040; }\n"
+".b2d  { position: absolute; left: 120; top: 40; width: 200; height: 120;\n"
+"        background: #20cc40; }\n"
+"</style>\n"
+"<body><div class=\"k2d\"><div class=\"a2d\"></div><div class=\"b2d\"></div></div></body>";
+
+/* 某平色指令的首个下标(kind<0 = RECT/QUAD 皆可); 无则 -1 */
+static int first_index_by_fill(const hn_display_list *dl, hn_color fill, int kind) {
+    for (int i = 0; i < dl->count; i++) {
+        const hn_cmd *c = &dl->cmds[i];
+        if (c->fill == fill &&
+            (kind < 0 || (int)c->kind == kind)) return i;
+    }
+    return -1;
+}
+
+static void test_depth_sort(void) {
+    printf("== K. preserve-3d 深度排序: 交错对按面片深度发射, 2D 对照不变 ==\n");
+    const hn_color RED = 0xFF2040FF, GREEN = 0x20CC40FF;
+
+    /* --- 3D 交错对: 文档序(近, 远) → 发射序应(远, 近) --- */
+    hn_context *ctx = build_ctx(K3D_HTML, 400, 300);
+    const hn_display_list *dl = ctx ? hn_context_display_list(ctx) : NULL;
+    if (!dl) { check(0, "K0 display list 就绪"); return; }
+    int ir = first_index_by_fill(dl, RED, HN_CMD_QUAD);
+    int ig = first_index_by_fill(dl, GREEN, HN_CMD_QUAD);
+    printf("    3D: 红(近)QUAD@%d  绿(远)QUAD@%d (期望 绿 < 红)\n", ir, ig);
+    check(ir >= 0 && ig >= 0, "K0 近/远面片各产出一条 QUAD(独占色)");
+    if (ir >= 0 && ig >= 0) {
+        check(ig < ir,
+              mkstr("K1 preserve-3d 下按深度序发射: 远面片先于近面片"
+                    "(绿@%d < 红@%d)", ig, ir));
+        /* 位图交叠区像素: 近者(红)遮挡远者(绿) —— 排序的最终目的 */
+        unsigned char *bm = hnsoft_render(dl, 400, 300, 0x0B0E13FF);
+        if (bm) {
+            /* 交叠区中心 = x 120..200 与 y 40..160 的中点 */
+            const unsigned char *p = bm + ((100 * 400) + 160) * 4;
+            printf("    交叠区(160,100)像素: r=%u g=%u b=%u (期望红)\n",
+                   (unsigned)p[0], (unsigned)p[1], (unsigned)p[2]);
+            check(p[0] > 200 && p[1] < 90 && p[2] < 110,
+                  mkstr("K2 交叠区像素 = 近面片(红)遮挡远面片(绿)"
+                        " (got r=%u g=%u b=%u)", p[0], p[1], p[2]));
+            free(bm);
+        } else {
+            check(0, "K2 hnsoft 位图就绪");
+        }
+    }
+    hn_context_destroy(ctx);
+
+    /* --- 非 3D 对照组: 同文档序, 发射序不变(红仍先于绿) --- */
+    ctx = build_ctx(K2D_HTML, 400, 300);
+    dl = ctx ? hn_context_display_list(ctx) : NULL;
+    if (!dl) { check(0, "K3 对照组 display list 就绪"); return; }
+    ir = first_index_by_fill(dl, RED, -1);
+    ig = first_index_by_fill(dl, GREEN, -1);
+    printf("    2D 对照: 红(文档先)@%d  绿(文档后)@%d (期望 红 < 绿)\n", ir, ig);
+    check(ir >= 0 && ig >= 0, "K3 对照组两条交错矩形就绪(独占色)");
+    if (ir >= 0 && ig >= 0) {
+        check(ir < ig,
+              mkstr("K4 非 3D 交错对仍按文档序发射(2D 语义不变)"
+                    "(红@%d < 绿@%d)", ir, ig));
+    }
+    hn_context_destroy(ctx);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("quad3d_probe — 3D 场景面 display list + 位图断言"
            "(preserve-3d 复合 / QUAD 渐变 / 3D 子树文字 / 布局上下文 /\n"
-           "渐变像素 / cairo 缝线 / 2D 分量进 3D 矩阵 / 摊平单应 / 文字装饰随变换)\n"
-           "A-D 锚定修复后的正确行为(不得回退); E-J 是上轮验收遗留清单,"
+           "渐变像素 / cairo 缝线 / 2D 分量进 3D 矩阵 / 摊平单应 / 文字装饰随变换 /\n"
+           "preserve-3d 深度排序)\n"
+           "A-D 锚定修复后的正确行为(不得回退); E-K 是验收遗留清单,"
            "修复前必须逐条红。\n\n");
     test_cube();
     test_gradient();
@@ -869,6 +962,7 @@ int main(int argc, char **argv) {
     test_p3d_scale();
     test_flatten_accuracy();
     test_text_deco_scale();
+    test_depth_sort();
 
     printf("\n结果: %d 通过, %d 失败", g_pass, g_fail);
     if (g_skip > 0) printf(" (+%d skip)", g_skip);

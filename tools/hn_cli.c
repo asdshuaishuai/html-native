@@ -112,7 +112,7 @@ static void resp_field(const char *json, const char *key, char *out, size_t cap)
 
 static void usage(void) {
     fprintf(stderr,
-        "hn — html-native C99 命令行(agent 的系统入口)\n"
+        "hn — html-native 命令行(agent 的系统入口; 引擎: Neb = NO-WEB)\n"
         "  hn ping\n"
         "  hn open <id> <file.html> [--css f.css] [--w N] [--h N] [--window]\n"
         "  hn update <id> <file.html>\n"

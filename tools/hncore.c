@@ -476,7 +476,7 @@ static void media_print_lines(hn_node *n, hn_context *ctx) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fputs("用法: hncore <render|parse|layout|paint|text|boxes|verify> <file.html> [W H|out.png W H]\n"
+        fputs("hncore — Neb 引擎(NO-WEB)离屏 CLI\n用法: hncore <render|parse|layout|paint|text|boxes|verify> <file.html> [W H|out.png W H]\n"
 #ifdef HN_USE_CAIRO
               "  render  渲染为 PNG(软件光栅化, 零 GUI 依赖; 文本需 FreeType)\n"
               "  renderc 渲染为 PNG(cairo 后端: 一份实现喂所有平台)\n"

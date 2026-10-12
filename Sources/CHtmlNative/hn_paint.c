@@ -1089,6 +1089,55 @@ static void paint_children_sorted(hn_context *c, hn_node *n, const hn_style *st,
     }
 }
 
+/* ---- preserve-3d 子树的深度排序(画家算法) ----
+ * 3D 遮挡此前靠文档序(作者手工按"远→近"排兄弟); 这里在 preserve-3d
+ * 容器的子级发射前, 按**面片中心的视空间 z**(复合矩阵后、透视除之前,
+ * 与投影 k = d/(d−z) 单调一致: z 越大越近)从远到近稳定排序 —— 面片与其
+ * 摊平附属内容(文字/子树)整块随排序走。非 3D 祖先下完全不走这条路,
+ * z-index/2D 文档序语义原样保留。同深(含全部平面内的兄弟)保持文档序,
+ * 既有探针的共面/单面场景顺序不变。 */
+
+/* 深度键: 面片中心的 z(视空间)。text 节点借用父盒(坐在父面片平面上)。 */
+static float face_center_z(const hn_style *st, const float parent[4][4],
+                           float bx, float by, float bw, float bh) {
+    float qx[4], qy[4], mtotal[4][4];
+    /* persp/sx/sy/消失点全传 0: 只要 mtotal 的 z 行, 角点/透视除不参与键 */
+    project_3d(st, parent, bx, by, bw, bh, 0, 0, 0, 0, 0, qx, qy, mtotal);
+    float u, v, z;
+    mat_point(mtotal, bx + bw * 0.5f, by + bh * 0.5f, &u, &v, &z);
+    return z;
+}
+
+typedef struct { hn_node *node; float z; } depth_item;
+
+static void paint_children_depth_sorted(hn_context *c, hn_node *n, const hn_style *st,
+                                        float alpha, float sx, float sy,
+                                        paint_guard *g) {
+    depth_item list[256];
+    int cnt = 0;
+    for (hn_node *ch = n->first; ch && cnt < 256; ch = ch->next) {
+        list[cnt].node = ch;
+        list[cnt].z = (ch->kind == HN_ELEM)
+            ? face_center_z(&ch->style, g->m3d, ch->bx, ch->by, ch->bw, ch->bh)
+            : face_center_z(st, g->m3d, n->bx, n->by, n->bw, n->bh);
+        cnt++;
+    }
+    /* 稳定插入排序: z 升序(远→近)。|Δz| <= 0.01px 视为同深(浮点噪声不
+       惊动共面兄弟的文档序, 如地板格线 translateZ(0.02px) 一类)。 */
+    for (int i = 1; i < cnt; i++) {
+        depth_item key = list[i];
+        int j = i - 1;
+        while (j >= 0 && (list[j].z - key.z) > 0.01f) { list[j + 1] = list[j]; j--; }
+        list[j + 1] = key;
+    }
+    for (int i = 0; i < cnt; i++) {
+        if (g->nodes > HN_PAINT_MAX_NODES || g->depth > HN_PAINT_MAX_DEPTH) break;
+        g->depth++;
+        paint_walk_g(c, list[i].node, st, alpha, sx, sy, g);
+        g->depth--;
+    }
+}
+
 static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                          float alpha, float sx, float sy, paint_guard *g) {
     if (alpha <= 0.001f) return;
@@ -1712,9 +1761,13 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     float csx = sx + n->scroll_x, csy = sy + n->scroll_y;
 
     float child_alpha = alpha * st->opacity;
-    /* 子节点绘制顺序: z-index 非零的定位元素排在后面(覆盖常规流内容)。
-       稳定排序: 同 z-index 保持文档顺序。 */
-    if (has_positioned_children(n)) {
+    /* 子节点绘制顺序: preserve-3d 容器的子级按深度序(3D 渲染上下文内
+       遮挡由深度决定, CSS 同款语义 —— z-index 在 3D 上下文里让位);
+       其余按 z-index 非零的定位元素排后(覆盖常规流内容)。
+       两种排序都稳定: 同键/同深保持文档顺序。 */
+    if (st->transform_style == 1) {
+        paint_children_depth_sorted(c, n, st, child_alpha, csx, csy, g);
+    } else if (has_positioned_children(n)) {
         paint_children_sorted(c, n, st, child_alpha, csx, csy, g);
     } else {
         for (hn_node *ch = n->first; ch; ch = ch->next) {

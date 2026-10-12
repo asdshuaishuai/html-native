@@ -68,6 +68,13 @@ void hnp_window_set_title(hnp_window *w, const char *utf8) {
    物化语义不存在 —— 空实现 + 注释, 与 always_on_top 等 desc 字段同一口径。 */
 void hnp_window_set_click_through(hnp_window *w, int on) { (void)w; (void)on; }
 
+/* 几何记忆采样口: 无头平台没有屏幕坐标可读, 返回 0 —— 调用方(hn_app)
+   据此整体跳过几何轮询/落盘, 与 desc.x/y 的"优雅忽略"同一口径。 */
+int hnp_window_origin(hnp_window *w, int *x, int *y) {
+    (void)w; (void)x; (void)y;
+    return 0;
+}
+
 int hnp_pump(hnp_event *ev, int timeout_ms) {
     if (!ev) return 0;
     ev->kind = HNP_EV_NONE;

@@ -1,4 +1,7 @@
-/* hn.h — html-native engine, public C API
+/* hn.h — Neb 引擎公共 C API(html-native 项目)
+ *
+ * **Neb = NO-WEB** —— 本引擎的正式名称: 自研 C99 渲染引擎,
+ * 不含 WebView/浏览器内核, 从解析到像素一条自有管线。
  *
  * html-native: 与 RN/Flutter 同级的原生 UI 框架, 形态是系统级
  * PWA/小程序引擎。引擎只做一件事: 把 hn 编码(HTML 语法)渲染成
@@ -249,6 +252,16 @@ void  hn_lottie_size(struct hn_lottie *l, float *w, float *h);
  *        hn-mesh-anchor="bottom" hn-mesh-freq="1">
  *
  * 顶点位置 = 网格 + 正弦形变(按 anchor 端固定, 向另一端渐强)。
+ * 数字人观感的细化属性(与 sway 叠加, 全部确定性, 无随机):
+ *   hn-mesh-breath="频率"   整体 y 向微缩放呼吸, 缩放中心 = anchor 端
+ *   hn-mesh-anchor          新增三档 head|chest|waist: 网格按 y 分三带,
+ *                           摆幅头带最大/腰带最小, 带间 smoothstep 平滑
+ *   hn-mesh-phase-y="k"     行相位 = k*row(缺省按 v*2.2), 波浪沿身传播
+ *   hn-mesh-look="0-100"    视线/头部跟随指针(引擎存最近指针坐标, 节点上
+ *                           一阶滞后平滑, 幅度按强度缩放)
+ *   hn-mesh-idle="1"        待机: 叠加双正弦 sin(t*0.9)+0.5*sin(t*2.3)
+ * JS 桥 hnMeshParam(id, name, v)(name ∈ look_x/look_y/mouth/body_x/body_y,
+ * 值 -1..1)在求值时叠加对应形变 —— 数字人脚本可直接驱动口型/体摆。
  * 更复杂的骨骼/物理可由脚本通过 hn_node_set_mesh_verts() 逐帧驱动 ——
  * 引擎只提供网格与贴图合成, 装配逻辑(即 Live2D 的 rig)属于应用层。
  */
@@ -257,6 +270,9 @@ void  hn_lottie_size(struct hn_lottie *l, float *w, float *h);
 int hn_node_set_mesh_verts(hn_node *n, const float *verts, int cols, int rows);
 /* 该节点当前是否为网格绘制(声明了 hn-mesh 或被脚本写入顶点) */
 int hn_node_mesh_info(hn_node *n, int *cols, int *rows);
+/* 数字人参数桥引擎侧: 把 -1..1 的形变参数写到节点上(name 非法静默忽略),
+   下一次网格求值生效。与 hn_node_set_mesh_verts 互斥(脚本顶点优先)。 */
+void hn_node_set_mesh_param(hn_node *n, const char *name, float value);
 
 /* ---- 应用清单: hn 编码中的表面声明, 供宿主物化 ----
  *
@@ -392,6 +408,10 @@ int hn_context_anim_tick(hn_context *c, float dt_ms);
 /* 设置/清除当前悬浮与按下元素(触发 :hover/:active 重新匹配), 随后需重布局 */
 void hn_context_set_hover(hn_context *c, hn_node *n);
 void hn_context_set_active(hn_context *c, hn_node *n);
+/* 最近指针坐标(视口参照系): 运行时在 pointer_move 事件处喂入。引擎平时
+   不存坐标, 唯独网格变形的 hn-mesh-look(视线/头部跟随)需要在求值时知道
+   "指针相对元素中心在哪个方向" —— 这里是它的唯一事实源。 */
+void hn_context_set_pointer(hn_context *c, float x, float y);
 /* 焦点元素(:focus 伪类)与插入符可见性。
    set_focus 在已有布局时会**立即重渲染**(样式重算 + 重布局 + 重绘),
    使 :focus 规则与引擎默认焦点环即刻生效; 禁用的控件拒绝聚焦。 */

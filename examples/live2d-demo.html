@@ -1,0 +1,106 @@
+<html><head>
+<!-- live2d-demo — 数字人观感三件套(呼吸 / 三带摆动 / 视线跟随)
+     ==========================================================
+     在桌宠形态(transparent + frameless + floating)里演示 hn-mesh
+     的 Live2D 类细化属性, 立绘不再是"一根草在摇", 而是:
+       hn-mesh-anchor="waist"  三带摆动: 头带 > 胸带 > 腰带(根在腰)
+       hn-mesh-breath="1"      整体 y 向微缩放呼吸(缩放中心 = 腰端)
+       hn-mesh-idle="1"        待机双正弦叠加(站着不动也"活")
+       hn-mesh-phase-y="0.7"   行相位 = 0.7*row, 波浪沿身传播
+       hn-mesh-look="60"       视线/头部跟随指针(强度 60/100)
+     气泡 = 三条 CSS keyframes 错相轮播(与 pet.html 同一口径)。
+
+     渲染(离屏截图; 资产按文档相对解析, 在 examples/ 目录里执行):
+       (cd examples && HN_CLOCK=0   ../dist/hncore-macos-arm64 render live2d-demo.html ../screenshots/live2d.png    420 560)
+       (cd examples && HN_CLOCK=900 ../dist/hncore-macos-arm64 render live2d-demo.html ../screenshots/live2d-f2.png 420 560)
+     两帧网格相位不同 → 逐字节不同(确定性取帧, 无随机)。
+
+     真窗口(hnapp 运行时带 QuickJS, <script> 里的 hnMeshParam 参数桥
+     生效: 微笑 + 微侧头; hncore 离屏渲染不编 JS, 该段被跳过):
+       dist/hnapp-macos-arm64 examples/live2d-demo.html
+-->
+<meta charset="utf-8">
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="420x560">
+<meta name="hn-title" content="hn 数字人">
+<meta name="hn-transparent" content="1">
+<meta name="hn-frameless" content="1">
+<meta name="hn-level" content="floating">
+<meta name="hn-spaces" content="all">
+<meta name="hn-shadow" content="0">
+<meta name="hn-draggable" content="1">
+<style>
+  /* 无底色: 只有立绘与气泡可见, 其余是桌面(与 pet.html 同一口径) */
+  html, body { margin: 0; width: 100%; height: 100%; }
+
+  /* ---- 立绘: 大网格 + 三带摆动 + 呼吸 + 待机 + 视线跟随 ----
+     全部属性在同一求值里叠加: sway(三带权重) + idle(双正弦)
+     + breath(绕腰端 y 微缩放) + look(指针方向剪切+平移)。 */
+  .stage { position: absolute; left: 60; top: 168; width: 300; height: 300; }
+  .stage img { width: 300; height: 300; }
+
+  /* 落地阴影: 站在桌面上的锚; 呼吸同步缩放(width 动画) */
+  .shadow { position: absolute; left: 105; top: 470; width: 210; height: 16;
+            background: rgba(0, 0, 0, 0.30); border-radius: 50%;
+            animation: ld-shadow 3.4s ease-in-out infinite; }
+  @keyframes ld-shadow { 0% { scale: 1; opacity: 0.30; } 50% { scale: 0.94; opacity: 0.20; } 100% { scale: 1; opacity: 0.30; } }
+
+  /* ---- 轮播气泡: 三条错相(负延迟)共用一条时间轴 ---- */
+  .bubble { position: absolute; left: 30; top: 56; width: 360; box-sizing: border-box;
+            padding: 10 14; text-align: center; font-size: 13; color: #eef2fb;
+            background: rgba(20, 26, 40, 0.88);
+            border: 1 solid rgba(130, 155, 225, 0.40);
+            border-radius: 15;
+            text-shadow: 0 1 6 rgba(0, 0, 0, 0.55);
+            animation: ld-bubble 13.5s linear infinite; }
+  .b2 { animation-delay: -4.5s; }
+  .b3 { animation-delay: -9s; }
+  @keyframes ld-bubble {
+    0%   { opacity: 0; translate-y: 12; }
+    5%   { opacity: 1; translate-y: 0; }
+    25%  { opacity: 1; translate-y: -8; }
+    33%  { opacity: 0; translate-y: -16; }
+    100% { opacity: 0; translate-y: -16; }
+  }
+
+  /* ---- 顶栏: 标题 + 状态 dot(呼吸) ---- */
+  .title { position: absolute; left: 30; top: 14; width: 300;
+           font-size: 15; color: #dfe6f5; text-align: center;
+           text-shadow: 0 1 6 rgba(0, 0, 0, 0.6); }
+  .dot { position: absolute; left: 348; top: 168; width: 13; height: 13;
+         border-radius: 7; background: #57e08f;
+         border: 2 solid rgba(255, 255, 255, 0.75);
+         animation: ld-pulse 2.4s ease-in-out infinite; }
+  @keyframes ld-pulse { 0% { opacity: 1; } 50% { opacity: 0.35; } 100% { opacity: 1; } }
+
+  /* 底部属性条: 把本页用到的形变属性写出来(自文档化) */
+  .attrs { position: absolute; left: 30; top: 512; width: 360; text-align: center;
+           font-size: 10; color: rgba(200, 214, 240, 0.66); }
+</style>
+</head><body>
+  <div class="title">hn 数字人 · live2d 原语</div>
+
+  <!-- 轮播气泡 -->
+  <div class="bubble b1">三带摆动: 头带 &gt; 胸带 &gt; 腰带, 根在腰、梢在头</div>
+  <div class="bubble b2">呼吸 + 待机双正弦 —— 站着不动也是活的</div>
+  <div class="bubble b3">移动鼠标, 立绘会用 hn-mesh-look 看向你</div>
+
+  <!-- 立绘(hn-mesh 大网格, 三件套全开)+ 状态 dot -->
+  <div class="stage">
+    <img id="star" src="assets/avatar-r.png"
+         hn-mesh="16x14" hn-mesh-sway="7" hn-mesh-speed="1.1"
+         hn-mesh-anchor="waist" hn-mesh-breath="1" hn-mesh-idle="1"
+         hn-mesh-phase-y="0.7" hn-mesh-look="60">
+  </div>
+  <div class="shadow"></div>
+  <div class="dot"></div>
+
+  <div class="attrs">hn-mesh-anchor="waist" · breath · idle · phase-y · look=60 · hnMeshParam()</div>
+
+  <!-- 数字人参数桥(hnapp 运行时生效): 载入即给一点微笑与微侧头;
+       hncore 离屏渲染不编 QuickJS, 此段被跳过(截图仍确定)。 -->
+  <script>
+    hnMeshParam("star", "mouth", 0.42);
+    hnMeshParam("star", "look_x", 0.12);
+  </script>
+</body></html>

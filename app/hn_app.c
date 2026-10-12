@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <time.h>
 #include <sys/stat.h>
 
@@ -166,6 +167,88 @@ static hn_rt *doc_reload(const char *path, int W, int H) {
     return rt;
 }
 
+/* ---------------- 窗口几何记忆(~/.html-native/geometry/<doc-stem>.json) ----------------
+ *
+ * 桌宠/数字人"关了再开回到原位": 主循环 ~2s 轮询 hnp_window_origin,
+ * 位置变了 → 滑动 debounce 2s 后落盘(拖动期间顺延, 停手即写);
+ * SIGTERM(daemon 收口 win_kill)与正常关闭(HNP_EV_CLOSE/Esc)在退窗前
+ * 补写最后一次。SIGKILL/崩溃允许丢最后一次(≤2s 的几何, 可接受)。
+ * 开窗前读回: 位置必须随 hnp_window_desc.x/y 进开窗调用, 不能开了再挪
+ * (manifest 显式 @x,y 优先 —— 作者声明压过记忆)。
+ * 文件是普通 fwrite(非原子), 崩溃最多留下半截 JSON —— 读回端解析失败
+ * 按无记忆处理, 下次落盘自愈。 */
+
+#define HN_GEO_POLL_MS     2000   /* 轮询周期(拖动采样粒度) */
+#define HN_GEO_DEBOUNCE_MS 2000   /* 变更后的静默期(拖动中不断顺延) */
+
+typedef struct { int x, y, w, h; } geo_rect;
+
+/* doc-stem: base 去扩展名("pet.html" → "pet")—— geometry 的文件名键 */
+static void geo_stem(const char *base, char *out, size_t cap) {
+    snprintf(out, cap, "%s", base);
+    char *dot = strrchr(out, '.');
+    if (dot && dot != out) *dot = 0;
+}
+
+static void geo_path(const char *stem, char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    snprintf(out, cap, "%s/.html-native/geometry/%s.json",
+             home && *home ? home : ".", stem);
+}
+
+/* 极简 JSON 数字读取(与 tools/hn_daemon.c 的 json_num 同思路) */
+static int geo_num(const char *json, const char *key, int dflt) {
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(json, pat);
+    if (!p) return dflt;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return dflt;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    char *e = NULL;
+    long v = strtol(p, &e, 10);
+    return e == p ? dflt : (int)v;
+}
+
+static int geo_load(const char *path, geo_rect *g) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char buf[512] = { 0 };
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (!n) return 0;
+    g->x = geo_num(buf, "x", 0);
+    g->y = geo_num(buf, "y", 0);
+    g->w = geo_num(buf, "w", 0);
+    g->h = geo_num(buf, "h", 0);
+    /* 字段全 0 = 半截/空文件: 按无记忆处理 */
+    return (g->x || g->y || g->w || g->h);
+}
+
+static void geo_store(const char *path, const geo_rect *g) {
+    const char *home = getenv("HOME");
+    if (!home || !*home) return;
+    char dir[1024];
+    /* mkdir 只建末级: 隔离 HOME(验收脚本)里 .html-native 本身可能不存在,
+       两级都建(mkdir 已存在时 EEXIST, 无妨)。 */
+    snprintf(dir, sizeof(dir), "%s/.html-native", home);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/.html-native/geometry", home);
+    mkdir(dir, 0755);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}\n", g->x, g->y, g->w, g->h);
+    fclose(f);
+}
+
+/* SIGTERM(daemon win_kill 收口)/SIGINT: 置位由主循环消费 —— 用 sigaction
+   且不带 SA_RESTART, 阻塞中的 hnp_pump 被 EINTR 打断立即醒, 退窗前还能
+   把最后一次几何写盘(signal() 的 BSD 语义带 SA_RESTART 会睡满超时)。 */
+static volatile sig_atomic_t g_app_term = 0;
+static void hn_app_on_term(int sig) { (void)sig; g_app_term = 1; }
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "用法: hn_app <file.html> [W H] [--watch 0|1] | --probe | --shot <png> [W H] [--advance MS]\n");
@@ -284,11 +367,27 @@ int main(int argc, char **argv) {
     wd.no_shadow = !man.shadow;
     wd.join_all_spaces = man.spaces_all;
     wd.click_through = man.click_through;
+    wd.x = HNP_WINDOW_POS_AUTO;
+    wd.y = HNP_WINDOW_POS_AUTO;
     /* 环境钮(验收脚本/调试): HN_CLICK_THROUGH=0|1 覆盖文档声明,
        便于对同一份桌宠页面演示"幽灵模式"两个态而不改文档。 */
     {
         const char *ct = getenv("HN_CLICK_THROUGH");
         if (ct && *ct) wd.click_through = atoi(ct) ? 1 : 0;
+    }
+    /* ---- 几何记忆读回(必须赶在开窗前 —— 位置随 desc 进开窗调用) ----
+       manifest 显式 @x,y 时作者声明优先; 否则读回上次会话的摆放。
+       只有 w/h 记进文件备查: 开窗尺寸仍按 manifest/CLI 口径(daemon 每次
+       都显式传 W H, 记忆尺寸不掺和)。 */
+    {
+        char stem[256], gpath[1152];
+        geo_stem(base, stem, sizeof(stem));
+        geo_path(stem, gpath, sizeof(gpath));
+        geo_rect mem;
+        if (man.x == 0 && man.y == 0 && geo_load(gpath, &mem)) {
+            wd.x = mem.x;
+            wd.y = mem.y;
+        }
     }
     hnp_window *w = hnp_window_open(&wd);
     if (!w) {
@@ -297,6 +396,38 @@ int main(int argc, char **argv) {
         return 1;
     }
     blit_now(rt, w);
+
+    /* ---- 收尾信号(SIGTERM = daemon win_kill 的优雅关闭路径) ---- */
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = hn_app_on_term;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;   /* 不带 SA_RESTART: pump 立刻醒, 见 handler 注释 */
+        sigaction(SIGTERM, &sa, NULL);
+        sigaction(SIGINT, &sa, NULL);
+    }
+
+    /* ---- 几何记忆状态: 基线记账(开窗即写一次, 记忆与窗口同生命周期) ----
+       平台读不到 origin(headless/linux)时 geo_have=0, 整条记忆路径静默跳过。
+       首帧即落盘基线: 未挪动过的窗口也有账(下次开窗回到同一处, 而不是
+       每次都换居中点), 验收脚本也由此拿到确定性的"文件会出现"。 */
+    geo_rect geo = { wd.x, wd.y, wd.width, wd.height };
+    int geo_have = 0;
+    unsigned long geo_dirty_at = 0;   /* 0 = 干净; 非 0 = 变脏时刻(debounce 起) */
+    unsigned long last_geo_poll = hnp_now_ms();
+    char gpath[1152];
+    {
+        char stem[256];
+        geo_stem(base, stem, sizeof(stem));
+        geo_path(stem, gpath, sizeof(gpath));
+        int gx, gy;
+        if (hnp_window_origin(w, &gx, &gy)) {
+            geo.x = gx; geo.y = gy;
+            geo_have = 1;
+            geo_store(gpath, &geo);
+        }
+    }
 
     /* ---- mtime 热重载 watch: 指纹基线(重载只认它, 与窗口表面无关) ---- */
     file_fp fp = { 0, 0 };
@@ -322,12 +453,18 @@ int main(int argc, char **argv) {
     }
     unsigned long last_trace = 0;
     while (!quit) {
+        if (g_app_term) quit = 1;   /* SIGTERM/SIGINT: 退窗前补写几何(下方出口) */
         hnp_event ev;
         if (hnp_pump(&ev, pump_ms)) {
             switch (ev.kind) {
             case HNP_EV_CLOSE: quit = 1; break;
             case HNP_EV_RESIZE:
                 hnp_window_resize(w, ev.x, ev.y);
+                /* 尺寸也进几何账(下次开窗仍按 manifest/CLI, 仅备查) */
+                if (geo_have && (geo.w != ev.x || geo.h != ev.y)) {
+                    geo.w = ev.x; geo.h = ev.y;
+                    geo_dirty_at = hnp_now_ms();
+                }
                 hn_rt_reflow(rt);
                 blit_now(rt, w);
                 break;
@@ -392,6 +529,21 @@ int main(int argc, char **argv) {
         int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
         if (repaint) blit_now(rt, w);
+        /* ---- 几何记忆: ~2s 轮询 origin; 变了 → 滑动 debounce 2s 后落盘 ----
+           拖动中不断顺延(停手 2s 才写, 一场拖动最多落一次盘);
+           SIGTERM/正常关闭走出口处的补写, 不等 debounce。 */
+        if (geo_have && now - last_geo_poll >= HN_GEO_POLL_MS) {
+            last_geo_poll = now;
+            int gx, gy;
+            if (hnp_window_origin(w, &gx, &gy) && (gx != geo.x || gy != geo.y)) {
+                geo.x = gx; geo.y = gy;
+                geo_dirty_at = now;   /* 滑动: 每次变化都把静默期顺延 */
+            }
+        }
+        if (geo_have && geo_dirty_at && now - geo_dirty_at >= HN_GEO_DEBOUNCE_MS) {
+            geo_store(gpath, &geo);
+            geo_dirty_at = 0;
+        }
         if (trace && now - last_trace >= 500) {
             last_trace = now;
             hn_media_platform_trace(rt);
@@ -405,6 +557,15 @@ int main(int argc, char **argv) {
            只改唤醒节奏, 不改任何渲染语义: 重绘仍只发生在 hn_rt_frame/
            事件处理报告 repaint 时, dt 口径(now-last)与原先一致。 */
         pump_ms = beat < 0 ? HN_IDLE_PUMP_MS : (beat < 1 ? 1 : beat);
+    }
+
+    /* 出口补写: SIGTERM(daemon 收口)/红叉/Esc 都在这里退窗前把最后一次
+       几何落盘 —— 不依赖 debounce 到点。SIGKILL/崩溃到此为止不了, 最多丢
+       最后 ~2s 的几何(可接受, 见文件头注释)。 */
+    if (geo_have) {
+        int gx, gy;
+        if (hnp_window_origin(w, &gx, &gy)) { geo.x = gx; geo.y = gy; }
+        geo_store(gpath, &geo);
     }
 
     hnp_window_close(w);

@@ -351,6 +351,16 @@ struct hn_node {
        程序化网格 —— 让应用层实现自己的 rig(Live2D 的装配属于应用层)。 */
     float *mesh_verts;
     int    mesh_cols, mesh_rows;
+    /* 网格视线跟随(hn-mesh-look)的一阶滞后状态: 每次网格求值向"指针方向
+       目标"逼近固定系数(见 hn_mesh.c)。存节点上 —— 文档替换(节点重建)
+       自然归零, 不需要额外清理; 状态在两次求值之间延续才有"平滑转头"。 */
+    float  mesh_look_x, mesh_look_y;
+    /* 数字人参数桥(hnMeshParam(id, name, v)): JS 写入、网格求值时叠加对应
+       形变。全部钳在 -1..1(写入处钳); 缺省 0 = 无形变 —— 未接桥的文档
+       与旧引擎逐位一致。 */
+    float  mesh_param_look_x, mesh_param_look_y;   /* 视线: 水平/竖直偏移 */
+    float  mesh_param_mouth;                       /* 口型: 上带局部张开 */
+    float  mesh_param_body_x, mesh_param_body_y;   /* 整体摆 */
 };
 
 struct hn_doc {
@@ -520,6 +530,12 @@ struct hn_context {
     hn_text_backend tb;
     int tb_valid;
     hn_node *hover_node, *active_node, *focus_node; /* 伪类状态 */
+    /* 最近指针坐标(视口参照系): hn_rt_pointer_move 每次事件喂入。网格变形
+       的 look(视线/头部跟随)在求值时按"指针相对元素中心"取指向 —— 引擎
+       此前不存坐标, 形变无从"看向"指针。只此一份存储, 命中测试仍按事件
+       现场重算, 不引入第二事实源。 */
+    float    pointer_x, pointer_y;
+    int      has_pointer;   /* 0 = 尚未收到过事件(look 目标 = 回中) */
     int      caret_on;   /* 是否绘制插入符(窗口聚焦时) */
     int      has_theme;  /* 索引 1 是否为主题槽(热更新时替换) */
     /* 透明背板: 1 = 每次样式计算后把 html/body 的底色清掉。

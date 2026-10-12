@@ -740,6 +740,24 @@ static JSValue js_hn_set_value(JSContext *ctx, JSValueConst, int argc, JSValueCo
     return JS_UNDEFINED;
 }
 
+/* hnMeshParam(id, name, value): 数字人参数桥 —— 引擎侧 hn_node_set_mesh_param
+   把形变参数写到节点上, 下一次网格求值生效。name ∈ look_x/look_y/mouth/
+   body_x/body_y(值 -1..1, 引擎侧钳位; 未知名静默忽略)。与 hnSetText 同一
+   纪律: 找不到 id → 返回 false, 不抛异常。 */
+static JSValue js_hn_mesh_param(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+    if (argc < 3 || !JS_IsString(argv[1])) return JS_FALSE;
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    const char *id = JS_ToCString(ctx, argv[0]);
+    const char *name = JS_ToCString(ctx, argv[1]);
+    double v = 0;
+    JS_ToFloat64(ctx, &v, argv[2]);
+    hn_node *n = (b && b->doc && id && name) ? hn_doc_find_by_id(b->doc, id) : NULL;
+    if (n) hn_node_set_mesh_param(n, name, (float)v);
+    if (id) JS_FreeCString(ctx, id);
+    if (name) JS_FreeCString(ctx, name);
+    return JS_NewBool(ctx, n != NULL);
+}
+
 /* ---- 媒体桥(hnMedia*, 契约 §6): 宿主未注入/目标不存在 → 静默 no-op 或
    缺省值, 不抛异常(与 hnSetText 一致) ---- */
 
@@ -1176,6 +1194,8 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_set_text, "hnSetText", 2));
     JS_SetPropertyStr(ctx, global, "hnSetValue",
         JS_NewCFunction(ctx, js_hn_set_value, "hnSetValue", 2));
+    JS_SetPropertyStr(ctx, global, "hnMeshParam",
+        JS_NewCFunction(ctx, js_hn_mesh_param, "hnMeshParam", 3));
     JS_SetPropertyStr(ctx, global, "hnMediaPlay",
         JS_NewCFunction(ctx, js_hn_media_play, "hnMediaPlay", 1));
     JS_SetPropertyStr(ctx, global, "hnMediaPause",
@@ -1375,6 +1395,9 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
 
 int hn_rt_pointer_move(hn_rt *rt, float x, float y) {
     if (!rt) return 0;
+    /* 喂坐标(在 hover 无变化的早退之前 —— 指针在同一元素内滑动时
+       hover 不变, 但网格 hn-mesh-look 的指向每一步都要跟上)。 */
+    hn_context_set_pointer(rt->ctx, x, y);
     hn_node *n = hn_context_hit_node(rt->ctx, x, y);
     if (n == rt->hover) return 0;
     rt->hover = n;

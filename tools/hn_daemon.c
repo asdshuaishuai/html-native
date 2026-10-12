@@ -30,6 +30,10 @@
  *   {"op":"text","id":"a","element":"x"} → {"text":"..."}
  *   {"op":"event","id":"a","kind":"click","target":"go","x":..,"y":..}
  *   {"op":"shot","id":"a","path":"out.png"}
+ *   {"op":"resident","file":"pet.html","w":360,"h":360,"id":"pet"}
+ *       → 立即开真窗 + 登记进 ~/.html-native/persist/resident.json;
+ *         daemon 下次启动自动重开这些窗口(--no-resident 显式关) ——
+ *         桌宠/数字人"持久化常驻"的一键回归(账本格式见 resident_persist)。
  *
  * **窗口即 UI**(daemon 接管开窗): open 带 "window":1 时 daemon 不建文档
  * (不占 headless 槽位), 而是 posix_spawn 平台壳子进程
@@ -271,6 +275,26 @@ static pid_t win_spawn(const char *shell, const char *path, int w, int h) {
     return rc == 0 ? pid : -1;
 }
 
+/* spawn 平台壳 + 记入窗口表(open op 与 resident 重开共用这一条路)。
+   返回 pid(>0); 壳缺失/spawn 失败/表满/撞 id 返回 -1(调用方走各自
+   的回退/报错)。 */
+static pid_t win_open_register(const char *id, const char *path, int w, int h) {
+    char shell[1024];
+    if (!win_shell_path(shell, sizeof(shell))) return -1;
+    win_reap();
+    if (g_win_n >= HN_DAEMON_MAX_WINS || win_find(id) || app_find(id)) return -1;
+    pid_t pid = win_spawn(shell, path, w, h);
+    if (pid <= 0) return -1;
+    dwin *wv = &g_wins[g_win_n++];
+    memset(wv, 0, sizeof(*wv));
+    snprintf(wv->id, sizeof(wv->id), "%s", id);
+    wv->pid = pid;
+    wv->w = w; wv->h = h;
+    wv->alive = 1;
+    snprintf(wv->path, sizeof(wv->path), "%s", path);
+    return pid;
+}
+
 /* 原子覆写: tmp 写**同目录** + rename(同目录才在同一文件系统, rename 原子)。
  * 子进程 hn_app 的 mtime watch 随时可能 stat+read 这个 path —— fopen "wb"
  * 先截断再写会让它读到半截 HTML; rename 语义下 path 要么指旧文件要么指
@@ -288,6 +312,98 @@ static int win_atomic_write(const char *path, const char *data, size_t len) {
         return 0;
     }
     return 1;
+}
+
+/* ---------------- 常驻回归账本(~/.html-native/persist/resident.json) ----------------
+ *
+ * JSON-lines, 一行一条 {"id":..,"file":..,"w":..,"h":..}: daemon 启动时
+ * 逐行读回自动重开(--no-resident 关)。同 file 覆盖(同一页面的常驻登记
+ * 只留最新一条), 其余条目保留(多桌宠共存)。行格式选 JSONL 而非嵌套
+ * JSON: 与本文件的极简 json_str/json_num 读取器同构, 不需要真解析器。
+ * 文件损坏(半行)只丢那一条 —— 逐行容错, 不会整体失效。 */
+
+static char *resident_path(void) {
+    const char *home = getenv("HOME");
+    if (!home || !*home) return NULL;
+    char *p = (char *)malloc(strlen(home) + 48);
+    if (!p) return NULL;
+    sprintf(p, "%s/.html-native/persist/resident.json", home);
+    return p;
+}
+
+/* 登记一条常驻记录(同 file 覆盖, 其余条目原样保留)。 */
+static void resident_persist(const char *id, const char *file, int w, int h) {
+    char *rp = resident_path();
+    if (!rp) return;
+    char keep[4096] = "";
+    FILE *f = fopen(rp, "rb");
+    if (f) {
+        char line[1024];
+        while (fgets(line, sizeof(line), f)) {
+            char *lf = json_str(line, "file");
+            int dup = lf && !strcmp(lf, file);
+            free(lf);
+            if (dup) continue;                      /* 同 file: 旧账让位 */
+            size_t ll = strlen(line);
+            if (strlen(keep) + ll + 2 >= sizeof(keep)) continue;  /* 满则丢旧 */
+            strcat(keep, line);
+            if (ll == 0 || line[ll - 1] != '\n') strcat(keep, "\n");
+        }
+        fclose(f);
+    }
+    char dir[1024], *sl;
+    /* mkdir 只建末级: 两级都建(隔离 HOME/自定义布局下 .html-native 可能
+       尚不存在; 已存在时 EEXIST, 无妨)。 */
+    snprintf(dir, sizeof(dir), "%s", rp);
+    sl = strrchr(dir, '/');
+    if (sl) {
+        *sl = 0;
+        mkdir(dir, 0755);   /* .../persist */
+        char *p2 = strrchr(dir, '/');
+        if (p2) *p2 = 0;
+        mkdir(dir, 0755);   /* .../.html-native */
+    }
+    f = fopen(rp, "wb");
+    if (f) {
+        fputs(keep, f);
+        fprintf(f, "{\"id\":\"%s\",\"file\":\"%s\",\"w\":%d,\"h\":%d}\n",
+                id, file, w, h);
+        fclose(f);
+    }
+    free(rp);
+}
+
+/* 启动重开: resident.json 里登记的窗口逐条 win_open_register。
+   非 macOS(壳缺失)/撞 id/表满的条目静默跳过 —— 常驻是尽力而为的意愿,
+   不因单条失败挡 daemon 起来。返回重开条数。 */
+static int resident_restore(void) {
+    char *rp = resident_path();
+    if (!rp) return 0;
+    FILE *f = fopen(rp, "rb");
+    if (!f) { free(rp); return 0; }
+    char line[1024];
+    int rn = 0, ok = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char *rf = json_str(line, "file");
+        if (!rf || !rf[0]) { free(rf); continue; }
+        char *rid = json_str(line, "id");
+        char idbuf[64];
+        if (!rid || !rid[0]) {
+            free(rid);
+            snprintf(idbuf, sizeof(idbuf), "resident-%d", ++rn);
+            rid = idbuf;
+        }
+        long rw = json_num(line, "w", 480), rh = json_num(line, "h", 700);
+        if (win_open_register(rid, rf, (int)rw, (int)rh) > 0) {
+            fprintf(stderr, "[resident] 重开 %s (%s %ldx%ld)\n", rid, rf, rw, rh);
+            ok++;
+        }
+        free(rf);
+        if (rid != idbuf) free(rid);
+    }
+    fclose(f);
+    free(rp);
+    return ok;
 }
 
 /* ---------------- 文本后端(FreeType 可用则真实测量) ---------------- */
@@ -613,28 +729,15 @@ static void handle_line(const char *line, char *out, size_t cap) {
                 resp_json(out, cap, 0, "\"error\":\"window open needs path\"");
                 return;
             }
-            char shell[1024];
-            int shelled = win_shell_path(shell, sizeof(shell));
-            if (shelled) win_reap();
-            if (shelled && g_win_n < HN_DAEMON_MAX_WINS &&
-                !win_find(id) && !app_find(id)) {
-                pid_t pid = win_spawn(shell, spath, (int)w, (int)h);
-                if (pid > 0) {
-                    dwin *wv = &g_wins[g_win_n++];
-                    memset(wv, 0, sizeof(*wv));
-                    snprintf(wv->id, sizeof(wv->id), "%s", id);
-                    wv->pid = pid;
-                    wv->w = (int)w; wv->h = (int)h;
-                    wv->alive = 1;
-                    snprintf(wv->path, sizeof(wv->path), "%s", spath);
-                    char body[192];
-                    snprintf(body, sizeof(body),
-                             "\"id\":\"%s\",\"pid\":%d,\"window\":true,\"w\":%d,\"h\":%d",
-                             id, (int)pid, (int)w, (int)h);
-                    resp_json(out, cap, 1, body);
-                    free(id); free(html); free(css); free(title); free(spath);
-                    return;
-                }
+            pid_t pid = win_open_register(id, spath, (int)w, (int)h);
+            if (pid > 0) {
+                char body[192];
+                snprintf(body, sizeof(body),
+                         "\"id\":\"%s\",\"pid\":%d,\"window\":true,\"w\":%d,\"h\":%d",
+                         id, (int)pid, (int)w, (int)h);
+                resp_json(out, cap, 1, body);
+                free(id); free(html); free(css); free(title); free(spath);
+                return;
             }
             fallback_headless = 1;   /* 壳缺失/spawn 失败/表满或撞 id */
         }
@@ -684,6 +787,47 @@ static void handle_line(const char *line, char *out, size_t cap) {
                      a->id, a->w, a->h, a->headless ? "true" : "false");
         resp_json(out, cap, 1, body);
         free(id); free(html); free(css); free(title); free(spath);
+        return;
+    }
+
+    if (!strcmp(op, "resident")) {
+        /* ---- 一键回归(常驻): 立即开窗 + 登记持久化, daemon 重启自动重开 ----
+           {"op":"resident","file":"examples/pet.html","w":360,"h":360,
+            "id":"pet"}  (id 缺省 "resident")
+           → spawn 真窗(与 open window:1 同一条 win_open_register 路) +
+             把 {id,file,w,h} 写进 ~/.html-native/persist/resident.json
+             (JSON-lines, 同 file 覆盖) —— "kill 一切再重启, 桌宠自己
+             回来"的账本。关闭不摘账(常驻是意愿登记, 不是会话)。 */
+        char *file = json_str(line, "file");
+        char *rid = json_str(line, "id");
+        long w = json_num(line, "w", 480);
+        long h = json_num(line, "h", 700);
+        if (!file || !file[0]) {
+            free(file); free(rid);
+            resp_json(out, cap, 0, "\"error\":\"file required\"");
+            return;
+        }
+        if (!rid || !rid[0]) {
+            free(rid);
+            rid = (char *)malloc(9);
+            if (rid) strcpy(rid, "resident");
+        }
+        pid_t pid = rid ? win_open_register(rid, file, (int)w, (int)h) : -1;
+        if (pid <= 0) {
+            free(file); free(rid);
+            resp_json(out, cap, 0,
+                      "\"error\":\"window spawn failed (shell missing or table full)\"");
+            return;
+        }
+        resident_persist(rid, file, (int)w, (int)h);
+        char *rp = resident_path();
+        char body[1408];
+        snprintf(body, sizeof(body),
+                 "\"id\":\"%s\",\"pid\":%d,\"window\":true,\"persisted\":\"%s\"",
+                 rid, (int)pid, rp ? rp : "");
+        free(rp);
+        resp_json(out, cap, 1, body);
+        free(file); free(rid);
         return;
     }
 
@@ -1071,6 +1215,10 @@ int main(int argc, char **argv) {
     g_argv0 = argc > 0 ? argv[0] : NULL;
     const char *home = getenv("HOME");
     char sock[1024];
+    /* --no-resident: 显式关掉 resident.json 的启动重开(调试/临时清场) */
+    int no_resident = 0;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--no-resident")) no_resident = 1;
     if (argc > 2 && !strcmp(argv[1], "--socket")) {
         snprintf(sock, sizeof(sock), "%s", argv[2]);
     } else {
@@ -1108,7 +1256,11 @@ int main(int argc, char **argv) {
     if (bind(g_listen, (struct sockaddr *)&addr, sizeof(addr)) != 0) { perror("bind"); return 1; }
     if (listen(g_listen, 16) != 0) { perror("listen"); return 1; }
     fcntl(g_listen, F_SETFD, FD_CLOEXEC);   /* spawn 的窗口子进程不继承监听 fd */
-    fprintf(stderr, "hn_daemon(C99): listening %s\n", sock);
+    fprintf(stderr, "hn-daemon(Neb = NO-WEB): listening %s\n", sock);
+
+    /* ---- 常驻回归: resident.json 登记的窗口自动重开(在 listen 之后、
+       accept 之前 —— ping 通时窗口已在路上; --no-resident 显式关) ---- */
+    if (!no_resident) resident_restore();
 
     while (g_run) {
         int cfd = accept(g_listen, NULL, NULL);

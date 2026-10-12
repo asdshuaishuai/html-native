@@ -267,6 +267,14 @@ void hnp_window_set_title(hnp_window *w, const char *utf8) {
    在 Linux 的完整物化属于壳层路线图, 与 always_on_top 等 desc 字段一致)。 */
 void hnp_window_set_click_through(hnp_window *w, int on) { (void)w; (void)on; }
 
+/* 几何记忆采样口: XTranslateCoordinates 能拿到窗口绝对位置, 但需要
+   dlopen 附加符号 —— 与 click_through 同一批留位(声明照常接受, 返回 0
+   让 hn_app 整体跳过几何记忆, 桌宠位置记忆在 Linux 暂不生效)。 */
+int hnp_window_origin(hnp_window *w, int *x, int *y) {
+    (void)w; (void)x; (void)y;
+    return 0;
+}
+
 static hnp_key keysym_to_hnp(unsigned long ks) {
     switch (ks) {
     case 0xFF1B: return HNP_KEY_ESCAPE;

@@ -94,6 +94,20 @@ static obj_t nsstr(const char *s) {
         o_getClass("NSString"), o_sel("stringWithUTF8String:"), s);
 }
 
+/* 主屏(frame)高度: AppKit 全局坐标原点在主屏左下, 与引擎的左上原点
+   口径互翻时用它(y_top = 主屏高 − y_appkit − h)。取 NSScreen.screens[0]
+   (= 带菜单栏的主屏; mainScreen 只是"有键盘焦点的屏", 多屏时不一定主)。
+   取不到时回退 mainScreen —— 单屏环境两者相同。 */
+static double hn_primary_screen_height(void) {
+    obj_t arr = MSG0(obj_t, o_getClass("NSScreen"), "screens");
+    obj_t s = arr ? ((obj_t (*)(obj_t, sel_t, int))o_msgSend)(
+        arr, o_sel("objectAtIndex:"), 0) : NULL;
+    if (!s) s = MSG0(obj_t, o_getClass("NSScreen"), "mainScreen");
+    if (!s) return 0;
+    CGRect f = MSG0(CGRect, s, "frame");
+    return f.size.h;
+}
+
 int hnp_init(int argc, char **argv) {
     (void)argc; (void)argv;
     if (!dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW)) return 0;
@@ -207,13 +221,18 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
     CGRect cr = { { 0, 0 }, { (double)d->width, (double)d->height } };
     iv = ((obj_t (*)(obj_t, sel_t, CGRect))o_msgSend)(iv, o_sel("initWithFrame:"), cr);
     MSG1(void, win, "setContentView:", iv);
-    /* 主屏可见区中央 */
+    /* 主屏可见区中央; 几何记忆命中(desc.x/y 非 AUTO)则摆回记忆位置 ——
+       左上原点 → AppKit 左下原点按主屏高翻 y。 */
     obj_t screen = MSG0(obj_t, o_getClass("NSScreen"), "mainScreen");
     CGRect sf = MSG0(CGRect, screen, "visibleFrame");
     CGRect wf = MSG0(CGRect, win, "frame");
     CGRect pos = { { sf.origin.x + (sf.size.w - wf.size.w) / 2,
                      sf.origin.y + (sf.size.h - wf.size.h) / 2 },
                    { wf.size.w, wf.size.h } };
+    if (d->x != HNP_WINDOW_POS_AUTO || d->y != HNP_WINDOW_POS_AUTO) {
+        pos.origin.x = (double)d->x;
+        pos.origin.y = hn_primary_screen_height() - (double)d->y - pos.size.h;
+    }
     ((void (*)(obj_t, sel_t, CGRect, int))o_msgSend)(win, o_sel("setFrame:display:"), pos, 1);
     MSG1(void, win, "makeKeyAndOrderFront:", (obj_t)1);
     MSG1(void, MSG0(obj_t, o_getClass("NSApplication"), "sharedApplication"),
@@ -270,6 +289,21 @@ void hnp_window_set_title(hnp_window *w, const char *utf8) {
    切回 0 恢复。 */
 void hnp_window_set_click_through(hnp_window *w, int on) {
     if (w && w->win) MSGI(void, w->win, "setIgnoresMouseEvents:", on ? 1 : 0);
+}
+
+/* 几何记忆采样口: 读 NSWindow frame origin(AppKit 全局坐标, 主屏左下
+   原点), 按主屏高翻成引擎口径(左上原点, y 向下)。movableByWindowBackground
+   的桌宠拖动会实时反映在 frame 上 —— hn_app 2s 轮询这里, 变了就落盘。 */
+static int hn_round_d(double v) {
+    return (int)(v + (v < 0 ? -0.5 : 0.5));
+}
+
+int hnp_window_origin(hnp_window *w, int *x, int *y) {
+    if (!w || !w->win || !x || !y) return 0;
+    CGRect f = MSG0(CGRect, w->win, "frame");
+    *x = hn_round_d(f.origin.x);
+    *y = hn_round_d(hn_primary_screen_height() - f.origin.y - f.size.h);
+    return 1;
 }
 
 static hnp_key mac_keycode_to_hnp(unsigned short kc) {

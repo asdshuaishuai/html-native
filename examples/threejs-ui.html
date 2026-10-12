@@ -22,8 +22,9 @@
            - 带 translateZ 投影的面片(卡片环前卡)里, 子级反过来**不能**
              再带自身 transform(会脱锚) —— 表盘 tick 因此不带 rotate,
              只用 margin-top 排弧。
-     无逐深度排序: 遮挡由文档序决定, 立方体六面与卡片环按"远 → 近"排列;
-     动画绕 Z(in-plane)旋转不改变各面深度 —— 文档序对所有时刻都成立。 */
+     深度排序: preserve-3d 子树内按面片中心视空间 z 从远到近自动发射
+     (画家算法); 卡片环因此被"转出交错深度"也不再错序 —— 非 3D 内容
+     仍文档序, z-index/2D 语义不受影响。 */
 
   body { background:#070a12; color:#e8eefc; font-size:13; padding:12 18;
          font-family: sans-serif; }
@@ -98,7 +99,7 @@
 
   /* ── 3 · 中央立方体标识(右): 6 面 preserve-3d ──
      容器 rotateX(-22°) rotateY(34°) 复合矩阵传给六面; 动画只采样
-     rotate 字段(绕视平面法线), 不改变各面深度 → 文档序恒成立。
+     rotate 字段(绕视平面法线), 每帧由 preserve-3d 深度排序重算遮挡。
      六面渐变 + 边框 + 字母(文字上 3D 面片)。 */
   @keyframes cubespin { from { rotate: 0; } to { rotate: 360; } }
   .cwrap { position:relative; height:296; }
@@ -126,14 +127,17 @@
               border:1 solid rgba(83,209,255,.35); }
 
   /* ── 4 · 环形仪表: 六卡 rotateY 60° 步进 + translateZ(190px) 半径 ──
-     环容器 rotateX(-12°) rotateY(-16°) 倾斜; 文档序按有效方位角远 → 近
-     (164°→136°→104°→76°→44°→16°)。前卡(NODE-01)内嵌弧形 tick 表盘:
+     环容器 rotateX(-12°) rotateY(40°) 倾斜+转出**交错深度**: 文档序
+     rc4→rc5→rc3→rc6→rc2→rc1 的有效方位角对应深度序不再是单调"远→近"
+     (40°: 深度序 rc3→rc4→rc2→rc5→rc1→rc6) —— 遮挡交由引擎的
+     preserve-3d 深度排序自动处理(面片中心视空间 z 从远到近发射),
+     作者不再按方位角手工排文档序。前卡(NODE-01)内嵌弧形 tick 表盘:
      12 根普通流 tick 用 margin-top 排在圆弧上 —— 卡面带 translateZ 投影,
      子级不能再带自身 transform(见页首口径), 切向倾斜只好省略。 */
   .rstage { position:relative; height:212; }
   .ring { position:relative; width:400; height:200; margin:4 auto 0;
           perspective:820; transform-style:preserve-3d;
-          transform:rotateX(-12deg) rotateY(-16deg); }
+          transform:rotateX(-12deg) rotateY(40deg); }
   .rc { position:absolute; left:138; top:46; width:124; height:108;
         border-radius:10; padding:7 9; box-sizing:border-box;
         border:1 solid rgba(160,220,255,.55); color:#eaf4ff;
@@ -247,7 +251,7 @@
         </div>
         <div class="cubebase"></div>
       </div>
-      <div class="cap">6 面 preserve-3d · rotateX(-22°) rotateY(34°) · @keyframes rotate 0→360° / 6s infinite(动画绕视平面法线, 不改变面的深度序)</div>
+      <div class="cap">6 面 preserve-3d · rotateX(-22°) rotateY(34°) · @keyframes rotate 0→360° / 6s infinite(遮挡逐帧由 preserve-3d 深度排序重算)</div>
     </div>
   </div>
 
@@ -279,7 +283,7 @@
       </div>
     </div>
   </div>
-  <div class="cap">环容器 rotateX(-12°) rotateY(-16°) · 有效方位角 164°→136°→104°→76°→44°→16°(文档序远→近) · 前卡 12 根普通流 tick 沿 R=50 圆弧排布(margin-top 定位, 不带自身 transform), 亮 9/12 = 75% 圆弧进度近似</div>
+  <div class="cap">环容器 rotateX(-12°) rotateY(40°) · 转出交错深度(文档序 ≠ 深度序), 遮挡由 preserve-3d 深度排序自动处理 · 前卡 12 根普通流 tick 沿 R=50 圆弧排布(margin-top 定位, 不带自身 transform), 亮 9/12 = 75% 圆弧进度近似</div>
 
   <div class="foot">html-native · CSS 3D 变换 + QUAD 透视投影(非 WebGL: 无光照/阴影/模型系统) · 动画帧由 HN_CLOCK 取样 · 支持度矩阵见 docs/threejs-support.md</div>
 

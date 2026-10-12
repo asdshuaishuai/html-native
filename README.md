@@ -5,6 +5,7 @@
 [![license](https://img.shields.io/badge/license-MIT-3ecf6f)](LICENSE)
 
 > 与 RN / Flutter 同级的原生 UI 框架——UI 描述语言是 HTML。
+> **渲染引擎:C99 全自研, 官方名称 Neb(NO-WEB)** —— 名字即承诺: 不含 WebView/浏览器内核。
 > 形态是一个**系统级 PWA / 小程序引擎**：随时生成、销毁、持久化一个应用。
 >
 > 渲染全部走自研 C99 引擎(原生、无 WebView、无 Swift): 平台差异收敛在
@@ -135,7 +136,7 @@ macOS/Linux/Windows 产物 —— 除五个 `hncore` 引擎 CLI（验证与集�
 ## 架构与代码地图
 
 ```
-Sources/CHtmlNative/  引擎核心(C99, ~10900 行, 零依赖, 不含平台/UI/网络)
+Sources/CHtmlNative/  **Neb 引擎核心**(C99, ~10900 行, 零依赖, 不含平台/UI/网络)
   hn_html.c    hn 编码解析 → DOM(arena)
   hn_css.c     样式表解析 → 规则(选择器展开/特异性)
   hn_style.c   级联 + 继承 + UA 样式表
@@ -452,8 +453,17 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   恒为 0), 也可由脚本 `hn_node_set_mesh_verts()` 逐帧写入顶点(rig 逻辑属应用层,
   与 Live2D 把 SDK 与建模工具分层的做法一致)。`.moc3` 是专有格式需 Cubism SDK
   商业授权, 无法自研解码, 但底层技术以本原语形式交付。UV 在变形下仍是均匀网格
-  (贴图跟着网格走)。`tools/mesh_probe.c` 19 条断言覆盖网格解析/六种 anchor/
-  UV 正确性/脚本驱动。
+  (贴图跟着网格走)。**数字人观感细化**(与 sway 叠加, 全部确定性无随机):
+  `hn-mesh-breath="频率"`(整体 y 向微缩放呼吸, 缩放中心 = anchor 端)、
+  `hn-mesh-anchor` 新增三档 **head|chest|waist**(网格按 y 分三带, 摆幅头带最大/
+  腰带最小, 带间 smoothstep 平滑过渡避免硬边)、`hn-mesh-phase-y="k"`(行相位 =
+  k*row, 波浪沿身传播)、`hn-mesh-look="0-100"`(视线/头部跟随指针: 引擎存最近
+  指针坐标 `hn_context_set_pointer`, 节点上一阶滞后平滑, 幅度按强度缩放)、
+  `hn-mesh-idle="1"`(待机双正弦 sin(t*0.9)+0.5*sin(t*2.3)); JS 桥
+  `hnMeshParam(id, name, v)`(name ∈ look_x/look_y/mouth/body_x/body_y, 值 -1..1)
+  供数字人脚本直接驱动口型/体摆。综合演示见 `examples/live2d-demo.html`。
+  `tools/mesh_probe.c` 38 条断言覆盖网格解析/六种 anchor/三带 anchor/UV 正确性/
+  脚本驱动/phase-y/look 滞后/idle/hnMeshParam/旧口径逐位零漂移守门。
 - **跨平台确定性**: 引擎是纯 C99, `-ffp-contract=off` 关掉 FMA 融合(arm64 有
   而 x86_64 基线没有, 默认融合会让同一文档算出不同 px 值)。构建脚本带**跨架构
   确定性门禁**: 同 HN_NO_TEXT 口径下比对各架构产物的布局输出, 不一致即构建失败。
