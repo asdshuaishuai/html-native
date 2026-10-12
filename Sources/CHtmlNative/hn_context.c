@@ -11,6 +11,9 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms);
 static void stream_anchor_walk(hn_context *c, hn_node *n); /* hn-stream 贴底/让出(滚动节) */
 static int  stream_loop_walk(hn_node *n);   /* hn-stream-loop 滑窗摘除(滚动节) */
 static int  stream_anim_walk(hn_node *n, float dt_ms); /* 平滑追上推进(滚动节) */
+static int  scroll_anim_walk(hn_node *n, float dt_ms); /* 锚点平滑滚动推进(滚动节) */
+static int  doc_scroll_to_now(hn_doc *doc, const char *id);  /* 锚点瞬跳(离屏口径) */
+static int  doc_scroll_to_anim(hn_context *c, const char *id); /* 锚点武装(实时口径) */
 
 hn_context *hn_context_create(void) {
     hn_context *c = calloc(1, sizeof(hn_context));
@@ -217,17 +220,20 @@ int hn_node_mesh_info(hn_node *n, int *cols, int *rows) {
    返回值并入 —— 视频在播时帧循环不能停, 否则画面冻结在最后一帧。
    hn-stream 平滑追上同一帧循环: dt>0 即标记帧循环活跃(布局期锚定从
    "直接贴底"切换到动画口径), 在途容器逐帧指数逼近, 返回值并入 ——
-   收敛前帧循环不熄火, 否则追上动画停在半途。 */
+   收敛前帧循环不熄火, 否则追上动画停在半途。
+   锚点平滑滚动(#锚导航)同一帧循环: 实时帧下武装的容器逐帧向目标偏移
+   指数逼近, 返回值并入 —— 收敛前帧循环不熄火, 否则滚动停在半途。 */
 int hn_context_anim_tick(hn_context *c, float dt_ms) {
     if (!c->doc || !c->doc->root) return 0;
     int media = 0;
     if (dt_ms >= 0) media = hn_media_tick_ret(c, dt_ms);
-    int streams = 0;
+    int streams = 0, anchors = 0;
     if (dt_ms > 0) {
         c->live_frame = 1;
         streams = stream_anim_walk(c->doc->root, dt_ms);
+        anchors = scroll_anim_walk(c->doc->root, dt_ms);
     }
-    return anim_walk(c, c->doc->root, dt_ms) || media || streams;
+    return anim_walk(c, c->doc->root, dt_ms) || media || streams || anchors;
 }
 
 void hn_context_set_hover(hn_context *c, hn_node *n) { c->hover_node = n; }
@@ -1114,9 +1120,15 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
                - 若上次 tick 写回过(dirty_written) 且当前样式字段与我们写回的一致
                  → 字段是插值产物, 目标取 a->*_to
                - 否则字段就是样式计算刚写入的目标 */
+            /* "写回者"判定按**量化后的打包色**比较(u32 相等), 不按 float
+               位型 memcmp: 插值产物写回样式要经 color_of 量化, 下帧重读
+               (rgba_of)的分量与插值 float 几乎必有位差 —— 按位比较永远判
+               成"样式变过", 中途帧被当成新目标(量化后的当前值)重启, 过渡
+               在第一步后自我回吞、永远到不了端点(与本文件下方 opacity
+               判定的修复同一类坑: 写回者要按"经样式打包往返后的值"认领)。 */
             int style_is_ours = a->dirty_written &&
-                memcmp(bg_now, a->bg, sizeof(bg_now)) == 0 &&
-                memcmp(fg_now, a->fg, sizeof(fg_now)) == 0;
+                color_of(a->bg) == st->background &&
+                color_of(a->fg) == st->color;
             float bg_target[4], fg_target[4];
             if (style_is_ours) {
                 memcpy(bg_target, a->bg_to, sizeof(bg_target));
@@ -1355,6 +1367,40 @@ static int stream_anim_walk(hn_node *n, float dt_ms) {
     return active;
 }
 
+/* ---- 锚点平滑滚动推进: #锚导航的逐帧逼近(与 stream_anim_walk 同款) ----
+ * hn_context_scroll_to 在实时帧口径下武装各溢出容器(记下"把锚滚进可视
+ * 区"的最终偏移 scroll_target), 这里每帧向目标推进 step = gap·(1−e^(−dt/τ)),
+ * τ 与 stream 平滑追上一致(HN_STREAM_TAU = 80ms) —— 帧率无关, 纯 float
+ * 固定顺序运算 + libm expf, 同一 dt 序列喂出同一轨迹(确定性口径与 stream
+ * 相同)。|gap| < 1px 当帧落位并结束动画。
+ * 用户滚轮/脚本滚动(hn_node_scroll_by)清 scroll_anim 立即中断 —— 与
+ * stream 让出同一套"用户接管即停"纪律。
+ * 返回 1 = 仍有容器在途: hn_context_anim_tick 并入返回值保持帧循环。 */
+static int scroll_anim_walk(hn_node *n, float dt_ms) {
+    int active = 0;
+    if (n->kind == HN_ELEM && n->scroll_anim) {
+        float max_y = n->content_h - n->bh;
+        if (max_y < 0) max_y = 0;
+        float target = n->scroll_target;
+        if (target < 0) target = 0;
+        if (target > max_y) target = max_y;   /* 布局中途变矮: 目标重钳 */
+        float gap = target - n->scroll_y;
+        if (gap > -1.0f && gap < 1.0f) {
+            n->scroll_y = target;       /* 已到位: 当帧落位, 动画结束 */
+            n->scroll_anim = 0;
+        } else if (dt_ms > 0) {
+            float ny = n->scroll_y + gap * (1.0f - expf(-dt_ms / HN_STREAM_TAU));
+            if (ny < 0) ny = 0;
+            if (ny > max_y) ny = max_y;
+            n->scroll_y = ny;
+            active = 1;                 /* 未到位: 下一帧继续 */
+        }
+    }
+    for (hn_node *ch = n->first; ch; ch = ch->next)
+        if (scroll_anim_walk(ch, dt_ms)) active = 1;
+    return active;
+}
+
 /* layout 尾部遍历: 对所有 hn-stream 容器做贴底/让出校正(绘制前) */
 static void stream_anchor_walk(hn_context *c, hn_node *n) {
     if (n->kind != HN_ELEM) return;
@@ -1406,6 +1452,9 @@ hn_node *hn_context_scrollable_at(hn_context *c, float x, float y) {
 
 int hn_node_scroll_by(hn_node *n, float dx, float dy) {
     if (!n || n->kind != HN_ELEM || !n->style.overflow) return 0;
+    /* 用户滚轮/脚本滚动即接管: 在途的锚点平滑滚动立即中断 —— 与 stream
+       让出同一套"用户介入即停"纪律, 防止动画把用户刚滚到的位置又拉走。 */
+    n->scroll_anim = 0;
     float max_y = n->content_h - n->bh;
     if (max_y < 0) max_y = 0;
     float max_x = 0; /* v1 仅纵向滚动 */
@@ -1795,18 +1844,26 @@ hn_node *hn_doc_find_by_id(hn_doc *doc, const char *id) {
  *
  * 引擎不做"打开浏览器"这类平台动作 —— 外部链接只置入待消费链接, 宿主
  * (daemon/壳/rt)在 click 派发处调 hn_context_activate_link 后按返回值
- * 处理: ANCHOR 已在引擎内滚动完(需 repaint), EXTERNAL 则 take 出 href
- * 交系统打开(与 sys://open 同款动作)。 #锚滚动复用既有溢出容器语义:
- * 布局盒是内容坐标(未含滚动偏移, 点击/绘制时才叠加各层 scroll), 因此
- * 溢出容器的可视窗口 = [容器.by + scroll, +bh], 目标盒滚进窗口即可,
- * hn_node_scroll_by 负责钳制。 */
+ * 处理: ANCHOR 已在引擎内滚动(实时帧下是平滑滚动动画在途, 需持续帧
+ * 循环 + repaint), EXTERNAL 则 take 出 href 交系统打开(与 sys://open
+ * 同款动作)。 #锚滚动复用既有溢出容器语义: 布局盒是内容坐标(未含滚动
+ * 偏移, 点击/绘制时才叠加各层 scroll), 因此溢出容器的可视窗口 =
+ * [容器.by + scroll, +bh], 目标盒滚进窗口即可, 钳制口径与
+ * hn_node_scroll_by 一致。
+ *
+ * 两种口径(与 hn-stream 贴底同一套 live_frame 分法):
+ *   瞬跳 doc_scroll_to_now —— 无帧循环的管线(离屏 shot/dump、不跑
+ *     anim_tick 的宿主)无从推进动画, 直接落位, 单帧出图仍是终态;
+ *   平滑 doc_scroll_to_anim —— 实时帧窗口武装动画(记下各层容器的最终
+ *     偏移), hn_context_anim_tick 逐帧指数逼近(τ = 80ms, 与 stream
+ *     平滑追上同款), 用户滚动立即中断。 */
 
-int hn_doc_scroll_to(hn_doc *doc, const char *id) {
+/* 瞬跳口径: 沿祖先链把目标滚进每一层溢出容器的可视区(嵌套容器逐层
+   校正; 单层容器即最常见情形, 坐标精确)。 */
+static int doc_scroll_to_now(hn_doc *doc, const char *id) {
     if (!doc || !doc->root || !id || !*id) return 0;
     hn_node *t = find_by_id_rec(doc->root, id);
     if (!t) return 0;
-    /* 沿祖先链把目标滚进每一层溢出容器的可视区(嵌套容器逐层校正;
-       单层容器即最常见情形, 坐标精确)。 */
     for (hn_node *a = t->parent; a; a = a->parent) {
         if (a->kind != HN_ELEM || !a->style.overflow) continue;
         float top = a->by + a->scroll_y;
@@ -1816,6 +1873,48 @@ int hn_doc_scroll_to(hn_doc *doc, const char *id) {
             hn_node_scroll_by(a, 0, (t->by + t->bh) - (top + a->bh)); /* 底对齐 */
     }
     return 1;
+}
+
+/* 平滑口径(实时帧): 不动偏移, 只武装 —— 每层涉及的溢出容器记下"把锚
+   滚进可视区"的最终偏移(顶对齐/底对齐终态, 与瞬跳同一坐标推导, 只是
+   推导自当前 scroll_y 的等价闭式), scroll_anim_walk 逐帧逼近。已在可视
+   区的容器不武装(不产生多余动画)。返回 1 = 目标存在(与瞬跳同语义)。 */
+static int doc_scroll_to_anim(hn_context *c, const char *id) {
+    hn_doc *doc = c->doc;
+    if (!doc || !doc->root || !id || !*id) return 0;
+    hn_node *t = find_by_id_rec(doc->root, id);
+    if (!t) return 0;
+    for (hn_node *a = t->parent; a; a = a->parent) {
+        if (a->kind != HN_ELEM || !a->style.overflow) continue;
+        float max_y = a->content_h - a->bh;
+        if (max_y < 0) max_y = 0;
+        float top = a->by + a->scroll_y;
+        float target = a->scroll_y;
+        if (t->by < top - 0.5f)
+            target = t->by - a->by;                          /* 顶对齐终态 */
+        else if (t->by + t->bh > top + a->bh + 0.5f)
+            target = (t->by + t->bh) - a->by - a->bh;        /* 底对齐终态 */
+        if (target < 0) target = 0;
+        if (target > max_y) target = max_y;
+        float gap = target - a->scroll_y;
+        if (gap > -1.0f && gap < 1.0f) continue;             /* 已在可视区 */
+        a->scroll_target = target;
+        a->scroll_anim = 1;
+    }
+    return 1;
+}
+
+/* #锚导航的滚动入口(activate_link 落点): 有帧循环的窗口(live_frame,
+   真窗/有 anim_tick 的宿主)武装平滑滚动; 无帧循环的管线直接落位。
+   返回 1 = 目标存在。 */
+static int hn_context_scroll_to(hn_context *c, const char *id) {
+    if (!c) return 0;
+    if (!c->live_frame) return doc_scroll_to_now(c->doc, id);
+    return doc_scroll_to_anim(c, id);
+}
+
+int hn_doc_scroll_to(hn_doc *doc, const char *id) {
+    return doc_scroll_to_now(doc, id);   /* 公开 API 保持瞬跳语义(离屏安全) */
 }
 
 void hn_doc_set_pending_link(hn_doc *doc, const char *href) {
@@ -1847,8 +1946,9 @@ int hn_context_activate_link(hn_context *c, float x, float y) {
     hn_node *a = hn_node_ancestor_with_attr(n, "href");
     const char *href = a ? hn_node_attr(a, "href") : NULL;
     if (!href || !*href) return HN_LINK_NONE;
-    if (href[0] == '#')                          /* 页内锚 → 引擎内滚动 */
-        return hn_doc_scroll_to(c->doc, href + 1) ? HN_LINK_ANCHOR : HN_LINK_NONE;
+    if (href[0] == '#')                          /* 页内锚 → 引擎内滚动
+                                                    (实时帧=平滑, 离屏=瞬跳) */
+        return hn_context_scroll_to(c, href + 1) ? HN_LINK_ANCHOR : HN_LINK_NONE;
     hn_doc_set_pending_link(c->doc, href);       /* 外链 → 宿主消费 */
     return HN_LINK_EXTERNAL;
 }

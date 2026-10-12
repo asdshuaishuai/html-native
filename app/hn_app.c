@@ -60,6 +60,11 @@ static void blit_now(hn_rt *rt, hnp_window *w) {
 /* watch 轮询周期(ms): 与 16ms 帧节拍解耦, 文件系统事件不值得更密 */
 #define HN_WATCH_INTERVAL_MS 300
 
+/* 空闲 pump 周期(ms): hn_rt_frame 报告"无事可睡"(-1)时的唤醒节奏。
+   250ms = 4Hz —— 足以兜住 300ms 的 mtime watch 周期(由循环内计时判定),
+   又让真窗口在无动画/无轮询时彻底离开 60fps 空转。 */
+#define HN_IDLE_PUMP_MS 250
+
 /* 源文件指纹(mtime 纳秒 + 尺寸): 秒级 mtime 会漏掉同秒内的连推,
  * 纳秒口径才能接住 daemon 每几百毫秒一帧的流式推送。 */
 typedef struct { long long mtime_ns; long long size; } file_fp;
@@ -190,10 +195,12 @@ int main(int argc, char **argv) {
 
     int quit = 0;
     unsigned long last = hnp_now_ms();
+    /* 唤醒节奏(ms): 首帧前按空闲节奏起步, 之后由 hn_rt_frame 的返回值
+       逐帧刷新(见循环尾部的"帧节拍接线")。 */
+    int pump_ms = HN_IDLE_PUMP_MS;
     while (!quit) {
         hnp_event ev;
-        int timeout = 16;   /* 帧节拍; hn_rt_frame 会给更精确的值 */
-        if (hnp_pump(&ev, timeout)) {
+        if (hnp_pump(&ev, pump_ms)) {
             switch (ev.kind) {
             case HNP_EV_CLOSE: quit = 1; break;
             case HNP_EV_RESIZE:
@@ -249,9 +256,18 @@ int main(int argc, char **argv) {
             }
         }
         int repaint = 0;
-        hn_rt_frame(rt, (float)(now - last), &repaint);
+        int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
         if (repaint) blit_now(rt, w);
+        /* ---- 帧节拍接线: hn_rt_frame 的返回值就是"下一次该醒的时刻" ----
+           16      动画在跑(过渡/keyframes/Lottie/媒体) → 60fps 帧循环;
+           N > 16  距最近 hx 轮询的期限(ms) → 到点即醒;
+           -1      空闲 → 250ms(4Hz)醒来看热重载 watch —— watch 的 300ms
+                   周期由循环内计时兜住, 事件到达即醒(hnp_pump 被事件打断),
+                   真窗口不再 60fps 空转。
+           只改唤醒节奏, 不改任何渲染语义: 重绘仍只发生在 hn_rt_frame/
+           事件处理报告 repaint 时, dt 口径(now-last)与原先一致。 */
+        pump_ms = beat < 0 ? HN_IDLE_PUMP_MS : (beat < 1 ? 1 : beat);
     }
 
     hnp_window_close(w);

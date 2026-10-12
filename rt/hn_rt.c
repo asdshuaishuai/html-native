@@ -581,6 +581,11 @@ static void run_load_actions(hn_rt *rt) {
 
 static int rt_render(hn_rt *rt) {
     hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+    /* relayout 会把动画采样值从级联重算冲掉(每帧 tick 后紧跟 render,
+       kf_clock 不变)—— 零步进重采样一次再建显示列表, 过渡/关键帧的
+       中间态才真正落到像素(与 tools/hncore.c render 路径同一修法)。 */
+    hn_context_anim_tick(rt->ctx, 0);
+    hn_context_repaint(rt->ctx);
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
     hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
@@ -1363,7 +1368,9 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     }
     if (anim) return 16;                        /* 动画在跑: 16ms 一帧 */
     if (next > 0) return (int)(next * 1000.0);  /* 下一个轮询 */
-    return anim ? 16 : -1;                      /* 无事可睡 */
+    /* 空闲: -1 = 无事可睡。宿主(app/hn_app.c 的帧节拍接线)按自己的
+       空闲节奏低频醒来(热重载 watch 等), 事件到达即醒, 不空转 60fps。 */
+    return -1;
 }
 
 int hn_rt_pointer_move(hn_rt *rt, float x, float y) {

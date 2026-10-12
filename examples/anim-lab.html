@@ -1,0 +1,256 @@
+<html><head>
+<!-- anim-lab — 动画 · 交互 · 流畅性 演示(920x880, hn-theme dark)
+     ============================================================
+     五组能力同屏:
+       1. hover 过渡卡   transition: 多属性 .3s(背景/前景/位移), 悬停即动画;
+       2. 关键帧进度条   @keyframes translate-x 扫掠, 负延迟(-0s..-1.28s)错相
+                        —— 任一时钟时刻五条相位各不相同;
+       3. Lottie         examples/assets/loading.json(引擎矢量求值, 循环);
+       4. 锚点平滑导航   顶部目录 a[href="#sec-*"] 点击走引擎内平滑滚动
+                        (实时帧下逐帧指数逼近 τ=80ms, 与 hn-stream 同款;
+                        离屏单帧直接落位);
+       5. canvas 2D 折线 真窗 JS 驱动: 装载画一帧, 点击画布推进相位重画
+                        (引擎暂无 JS 定时器 — roadmap; 帧循环由 CSS/Lottie
+                        持续驱动)。注意 hncore 离线截图管线无 JS 引擎,
+                        截图中该区域显示 CSS 面板底。
+
+     渲染(离屏截图, 仓库根目录执行; HN_CLOCK 推进全部引擎动画到指定时刻,
+     两张逐字节不同 = 动画在走):
+       HN_CLOCK=0   dist/hncore-macos-arm64 render examples/anim-lab.html screenshots/anim-lab.png    920 880
+       HN_CLOCK=900 dist/hncore-macos-arm64 render examples/anim-lab.html screenshots/anim-lab-f2.png 920 880
+     canvas 折线帧(真窗 JS)如需离线捕获, 用带 QuickJS 的壳:
+       dist/hnapp-macos-headless examples/anim-lab.html --shot screenshots/anim-lab-js.png 920 880
+-->
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x880">
+<meta name="hn-title" content="anim-lab · 动画 / 交互 / 流畅性">
+<meta name="hn-theme" content="dark">
+<style>
+  html, body { margin: 0; }
+  /* 页面容器 = 窗口尺寸的溢出容器: 目录 #锚 在其中平滑滚动 */
+  #page { height: 880; box-sizing: border-box; padding: 22 26;
+          overflow: hidden; background: var(--bg); }
+  h1 { font-size: 21; font-weight: 700; color: var(--ink); margin: 0; }
+  .sub { font-size: 11; color: var(--dim); margin-top: 3; }
+  h2 { font-size: 12; color: var(--accent-2); letter-spacing: 2;
+       margin: 20 0 8 0; font-weight: 700; }
+
+  /* ---- 顶部目录(#锚 → 引擎内平滑滚动) ---- */
+  .toc { display: flex; gap: 10; margin: 14 0 4 0; }
+  .toc a { display: block; padding: 6 14; font-size: 12; color: #bcd0ff;
+           background: #161c2a; border: 1 solid var(--line); border-radius: 7;
+           text-decoration: none; }
+  .toc .hint { font-size: 10; color: var(--dim); padding: 8 0 0 4; }
+
+  /* ---- 1. hover 过渡卡(多属性 .3s) ---- */
+  .cards { display: flex; gap: 16; margin: 8 0 4 0; }
+  .hcard { width: 200; height: 108; box-sizing: border-box; padding: 13;
+           background: #151b28; color: #c9d2e4;
+           border: 1 solid #232b3c; border-radius: 12;
+           transition: background .3s, color .3s, transform .3s; }
+  .hcard:hover { background: #233460; color: #ffffff;
+                 transform: translateY(-6px); }
+  .hcard .t { font-size: 13; font-weight: 700; }
+  .hcard .d { font-size: 10; color: var(--dim); margin-top: 5; }
+  .hcard .chip { display: block; margin-top: 12; padding: 3 9; width: 74;
+                 font-size: 10; color: #9fc0ff;
+                 background: #1c2436; border-radius: 5; text-align: center; }
+  .cap { font-size: 10; color: var(--dim); margin: 6 0 0 0; }
+
+  /* ---- 2. 关键帧进度条(负延迟错相扫掠) ---- */
+  .brow { display: flex; gap: 10; margin: 7 0; }
+  .blab { width: 58; font-size: 11; color: var(--dim); }
+  .bar  { width: 700; height: 18; border-radius: 9; background: #131926;
+          border: 1 solid #1e2637; overflow: hidden; }
+  .fill { height: 18; border-radius: 9;
+          background: linear-gradient(90deg, #2f5fd0, #4f7cff); }
+  .run  { width: 64; height: 18; border-radius: 9;
+          background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.38), rgba(255,255,255,0));
+          animation: sweep 1.6s linear infinite; }
+  @keyframes sweep { from { translate-x: 0; } to { translate-x: 804; } }
+  .d1 { animation-delay: -0.32s; }
+  .d2 { animation-delay: -0.64s; }
+  .d3 { animation-delay: -0.96s; }
+  .d4 { animation-delay: -1.28s; }
+  .bpct { font-size: 11; color: var(--dim); }
+
+  /* ---- 3. Lottie ---- */
+  .lrow { display: flex; gap: 16; margin: 8 0 2 0; }
+  .lcard { width: 200; height: 148; box-sizing: border-box; padding: 12;
+           background: #151b28; border: 1 solid #232b3c; border-radius: 12;
+           display: flex; flex-direction: column; align-items: center; gap: 7; }
+  .lotbox { width: 92; height: 92; overflow: hidden; border-radius: 10;
+            background: #0f131a; display: flex; }
+  .lot { width: 92; height: 92; }
+  .mesh { width: 80; height: 80; border-radius: 9; }
+  .k { font-size: 10; color: var(--dim); }
+
+  /* ---- 4. 锚点滚动沙盒(嵌套容器, 目录/内链都走平滑滚动) ---- */
+  .alinks { display: flex; gap: 8; margin: 8 0; }
+  .alinks a { display: block; padding: 4 12; font-size: 11; color: #9fe0b8;
+              background: #14201c; border: 1 solid #234033; border-radius: 6;
+              text-decoration: none; }
+  #playbox { overflow: hidden; height: 190; border: 1 solid var(--line);
+             border-radius: 10; background: #10151f; }
+  .play { height: 96; padding: 10 14; box-sizing: border-box;
+          font-size: 12; color: var(--ink); }
+  #pa { background: #182338; }
+  #pb { background: #1c2a1e; }
+  #pc { background: #33221c; }
+
+  /* ---- 5. canvas 2D 折线(真窗 JS 驱动) ---- */
+  canvas { display: block; }
+  #wave { width: 868; height: 188; border: 1 solid var(--line); border-radius: 10;
+          background: linear-gradient(180deg, #10151f, #0d1017); }
+</style>
+</head><body>
+<div id="page">
+
+  <h1>anim-lab — 动画 · 交互 · 流畅性</h1>
+  <div class="sub">帧节拍接线 · 平滑锚滚动 · 过渡 / 关键帧 / Lottie / canvas —— HN_CLOCK 取帧(0ms vs 900ms 逐字节不同)</div>
+
+  <!-- 顶部目录: # 链接在真窗里走引擎内平滑滚动 -->
+  <div class="toc">
+    <a href="#sec-motion">① 过渡与关键帧</a>
+    <a href="#sec-anchor">② 锚点平滑导航</a>
+    <a href="#sec-canvas">③ canvas 折线</a>
+    <div class="hint">真窗点击目录 → 平滑滚动(逐帧逼近); 离屏截图 → 直接落位</div>
+  </div>
+
+  <!-- ═══ 1. hover 过渡 + 关键帧进度条 + Lottie ═══ -->
+  <h2 id="sec-motion">① 过渡与关键帧</h2>
+  <div class="cards">
+    <div class="hcard"><div class="t">背景过渡</div>
+      <div class="d">transition: background .3s</div>
+      <div class="chip">hover 我</div></div>
+    <div class="hcard"><div class="t">前景过渡</div>
+      <div class="d">color .3s — 文字随悬停点亮</div>
+      <div class="chip">hover 我</div></div>
+    <div class="hcard"><div class="t">位移过渡</div>
+      <div class="d">transform .3s — 上浮 6px</div>
+      <div class="chip">hover 我</div></div>
+    <div class="hcard"><div class="t">多属性并行</div>
+      <div class="d">三槽同启, 同一时长各自插值</div>
+      <div class="chip">hover 我</div></div>
+  </div>
+  <div class="cap">过渡卡: 悬停背景 #151b28→#233460 / 文字点亮 / 上浮, 全部 .3s 同时推进。</div>
+
+  <div class="brow"><div class="blab">build</div>
+    <div class="bar"><div class="fill" style="width:260"></div><div class="run"></div></div>
+    <div class="bpct">30%</div></div>
+  <div class="brow"><div class="blab">test</div>
+    <div class="bar"><div class="fill" style="width:400"></div><div class="run d1"></div></div>
+    <div class="bpct">46%</div></div>
+  <div class="brow"><div class="blab">render</div>
+    <div class="bar"><div class="fill" style="width:540"></div><div class="run d2"></div></div>
+    <div class="bpct">62%</div></div>
+  <div class="brow"><div class="blab">package</div>
+    <div class="bar"><div class="fill" style="width:660"></div><div class="run d3"></div></div>
+    <div class="bpct">76%</div></div>
+  <div class="brow"><div class="blab">publish</div>
+    <div class="bar"><div class="fill" style="width:820"></div><div class="run d4"></div></div>
+    <div class="bpct">95%</div></div>
+  <div class="cap">进度条: @keyframes translate-x 扫掠 1.6s infinite, 负延迟 0/-0.32/-0.64/-0.96/-1.28s —— 任一时刻五条相位错开。</div>
+
+  <div class="lrow">
+    <div class="lcard"><div class="lotbox"><img class="lot" src="examples/assets/loading.json" hn-lottie></div>
+      <div class="k">Lottie loading(循环)</div></div>
+    <div class="lcard"><div class="lotbox"><img class="lot" src="examples/assets/loading.json" hn-lottie hn-lottie-speed="2"></div>
+      <div class="k">2 倍速</div></div>
+    <div class="lcard"><div class="lotbox"><img class="lot" src="examples/assets/loading.json" hn-lottie hn-lottie-speed="0.5"></div>
+      <div class="k">0.5 倍速</div></div>
+    <div class="lcard"><img class="mesh" src="examples/assets/avatar-a.png"
+         hn-mesh="8x8" hn-mesh-sway="7" hn-mesh-speed="1.2">
+      <div class="k">网格变形(同帧循环)</div></div>
+  </div>
+
+  <!-- ═══ 2. 锚点平滑导航 ═══ -->
+  <h2 id="sec-anchor">② 锚点平滑导航</h2>
+  <div class="cap" style="margin:0 0 2 0">
+    顶部目录与本盒内链接都是 #锚: 真窗点击 → 容器偏移逐帧指数逼近(τ=80ms, 与 hn-stream 平滑追上同款);
+    用户滚轮介入即中断; 离屏单帧渲染直接落位。</div>
+  <div class="alinks">
+    <a href="#pa">段落甲</a>
+    <a href="#pb">段落乙</a>
+    <a href="#pc">段落丙</a>
+  </div>
+  <div id="playbox">
+    <div class="play" id="pa">段落甲 — 顶部目录的「② 锚点平滑导航」滚到的是本节;
+      这三个内链滚的是下面这个嵌套容器。</div>
+    <div class="play" id="pb">段落乙 — 点击上方「段落丙」, 观察容器偏移平滑推进到把丙滚进可视区(底对齐, 撞钳界则停在上限)。</div>
+    <div class="play" id="pc">段落丙 — 动画在途时用滚轮一扰即停: 用户接管永远优先于动画。</div>
+    <div class="play" id="pd" style="height:60; color:var(--dim); font-size:11">(垫高内容, 让容器可滚)</div>
+  </div>
+
+  <!-- ═══ 3. canvas 2D 折线(真窗 JS 驱动; 点击推进相位) ═══ -->
+  <h2 id="sec-canvas">③ canvas 2D 折线</h2>
+  <canvas id="wave" width="868" height="188"></canvas>
+  <div class="cap">真窗 JS 驱动: 装载画一帧, 点击画布推进相位重画(无随机、无时钟, 确定性)。
+    hncore 离线截图管线无 JS 引擎 —— 截图中此处为 CSS 面板底; 折线帧可由 hnapp --shot 捕获(见文件头命令)。</div>
+
+</div>
+<script>
+/* canvas 2D 折线: 双正弦波形 + 网格 + 数据点, phase 为唯一形状参数。
+   装载时 phase=0 画一帧(静态截图即此帧); 真窗点击画布 phase += 0.7 重画
+   —— JS 驱动的实时动画步进。全程无随机数/无时钟读取, 确定性。 */
+var ctx = document.getElementById('wave').getContext('2d');
+var W = 868, H = 188, phase = 0;
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  /* 面板网格 */
+  ctx.strokeStyle = 'rgba(96,112,150,0.22)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (var gx = 24; gx <= W - 24; gx += 52) { ctx.moveTo(gx, 18); ctx.lineTo(gx, H - 22); }
+  for (var gy = 18; gy <= H - 22; gy += 30) { ctx.moveTo(24, gy); ctx.lineTo(W - 24, gy); }
+  ctx.stroke();
+
+  /* 双折线: 平滑主波(青) + 相位导数包络(蓝), 同一 phase 驱动 */
+  var lines = [
+    { col: '#7fdbca', amp: 52, base: 108, k: 0.021, ph: phase,         w: 2.5 },
+    { col: '#4f7cff', amp: 30, base: 108, k: 0.034, ph: phase * 1.6,   w: 1.5 }
+  ];
+  for (var li = 0; li < lines.length; li++) {
+    var L = lines[li];
+    ctx.strokeStyle = L.col;
+    ctx.lineWidth = L.w;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (var x = 24; x <= W - 24; x += 14) {
+      var y = L.base - Math.sin(x * L.k + L.ph) * L.amp
+                       - Math.sin(x * L.k * 0.37 + L.ph * 0.5) * L.amp * 0.35;
+      if (x === 24) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    /* 当前值点(线尾) */
+    var xe = W - 24;
+    var ye = L.base - Math.sin(xe * L.k + L.ph) * L.amp
+                   - Math.sin(xe * L.k * 0.37 + L.ph * 0.5) * L.amp * 0.35;
+    ctx.beginPath();
+    ctx.arc(xe, ye, 4, 0, Math.PI * 2, false);
+    ctx.fillStyle = L.col;
+    ctx.fill();
+  }
+
+  /* 图例与相位读数 */
+  ctx.fillStyle = '#8a93a8';
+  ctx.font = '11px sans-serif';
+  ctx.fillText('wave A · phase=' + phase.toFixed(1), 30, 32);
+  ctx.fillStyle = '#7fdbca';
+  ctx.fillRect(30, 40, 18, 3);
+  ctx.fillStyle = '#4f7cff';
+  ctx.fillRect(30, 48, 18, 3);
+  ctx.fillStyle = '#8a93a8';
+  ctx.fillText('A(主波)', 54, 52);
+  ctx.fillText('B(包络)', 54, 44);
+}
+draw();
+document.getElementById('wave').addEventListener('click', function () {
+  phase += 0.7;
+  if (phase > Math.PI * 2) phase -= Math.PI * 2;
+  draw();
+});
+</script>
+</body></html>

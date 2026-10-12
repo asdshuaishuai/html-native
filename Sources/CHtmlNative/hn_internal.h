@@ -322,6 +322,13 @@ struct hn_node {
        逐帧向底部指数逼近; gap < 1px 落位即清)。用户让出立即清 —— 动画
        中断, 让出状态机只有 stream_yield 一套。 */
     int stream_anim;
+    /* 锚点平滑滚动(#锚导航): 1 = 滚动动画在途(hn_context_scroll_to 武装
+       "把锚滚进可视区"的最终偏移 scroll_target, hn_context_anim_tick 逐帧
+       指数逼近 —— 与 stream 平滑追上同一时间常数; gap < 1px 落位即清)。
+       用户滚轮/脚本滚动(hn_node_scroll_by)立即清 —— 与 stream 同一套
+       "用户接管即中断"纪律。离屏/无帧循环管线不武装, 直接落位。 */
+    int   scroll_anim;
+    float scroll_target;   /* 动画目标偏移(武装时按布局盒现算并钳界) */
     /* 测量模式下收缩后的内容宽(shrink-to-fit); pref_h = flex 自然主轴高(定高被压缩前的内容需求) */
     float pref_w, pref_h;
     /* 行内排版结果(每次 layout 重建; 元素节点也会持有 — 输入控件用) */

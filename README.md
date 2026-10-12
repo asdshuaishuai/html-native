@@ -536,11 +536,14 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   五步推流 + 三帧留档, 见 `examples/agent-chat.html` 与
   `screenshots/chat-stream-{1,2,3}.png`
 - **动画与呈现**: 引擎按 t 求值 —— 过渡/@keyframes/Lottie/网格变形由
-  `hn_context_anim_tick(dt)` 单一时钟推进, 壳的帧循环只负责喂 dt
-  (Linux 壳: select 超时取"16ms 帧 / 最近 hx 轮询 / 无限阻塞"最小者,
-  空闲零唤醒); 缓动曲线全部**帧率无关**(同一 t 给同一值, 60/120Hz 一致),
-  弹性族是闭式解(无逐帧积分状态)。这些性质由 render_probe 与各探针的
-  回归断言守着
+  `hn_context_anim_tick(dt)` 单一时钟推进, 壳的帧循环只负责喂 dt:
+  `hn_rt_frame` 返回唤醒节拍(动画→16ms / 最近 hx 轮询→期限 / 空闲→阻塞),
+  hn_app/hnweb 消费它 —— **空闲零空转**(静态文档真窗 CPU 0.0%);
+  `#锚`导航与 hn-stream 同款**指数逼近平滑动画**(实时帧驱动, 离屏/shot
+  直接落位, 用户滚轮即中断); rt_render/shot 在 relayout 后**零步进重采样**
+  —— 过渡/关键帧的中间态真正落到像素(此前真窗只见终态)。
+  缓动曲线全部**帧率无关**, 弹性族是闭式解。这些性质由 anim_probe(31)、
+  stream_probe(30)与各探针的回归断言守着
 - **设计令牌基底(`hn-theme`)**: `dark`/`light` 一行声明即得完整设计系统——
   色彩令牌(`--accent/--bg/--card/--line/--ink/--dim`)、字阶与行距、卡片/按钮/输入/骨架
   居中、sys:// 片段自动皮肤化、卡片投影与 hover 反馈。作者 css 排在其后, 任意令牌可覆盖。

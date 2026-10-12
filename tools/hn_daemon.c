@@ -879,6 +879,11 @@ static void handle_line(const char *line, char *out, size_t cap) {
         free(id);
         char *p = json_str(line, "path");
         hn_context_layout(app_ctx(a), (float)a->w, (float)a->h, &g_tb);
+        /* anim op 推进的动画时钟在 relayout 里被级联重算冲掉 —— 零步进
+           重采样再重建显示列表, shot 取到的才是推进到的那一帧
+           (与 tools/hncore.c render 路径同一修法)。 */
+        hn_context_anim_tick(app_ctx(a), 0);
+        hn_context_repaint(app_ctx(a));
         const hn_display_list *dl = hn_context_display_list(app_ctx(a));
         int rc = 1;
         if (dl) {
