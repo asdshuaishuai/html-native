@@ -1,17 +1,21 @@
 /* hn_lottie.c — Lottie(bodymovin)矢量动画求值 → 绘制指令
  *
  * 分层: 引擎负责"矢量图形 + 时间轴", 产物仍是平台无关的绘制指令
- * (POLYGON / IMAGE / RECT), 因此三个后端(native CoreGraphics、hnsoft、
- * WebKit)同等支持 —— 不需要为每个平台实现一遍播放器。
+ * (POLYGON / IMAGE / RECT / CLIP_PUSH), 因此三个后端(native CoreGraphics、
+ * hnsoft、WebKit)同等支持 —— 不需要为每个平台实现一遍播放器。
  * JSON 从哪来由运行时的资产后端注入(引擎自身不做磁盘/网络 I/O)。
  *
  * 支持子集(覆盖图标/loading/表情/插画类动画的绝大多数):
  *   图层: 形状层(ty=4) / 纯色层(ty=1) / 图片层(ty=2)
  *   形状: 组(gr, 含嵌套与自身变换) / 矩形(rc, 含圆角) / 椭圆(el) / 路径(sh)
- *   画刷: 填充(fl) / 描边(st)
+ *   画刷: 填充(fl) / 描边(st) / **渐变填充(gf) / 渐变描边(gs)** ——
+ *         线性多 stop 在形状局部空间切成色带; 径向退化为中位色
  *   动画: 锚点/位置/缩放/旋转/不透明度关键帧 + 路径变形关键帧(sh.ks.k)
- * 明确不支持(跳过, 不报错): 预合成 / 文本层 / 表达式 / 特效 / trim path /
- *   遮罩与轨道遮罩 / repeater / merge paths / 时间重映射。
+ *   mask: 图层 masksProperties 的**单条加法蒙版** —— 取路径外接矩形做
+ *         CLIP_PUSH 裁剪(矩形蒙版精确, 曲线蒙版是外接盒近似)
+ * 明确不支持(跳过, 不报错): 预合成 / 文本层 / 表达式 / 特效 / trim path
+ *   之外的高级 trim 语义 / 轨道遮罩(td) / merge paths / 时间重映射 /
+ *   径向渐变的形状化 / 蒙版的反相·相减·相交模式。
  */
 #include <math.h>
 #include <stdlib.h>
@@ -90,9 +94,13 @@ static float norm_op(float o) { return o > 1.0001f ? o / 100.0f : o; }
 
 /* ---------------- 形状定义 ---------------- */
 
-enum { L_GROUP, L_RECT, L_ELLIPSE, L_PATH, L_FILL, L_STROKE, L_TRANSFORM, L_TRIM, L_REPEATER };
+enum { L_GROUP, L_RECT, L_ELLIPSE, L_PATH, L_FILL, L_STROKE, L_TRANSFORM, L_TRIM, L_REPEATER,
+       L_FILL_GRAD, L_STROKE_GRAD };
 
 typedef struct { float t; float *data; int n; } lpkf;   /* 路径关键帧 */
+
+#define LOTTIE_MAX_GSTOPS 16    /* 渐变 stop 上限 */
+#define LOTTIE_GRAD_BANDS 24    /* 线性渐变→色带数(填充) */
 
 typedef struct lshape {
     int kind;
@@ -112,6 +120,19 @@ typedef struct lshape {
     lprop rep_count_prop;   /* c 为动画属性时的载体 */
     float rep_count;
     unsigned char has_rep;
+    /* 渐变画刷(gf 渐变填充 / gs 渐变描边) —— 多 stop 线性渐变。
+       引擎的 POLYGON 指令没有渐变通道, 因此这里在**形状局部空间**把几何
+       按渐变轴切成色带(每条色带一个插值色), 再走既有变换/发射路径 ——
+       cairo 与 hnsoft 两个后端零改动即得到渐变观感(带宽 1px 级以下时
+       相邻色带的衔接不可见)。
+       字段: s/e = 渐变轴两端(局部坐标, 可动画); gsp/gsc = stop 位置与颜色。
+       径向(t=2)无对应的几何切分方式(等值线是圆环, 单轮廓多边形表达不了),
+       退化为中位色 —— 见文件头"不支持"一节。 */
+    lprop gp0, gp1;
+    lprop gsp[LOTTIE_MAX_GSTOPS], gsc[LOTTIE_MAX_GSTOPS];
+    int    n_gstops;
+    int    gtype;                     /* 1=线性 2=径向 */
+    unsigned char has_grad;
     lprop anchor, tpos, scale, rot;   /* 变换 */
     struct lshape *kids; int n_kids;  /* 组 */
 } lshape;
@@ -124,6 +145,17 @@ typedef struct {
     hn_color solid_color;
     lprop anchor, pos, scale, rot, opacity;
     lshape *shapes; int n_shapes;
+    /* mask 最小版(masksProperties): 第一条 mode="a" 且 inv=false 的蒙版,
+       在绘制该层内容前用 CLIP_PUSH 裁剪。路径是**图层局部坐标**的贝塞尔
+       顶点(与形状层的 sh 同一几何编码), 展开为折线后取外接矩形做矩形
+       裁剪 —— 对矩形/圆角矩形蒙版(卡片/图片裁切)精确, 对任意曲线蒙版
+       是外接盒近似(会把少许边缘内容带进来)。反相/相减/相交等模式不做,
+       多条蒙版只取第一条 —— 见文件头"不支持"一节。 */
+    float *mask_v, *mask_i, *mask_o;
+    int    n_mask_v;
+    unsigned char mask_closed;
+    lpkf  *mask_pkf; int n_mask_pkf;
+    unsigned char has_mask;
 } llayer;
 
 struct hn_lottie {
@@ -276,6 +308,12 @@ static void norm_shape_time(lshape *s, float mpf) {
     norm_prop_time(&s->tpos, mpf);
     norm_prop_time(&s->scale, mpf);
     norm_prop_time(&s->rot, mpf);
+    norm_prop_time(&s->gp0, mpf);
+    norm_prop_time(&s->gp1, mpf);
+    for (int i = 0; i < s->n_gstops; i++) {
+        norm_prop_time(&s->gsp[i], mpf);
+        norm_prop_time(&s->gsc[i], mpf);
+    }
     for (int i = 0; i < s->n_pkf; i++) s->pkf[i].t *= mpf;
     for (int i = 0; i < s->n_kids; i++) norm_shape_time(&s->kids[i], mpf);
 }
@@ -423,6 +461,60 @@ static void parse_item(hn_arena *a, const hn_json *it, lshape *sh) {
         parse_prop(a, hn_json_obj_get(it, "c"), &sh->color);
         parse_prop(a, hn_json_obj_get(it, "o"), &sh->opacity);
         parse_prop(a, hn_json_obj_get(it, "w"), &sh->width);
+    } else if (!strcmp(ty, "gf") || !strcmp(ty, "gs")) {
+        /* 渐变填充/描边: 多 stop 线性渐变。s/e 是**形状局部坐标**的轴两端
+           (可动画), g.k 是 stop 数组 [{t:位置, s:[r,g,b,a]}, ...]。
+           t=2(径向)不做形状化, 取 stop 中位色退化为纯色填充/描边。 */
+        sh->kind = (!strcmp(ty, "gf")) ? L_FILL_GRAD : L_STROKE_GRAD;
+        parse_prop(a, hn_json_obj_get(it, "s"), &sh->gp0);
+        parse_prop(a, hn_json_obj_get(it, "e"), &sh->gp1);
+        parse_prop(a, hn_json_obj_get(it, "o"), &sh->opacity);
+        parse_prop(a, hn_json_obj_get(it, "w"), &sh->width);
+        sh->gtype = ((int)hn_json_num(hn_json_obj_get(it, "t"), 1) == 2) ? 2 : 1;
+        /* g.k 有两种真实编码, 都要吃下:
+             (a) 新式: [{t:pos, s:[r,g,b(,a)]}, ...]
+             (b) 旧式(bodymovin 至今仍大量导出): 扁平数字数组
+                 [pos, r, g, b, pos, r, g, b, ...] —— g.p 是 stop 数。
+           只认其中一种会让另一类文件的渐变整个消失(静默空白)。 */
+        const hn_json *g = hn_json_obj_get(it, "g");
+        const hn_json *k = g ? hn_json_obj_get(g, "k") : NULL;
+        if (k && k->kind == HN_JSON_OBJ) k = hn_json_obj_get(k, "k");   /* {a,k} 包装 */
+        if (k && k->kind == HN_JSON_ARR && k->count > 0) {
+            hn_json *e0 = hn_json_at(k, 0);
+            if (e0 && e0->kind == HN_JSON_OBJ) {
+                int ns = k->count;
+                if (ns > LOTTIE_MAX_GSTOPS) ns = LOTTIE_MAX_GSTOPS;
+                int n = 0;
+                for (int i = 0; i < ns; i++) {
+                    const hn_json *st_e = hn_json_at(k, i);
+                    if (!st_e || st_e->kind != HN_JSON_OBJ) continue;
+                    parse_prop(a, hn_json_obj_get(st_e, "t"), &sh->gsp[n]);
+                    parse_prop(a, hn_json_obj_get(st_e, "s"), &sh->gsc[n]);
+                    n++;
+                }
+                sh->n_gstops = n;
+            } else if (e0 && (e0->kind == HN_JSON_NUM || e0->kind == HN_JSON_BOOL)) {
+                int total = k->count / 4;
+                if (total > LOTTIE_MAX_GSTOPS) total = LOTTIE_MAX_GSTOPS;
+                int n = 0;
+                for (int i = 0; i < total; i++) {
+                    const hn_json *pe = hn_json_at(k, i * 4);
+                    lprop pv;
+                    memset(&pv, 0, sizeof(pv));
+                    pv.v[0] = (float)hn_json_num(pe, 0);
+                    pv.ncomp = 1;
+                    sh->gsp[n] = pv;
+                    memset(&sh->gsc[n], 0, sizeof(lprop));
+                    for (int c = 0; c < 3; c++)
+                        sh->gsc[n].v[c] = (float)hn_json_num(hn_json_at(k, i * 4 + 1 + c), 0);
+                    sh->gsc[n].v[3] = 1.0f;
+                    sh->gsc[n].ncomp = 4;
+                    n++;
+                }
+                sh->n_gstops = n;
+            }
+        }
+        if (sh->n_gstops > 0) sh->has_grad = 1;
     } else if (!strcmp(ty, "tr")) {
         sh->kind = L_TRANSFORM;
         parse_transform(a, it, sh);
@@ -544,6 +636,59 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
             } else {
                 ly->n_shapes = parse_items(a, hn_json_obj_get(lj, "shapes"), &ly->shapes);
             }
+            /* mask 最小版: 取第一条 mode="a"(加法)且 inv=false 的蒙版路径。
+               其余模式(相减/相交/反相)与后续蒙版跳过 —— 绘制期用该路径的
+               外接矩形做 CLIP_PUSH(矩形蒙版精确, 曲线蒙版是外接盒近似)。 */
+            const hn_json *masks = hn_json_obj_get(lj, "masksProperties");
+            if (masks && masks->kind == HN_JSON_ARR) {
+                for (int q = 0; q < masks->count && !ly->has_mask; q++) {
+                    const hn_json *m = hn_json_at(masks, q);
+                    if (!m || m->kind != HN_JSON_OBJ) continue;
+                    const char *mode = hn_json_str(hn_json_obj_get(m, "mode"), "a");
+                    if (strcmp(mode, "a") != 0) continue;
+                    if (hn_json_bool(hn_json_obj_get(m, "inv"), 0)) continue;
+                    const hn_json *pt = hn_json_obj_get(m, "pt");
+                    if (!pt || pt->kind != HN_JSON_OBJ) continue;
+                    const hn_json *k = hn_json_obj_get(pt, "k");
+                    if (!k) continue;
+                    hn_json *f0 = (k->kind == HN_JSON_ARR) ? hn_json_at(k, 0) : NULL;
+                    if (f0 && f0->kind == HN_JSON_OBJ) {
+                        /* 蒙版路径变形关键帧: 与 sh 同一几何编码 */
+                        int cnt = k->count;
+                        ly->mask_pkf = (lpkf *)hn_arena_alloc(a, sizeof(lpkf) * (size_t)cnt);
+                        memset(ly->mask_pkf, 0, sizeof(lpkf) * (size_t)cnt);
+                        for (int j = 0; j < cnt; j++) {
+                            hn_json *e = hn_json_at(k, j);
+                            ly->mask_pkf[j].t = (float)hn_json_num(hn_json_obj_get(e, "t"), 0);
+                            hn_json *s0 = hn_json_at(hn_json_obj_get(e, "s"), 0);
+                            lshape tmp;
+                            memset(&tmp, 0, sizeof(tmp));
+                            if (s0) parse_path_geom(a, s0, &tmp);
+                            int nv = tmp.n_verts;
+                            ly->mask_pkf[j].n = nv;
+                            ly->mask_pkf[j].data = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(nv * 6 + 8));
+                            if (nv > 0 && ly->mask_pkf[j].data) {
+                                if (tmp.verts)   memcpy(ly->mask_pkf[j].data,         tmp.verts,   sizeof(float) * (size_t)(nv * 2));
+                                if (tmp.tan_in)  memcpy(ly->mask_pkf[j].data + nv * 2, tmp.tan_in,  sizeof(float) * (size_t)(nv * 2));
+                                if (tmp.tan_out) memcpy(ly->mask_pkf[j].data + nv * 4, tmp.tan_out, sizeof(float) * (size_t)(nv * 2));
+                            }
+                            if (j == 0) { ly->mask_closed = (unsigned char)tmp.closed; ly->n_mask_v = nv; }
+                        }
+                        ly->n_mask_pkf = cnt;
+                        ly->has_mask = 1;
+                    } else if (k->kind == HN_JSON_OBJ) {
+                        lshape tmp;
+                        memset(&tmp, 0, sizeof(tmp));
+                        parse_path_geom(a, k, &tmp);
+                        ly->mask_v = tmp.verts;
+                        ly->mask_i = tmp.tan_in;
+                        ly->mask_o = tmp.tan_out;
+                        ly->n_mask_v = tmp.n_verts;
+                        ly->mask_closed = (unsigned char)tmp.closed;
+                        if (ly->n_mask_v > 0) ly->has_mask = 1;
+                    }
+                }
+            }
             /* 关键帧时间: 帧 → 毫秒(整层归一) */
             float mpf = 1000.0f / fr;
             norm_prop_time(&ly->anchor, mpf);
@@ -551,6 +696,7 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
             norm_prop_time(&ly->scale, mpf);
             norm_prop_time(&ly->rot, mpf);
             norm_prop_time(&ly->opacity, mpf);
+            for (int q = 0; q < ly->n_mask_pkf; q++) ly->mask_pkf[q].t *= mpf;
             for (int q = 0; q < ly->n_shapes; q++) norm_shape_time(&ly->shapes[q], mpf);
             n++;
         }
@@ -759,6 +905,254 @@ static lfit fit_of(const char *mode, float cw, float ch, float bw, float bh) {
 /* 0..100 的百分比标量(Lottie 的 trim s/e/o 都是这个量纲) */
 static float norm_pct(float v) { return v; }
 
+/* trim path 的采样区间(顶点计数近似, 见 emit_paint 内的说明)。
+   返回 0 = 区间为空(不画), 否则 b0/b1 出参为保留的顶点下标区间 [b0, b1)。 */
+static int trim_range(const vbuf *v, float tr_s, float tr_e, float tr_o,
+                      int *b0, int *b1) {
+    int n = v->n;
+    *b0 = 0; *b1 = n;
+    if (!(tr_s > 0.0f || tr_e < 100.0f)) return n >= 2;
+    double total = 0;
+    for (int q = 1; q < n; q++) {
+        double dx = (double)v->v[q * 2] - (double)v->v[(q - 1) * 2];
+        double dy = (double)v->v[q * 2 + 1] - (double)v->v[(q - 1) * 2 + 1];
+        total += sqrt(dx * dx + dy * dy);
+    }
+    (void)total;
+    double a0 = fmod(tr_s + tr_o, 100.0), a1 = fmod(tr_e + tr_o, 100.0);
+    if (a0 < 0) a0 += 100.0;
+    if (a1 < 0) a1 += 100.0;
+    if (a1 <= a0) a1 += 100.0;              /* 跨 0 的情况: 绕一圈 */
+    int i0 = (int)(a0 / 100.0 * (n - 1) + 0.5);
+    int i1 = (int)(a1 / 100.0 * (n - 1) + 0.5);
+    if (i0 < 0) i0 = 0;
+    if (i1 > n - 1) i1 = n - 1;
+    if (i1 <= i0) return 0;                 /* 区间为空: 不画 */
+    *b0 = i0; *b1 = i1 + 1;
+    return *b1 - *b0 >= 2;
+}
+
+/* 渐变 stop 求值: u ∈ [0,1] → 归一化 RGBA(线性插值)。
+   Lottie 的 stop 位置一般是 0..1; 少数导出用 0..100 —— 有点越界就整体 /100。
+   无 stop 返回 0(调用方退化)。 */
+static int grad_color_at(const lshape *paint, float t, float u, float out[4]) {
+    int ns = paint->n_gstops;
+    if (ns <= 0) return 0;
+    float pos[LOTTIE_MAX_GSTOPS];
+    float col[LOTTIE_MAX_GSTOPS][4];
+    float scale01 = 1.0f;
+    for (int i = 0; i < ns; i++) {
+        float pv[4], cv[4];
+        lprop_at(&paint->gsp[i], t, pv);
+        lprop_at(&paint->gsc[i], t, cv);
+        pos[i] = pv[0];
+        if (pos[i] > 1.5f) scale01 = 100.0f;
+        col[i][0] = cv[0]; col[i][1] = cv[1]; col[i][2] = cv[2];
+        col[i][3] = (cv[3] > 0.0001f ? cv[3] : 1.0f);
+    }
+    for (int i = 0; i < ns; i++) pos[i] /= scale01;
+    /* stop 顺序未必有序: 按位置插入排序(数量 <= 16, 开销可忽略) */
+    for (int i = 1; i < ns; i++) {
+        float kp = pos[i], kc[4];
+        memcpy(kc, col[i], sizeof(kc));
+        int j = i - 1;
+        while (j >= 0 && pos[j] > kp) {
+            pos[j + 1] = pos[j];
+            memcpy(col[j + 1], col[j], sizeof(kc));
+            j--;
+        }
+        pos[j + 1] = kp;
+        memcpy(col[j + 1], kc, sizeof(kc));
+    }
+    if (u <= pos[0]) { memcpy(out, col[0], sizeof(float) * 4); return 1; }
+    if (u >= pos[ns - 1]) { memcpy(out, col[ns - 1], sizeof(float) * 4); return 1; }
+    for (int i = 0; i < ns - 1; i++) {
+        if (u < pos[i] || u > pos[i + 1]) continue;
+        float span = pos[i + 1] - pos[i];
+        float f = span > 0.0001f ? (u - pos[i]) / span : 0.0f;
+        for (int k = 0; k < 4; k++) out[k] = col[i][k] + (col[i + 1][k] - col[i][k]) * f;
+        return 1;
+    }
+    memcpy(out, col[ns - 1], sizeof(float) * 4);
+    return 1;
+}
+
+/* 半平面裁剪(Sutherland–Hodgman): 保留 n·p <= d 一侧。in/out 为 x,y 交替。
+   返回输出顶点数(可能为 0 = 整体在带外)。 */
+static int clip_half(const float *in, int n, float nx, float ny, float d,
+                     float *out) {
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const float *A = &in[i * 2];
+        const float *B = &in[((i + 1) % n) * 2];
+        float da = nx * A[0] + ny * A[1] - d;
+        float db = nx * B[0] + ny * B[1] - d;
+        if (da <= 0.0f && m < LOTTIE_MAX_VERTS) {
+            out[m * 2] = A[0]; out[m * 2 + 1] = A[1]; m++;
+        }
+        if (((da < 0.0f && db > 0.0f) || (da > 0.0f && db < 0.0f)) &&
+            m < LOTTIE_MAX_VERTS) {
+            float f = da / (da - db);
+            out[m * 2]     = A[0] + (B[0] - A[0]) * f;
+            out[m * 2 + 1] = A[1] + (B[1] - A[1]) * f;
+            m++;
+        }
+    }
+    return m;
+}
+
+/* 渐变画刷(gf 填充 / gs 描边)。
+   原理: 引擎的 POLYGON 指令没有渐变通道, 而所有后端都支持"任意多边形 + 填充色",
+   因此在**形状局部空间**把几何按渐变轴切成 N 条色带, 每条色带取轴中点处的
+   插值色 —— 后端零改动即得渐变观感(带数 32 时相邻色差 <= 3%, 目视连续)。
+   gf: 用两条平行半平面把路径多边形裁成条带再发射(填充);
+   gs: 把折线按段展开成小四边形(带端点外扩以防拐角漏缝), 逐段取色 ——
+       拐角处是斜接近似而非圆角(CSS/Lottie 的 round join 不做)。 */
+static void emit_grad(hn_context *c, hn_arena *a, pathbag *bag, const lshape *paint,
+                      lmat m, float alpha, float sx, float sy, lfit f,
+                      int from, float t, float tr_s, float tr_e, float tr_o,
+                      int rep_c, float rpx, float rpy) {
+    float ov[4];
+    lprop_at(&paint->opacity, t, ov);
+    float pop = (paint->opacity.ncomp || paint->opacity.n_kf) ? norm_op(ov[0]) : 1.0f;
+    float aa = alpha * pop;
+    if (aa <= 0.003f) return;
+    if (paint->n_gstops <= 0) return;
+    int is_stroke = (paint->kind == L_STROKE_GRAD);
+    float sw = is_stroke ? lprop_at1(&paint->width, t, 0) : 0;
+    if (is_stroke && sw <= 0.05f) return;
+    /* 渐变轴(局部坐标)。径向(t=2)没有对应的几何切分方式: 等值线是圆环,
+       单轮廓多边形表达不了 —— 退化为中位色(如实写明, 不硬做)。 */
+    float av[4], ev[4];
+    lprop_at(&paint->gp0, t, av);
+    lprop_at(&paint->gp1, t, ev);
+    float ax = av[0], ay = av[1], ex = ev[0], ey = ev[1];
+    float dx = ex - ax, dy = ey - ay;
+    float len2 = dx * dx + dy * dy;
+    int solid_fallback = (paint->gtype == 2) || (len2 < 0.0001f);
+    if (solid_fallback) {
+        float mid[4];
+        grad_color_at(paint, t, 0.5f, mid);
+        hn_color col = lot_color(mid, aa);
+        for (int rep = 0; rep < (rep_c > 0 ? rep_c : 1); rep++) {
+            float rdx = rpx * (float)rep, rdy = rpy * (float)rep;
+            for (int i = from; i < bag->n_paths; i++) {
+                vbuf *v = &bag->paths[i];
+                int b0, b1;
+                if (!trim_range(v, tr_s, tr_e, tr_o, &b0, &b1)) continue;
+                int cn = b1 - b0;
+                float *out = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(cn * 2));
+                if (!out) continue;
+                for (int q = 0; q < cn; q++) {
+                    float px, py;
+                    lm_apply(m, v->v[(b0 + q) * 2], v->v[(b0 + q) * 2 + 1], &px, &py);
+                    out[q * 2]     = (px - f.ox) * f.kx + sx + rdx;
+                    out[q * 2 + 1] = (py - f.oy) * f.ky + sy + rdy;
+                }
+                hn_cmd cmd;
+                memset(&cmd, 0, sizeof(cmd));
+                cmd.kind = HN_CMD_POLYGON;
+                cmd.poly = out;
+                cmd.poly_n = cn;
+                cmd.even_odd = (paint->fill_rule == 2);
+                if (is_stroke) { cmd.stroke = col; cmd.stroke_w = sw * f.kx; }
+                else cmd.fill = col;
+                hn_paint_push(c, &cmd);
+            }
+        }
+        return;
+    }
+    const int NB = LOTTIE_GRAD_BANDS;
+    float *tmp1 = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(LOTTIE_MAX_VERTS * 2));
+    float *tmp2 = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(LOTTIE_MAX_VERTS * 2));
+    if (!tmp1 || !tmp2) return;
+    float px0 = dx * ax + dy * ay;              /* d·p0 */
+    for (int rep = 0; rep < (rep_c > 0 ? rep_c : 1); rep++) {
+        float rdx = rpx * (float)rep, rdy = rpy * (float)rep;
+        for (int i = from; i < bag->n_paths; i++) {
+            vbuf *v = &bag->paths[i];
+            int b0, b1;
+            if (!trim_range(v, tr_s, tr_e, tr_o, &b0, &b1)) continue;
+            int cn = b1 - b0;
+            if (cn < 2) continue;
+            if (is_stroke) {
+                /* 描边: 逐段四边形(端点外扩 w/2, 让相邻四边形在拐角重叠)。
+                   每段再细分 sub 份: 渐变沿路径推进时才有连续观感 ——
+                   一条两点直线只有一段, 不细分就整条一个中位色(实测缺陷)。
+                   sub 与色带数挂钩: 段少时细分多, 段多时每段一份即可。 */
+                float hw = sw * 0.5f;
+                int nseg = cn - 1;
+                int sub = nseg > 0 ? NB / nseg : 1;
+                if (sub < 1) sub = 1;
+                if (sub > 32) sub = 32;
+                for (int q = 0; q + 1 < cn; q++) {
+                    float x0 = v->v[(b0 + q) * 2], y0 = v->v[(b0 + q) * 2 + 1];
+                    float x1 = v->v[(b0 + q + 1) * 2], y1 = v->v[(b0 + q + 1) * 2 + 1];
+                    float sdx = x1 - x0, sdy = y1 - y0;
+                    float sl = sqrtf(sdx * sdx + sdy * sdy);
+                    if (sl < 1e-5f) continue;
+                    float ux = sdx / sl, uy = sdy / sl;
+                    float nx = -uy * hw, ny = ux * hw;
+                    for (int k = 0; k < sub; k++) {
+                        float k0 = (float)k / (float)sub, k1 = (float)(k + 1) / (float)sub;
+                        float ax = x0 + sdx * k0, ay = y0 + sdy * k0;
+                        float bx = x0 + sdx * k1, by = y0 + sdy * k1;
+                        float qx[4] = { ax - ux * hw + nx, bx + ux * hw + nx,
+                                        bx + ux * hw - nx, ax - ux * hw - nx };
+                        float qy[4] = { ay - uy * hw + ny, by + uy * hw + ny,
+                                        by + uy * hw - ny, ay - uy * hw - ny };
+                        float mid[4];
+                        float uu = ((dx * (ax + bx) * 0.5f + dy * (ay + by) * 0.5f) - px0) / len2;
+                        if (!grad_color_at(paint, t, uu, mid)) continue;
+                        float *out = (float *)hn_arena_alloc(a, sizeof(float) * 8);
+                        if (!out) continue;
+                        for (int m2 = 0; m2 < 4; m2++) {
+                            float px, py;
+                            lm_apply(m, qx[m2], qy[m2], &px, &py);
+                            out[m2 * 2]     = (px - f.ox) * f.kx + sx + rdx;
+                            out[m2 * 2 + 1] = (py - f.oy) * f.ky + sy + rdy;
+                        }
+                        hn_cmd cmd;
+                        memset(&cmd, 0, sizeof(cmd));
+                        cmd.kind = HN_CMD_POLYGON;
+                        cmd.poly = out;
+                        cmd.poly_n = 4;
+                        cmd.fill = lot_color(mid, aa);
+                        hn_paint_push(c, &cmd);
+                    }
+                }
+                continue;
+            }
+            /* 填充: 逐色带把多边形裁出来 */
+            for (int k = 0; k < NB; k++) {
+                float t0 = (float)k / (float)NB, t1 = (float)(k + 1) / (float)NB;
+                int n1 = clip_half(&v->v[b0 * 2], cn, -dx, -dy, -(px0 + t0 * len2), tmp1);
+                if (n1 < 3) continue;
+                int n2 = clip_half(tmp1, n1, dx, dy, px0 + t1 * len2, tmp2);
+                if (n2 < 3) continue;
+                float mid[4];
+                if (!grad_color_at(paint, t, (t0 + t1) * 0.5f, mid)) continue;
+                float *out = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(n2 * 2));
+                if (!out) continue;
+                for (int q = 0; q < n2; q++) {
+                    float px, py;
+                    lm_apply(m, tmp2[q * 2], tmp2[q * 2 + 1], &px, &py);
+                    out[q * 2]     = (px - f.ox) * f.kx + sx + rdx;
+                    out[q * 2 + 1] = (py - f.oy) * f.ky + sy + rdy;
+                }
+                hn_cmd cmd;
+                memset(&cmd, 0, sizeof(cmd));
+                cmd.kind = HN_CMD_POLYGON;
+                cmd.poly = out;
+                cmd.poly_n = n2;
+                cmd.even_odd = (paint->fill_rule == 2);
+                cmd.fill = lot_color(mid, aa);
+                hn_paint_push(c, &cmd);
+            }
+        }
+    }
+}
+
 static void emit_paint(hn_context *c, hn_arena *a, pathbag *bag, const lshape *paint,
                        lmat m, float alpha, float sx, float sy, lfit f,
                        int from, float t, float tr_s, float tr_e, float tr_o,
@@ -787,24 +1181,7 @@ static void emit_paint(hn_context *c, hn_arena *a, pathbag *bag, const lshape *p
            均匀细分折线两者差异在 1% 量级, 而精确弧长要为每条路径建前缀和,
            收益不成比例。 */
         int b0 = 0, b1 = n;
-        if (tr_s > 0.0f || tr_e < 100.0f) {
-            double total = 0;
-            for (int q = 1; q < n; q++) {
-                double dx = (double)v->v[q*2] - v->v[(q-1)*2];
-                double dy = (double)v->v[q*2+1] - v->v[(q-1)*2+1];
-                total += sqrt(dx*dx + dy*dy);
-            }
-            double a0 = fmod(tr_s + tr_o, 100.0), a1 = fmod(tr_e + tr_o, 100.0);
-            if (a0 < 0) a0 += 100.0;
-            if (a1 < 0) a1 += 100.0;
-            if (a1 <= a0) a1 += 100.0;              /* 跨 0 的情况: 绕一圈 */
-            int i0 = (int)(a0 / 100.0 * (n - 1) + 0.5);
-            int i1 = (int)(a1 / 100.0 * (n - 1) + 0.5);
-            if (i0 < 0) i0 = 0;
-            if (i1 > n - 1) i1 = n - 1;
-            if (i1 <= i0) continue;                 /* 区间为空: 不画 */
-            b0 = i0; b1 = i1 + 1;
-        }
+        if (!trim_range(v, tr_s, tr_e, tr_o, &b0, &b1)) continue;
         int cn = b1 - b0;
         if (cn < 2) continue;
         float *out = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(cn * 2));
@@ -896,8 +1273,66 @@ static void emit_group(hn_context *c, hn_arena *a, const lshape *items, int n,
         if (s->kind == L_FILL || s->kind == L_STROKE)
             emit_paint(c, a, bag, s, gm, galpha, sx, sy, f, from, t,
                        tr_s, tr_e, tr_o, has_rep ? (int)rep_c : 1, rpx, rpy);
+        else if (s->kind == L_FILL_GRAD || s->kind == L_STROKE_GRAD)
+            emit_grad(c, a, bag, s, gm, galpha, sx, sy, f, from, t,
+                      tr_s, tr_e, tr_o, has_rep ? (int)rep_c : 1, rpx, rpy);
     }
     bag->n_paths = from;
+}
+
+/* mask 最小版的裁剪矩形: 蒙版路径在**图层局部坐标**(与形状层几何同一空间,
+   图层 ks 变换随后统一作用)。路径先展平为折线, 取外接矩形, 四角过图层
+   矩阵取轴对齐 bbox —— 旋转图层下矩形蒙版依然贴着内容。返回 0 = 蒙版
+   退化(无点/零面积) → 调用方不应裁剪(视作无蒙版, 保持内容可见而非全隐)。 */
+static int mask_clip_rect(hn_arena *a, const llayer *ly, float t, lmat m,
+                          lfit f, float sx, float sy,
+                          float *cx, float *cy, float *cw, float *ch) {
+    if (!ly->has_mask) return 0;
+    vbuf bp;
+    memset(&bp, 0, sizeof(bp));
+    bp.a = a;
+    if (ly->n_mask_pkf > 0) {
+        int i = 0;
+        for (; i < ly->n_mask_pkf - 1; i++)
+            if (t >= ly->mask_pkf[i].t && t <= ly->mask_pkf[i + 1].t) break;
+        if (i >= ly->n_mask_pkf - 1) i = ly->n_mask_pkf - 2;
+        if (i < 0) i = 0;
+        const lpkf *A = &ly->mask_pkf[i], *B = &ly->mask_pkf[i + 1];
+        int n = HN_MIN(A->n, B->n);
+        if (n <= 0) return 0;
+        float span = B->t - A->t;
+        float ff = span > 0.0001f ? (t - A->t) / span : 0;
+        if (ff < 0) ff = 0; else if (ff > 1) ff = 1;
+        float *buf = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)(n * 6));
+        if (!buf) return 0;
+        for (int k = 0; k < n * 6; k++) buf[k] = A->data[k] + (B->data[k] - A->data[k]) * ff;
+        lshape tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        tmp.verts = buf; tmp.tan_in = buf + n * 2; tmp.tan_out = buf + n * 4;
+        tmp.n_verts = n; tmp.closed = ly->mask_closed;
+        path_points(a, &tmp, t, &bp);
+    } else if (ly->n_mask_v > 0) {
+        lshape tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        tmp.verts = ly->mask_v; tmp.tan_in = ly->mask_i; tmp.tan_out = ly->mask_o;
+        tmp.n_verts = ly->n_mask_v; tmp.closed = ly->mask_closed;
+        path_points(a, &tmp, t, &bp);
+    }
+    if (bp.n < 2) return 0;
+    float mnx = 1e9f, mny = 1e9f, mxx = -1e9f, mxy = -1e9f;
+    for (int i = 0; i < bp.n; i++) {
+        float px, py;
+        lm_apply(m, bp.v[i * 2], bp.v[i * 2 + 1], &px, &py);
+        float gx = (px - f.ox) * f.kx + sx;
+        float gy = (py - f.oy) * f.ky + sy;
+        if (gx < mnx) mnx = gx;
+        if (gx > mxx) mxx = gx;
+        if (gy < mny) mny = gy;
+        if (gy > mxy) mxy = gy;
+    }
+    if (mxx - mnx < 0.01f || mxy - mny < 0.01f) return 0;
+    *cx = mnx; *cy = mny; *cw = mxx - mnx; *ch = mxy - mny;
+    return 1;
 }
 
 /* ---------------- 对外绘制入口 ---------------- */
@@ -961,7 +1396,24 @@ void hn_lottie_emit(hn_context *c, struct hn_lottie *l, float clock_ms,
             continue;
         }
         if (!ly->shapes || ly->n_shapes <= 0) continue;
+        /* mask 最小版: 内容发射前裁到蒙版外接矩形(CLIP_PUSH/POP 配对)。
+           矩形蒙版精确; 曲线蒙版把少许边缘内容带进来 —— 如实写明。 */
+        float mcx = 0, mcy = 0, mcw = 0, mch = 0;
+        int mask_on = mask_clip_rect(a, ly, t, m, f, sx, sy, &mcx, &mcy, &mcw, &mch);
+        if (mask_on) {
+            hn_cmd cp;
+            memset(&cp, 0, sizeof(cp));
+            cp.kind = HN_CMD_CLIP_PUSH;
+            cp.x = mcx; cp.y = mcy; cp.w = mcw; cp.h = mch;
+            hn_paint_push(c, &cp);
+        }
         bag.n_paths = 0;
         emit_group(c, a, ly->shapes, ly->n_shapes, t, m, la, sx, sy, f, &bag, 0);
+        if (mask_on) {
+            hn_cmd cp;
+            memset(&cp, 0, sizeof(cp));
+            cp.kind = HN_CMD_CLIP_POP;
+            hn_paint_push(c, &cp);
+        }
     }
 }

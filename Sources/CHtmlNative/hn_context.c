@@ -30,6 +30,8 @@ void hn_context_destroy(hn_context *c) {
     if (!c) return;
     hn_context_lottie_clear(c);
     free(c->lot);
+    hn_context_gif_clear(c);      /* GIF 缓存与 Lottie 同一纪律: 先于结构释放 */
+    free(c->gifs);
     hn_media_sessions_clear(c);   /* 媒体会话持宿主句柄与帧缓存, 必须先于结构释放 */
     free(c->med_sessions);
     hn_canvas_dispose(c);         /* <canvas> op 账本持堆顶点/字符串, 随上下文销毁 */
@@ -50,12 +52,14 @@ void hn_context_set_doc(hn_context *c, hn_doc *doc) {
     if (replaced) {
         hn_media_sessions_clear(c);
         hn_canvas_dispose(c);
+        hn_context_gif_clear(c);   /* GIF 缓存独立于 DOM: 文档换掉即失效 */
     }
     c->doc = doc;
     /* Markdown 直染后处理: 在首次 layout 之前、<script> 执行之前
        (运行时的 run_doc_scripts 在 open/render 之后才跑)把 hn-md 源
        替换成普通 DOM 子树 —— md 一进来就变成 hn 编码。 */
     if (replaced) hn_md_apply(c->doc);
+    if (replaced) hn_fmt_apply(c->doc);   /* JSON/CSV 直染: 同一装载批次 */
     /* 主题是渲染语义: 声明了 hn-theme 就装载基座(所有平台一致) */
     hn_context_apply_theme(c);
 }
@@ -120,6 +124,7 @@ void hn_context_set_images(hn_context *c, const hn_image_backend *backend) {
 void hn_context_set_assets(hn_context *c, const hn_asset_backend *backend) {
     c->assets = backend;
     hn_context_lottie_clear(c);     /* 后端换了, 旧解析结果可能不再可得 */
+    hn_context_gif_clear(c);        /* 同上: GIF 解码结果同样随资产后端失效 */
 }
 
 const hn_asset_backend *hn_context_assets(hn_context *c) { return c ? c->assets : NULL; }
@@ -174,6 +179,43 @@ void hn_context_lottie_clear(hn_context *c) {
         if (c->lot[i].lottie) hn_lottie_free(c->lot[i].lottie);
     }
     c->n_lot = 0;
+}
+
+/* ---- GIF 动图缓存(按路径) ----
+   与 Lottie 缓存同构: 命中即返回(含负缓存); 解码走资产后端(引擎自身
+   不做 I/O)。帧序列较大, 但一个文档里 GIF 数量有限, 每路径一份是
+   正确的平衡(比每帧重解省掉 LZW 全量重跑)。 */
+hn_gif *hn_context_gif(hn_context *c, const char *path) {
+    if (!c || !path || !*path) return NULL;
+    for (int i = 0; i < c->n_gif; i++)
+        if (c->gifs[i].path && !strcmp(c->gifs[i].path, path)) return c->gifs[i].gif;
+    hn_gif *g = NULL;
+    const hn_asset_backend *ab = c->assets;
+    if (ab && ab->load) {
+        size_t len = 0;
+        const char *bytes = ab->load(ab->ctx, path, &len);
+        if (bytes && len) g = hn_gif_decode((const unsigned char *)bytes, len);
+    }
+    if (c->n_gif == c->cap_gif) {
+        int nc = c->cap_gif ? c->cap_gif * 2 : 8;
+        void *nv = realloc(c->gifs, sizeof(*c->gifs) * (size_t)nc);
+        if (!nv) { if (g) hn_gif_free(g); return NULL; }
+        c->gifs = nv;
+        c->cap_gif = nc;
+    }
+    c->gifs[c->n_gif].path = hn_strdup(path);
+    c->gifs[c->n_gif].gif = g;      /* 失败也入表(负缓存) */
+    c->n_gif++;
+    return g;
+}
+
+void hn_context_gif_clear(hn_context *c) {
+    if (!c || !c->gifs) return;
+    for (int i = 0; i < c->n_gif; i++) {
+        free(c->gifs[i].path);
+        if (c->gifs[i].gif) hn_gif_free(c->gifs[i].gif);
+    }
+    c->n_gif = 0;
 }
 
 /* ---- 脚本驱动网格 ---- */
@@ -991,13 +1033,24 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
         rgba_of(st->background, bg_now);
         rgba_of(st->color, fg_now);
 
-        /* 外部资源动画时钟(Lottie / 网格变形): 与 CSS 动画共用帧循环, 但独立累加。
-           CSS 动画有"播完"概念, Lottie 需要持续时钟(自身循环取模)。
-           有声明就把节点标记为活跃, 帧驱动才会持续调用 repaint。 */
+        /* 外部资源动画时钟(Lottie / 网格变形 / GIF 动图): 与 CSS 动画共用帧
+           循环, 但独立累加。CSS 动画有"播完"概念, Lottie 与 GIF 需要持续
+           时钟(自身循环取模)。有声明就把节点标记为活跃, 帧驱动才会持续
+           调用 repaint。GIF 只在**真的解出多帧**时才算活跃(单帧 GIF 或
+           解码失败退化为静态图, 不该让帧循环空转)。 */
         if (dt_ms > 0 &&
             (hn_node_attr(n, "hn-lottie") || hn_node_attr(n, "hn-mesh") || n->mesh_verts)) {
             n->ext_clock += dt_ms;
             active = 1;
+        } else if (dt_ms > 0 && hn_node_gif_src(n)) {
+            hn_gif *gg = hn_context_gif(c, hn_node_gif_src(n));
+            if (gg && hn_gif_frame_count(gg) > 1) {
+                /* hn-gif-speed: 与 hn-lottie-speed 同一语义(倍速)。
+                   时钟本身保持统一推进, 取帧时按倍速缩放 —— 与 Lottie 在
+                   绘制点乘 speed 的做法一致(节点时钟不因倍速而不同频)。 */
+                n->ext_clock += dt_ms;
+                active = 1;
+            }
         }
 
         /* @keyframes 动画: 声明了 animation-name 且能在样式表里找到定义。
@@ -2013,6 +2066,11 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
     out->lifecycle = NULL;
     out->presence = HN_PRESENCE_AUTO;
     out->applet = NULL;
+    /* 桌宠形态缺省: 普通层级/有边框/不穿透/不跨空间(与既有行为一致) */
+    out->level = HN_LEVEL_NORMAL;
+    out->frameless = 0;
+    out->click_through = 0;
+    out->spaces_all = 0;
     if (!doc || !doc->root) return;
 
     hn_node *stack[256];
@@ -2064,6 +2122,20 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
                 } else if (!strcmp(name, "hn-lifecycle")) {
                     /* 关心哪些生命周期事件: "launch show hide destroy"(空格分隔) */
                     out->lifecycle = content;
+                } else if (!strcmp(name, "hn-level")) {
+                    /* 窗口层级: floating = 悬浮于普通窗口之上;
+                       desktop = 桌面级(壁纸之上、普通窗口之下);
+                       normal 或未知值 = 普通层级 */
+                    if (!strcmp(content, "floating")) out->level = HN_LEVEL_FLOATING;
+                    else if (!strcmp(content, "desktop")) out->level = HN_LEVEL_DESKTOP;
+                    else out->level = HN_LEVEL_NORMAL;
+                } else if (!strcmp(name, "hn-frameless")) {
+                    out->frameless = strcmp(content, "false") && strcmp(content, "0");
+                } else if (!strcmp(name, "hn-click-through")) {
+                    out->click_through = strcmp(content, "false") && strcmp(content, "0");
+                } else if (!strcmp(name, "hn-spaces")) {
+                    /* "all" = 跟随所有空间(含全屏空间旁边); 其余值不跨空间 */
+                    out->spaces_all = !strcmp(content, "all");
                 }
             }
         }
@@ -2218,6 +2290,7 @@ int hn_doc_swap(hn_doc *doc, const char *target_id, hn_swap_mode mode,
     if (html_src && len) hn_parse_into(doc, frag, html_src, len);
     splice_children(doc, frag, target, mode);
     hn_md_apply(doc);   /* 片段里带入的 hn-md 同样先变成普通 DOM */
+    hn_fmt_apply(doc);  /* 片段里带入的 hn-json/hn-csv 同批转换 */
     return 1;
 }
 
@@ -2238,6 +2311,7 @@ void hn_context_render(hn_context *c, const char *html_src, size_t len) {
     }
     /* 热更新可能改写了 hn-theme: 重新装载主题基座 */
     hn_md_apply(c->doc);   /* 新内容里的 hn-md 同样先变成普通 DOM */
+    hn_fmt_apply(c->doc);  /* 新内容里的 hn-json/hn-csv 同批转换 */
     hn_context_apply_theme(c);
 }
 

@@ -29,6 +29,9 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
     if (!w) return NULL;
     w->w = d->width; w->h = d->height; w->transparent = d->transparent;
     snprintf(w->title, sizeof(w->title), "%s", d->title ? d->title : "hn");
+    /* always_on_top/no_shadow/click_through/join_all_spaces/borderless:
+       桌宠形态字段在无头平台优雅忽略(没有窗口表面可物化; 字段存在是为了
+       调用方三平台同源, 见 hn_platform.h)。 */
     return w;
 }
 
@@ -60,6 +63,10 @@ void hnp_window_set_title(hnp_window *w, const char *utf8) {
     if (!w) return;
     snprintf(w->title, sizeof(w->title), "%s", utf8 ? utf8 : "hn");
 }
+
+/* 运行期鼠标穿透: 无头平台没有窗口表面, 声明照常接受(调用方不必分平台),
+   物化语义不存在 —— 空实现 + 注释, 与 always_on_top 等 desc 字段同一口径。 */
+void hnp_window_set_click_through(hnp_window *w, int on) { (void)w; (void)on; }
 
 int hnp_pump(hnp_event *ev, int timeout_ms) {
     if (!ev) return 0;

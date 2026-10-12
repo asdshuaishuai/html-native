@@ -2,6 +2,7 @@
 #ifndef HN_INTERNAL_H
 #define HN_INTERNAL_H
 #include "hn.h"
+#include "hn_gif.h"   /* GIF 帧序列 API(hn_gif.c); 上下文缓存/绘制点两处都用 */
 
 /* ---------- arena ---------- */
 typedef struct hn_arena hn_arena;
@@ -211,6 +212,11 @@ typedef struct hn_style {
     float      min_w, max_w;   unsigned char min_w_u, max_w_u;  /* -1/AUTO = 未设 */
     float      min_h, max_h;   unsigned char min_h_u, max_h_u;
     unsigned char margin_auto; /* bit1 top bit2 right bit4 bottom bit8 left */
+    /* object-fit: <img> 的内容适配(替换元素的"内容盒内放置"语义)。
+       0=fill(缺省, 拉伸铺满 —— 与旧口径逐位一致) 1=contain 2=cover 3=none。
+       此前完全没有: 声明了不生效也不报错, 所有图片一律被拉伸。
+       非 <img> 元素声明它无副作用(绘制点只在 <img> 分支消费)。 */
+    unsigned char object_fit;
 } hn_style;
 
 /* 行内片段: 某节点文本的一段在行盒中的位置(绝对坐标)。
@@ -395,6 +401,13 @@ void     hn_dom_append(hn_node *parent, hn_node *child);
  * 元素数量。之后样式/布局/绘制/交互全部走既有管线, 零特例。 */
 int hn_md_apply(hn_doc *doc);
 
+/* ---------- JSON / CSV 直染(hn_fmt.c) ----------
+ * 与 hn_md 同一挂点批次: <div hn-json> 源 → 语法着色树(.json-head 摘要 +
+ * .json-row 缩进行 + tok-k/tok-s/tok-n/tok-b 令牌); <div hn-csv>
+ * (hn-csv-sep 可选分隔符)→ 既有 table 语义(.csv-head 表头 + 数字列右对齐)。
+ * 深度/扇出/行数截断, 失败优雅回落原样代码块。返回转换的元素数量。 */
+int hn_fmt_apply(hn_doc *doc);
+
 /* ---------- 链接导航(pending link; hn_context.c 实现) ---------- */
 /* 置入待消费链接(替换旧值); 供 hn_context_activate_link 内部使用 */
 void hn_doc_set_pending_link(hn_doc *doc, const char *href);
@@ -519,6 +532,12 @@ struct hn_context {
        文档重渲染时由 hn_context_compact 清空(旧 arena 已随文档失效)。 */
     struct { char *path; struct hn_lottie *lottie; } *lot;
     int n_lot, cap_lot;
+    /* GIF 动图缓存(hn_gif.c): 与 Lottie 同一纪律 —— 按路径惰性解码一次,
+       键用副本, 文档替换/compact/destroy/换资产后端时全部清空。
+       帧序列(合成后的整幅 RGBA)生命周期跟随本缓存, 显示列表的 BITMAP
+       指令直接引用它 —— 下次 repaint 前不会被回收。 */
+    struct { char *path; hn_gif *gif; } *gifs;
+    int n_gif, cap_gif;
     /* 媒体宿主与会话表(hn_media.c)。宿主指针由运行时持有(NULL = 禁用);
        会话随文档替换/compact/destroy 全部 close+free —— 与 Lottie 缓存同一
        清理纪律(节点指针随旧文档 arena 失效)。 */
@@ -566,6 +585,13 @@ void hn_lottie_emit(hn_context *c, struct hn_lottie *l, float clock_ms,
                     const char *fit);
 struct hn_lottie *hn_lottie_load(hn_context *c, const char *path);
 void hn_lottie_free(struct hn_lottie *l);
+
+/* GIF 动图(hn_gif.c 解码 + hn_context.c 缓存)。
+   缓存口径与 Lottie 一致: 按路径惰性解码一次, 负结果也缓存(避免每帧重试)。 */
+hn_gif *hn_context_gif(hn_context *c, const char *path);
+void hn_context_gif_clear(hn_context *c);
+/* 该元素要按 GIF 播放的源(见 hn_gif.c 尾部注释); 非 GIF 返回 NULL */
+const char *hn_node_gif_src(hn_node *n);
 
 /* 网格变形(hn_mesh.c): 发射 MESH 指令 */
 void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,

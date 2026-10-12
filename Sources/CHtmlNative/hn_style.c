@@ -1200,6 +1200,15 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
     } else if (!strcmp(name, "box-sizing")) {
         if (!next_tok(&v, &t)) return;
         st->box_border = sv_eq(t, "border-box") ? 1 : 0;
+    } else if (!strcmp(name, "object-fit")) {
+        /* object-fit: fill | contain | cover | none(替换元素内容适配)。
+           仅 <img> 绘制点消费; 其他元素声明无副作用。scale-down 视作 contain
+           (声明它至少不再被静默忽略)。 */
+        if (!next_tok(&v, &t)) return;
+        if (sv_eq(t, "contain") || sv_eq(t, "scale-down")) st->object_fit = 1;
+        else if (sv_eq(t, "cover")) st->object_fit = 2;
+        else if (sv_eq(t, "none")) st->object_fit = 3;
+        else st->object_fit = 0;                     /* fill(缺省) */
     } else if (!strcmp(name, "opacity")) {
         if (next_tok(&v, &t) && sv_num(t, &f)) st->opacity = f < 0 ? 0 : (f > 1 ? 1 : f);
     } else if (!strcmp(name, "filter")) {

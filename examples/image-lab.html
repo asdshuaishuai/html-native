@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html><head>
+<!-- image-lab — 图片 / 动态图 / Lottie 渲染力演示(920x880, hn-theme dark)
+     ============================================================
+     四组能力同屏:
+       1. GIF 动图     examples/assets/anim-demo.gif(引擎解码 GIF87a/89a,
+                       LZW + 全局/局部色表 + 帧间 disposal, 8 帧循环),
+                       时钟由既有帧循环(节点 ext_clock)驱动;
+       2. Lottie 增强   examples/assets/gradient-lab.json —— 多 stop 线性
+                       渐变填充(gf) / 渐变描边(gs) / mask 最小版(masksProperties
+                       加法蒙版按外接矩形裁剪, 蒙版路径带关键帧);
+                       对照 examples/assets/loading.json(既有能力回归);
+       3. 静态 PNG     chart.png 三档, 配 object-fit: contain / cover / fill
+                       (content 盒内的等比适配);
+       4. object-fit 同源对照 同一张 PNG 在三个盒里三种适配, 外加 none
+                       (固有尺寸原样居中 —— 盒大于图时留边, 小于时溢出)。
+
+     渲染(离屏截图, 仓库根目录执行; HN_CLOCK 推进全部引擎动画到指定时刻,
+     两张逐字节不同 = GIF 与 Lottie 都在走):
+       HN_CLOCK=0   dist/hncore-macos-arm64 render examples/image-lab.html screenshots/image-lab.png    920 880
+       HN_CLOCK=140 dist/hncore-macos-arm64 render examples/image-lab.html screenshots/image-lab-f2.png 920 880
+     取 140ms 而不是整轮倍数: anim-demo.gif 一轮 560ms(8x70),
+     600/300 都落在帧边界的同一像素上(GIF#3 缩放盒还会因整除取样完全一致);
+     140ms 让三张 GIF 与两个 Lottie 都停在各自的中间帧。
+-->
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x880">
+<meta name="hn-title" content="image-lab · 图片 / 动图 / Lottie">
+<meta name="hn-theme" content="dark">
+<style>
+  html, body { margin: 0; }
+  #page { height: 880; box-sizing: border-box; padding: 16 26;
+          overflow: hidden; background: var(--bg); }
+  h1 { font-size: 21; font-weight: 700; color: var(--ink); margin: 0; }
+  .sub { font-size: 11; color: var(--dim); margin-top: 3; }
+  h2 { font-size: 12; color: var(--accent-2); letter-spacing: 2;
+       margin: 11 0 6 0; font-weight: 700; }
+  .cap { font-size: 10; color: var(--dim); }
+  .row { display: flex; gap: 14; }
+  .card { background: #151b28; border: 1 solid #232b3c; border-radius: 12;
+          padding: 9; box-sizing: border-box;
+          display: flex; flex-direction: column; align-items: center; gap: 5; }
+  .k { font-size: 10; color: var(--dim); }
+
+  /* ---- 1. GIF 动图(时钟驱动, 循环) ---- */
+  .gifcard { width: 158; height: 146; }
+  .gifbox { width: 100; height: 100; border-radius: 10; overflow: hidden;
+            background: #0f131a; display: flex; }
+  .gif { width: 100; height: 100; }
+  .gifsm { width: 64; height: 64; }
+  .gifboxsm { width: 64; height: 64; border-radius: 8; overflow: hidden;
+              background: #0f131a; display: flex; }
+
+  /* ---- 2. Lottie ---- */
+  .lotcard { width: 200; height: 190; }
+  .lot { width: 140; height: 140; }
+  .lotbox { width: 140; height: 140; border-radius: 10; overflow: hidden;
+            background: #0f131a; display: flex; }
+
+  /* ---- 3. 静态 PNG + object-fit ---- */
+  .fitcard { width: 214; height: 146; }
+  .fitbox { width: 188; height: 96; border-radius: 9; overflow: hidden;
+            background: #0f131a; display: flex; border: 1 solid #1e2637; }
+  /* 源图是竖构图(trace-shot.png 118x190 一类), 盒是横的 —— 差异一眼可见 */
+  .ofcontain { width: 188; height: 96; object-fit: contain; }
+  .ofcover   { width: 188; height: 96; object-fit: cover; }
+  .offill    { width: 188; height: 96; object-fit: fill; }
+  .ofnone    { width: 188; height: 96; object-fit: none; }
+
+  /* ---- 4. 同源对照条 ---- */
+  .strip { display: flex; gap: 10; }
+  .sbox { width: 128; height: 78; border-radius: 8; overflow: hidden;
+          background: #0f131a; display: flex; border: 1 solid #1e2637; }
+  .simg { width: 128; height: 78; }
+  .slab { font-size: 10; color: var(--dim); text-align: center; margin-top: 3; }
+</style>
+</head><body>
+<div id="page">
+
+  <h1>image-lab — 图片 · 动图 · Lottie</h1>
+  <div class="sub">GIF 解码(cid: hn_gif.c: LZW / 色表 / disposal / 透明索引) · Lottie 多 stop 渐变与 mask · object-fit</div>
+
+  <!-- ═══ 1. GIF 动图 ═══ -->
+  <h2>① GIF 动图(时钟驱动 · 循环 · 与 Lottie 同一帧循环)</h2>
+  <div class="row">
+    <div class="card gifcard">
+      <div class="gifbox"><img class="gif" src="examples/assets/anim-demo.gif"></div>
+      <div class="k">anim-demo.gif(48x48 · 8 帧 · 70ms/帧)</div>
+    </div>
+    <div class="card gifcard">
+      <div class="gifbox"><img class="gif" src="examples/assets/anim-demo.gif" hn-gif hn-gif-speed="2"></div>
+      <div class="k">hn-gif 显式声明 + 2 倍速</div>
+    </div>
+    <div class="card" style="width:104;height:146">
+      <div class="gifboxsm"><img class="gifsm" src="examples/assets/anim-demo.gif"></div>
+      <div class="k">缩小盒</div>
+    </div>
+    <div class="cap" style="width:236;padding-top:6">
+      GIF87a/89a 走引擎自带解码器: 全局/局部色表、LZW、
+      帧间 disposal(0/1/2/3)、透明色索引、NETSCAPE 循环次数、
+      交织。当前帧 = 时钟的纯函数(按每帧 delay 累计取模)，
+      所以 HN_CLOCK 取帧、循环回绕、真窗连续播放同一套口径。
+      挂载: src 以 .gif 结尾自动生效, 或 hn-gif 显式声明。
+    </div>
+  </div>
+
+  <!-- ═══ 2. Lottie ═══ -->
+  <h2>② Lottie: 多 stop 渐变(gf/gs) + mask 最小版 + 既有能力回归</h2>
+  <div class="row">
+    <div class="card lotcard">
+      <div class="lotbox"><img class="lot" src="examples/assets/gradient-lab.json" hn-lottie></div>
+      <div class="k">gradient-lab.json: 渐变填充 / 渐变描边 / 蒙版关键帧</div>
+    </div>
+    <div class="card lotcard">
+      <div class="lotbox"><img class="lot" src="examples/assets/loading.json" hn-lottie></div>
+      <div class="k">loading.json(既有: 旋转环 / 路径变形 / 脉冲点)</div>
+    </div>
+    <div class="cap" style="width:214;padding-top:6">
+      左边这张全部由新能力构成: 左上 = 四 stop 线性渐变卡片(沿对角线
+      蓝→紫→品红→橙, 带 360° 旋转); 左下 = 渐变描边圆环(三 stop,
+      沿圆周推进); 右上 = 长条渐变被 mask 裁剪(蒙版矩形带关键帧,
+      中段展宽再收回 —— mask 走的是路径外接矩形的 CLIP 裁剪, 矩形
+      蒙版精确, 曲线蒙版是外接盒近似); 右下 = 径向渐变(t=2)退化为
+      中位色的边界示例。
+    </div>
+  </div>
+
+  <!-- ═══ 3. 静态 PNG + object-fit ═══ -->
+  <h2>③ 静态 PNG(object-fit: contain / cover / fill)</h2>
+  <div class="row">
+    <div class="card fitcard">
+      <div class="fitbox"><img class="ofcontain" src="examples/assets/trace-shot.png"></div>
+      <div class="k">object-fit: contain(等比装得下, 留边)</div>
+    </div>
+    <div class="card fitcard">
+      <div class="fitbox"><img class="ofcover" src="examples/assets/trace-shot.png"></div>
+      <div class="k">object-fit: cover(等比盖得住, 裁边)</div>
+    </div>
+    <div class="card fitcard">
+      <div class="fitbox"><img class="offill" src="examples/assets/trace-shot.png"></div>
+      <div class="k">object-fit: fill(拉伸铺满, 缺省口径)</div>
+    </div>
+  </div>
+
+  <!-- ═══ 4. object-fit 同源四条 ═══ -->
+  <h2>④ object-fit 同源对照(同一张竖构图 PNG, 同一个横盒)</h2>
+  <div class="strip">
+    <div>
+      <div class="sbox"><img class="simg ofcontain" src="examples/assets/trace-chart.png"></div>
+      <div class="slab">contain</div>
+    </div>
+    <div>
+      <div class="sbox"><img class="simg ofcover" src="examples/assets/trace-chart.png"></div>
+      <div class="slab">cover</div>
+    </div>
+    <div>
+      <div class="sbox"><img class="simg ofnone" src="examples/assets/trace-chart.png"></div>
+      <div class="slab">none(固有尺寸居中)</div>
+    </div>
+    <div>
+      <div class="sbox"><img class="simg offill" src="examples/assets/trace-chart.png"></div>
+      <div class="slab">fill(拉伸)</div>
+    </div>
+    <div>
+      <div class="sbox"><img class="simg ofcontain" src="examples/assets/chart.png"></div>
+      <div class="slab">contain(横构图源)</div>
+    </div>
+  </div>
+  <div class="cap" style="margin-top:5">
+    object-fit 的固有尺寸来自图片后端注入; 未注入时引擎直接嗅探文件头
+    (PNG IHDR / GIF 逻辑屏 / BMP biWidth-biHeight)—— 不引入解码依赖。
+    未识别格式退回旧口径(拉伸), 声明不再被静默忽略。
+  </div>
+
+</div>
+</body></html>

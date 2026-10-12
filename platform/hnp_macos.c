@@ -4,6 +4,9 @@
  * 连链接期都不需要 framework(全部 dlsym)。
  * 事件常量逐值取自 SDK 的 NSEvent.h(NSEventTypeLeftMouseDown=1 等) ——
  * 不要凭记忆写(旧版枚举混写曾让 KitDefined 落进 keydown 分支崩溃)。
+ * 窗口层级/collectionBehavior 常量同样逐值抄自 SDK(CGWindowLevel.h /
+ * NSWindow.h, 见下方宏注释): 既有 int 又是 NSUInteger 位集, 凭记忆写
+ * 会静默错位。
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +28,13 @@ static obj_t (*o_msgSend)(obj_t, sel_t, ...);
 #define MSG1(RET, O, NAME, A1) \
     ((RET (*)(obj_t, sel_t, obj_t))o_msgSend)((O), o_sel(NAME), (obj_t)(A1))
 #define MSGI(RET, O, NAME, I) ((RET (*)(obj_t, sel_t, int))o_msgSend)((O), o_sel(NAME), (I))
+/* NSInteger/NSUInteger 参数(setLevel: 收 NSInteger, setCollectionBehavior: 收
+   NSUInteger)。不能用 MSGI: 变参 ABI 下窄整数的寄存器高位是未定义的,
+   负层级(desktop 级在 INT32_MIN 附近)会被读错 —— 必须按 64 位传。 */
+#define MSGL(RET, O, NAME, L) \
+    ((RET (*)(obj_t, sel_t, long))o_msgSend)((O), o_sel(NAME), (long)(L))
+#define MSGUL(RET, O, NAME, UL) \
+    ((RET (*)(obj_t, sel_t, unsigned long))o_msgSend)((O), o_sel(NAME), (unsigned long)(UL))
 
 typedef struct { double x, y; } CGPoint;
 typedef struct { double w, h; } CGSize;
@@ -47,6 +57,37 @@ typedef struct CGColorSpace *CGColorSpaceRef;
 #define EV_APPDEF 15
 #define EV_PERIODIC 16
 #define EV_SCROLL 22
+
+/* ---------------- 桌宠窗口形态常量(逐值抄自 SDK 头, 不凭记忆) ----------------
+
+   NSWindowLevel(NSWindow.h:192 `typedef NSInteger NSWindowLevel`)与
+   CGWindowLevel(CGWindowLevel.h:44 `typedef int32_t CGWindowLevel`)同一套值:
+     NSNormalWindowLevel   = kCGNormalWindowLevel   = 0    (CGWindowLevel.h:67)
+     NSFloatingWindowLevel = kCGFloatingWindowLevel = 3    (CGWindowLevel.h:68)
+     "desktop" 级没有 NS 名, 用 CG 宏:
+     kCGDesktopWindowLevel = kCGMinimumWindowLevel + 20    (CGWindowLevel.h:64)
+     其中 kCGMinimumWindowLevel = kCGBaseWindowLevel + kCGNumReservedBaseWindowLevels
+                               = INT32_MIN + 5              (CGWindowLevel.h:59-60)
+   即 desktop 级 = INT32_MIN + 25 —— 一个很大的负数, 这正是必须按 NSInteger
+   64 位传参的理由(见 MSGL 注释)。 */
+#define HN_NS_FLOATING_LEVEL 3
+#define HN_NS_DESKTOP_LEVEL  ((long)-2147483648L + 5 + 20)   /* INT32_MIN + 25 */
+
+/* NSWindowCollectionBehavior(NSWindow.h:128-149, 2026-10 抄录):
+     CanJoinAllSpaces = 1<<0 (:130)  跟随所有空间(含全屏空间旁边)
+     MoveToActiveSpace= 1<<1 (:131)  切空间时搬到当前活动空间
+     Managed          = 1<<2 (:133)  参与 spaces/exposé(normal 级默认)
+     Transient        = 1<<3 (:134)  在 spaces 中浮动, 被 exposé 隐藏
+     Stationary       = 1<<4 (:135)  不被 exposé 带走 —— 桌面窗口语义
+     IgnoresCycle     = 1<<6 (:138)  不进 Cmd+` 循环(浮动级默认)
+   桌宠组合 = CanJoinAllSpaces|Stationary|IgnoresCycle:
+     跟所有空间(所有桌面都看得见) + 不随 Mission Control 位移 + 不参与窗口循环。
+   注: CanJoinAllApplications(1<<18, :149)是 macOS 13+ 才有的 beat,
+   不开(留 ≤12 可运行)。 */
+#define HN_CB_CAN_JOIN_ALL_SPACES (1UL << 0)
+#define HN_CB_STATIONARY          (1UL << 4)
+#define HN_CB_IGNORES_CYCLE       (1UL << 6)
+#define HN_CB_PET (HN_CB_CAN_JOIN_ALL_SPACES | HN_CB_STATIONARY | HN_CB_IGNORES_CYCLE)
 
 static obj_t nsstr(const char *s) {
     return ((obj_t (*)(obj_t, sel_t, const char *))o_msgSend)(
@@ -79,14 +120,59 @@ struct hnp_window {
 /* 可打印字符的缓冲(单事件生命周期, 调用方在下次 pump 前消费) */
 static char g_utf8[8];
 
+/* 可拖动的内容视图子类: NSImageView.mouseDownCanMoveWindow 实测返回 0
+   (/tmp 探针实测: NSView 默认为 1, NSImageView 为 0), 拖动落在图上即失效
+   —— 桌宠整窗都是内容, 没有可拖的空白。运行期用 objc_allocateClassPair +
+   class_addMethod 建一个覆写该方法的子类(实测返回 1)。延迟注册一次,
+   供所有窗口复用; 运行时无这些符号(理论不可能, 同进程必有 libobjc)时返回
+   NULL, 调用方回退到原始 NSImageView(退化为"不可拖")。 */
+static signed char hn_view_can_move_window(obj_t self, sel_t cmd) {
+    (void)self; (void)cmd;
+    return 1;   /* 任意位置按下都可拖动窗口 */
+}
+
+static obj_t hn_pet_view_class(void) {
+    static obj_t cls;
+    if (cls) return cls;
+    obj_t (*alloc_pair)(obj_t, const char *, size_t) =
+        (obj_t (*)(obj_t, const char *, size_t))dlsym(RTLD_DEFAULT, "objc_allocateClassPair");
+    signed char (*add_method)(obj_t, sel_t, void (*)(void), const char *) =
+        (signed char (*)(obj_t, sel_t, void (*)(void), const char *))dlsym(RTLD_DEFAULT, "class_addMethod");
+    void (*reg_pair)(obj_t) = (void (*)(obj_t))dlsym(RTLD_DEFAULT, "objc_registerClassPair");
+    if (!alloc_pair || !add_method || !reg_pair) return NULL;
+    cls = alloc_pair(o_getClass("NSImageView"), "HNPImageView", 0);
+    if (!cls) return NULL;
+    /* 类型编码 "c@:" = BOOL 返回, self, _cmd(与 BOOL 的一致编码) */
+    if (!add_method(cls, o_sel("mouseDownCanMoveWindow"),
+                    (void (*)(void))hn_view_can_move_window, "c@:")) {
+        cls = NULL;
+        return NULL;
+    }
+    reg_pair(cls);
+    return cls;
+}
+
 hnp_window *hnp_window_open(const hnp_window_desc *d) {
     if (!d) return NULL;
     hnp_window *w = (hnp_window *)calloc(1, sizeof(*w));
     if (!w) return NULL;
     w->w = d->width; w->h = d->height; w->transparent = d->transparent;
 
+    /* styleMask(NSWindow.h:55-63):
+         Titled=1<<0 Closable=1<<1 Miniaturizable=1<<2 Resizable=1<<3
+       现状: 之前透明的窗口被顺手做成 style=0(无边框)——"透明"其实
+       隐含了"无标题栏", 但两者是独立的意图(可以有标题栏的透明窗口)。
+       桌宠形态把它拆开: borderless 显式声明无边框; transparent 只管
+       isOpaque/底色。两者都不声明时保持常规(可调尺寸)窗口。
+
+       注意 borderless 必须 style=0, 不能只留 Resizable: 只带 Resizable
+       的无标题窗口会被 AppKit 装上一圈**可拖拽的 resize 边**(实测
+       CGWindowList 报的尺寸比声明的少 8px —— 360x360 的桌宠变成 352x352
+       内容区 + 4px 死边框)。桌宠的边界必须在文档里看不见, 尺寸变化交给
+       文档/运行时(--shot 尺寸、热更新的 hn-window 改写), 不由拖边触发。 */
     unsigned long style = d->resizable ? (1 | 2 | 4 | 8) : (1 | 2 | 4);
-    if (d->transparent) style = 0;
+    if (d->borderless) style = 0;
+    else if (d->transparent) style = 0;   /* 兼容既有: 透明窗口保持无边框 */
     CGRect r = { { 0, 0 }, { (double)d->width, (double)d->height } };
     obj_t win = MSG0(obj_t, o_getClass("NSWindow"), "alloc");
     win = ((obj_t (*)(obj_t, sel_t, CGRect, unsigned long, unsigned long, int))o_msgSend)(
@@ -97,7 +183,27 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
         MSGI(void, win, "setOpaque:", 0);
         MSG1(void, win, "setBackgroundColor:", MSG0(obj_t, o_getClass("NSColor"), "clearColor"));
     }
-    obj_t iv = MSG0(obj_t, o_getClass("NSImageView"), "alloc");
+
+    /* ---- 桌宠形态(见 hn_platform.h 的字段注释) ---- */
+    /* 层级: floating=NSFloatingWindowLevel(3) / desktop=kCGDesktopWindowLevel
+       (INT32_MIN+25)。按 NSInteger 传(MSGL) —— 桌面级是负数, 走 int
+       变参在高位未定义时会被读错。 */
+    if (d->always_on_top == 1) MSGL(void, win, "setLevel:", HN_NS_FLOATING_LEVEL);
+    else if (d->always_on_top == 2) MSGL(void, win, "setLevel:", HN_NS_DESKTOP_LEVEL);
+    /* 跨空间: CanJoinAllSpaces|Stationary|IgnoresCycle(值见文件头宏注释) */
+    if (d->join_all_spaces) MSGUL(void, win, "setCollectionBehavior:", HN_CB_PET);
+    if (d->no_shadow) MSGI(void, win, "setHasShadow:", 0);
+    /* 鼠标穿透: 幽灵模式初始态(运行期切换见 hnp_window_set_click_through) */
+    if (d->click_through) MSGI(void, win, "setIgnoresMouseEvents:", 1);
+    /* 无边框 + 可拖: 桌宠没有标题栏可拖, 内容就是唯一拖动面。
+       movableByWindowBackground(NSWindow.h:414) 对 borderless 窗口生效;
+       内容视图需 mouseDownCanMoveWindow=YES(NSView 默认为 1, 但
+       NSImageView 实测为 0 —— 见 hn_pet_view_class)。 */
+    if (d->borderless) MSGI(void, win, "setMovableByWindowBackground:", 1);
+
+    obj_t cls = hn_pet_view_class();
+    obj_t iv = cls ? MSG0(obj_t, cls, "alloc") : MSG0(obj_t, o_getClass("NSImageView"), "alloc");
+    if (!iv) iv = MSG0(obj_t, o_getClass("NSImageView"), "alloc");
     CGRect cr = { { 0, 0 }, { (double)d->width, (double)d->height } };
     iv = ((obj_t (*)(obj_t, sel_t, CGRect))o_msgSend)(iv, o_sel("initWithFrame:"), cr);
     MSG1(void, win, "setContentView:", iv);
@@ -157,6 +263,13 @@ void hnp_window_invalidate(hnp_window *w) { if (w && w->win) MSG0(void, w->win, 
 
 void hnp_window_set_title(hnp_window *w, const char *utf8) {
     if (w && w->win) MSG1(void, w->win, "setTitle:", nsstr(utf8 ? utf8 : "hn"));
+}
+
+/* 运行期鼠标穿透切换(桌宠幽灵模式)。setIgnoresMouseEvents: 立即生效,
+   无需重开窗口; 穿透中窗口收不到任何鼠标事件(点击落到桌面/下层窗口),
+   切回 0 恢复。 */
+void hnp_window_set_click_through(hnp_window *w, int on) {
+    if (w && w->win) MSGI(void, w->win, "setIgnoresMouseEvents:", on ? 1 : 0);
 }
 
 static hnp_key mac_keycode_to_hnp(unsigned short kc) {

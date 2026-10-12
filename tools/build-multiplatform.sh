@@ -34,12 +34,13 @@ WASM_SRC=("${WASM3_SRC[@]}" Sources/CHtmlNative/hn_wasm.c)
 
 SRC=(tools/hncore.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
      Sources/CHtmlNative/hn_md.c \
+     Sources/CHtmlNative/hn_fmt.c \
      Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
      Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
      Sources/CHtmlNative/hn_media.c \
      Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
-     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c \
+     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c \
      Sources/CHtmlNative/hnsoft.c)
 SRC+=("${WASM_SRC[@]}")
 
@@ -158,12 +159,13 @@ build "hncore-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
 WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_md.c
+        Sources/CHtmlNative/hn_fmt.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
         Sources/CHtmlNative/hn_media.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
+        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
         Sources/CHtmlNative/hnsoft.c)
 WIN_RT+=("${WASM_SRC[@]}")
 
@@ -181,12 +183,13 @@ echo
 LINUX_RT=(tools/hnweb_linux.c
           Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_md.c
+        Sources/CHtmlNative/hn_fmt.c
           Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
           Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
           Sources/CHtmlNative/hn_media.c
           Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
           Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-          Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
+          Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
           Sources/CHtmlNative/hnsoft.c)
 LINUX_RT+=("${WASM_SRC[@]}")
 build "hnweb-linux-x86_64"  "x86_64-linux-musl"  "" "-DHN_NO_TEXT" \
@@ -207,12 +210,13 @@ build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
 MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
         Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_md.c
+        Sources/CHtmlNative/hn_fmt.c
         Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
         Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
         Sources/CHtmlNative/hn_media.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
+        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
         Sources/CHtmlNative/hnsoft.c)
 MAC_RT+=("${WASM_SRC[@]}")
 build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
@@ -224,15 +228,24 @@ build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 RT_SRC="rt/hn_rt.c"
 ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_md.c
+        Sources/CHtmlNative/hn_fmt.c
             Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
             Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
             Sources/CHtmlNative/hn_media.c
             Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
             Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-            Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_canvas.c
+            Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
             Sources/CHtmlNative/hnsoft.c)
 ENGINE_SRC+=("${WASM_SRC[@]}")
 RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3 $FT_INC"
+
+# 媒体宿主装配(app/hn_media_platform.c): 三个 hnapp 目标统一入列 ——
+#   仅 hnapp-macos-arm64 开 -DHN_MEDIA_PLATFORM_AVFOUNDATION: 平台真宿主
+#   直转 hnp_media_*(同列链接 platform/hnp_media_macos.c)。其余目标编纯
+#   合成替身, 不引用任何 hnp_media_* —— hnp_headless.c/hnp_linux.c 只提供
+#   hnp_media_supported() 一个符号("其余 hnp_media_* 有意不提供"), 开了宏
+#   就会撞未定义符号(媒体验收: hnapp 三平台同源, 编入位不同)。
+MEDIA_SRC=app/hn_media_platform.c
 
 # QuickJS(hn_rt 的 JS 引擎): 构建期可选 —— 本机探测到才定义 HN_HAVE_QUICKJS。
 # homebrew 的 quickjs 是 keg-only: 头文件在 <opt>/include/quickjs/ 子目录,
@@ -248,25 +261,26 @@ fi
 
 printf '  %-22s ' "hnapp-headless"
 if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF -DHN_VERSION="\"$VERSION\"" \
-        app/hn_app.c $RT_SRC platform/hnp_headless.c "${ENGINE_SRC[@]}" \
+        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_headless.c "${ENGINE_SRC[@]}" \
         -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-headless" 2>/tmp/hn_build_err.txt; then
-    printf '✓  hnapp-macos-headless (%s KB) 无 GUI\n' "$(($(wc -c < "$OUT/hnapp-macos-headless") / 1024))"
+    printf '✓  hnapp-macos-headless (%s KB) 无 GUI·合成媒体宿主\n' "$(($(wc -c < "$OUT/hnapp-macos-headless") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
 fi
 printf '  %-22s ' "hnapp-macos-arm64"
-if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF -DHN_VERSION="\"$VERSION\"" \
-        app/hn_app.c $RT_SRC platform/hnp_macos.c platform/hnp_media_macos.c "${ENGINE_SRC[@]}" \
+if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF \
+        -DHN_MEDIA_PLATFORM_AVFOUNDATION -DHN_VERSION="\"$VERSION\"" \
+        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_macos.c platform/hnp_media_macos.c "${ENGINE_SRC[@]}" \
         -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
-    printf '✓  hnapp-macos-arm64 (%s KB) 真窗口\n' "$(($(wc -c < "$OUT/hnapp-macos-arm64") / 1024))"
+    printf '✓  hnapp-macos-arm64 (%s KB) 真窗口·AVFoundation 媒体宿主\n' "$(($(wc -c < "$OUT/hnapp-macos-arm64") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
 fi
 printf '  %-22s ' "hnapp-linux-x86_64"
 if "$ZIG" cc -target x86_64-linux-musl -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_NO_TEXT -DHN_VERSION="\"$VERSION\"" \
-        app/hn_app.c $RT_SRC platform/hnp_linux.c "${ENGINE_SRC[@]}" \
+        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_linux.c "${ENGINE_SRC[@]}" \
         -lm -ldl -o "$OUT/hnapp-linux-x86_64" 2>/tmp/hn_build_err.txt; then
-    printf '✓  hnapp-linux-x86_64 (%s KB) dlopen X11\n' "$(($(wc -c < "$OUT/hnapp-linux-x86_64") / 1024))"
+    printf '✓  hnapp-linux-x86_64 (%s KB) dlopen X11·合成媒体宿主\n' "$(($(wc -c < "$OUT/hnapp-linux-x86_64") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
 fi

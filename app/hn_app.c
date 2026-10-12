@@ -9,12 +9,20 @@
  * 用法:
  *   hn_app <file.html> [W H]                开窗口
  *   hn_app <file.html> --probe [W H]        无窗口自检(管线统计+命中)
- *   hn_app <file.html> --shot <png> [W H]   渲染落盘
+ *   hn_app <file.html> --shot <png> [W H] [--advance MS]  渲染落盘
  *
  * mtime 热重载(--watch, 缺省开): 窗口主循环每 ~300ms stat 源文件,
  * mtime/尺寸变了就整文档换装(窗口表面/进程不动, 内容替换 + 重绘)——
  * daemon 的 update op 对 window 应用即"原子写回源文件 + 子进程自行重载",
  * `hn dev` 的核心语义(mtime 热重载)由此落地。
+ *
+ * 媒体宿主接线(本轮补齐, 见 app/hn_media_platform.{h,c}):
+ *   启动时 hn_rt_set_media(hn_media_platform_host()) —— macOS = AVFoundation
+ *   真宿主(视频解码 + 音频直出), 无媒体平台 = 合成替身(梯度帧假时钟)。
+ *   帧推进沿用既有节拍: hn_rt_frame → hn_context_anim_tick 内部已并入
+ *   hn_media_tick_ret(PLAYING 会话保持活跃), 视频在播时自动 16ms 帧循环,
+ *   无需额外时钟。窗口内 'm' 键 = 媒体静音开关(手工试听 walkthrough);
+ *   HN_MEDIA_TRACE=1 时每 ~500ms 打一行会话状态(验收脚本观测点)。
  */
 /* 特性宏: watch 要纳秒 mtime(秒级会漏同秒内的流式连推)。Darwin 的
  * st_mtimespec 在 _DARWIN_C_SOURCE 里(超集, 含全部 POSIX); 其余平台
@@ -28,10 +36,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #include "hn_rt.h"
 #include "hn_platform.h"
+#include "hn_media_platform.h"
 
 static char *read_all(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -53,6 +63,61 @@ static void blit_now(hn_rt *rt, hnp_window *w) {
     const unsigned char *px = hn_rt_pixels(rt);
     if (px) hnp_window_blit(w, px, hn_rt_width(rt), hn_rt_height(rt),
                             (size_t)hn_rt_width(rt) * 4);
+}
+
+/* ---------------- 媒体: 落盘前的确定性推进(--shot --advance MS) ---------------- */
+
+/* 全部 video 会话里最大的当前时刻(秒; 无媒体/无会话 = 0)。
+   只走 hn.h 公开遍历 API 与元素寻址媒体 API(与引擎内部零耦合)。 */
+static double max_video_time(hn_rt *rt) {
+    hn_doc *doc = rt ? hn_rt_doc(rt) : NULL;
+    hn_context *c = rt ? hn_rt_context(rt) : NULL;
+    hn_node *root = doc ? hn_doc_root(doc) : NULL;
+    if (!c || !root) return 0;
+    double best = 0;
+    hn_node *stack[256];
+    int sp = 0;
+    stack[sp++] = root;
+    while (sp > 0) {
+        hn_node *n = stack[--sp];
+        const char *tag = hn_node_tag(n);
+        if (tag && !strcmp(tag, "video")) {
+            double t = hn_media_time(c, n);
+            if (t > best) best = t;
+        }
+        for (hn_node *ch = hn_node_first_child(n); ch && sp < 256;
+             ch = hn_node_next_sibling(ch))
+            stack[sp++] = ch;
+    }
+    return best;
+}
+
+/* --shot --advance MS: 把媒体推进到 MS 毫秒处再落盘 —— 视频"动帧"的
+   确定性取样口径(两次不同 advance 的落盘必须给出不同像素, 验收 §③)。
+   synth 宿主(无媒体平台): 假时钟 16ms 步瞬时快进, 逐字节确定;
+   平台真宿主(AVPlayer): 只能真播 —— 墙钟每 16ms 走一帧直到目标时刻
+   (6s 上限防呆), 上限内未到也照落当前帧(位置单调, 帧序仍正确)。 */
+static void advance_media(hn_rt *rt, int ms) {
+    if (!rt || ms <= 0) return;
+    int repaint = 0;
+    if (!strcmp(hn_media_platform_kind(), "synth")) {
+        for (long t = 0; t < ms; t += 16) hn_rt_frame(rt, 16.0f, &repaint);
+        printf("advance(synth): media t=%.3f s(目标 %.3f)\n",
+               max_video_time(rt), ms / 1000.0);
+        return;
+    }
+    double target = ms / 1000.0;
+    unsigned long t0 = hnp_now_ms();
+    while (hnp_now_ms() - t0 < 6000) {
+        hn_rt_frame(rt, 16.0f, &repaint);
+        if (max_video_time(rt) >= target) break;
+        /* 墙钟等待一帧(usleep 不在 POSIX 2008; nanosleep 三平台都有) */
+        struct timespec ts = { 0, 16 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    printf("advance(platform): media t=%.3f s(目标 %.3f)\n",
+           max_video_time(rt), target);
+    fflush(stdout);
 }
 
 /* ---------------- mtime 热重载 ---------------- */
@@ -103,7 +168,7 @@ static hn_rt *doc_reload(const char *path, int W, int H) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "用法: hn_app <file.html> [W H] [--watch 0|1] | --probe | --shot <png>\n");
+        fprintf(stderr, "用法: hn_app <file.html> [W H] [--watch 0|1] | --probe | --shot <png> [W H] [--advance MS]\n");
         return 2;
     }
     const char *path = argv[1];
@@ -111,21 +176,42 @@ int main(int argc, char **argv) {
     int shot = (argc > 2 && !strcmp(argv[2], "--shot"));
     int watch = 1;   /* mtime 热重载缺省开(向后兼容); --watch 0 显式关 */
     int W = 480, H = 700;
+    int advance_ms = 0;   /* --shot --advance MS: 落盘前推进媒体到该时刻 */
     for (int i = 2; i < argc; i++)
         if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch = atoi(argv[i + 1]);
+    for (int i = 2; i < argc; i++)
+        if (!strcmp(argv[i], "--advance") && i + 1 < argc) advance_ms = atoi(argv[i + 1]);
     if (!probe && !shot) {
-        /* 位置参数 W H: 跳过 --watch 及其值(选项与位置参数可混排) */
+        /* 位置参数 W H: 跳过 --watch/--advance 及其值(选项与位置参数可混排) */
         int got = 0;
         for (int i = 2; i < argc && got < 2; i++) {
-            if (!strcmp(argv[i], "--watch")) { i++; continue; }
+            if (!strcmp(argv[i], "--watch") || !strcmp(argv[i], "--advance")) { i++; continue; }
             if (got == 0) W = atoi(argv[i]); else H = atoi(argv[i]);
             got++;
         }
     } else {
+        /* --shot <png> [W H] [--advance MS]: <png> 固定在 argv[3]; W/H 是
+           其后**非选项**的前两个数(逐项跳过 --advance/--watch 及其值,
+           避免把选项值(如 advance 的 1500)错当尺寸)。 */
         int a = shot ? 4 : 3;
-        if (argc > a) W = atoi(argv[a]);
-        if (argc > a + 1) H = atoi(argv[a + 1]);
+        int got = 0;
+        for (int i = a; i < argc && got < 2; i++) {
+            if (argv[i][0] == '-') {
+                if ((!strcmp(argv[i], "--advance") || !strcmp(argv[i], "--watch")) &&
+                    i + 1 < argc) i++;   /* 连值一起跳过 */
+                continue;
+            }
+            if (got == 0) W = atoi(argv[i]); else H = atoi(argv[i]);
+            got++;
+        }
     }
+
+    /* 媒体宿主装配(必须先于 hn_rt_open —— 每个 context 创建时经 g_media_be
+       注入; autoplay 会话在首轮布局就 open)。probe/shot 属自检口径:
+       未显式声明 HN_MEDIA_UNMUTE 时默认静音跑(探针不吵人; 真窗口不设)。 */
+    if ((probe || shot) && !getenv("HN_MEDIA_UNMUTE") && !getenv("HN_MEDIA_MUTE"))
+        setenv("HN_MEDIA_MUTE", "1", 1);
+    hn_rt_set_media(hn_media_platform_host());
 
     size_t hlen = 0;
     char *html = read_all(path, &hlen);
@@ -150,10 +236,12 @@ int main(int argc, char **argv) {
     hn_rt_desc d = { "app", html, hlen, NULL, 0, W, H };
     hn_rt *rt = hn_rt_open(&d);
     if (!rt) { fprintf(stderr, "文档初始化失败\n"); free(html); return 1; }
+    hn_media_platform_bind(rt);   /* 环境钮(静音/取消静音)在装载后施加 */
 
     if (probe) {
-        printf("platform=%s cmds=%d w=%d h=%d\n",
-               hnp_name(), hn_rt_cmd_count(rt), hn_rt_width(rt), hn_rt_height(rt));
+        printf("platform=%s cmds=%d w=%d h=%d media=%s\n",
+               hnp_name(), hn_rt_cmd_count(rt), hn_rt_width(rt), hn_rt_height(rt),
+               hn_media_platform_kind());
         char *dom = hn_rt_dom(rt, 2);
         if (dom) { printf("%s", dom); free(dom); }
         char *t = hn_rt_text(rt, "out");
@@ -164,6 +252,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (shot) {
+        if (advance_ms > 0) advance_media(rt, advance_ms);
         int ok = hn_rt_shot(rt, argv[3]);
         printf("%s\n", ok ? "shot OK" : "shot 失败");
         hn_rt_close(rt);
@@ -177,8 +266,30 @@ int main(int argc, char **argv) {
         hn_rt_close(rt); free(html);
         return 1;
     }
-    hnp_window_desc wd = { "hn", hn_rt_width(rt), hn_rt_height(rt), 0, 1 };
-    /* 透明背板: 文档清单声明时透传 */
+    /* 窗口形态 = 文档清单声明(透明/无边框/层级/跨空间/投影/穿透)。
+       桌宠形态就是这一组字段的组合, 见 platform/hn_platform.h 的字段注释;
+       平台不支持时优雅忽略(声明是意图, 物化看平台)。 */
+    hn_manifest man;
+    hn_rt_manifest(rt, &man);
+    hnp_window_desc wd;
+    memset(&wd, 0, sizeof(wd));
+    wd.title = "hn";                       /* borderless 时仅任务栏/调试显示名 */
+    wd.width = hn_rt_width(rt);
+    wd.height = hn_rt_height(rt);
+    wd.transparent = man.transparent;
+    wd.resizable = 1;
+    wd.borderless = man.frameless;
+    wd.always_on_top = (man.level == HN_LEVEL_FLOATING) ? 1
+                     : (man.level == HN_LEVEL_DESKTOP) ? 2 : 0;
+    wd.no_shadow = !man.shadow;
+    wd.join_all_spaces = man.spaces_all;
+    wd.click_through = man.click_through;
+    /* 环境钮(验收脚本/调试): HN_CLICK_THROUGH=0|1 覆盖文档声明,
+       便于对同一份桌宠页面演示"幽灵模式"两个态而不改文档。 */
+    {
+        const char *ct = getenv("HN_CLICK_THROUGH");
+        if (ct && *ct) wd.click_through = atoi(ct) ? 1 : 0;
+    }
     hnp_window *w = hnp_window_open(&wd);
     if (!w) {
         fprintf(stderr, "窗口创建失败\n");
@@ -198,6 +309,18 @@ int main(int argc, char **argv) {
     /* 唤醒节奏(ms): 首帧前按空闲节奏起步, 之后由 hn_rt_frame 的返回值
        逐帧刷新(见循环尾部的"帧节拍接线")。 */
     int pump_ms = HN_IDLE_PUMP_MS;
+    /* HN_MEDIA_TRACE=1: 每 ~500ms 一行会话状态(验收脚本/reverse 调试) */
+    int trace = 0;
+    {
+        const char *e = getenv("HN_MEDIA_TRACE");
+        if (e && *e && strcmp(e, "0") != 0) {
+            trace = 1;
+            printf("[media] 宿主=%s surf=%s(HN_MEDIA_TRACE=1, 按 m 切换静音)\n",
+                   hn_media_platform_kind(), hnp_name());
+            fflush(stdout);
+        }
+    }
+    unsigned long last_trace = 0;
     while (!quit) {
         hnp_event ev;
         if (hnp_pump(&ev, pump_ms)) {
@@ -220,6 +343,12 @@ int main(int argc, char **argv) {
                 break;
             case HNP_EV_KEY_DOWN:
                 if (ev.key == HNP_KEY_ESCAPE) { quit = 1; break; }
+                /* m = 媒体静音开关(手工验收 walkthrough: 试听/肃静两态);
+                   带 cmd/ctrl 修饰的 m 不拦(留给系统/编辑器快捷键),
+                   无媒体元素时也不消费, 照旧交引擎。 */
+                if (ev.utf8 && (ev.utf8[0] == 'm' || ev.utf8[0] == 'M') &&
+                    !(ev.mods & 10) && hn_media_platform_toggle_mute(rt))
+                    break;
                 if (hn_rt_key(rt, 1, (int)ev.key, ev.utf8)) blit_now(rt, w);
                 break;
             default: break;
@@ -238,6 +367,10 @@ int main(int argc, char **argv) {
                 hn_rt *nr = doc_reload(base, W, H);
                 if (!nr) nr = doc_reload(base, W, H);   /* 重试一次 */
                 if (nr) {
+                    /* 顺序: 先绑定新 rt(适配层的 g_bound_rt 立刻指向新文档,
+                       不悬空), 再关旧 —— 旧 rt 的媒体会话随 context 销毁
+                       统一 close(hn_media_sessions_clear), AVPlayer 及时释放。 */
+                    hn_media_platform_bind(nr);   /* 新文档: 时长表 + 环境钮 */
                     hn_rt_close(rt);   /* JS 安全性见 doc_reload 注释 */
                     rt = nr;
                     fp = cur;
@@ -259,6 +392,10 @@ int main(int argc, char **argv) {
         int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
         if (repaint) blit_now(rt, w);
+        if (trace && now - last_trace >= 500) {
+            last_trace = now;
+            hn_media_platform_trace(rt);
+        }
         /* ---- 帧节拍接线: hn_rt_frame 的返回值就是"下一次该醒的时刻" ----
            16      动画在跑(过渡/keyframes/Lottie/媒体) → 60fps 帧循环;
            N > 16  距最近 hx 轮询的期限(ms) → 到点即醒;

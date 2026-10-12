@@ -36,6 +36,16 @@ static const char *DARK_CSS =
     ".tok-c { color: #6f9c7d; }\n"
     ".tok-s { color: #d9a76a; }\n"
     ".tok-k { color: var(--accent-2); }\n"
+    /* JSON/CSV 直染(hn_fmt.c)新增两档令牌: 数字与布尔/null(深底取亮中性色) */
+    ".tok-n { color: #7fd0c0; }\n"
+    ".tok-b { color: #c79bf0; }\n"
+    /* JSON 直染的包边: 花括号/方括号、摘要条、错误条、截断提示 */
+    ".json-brace { color: #8a93a8; }\n"
+    ".json-head { background: #ffffff0a; }\n"
+    ".json-err { color: #ffb4ad; background: #ff5f5718; }\n"
+    ".json-more, .json-ellip { color: var(--dim); }\n"
+    ".csv-head th { background: #ffffff08; }\n"
+    ".csv-more td { color: var(--dim); }\n"
     "th, td { border-color: var(--line); }\n"
     "th { color: var(--ink); }\n"
     "input:not([type=checkbox]):not([type=radio]), textarea { background: #10151f; }\n"
@@ -68,6 +78,16 @@ static const char *LIGHT_CSS =
     ".tok-c { color: #5d8a6a; }\n"
     ".tok-s { color: #a05a2c; }\n"
     ".tok-k { color: var(--accent); }\n"
+    /* JSON/CSV 直染(hn_fmt.c)新增两档令牌: 数字与布尔/null(浅底取深中性色) */
+    ".tok-n { color: #0e7c6b; }\n"
+    ".tok-b { color: #7a3fb8; }\n"
+    /* JSON 直染的包边: 花括号/方括号、摘要条、错误条、截断提示 */
+    ".json-brace { color: #8b93a3; }\n"
+    ".json-head { background: #00000007; }\n"
+    ".json-err { color: #b42318; background: #ff5f571a; }\n"
+    ".json-more, .json-ellip { color: var(--dim); }\n"
+    ".csv-head th { background: #00000005; }\n"
+    ".csv-more td { color: var(--dim); }\n"
     "th, td { border-color: var(--line); }\n"
     "th { color: var(--ink); }\n"
     "input:not([type=checkbox]):not([type=radio]), textarea { background: #ffffff; }\n"

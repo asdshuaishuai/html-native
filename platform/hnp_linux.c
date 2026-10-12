@@ -262,6 +262,11 @@ void hnp_window_set_title(hnp_window *w, const char *utf8) {
     if (w && utf8) x11.XStoreName(x11.dpy, w->xw, utf8);
 }
 
+/* 运行期鼠标穿透: X11 的对应物是 XShape/XFixes 输入形状(shape input 置空),
+   需要额外 dlopen libXext/Xfixes —— M1 留位不实现(声明照常接受; 桌宠形态
+   在 Linux 的完整物化属于壳层路线图, 与 always_on_top 等 desc 字段一致)。 */
+void hnp_window_set_click_through(hnp_window *w, int on) { (void)w; (void)on; }
+
 static hnp_key keysym_to_hnp(unsigned long ks) {
     switch (ks) {
     case 0xFF1B: return HNP_KEY_ESCAPE;

@@ -602,6 +602,23 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   HTML 内嵌/脚注/缩进式代码块/跨行块注释延续。
   见 `examples/md-demo.html`(agent 报告窗); 口径由 `tools/md_probe.c`
   107 断言钉死
+- **JSON / CSV 直染(结构化工具输出)**: 与 markdown 同一模式、同一装载挂点
+  (`hn_context_set_doc` / `hn_context_render` / `hn_doc_swap` 三入口的
+  hn_md 批次内), 源文本替换成普通 DOM 子树, 之后零特例。
+  `<div hn-json>…</div>` 走既有 `hn_json.c` 解析 → 摘要条 `.json-head`
+  (`{…} N keys · N KB`)+ 逐行缩进树 `.json-row`/`.json-kids`(内联
+  padding-left), 令牌 `tok-k` 键 / `tok-s` 字符串(转义与中文原样) /
+  `tok-n` 数字 / `tok-b` 布尔与 null / `.json-brace` 括号;
+  `<div hn-csv>`(可选 `hn-csv-sep=";"`)→ 既有 table 语义
+  (table/tr/th/td, md 表格同款皮肤), 首行表头 `.csv-head`,
+  引号包围/引号内逗号与换行/`""` 转义(RFC4180 子集),
+  **逐列嗅探数字列(>70% 可解析)整列右对齐**。
+  **失败优雅回落**: 半截 JSON / 畸形 CSV / 空 → 顶部错误条或直接原样
+  代码块, 不抛错不中断装载。**截断口径**(agent 巨输出不炸布局):
+  JSON 深度 6(超出显示 `…`)/ 数组 50 / 对象 100 / 行预算 400;
+  CSV 200 行 / 12 列, 截断处补 `… more N items` / `… 共 N 行 · 共 N 列`。
+  见 `examples/fmt-demo.html`(agent 工具输出窗); 口径由
+  `tools/fmt_probe.c` 118 断言钉死
 - **流式视图(agent 轨迹/日志/对话)**: 声明 `hn-stream` 的 overflow 容器即获得
   "自动跟随底部"语义(引擎实现, 页面零脚本): 内容增长时**平滑追上**
   (帧率无关指数逼近 τ=80ms, 实时帧驱动; 离屏单帧路径直接贴底),

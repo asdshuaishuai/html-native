@@ -38,7 +38,8 @@ ENG = os.path.join(ROOT, "Sources", "CHtmlNative")
 ENGINE_SRC = [
     "hn_arena.c", "hn_html.c", "hn_md.c", "hn_css.c", "hn_style.c",
     "hn_layout.c", "hn_paint.c", "hn_context.c", "hn_theme.c",
-    "hn_json.c", "hn_lottie.c", "hn_mesh.c", "hn_png.c", "hn_canvas.c",
+    "hn_json.c", "hn_lottie.c", "hn_mesh.c", "hn_png.c", "hn_gif.c", "hn_canvas.c",
+    "hn_fmt.c",
     "hn_media.c",
 ]
 

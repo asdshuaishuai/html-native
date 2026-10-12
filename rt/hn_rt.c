@@ -1517,6 +1517,14 @@ char *hn_rt_text(hn_rt *rt, const char *element_id) {
 
 hn_doc *hn_rt_doc(hn_rt *rt) { return rt ? hn_context_doc(rt->ctx) : NULL; }
 
+/* 文档清单访问器: 平台壳在开窗时读一次(透明/无边框/层级/跨空间/穿透),
+   不重新解析 —— 与 hn_rt_open 内部同一份 hn_doc_manifest 语义。 */
+void hn_rt_manifest(const hn_rt *rt, hn_manifest *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    hn_doc_manifest(rt ? hn_context_doc(rt->ctx) : NULL, out);
+}
+
 hn_context *hn_rt_context(hn_rt *rt) { return rt ? rt->ctx : NULL; }
 
 int hn_rt_cmd_count(hn_rt *rt) {

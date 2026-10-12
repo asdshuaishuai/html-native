@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<!-- examples/fmt-demo.html — 结构化文本直染演示: "agent 工具输出窗"
+     ============================================================
+     agent 工具的返回值常是 JSON 与 CSV: 这里没有任何手写的表格/键值树,
+     全部内容都在 <div hn-json> 与 <div hn-csv> 里 —— 引擎装载时把源文本
+     替换成普通 DOM 子树(摘要条 + 语法着色缩进树 / table/tr/th/td),
+     之后样式/布局/绘制/交互全部走既有管线, 零特例。与 markdown 直染
+     (examples/md-demo.html)同一模式; 令牌色/皮肤来自 <meta hn-theme=dark>
+     (hn_theme.c: .tok-k/.tok-s/.tok-n/.tok-b 与 .json-*/.csv-* 类)。
+
+     已验证渲染命令(实际执行, 产物见 screenshots/fmt-demo.png):
+       dist/hncore-macos-arm64 render examples/fmt-demo.html screenshots/fmt-demo.png 920 900
+
+     本页演示两件事:
+       1. JSON 直染: 一段 agent 工具(read_pipeline_status)返回的嵌套 JSON
+          (含对象与数组); 键=tok-k、字符串=tok-s、数字=tok-n、布尔/null=
+          tok-b; 顶部一行 json-head 摘要条 `{…} N keys · 字节数`;
+       2. CSV 直染: 10 行指标表, 首行表头(th)、数字列自动右对齐;
+          末列是引号包围字段(内含逗号), 验证 RFC4180 子集。
+
+     约束(见 Sources/CHtmlNative/hn_fmt.c 文件头): 源里不要写 HTML 标签
+     (会被解析成元素); 尖括号若是数据的一部分请写 &lt;; 实体被 HTML 层
+     解码一次(&amp; → &amp;)。CSV 支持引号包围、引号内逗号/换行/"" 转义,
+     分隔符可 hn-csv-sep=";" 声明。截断口径: JSON 深度 6 / 数组 50 /
+     对象 100 / 行预算 400; CSV 200 行 / 12 列 —— 巨输出不炸布局。
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="920x900@80,60">
+<meta name="hn-title" content="fmt-demo · agent 工具输出窗">
+<meta name="hn-theme" content="dark">
+<style>
+  body { padding: 10; }
+  .shell { border: 1 solid var(--line); border-radius: 14; padding: 14 18;
+           background: var(--card); height: 100%; box-sizing: border-box;
+           overflow: scroll; }
+  .banner { display: flex; align-items: center; gap: 8; margin: 0 0 4; }
+  .dot { width: 8; height: 8; border-radius: 4; background: var(--accent); }
+  .banner .t { font-size: 11; font-weight: 700; letter-spacing: 1.2;
+               color: var(--dim); }
+  .banner .r { margin-left: auto; font-size: 10; color: var(--dim); }
+  .intro { font-size: 10; color: var(--dim); margin: 0 0 8; line-height: 1.4; }
+  /* 工具输出卡: 与 agent 轨迹面板(.ag)同一视觉语言 */
+  .tool { border-left: 2 solid #f5b73d; padding: 0 0 0 12; margin: 0 0 10; }
+  .tool-head { display: flex; align-items: center; gap: 6; margin: 0 0 4; }
+  .tool-dot { width: 6; height: 6; border-radius: 3; background: #f5b73d; }
+  .tool-kind { font-size: 10; font-weight: 700; color: var(--dim); letter-spacing: 0.4; }
+  .tool-name { font-size: 11; font-weight: 700; color: var(--ink); }
+  .tool-meta { margin-left: auto; font-size: 9; color: var(--dim); }
+  .point { font-size: 9; color: var(--dim); margin: 3 0 0; line-height: 1.35; }
+  /* JSON 树容器: 只调骨架, 令牌色交给主题 */
+  .json-wrap { background: #10151f; border: 1 solid var(--line); border-radius: 8;
+               padding: 5 10; font-family: monospace; font-size: 10;
+               line-height: 1.25; }
+  .json-head { font-size: 9; font-weight: 700; letter-spacing: 0.4;
+               padding: 1 7; border-radius: 5; margin: 0 0 4;
+               display: inline-block; }
+  .json-row { margin: 0; }
+  /* CSV 表格容器(表格骨架走既有 UA + 主题皮肤) */
+  .csv-wrap { background: #10151f; border: 1 solid var(--line); border-radius: 8;
+              padding: 2 4; }
+  table.csv { font-size: 10; margin: 2 0; }
+  table.csv th, table.csv td { font-family: monospace; padding: 1 5; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="banner">
+    <div class="dot"></div>
+    <div class="t">AGENT TOOL OUTPUT · HN-JSON / HN-CSV 直染</div>
+    <div class="r">deepStudio · 自动生成</div>
+  </div>
+  <div class="intro">
+    下面两段都是源文本直染: 内容原样写在 hn-json / hn-csv 里, 装载期被替换成普通
+    DOM 子树 —— 着色/缩进树/表头行/数字列右对齐全由引擎给, 页面零脚本零手写结构。
+  </div>
+
+  <!-- ============ 1. JSON 直染: agent 工具返回的嵌套 JSON(含数组) ============ -->
+  <div class="tool">
+    <div class="tool-head">
+      <div class="tool-dot"></div>
+      <div class="tool-kind">TOOL</div>
+      <div class="tool-name">read_pipeline_status</div>
+      <div class="tool-meta">ok · 工具原文直染</div>
+    </div>
+    <div class="json-wrap">
+      <div hn-json>
+{
+  "tool": "read_pipeline_status", "ok": true, "elapsed_ms": 26,
+  "host": { "platform": "macos-arm64", "cores": 10 },
+  "stages": [
+    { "id": "parse",  "ms": 3,  "pass": true },
+    { "id": "layout", "ms": 8,  "pass": true },
+    { "id": "raster", "ms": 18, "pass": false, "note": "首帧超预算 2ms" }
+  ],
+  "budget": { "first_frame_ms": 16, "display_list": 2000, "memory_mb": 48 },
+  "warnings": [ "RASTER_BUDGET" ], "error": null
+}
+      </div>
+    </div>
+    <div class="point">
+      点读: tok-k 键 / tok-s 字符串 / tok-n 数字 / tok-b 布尔与 null; 顶部 json-head 摘要条
+      `{…} 8 keys · 字节数`; 嵌套对象与数组各占一层缩进子树(内联 padding-left), 更深层截断为 …。
+    </div>
+  </div>
+
+  <!-- ============ 2. CSV 直染: 10 行指标表(数字列右对齐) ============ -->
+  <div class="tool" style="border-left-color: #3ecf6f">
+    <div class="tool-head">
+      <div class="tool-dot" style="background: #3ecf6f"></div>
+      <div class="tool-kind">TOOL</div>
+      <div class="tool-name">export_metrics</div>
+      <div class="tool-meta">CSV · 10 行</div>
+    </div>
+    <div class="csv-wrap">
+      <div hn-csv>
+frame,metric,value,budget,unit,note
+1,first_frame_ms,8,16,ms,"达标, 首帧在预算内"
+2,display_list_cmds,1180,2000,count,"1180 条, 余量充足"
+3,node_count,412,800,count,达标
+4,text_runs,263,500,count,达标
+5,memory_mb,24.5,48,MB,达标
+6,parse_ms,3,5,ms,达标
+7,cascade_ms,5,8,ms,达标
+8,layout_ms,8,12,ms,达标
+9,raster_ms,18,16,ms,"超预算 2ms, 待优化"
+10,frame_budget_use,112.5,100,percent,"红区, 见 warnings"      </div>
+    </div>
+    <div class="point">
+      点读: value / budget 两列数据行 &gt; 70% 可解析为数 → 整列(含表头)内联 text-align: right,
+      文本列左对齐; 表头行 class=csv-head; 末列 note 是引号包围字段(引号内逗号原样保留)。
+    </div>
+  </div>
+</div>
+</body>
+</html>

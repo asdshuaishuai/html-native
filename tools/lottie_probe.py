@@ -4,6 +4,12 @@
 引擎负责"矢量图形 + 时间轴", 产物是平台无关的绘制指令, 所以这里用
 hncore 的 paint 子命令直接看指令, 不涉及任何平台后端。
 
+本轮新增能力(断言见 [10]/[11] 节):
+  渐变填充 gf / 渐变描边 gs(多 stop 线性: 扁平与 [{t,s}] 两种编码、
+  0..1 与 0..100 两种量纲; 径向 t=2 退化为中位色);
+  mask 最小版(masksProperties 单条 mode="a" 且 inv=false → 路径外接矩形
+  CLIP_PUSH 裁剪, 支持路径关键帧; 相减/相交/反相模式跳过不裁)。
+
 探出来的四个真实缺陷(都已修):
   1) 非动画 sh 路径完全不显示: parse_item 把包装层 ks 当成了路径对象,
      几何在 ks.k 里 —— 于是 n_verts=0, 整条路径什么都不画。
@@ -161,6 +167,110 @@ base["layers"]=[layer(morph)]
 o9=render(base); c9=shape_cmds(o9)
 print("  [9] 路径变形关键帧:", c9[:1])
 ck("路径变形关键帧生效(顶点数变化)", len(c9)>=1 and "n=" in c9[0], c9[:1])
+
+# 10) 渐变填充 gf(多 stop 线性) —— 引擎把几何沿渐变轴切成色带
+def gf_layer(stops, t=1, sp=(-20,0), ep=(20,0), w=8, stroke=False):
+    brush = {"ty":"gs" if stroke else "gf","t":t,"s":{"a":0,"k":list(sp)},"e":{"a":0,"k":list(ep)},
+             "g":{"p":len(stops),"k":{"a":0,"k":stops}},"o":{"a":0,"k":100}}
+    if stroke: brush["w"] = {"a":0,"k":w}
+    shape = ({"ty":"sh","ks":{"a":0,"k":{"c":False,"v":[[-20,0],[20,0]],"i":[[0,0],[0,0]],"o":[[0,0],[0,0]]}}}
+             if stroke else
+             {"ty":"rc","p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[40,40]},"r":{"a":0,"k":0}})
+    return [grp([shape, brush])]
+
+def fills_of(cmds):
+    return [c.split("fill=")[1].split()[0] for c in cmds if "fill=" in c]
+
+# 10a) gf 扁平 stop 编码(bodymovin 至今大量导出): [pos,r,g,b, pos,r,g,b]
+base.pop("assets",None)
+base["layers"]=[layer(gf_layer([0,1,0,0, 1,0,0,1]))]
+o10=render(base); c10=shape_cmds(o10)
+f10=fills_of(c10)
+print("  [10a] gf 扁平 stop:", len(c10), "条色带,", len(set(f10)), "种颜色")
+# 色带取的是带**中点**处的插值色, 所以首带略偏洋红(FA0005)而不是纯 FF0000 ——
+# 断言按"红分量递减、蓝分量递增"的单调性钉住, 比钉字面更贴语义。
+def _rgb(hex8):
+    return int(hex8[0:2],16), int(hex8[2:4],16), int(hex8[4:6],16)
+r0,g0,b0 = _rgb(f10[0]); r1,g1,b1 = _rgb(f10[-1])
+mid = _rgb(f10[len(f10)//2])
+ck("gf 渐变填充生效(多色带 + 红→蓝单调过渡)",
+   len(c10)>=8 and len(set(f10))>=8 and r0>200 and b0<20 and b1>200 and r1<20
+   and r0>mid[0]>r1 and b0<mid[2]<b1,
+   (len(c10), f10[0], f10[len(f10)//2], f10[-1]))
+
+# 10b) gf 新式 stop 编码: [{t:pos,s:[r,g,b,a]}]
+base["layers"]=[layer(gf_layer([{"t":0,"s":[1,0,0,1]},{"t":1,"s":[0,0,1,1]}]))]
+o10b=render(base); c10b=shape_cmds(o10b)
+f10b=fills_of(c10b)
+print("  [10b] gf 新式 stop:", len(c10b), "条色带")
+ck("gf 新式 stop 编码同样生效", len(c10b)>=8 and len(set(f10b))>=8, len(c10b))
+
+# 10c) 0..100 量纲的 stop(少数导出) —— 越界自动 /100
+base["layers"]=[layer(gf_layer([0,1,0,0, 100,0,0,1]))]
+o10c=render(base); c10c=shape_cmds(o10c)
+f10c=fills_of(c10c)
+ck("gf stop 0..100 量纲归一(色带数不变)", len(c10c)>=8 and len(set(f10c))>=8, len(c10c))
+
+# 10d) 渐变描边 gs: 折线按段细分, 每小段一个逐段色
+base["layers"]=[layer(gf_layer([0,1,1,0, 1,1,0,0], stroke=True))]
+o10d=render(base); c10d=shape_cmds(o10d)
+f10d=fills_of(c10d)
+print("  [10d] gs 渐变描边:", len(c10d), "段")
+ck("gs 渐变描边生效(沿路径多段变色)", len(c10d)>=8 and len(set(f10d))>=8,
+   (len(c10d), len(set(f10d))))
+
+# 10e) 径向 t=2 退化为中位色(如实写明的不支持边界)
+base["layers"]=[layer(gf_layer([0,1,0,0, 1,0,0,1], t=2))]
+o10e=render(base); c10e=shape_cmds(o10e)
+ck("径向渐变退化为单色(不崩, 出 1 条)", len(c10e)==1, len(c10e))
+
+# 11) mask 最小版: masksProperties 单条加法蒙版 → CLIP_PUSH/POP 夹住内容
+mask_shapes=[grp([{"ty":"rc","p":{"a":0,"k":[0,0]},"s":{"a":0,"k":[80,80]},"r":{"a":0,"k":0}},
+                  {"ty":"fl","c":{"a":0,"k":[0,1,0]},"o":{"a":0,"k":100},"r":1}])]
+mask_ks={"inv":False,"mode":"a","o":{"a":0,"k":100},
+         "pt":{"a":0,"k":{"i":[[0,0],[0,0],[0,0],[0,0]],"o":[[0,0],[0,0],[0,0],[0,0]],
+                         "v":[[-10,-10],[10,-10],[10,10],[-10,10]],"c":True}}}
+base["layers"]=[layer(mask_shapes, masksProperties=[mask_ks])]
+o11=render(base)
+lines11=[l for l in o11.splitlines() if l.startswith(("CLIP","POLY"))]
+clip_push=[l for l in lines11 if l.startswith("CLIP+")]
+clip_pop=[l for l in lines11 if l.startswith("CLIP-")]
+print("  [11] mask:", lines11)
+ck("mask 最小版: CLIP+ 裁到蒙版外接矩形(20x20 @40,40)",
+   len(clip_push)==1 and " 40.0    40.0    20.0    20.0" in clip_push[0], clip_push)
+ck("mask 最小版: CLIP+/CLIP- 配对", len(clip_pop)==1, clip_pop)
+
+# 11b) 反相/相减蒙版不做(内容不被裁剪 —— 保持可见而非整块消失)
+mask_inv=dict(mask_ks); mask_inv["mode"]="s"
+base["layers"]=[layer(mask_shapes, masksProperties=[mask_inv])]
+o11b=render(base)
+ck("相减蒙版(mode=s)跳过不裁(不误伤内容)",
+   not any(l.startswith("CLIP+") for l in o11b.splitlines()), None)
+
+# 11c) 蒙版路径关键帧: 蒙版矩形随时间放大 → HN_CLOCK 不同时刻裁剪矩形不同
+mask_kf={"inv":False,"mode":"a","o":{"a":0,"k":100},
+         "pt":{"a":1,"k":[
+            {"t":0,"s":[{"i":[[0,0],[0,0],[0,0],[0,0]],"o":[[0,0],[0,0],[0,0],[0,0]],
+                          "v":[[-10,-10],[10,-10],[10,10],[-10,10]],"c":True}]},
+            {"t":60,"s":[{"i":[[0,0],[0,0],[0,0],[0,0]],"o":[[0,0],[0,0],[0,0],[0,0]],
+                          "v":[[-30,-30],[30,-30],[30,30],[-30,30]],"c":True}]}]}}
+base["layers"]=[layer(mask_shapes, masksProperties=[mask_kf])]
+import os as _os
+ap2=_os.path.join(D,"a.json"); open(ap2,"w").write(json.dumps(base))
+hp2=_os.path.join(D,"a.html")
+open(hp2,"w").write('<html><head><style>html,body{margin:0;width:100%;height:100%;background:#000}.l{width:100;height:100}</style></head><body><img class="l" src="a.json" hn-lottie></body></html>')
+def clip_at(clock):
+    env=dict(_os.environ); env["HN_CLOCK"]=str(clock)
+    out=subprocess.run([HN,"paint",hp2,"120","120"],capture_output=True,text=True,env=env).stdout
+    for l in out.splitlines():
+        if l.startswith("CLIP+"): return l
+    return ""
+c0, c60 = clip_at(0), clip_at(600)
+# 关键帧 t=0(20x20) → t=60 帧 = 1000ms(60x60); 600ms 是 0.6 进度 → 44x44 @ (28,28)
+print("  [11c] mask 关键帧 t=0:", c0, "| t=600:", c60)
+ck("蒙版路径关键帧生效(裁剪盒随时间变大)",
+   c0 and c60 and c0 != c60 and " 40.0    40.0    20.0    20.0" in c0
+   and " 28.0    28.0    44.0    44.0" in c60, (c0, c60))
 
 print()
 print("失败:",len(fails),fails)

@@ -53,10 +53,34 @@ const char *hnp_name(void);
 /* ---------------- 窗口 ---------------- */
 
 typedef struct {
-    const char *title;      /* UTF-8; NULL = "hn" */
+    const char *title;      /* UTF-8; NULL = "hn"。
+                               borderless=1 时窗口没有原生标题栏, 此字段退化为
+                               任务栏/Dock(悬停缩略图)/调试输出的显示名 —— macOS
+                               accessory 策略下不进 Dock, 仅作诊断可见性。 */
     int width, height;      /* 内容区尺寸(CSS px) */
     int transparent;        /* 1 = 逐像素 alpha 窗口 */
     int resizable;          /* 1 = 用户可拖边界 */
+
+    /* ---------------- 桌宠形态(无背景 + 无边框 + 悬浮桌面) ----------------
+       五个字段是"不以程序应用方式存在"的窗口侧开关: 桌宠/桌面小组件。
+       平台不支持时优雅忽略(不需要报错; 声明是意图, 物化看平台)。 */
+
+    int always_on_top;      /* 窗口层级: 0=普通(normal); 1=浮动(floating, 悬浮于
+                              普通窗口之上); 2=桌面(desktop, 壁纸之上、桌面图标与
+                              普通窗口之下 —— 桌面小组件语义)。
+                              macOS: 1→setLevel: NSFloatingWindowLevel(NSWindow.h:194
+                              = kCGFloatingWindowLevel = 3, CGWindowLevel.h:68);
+                              2→kCGDesktopWindowLevel(CGWindowLevel.h:64)。 */
+    int no_shadow;          /* 关闭窗口投影(setHasShadow:NO)。窗口整块是内容时
+                              投影会勾出一个不存在的"窗口矩形", 桌宠必须关。 */
+    int click_through;      /* 初始鼠标穿透(事件落到下层窗口)。
+                              macOS: setIgnoresMouseEvents:YES —— 幽灵模式初始态;
+                              运行期切换见 hnp_window_set_click_through。 */
+    int join_all_spaces;    /* 跟随所有空间(含全屏空间旁边)。
+                              macOS: setCollectionBehavior: 含 CanJoinAllSpaces|
+                              Stationary|IgnoresCycle(CG/NSWindow.h 精确值见 hnp_macos.c)。 */
+    int borderless;         /* 无标题栏无边框(styleMask 不含 Titled/Closable/…)。
+                              frame/bounds 即内容区, 无标题条可点。 */
 } hnp_window_desc;
 
 /* 创建窗口。返回 NULL 失败(原因一行 stderr)。 */
@@ -83,6 +107,11 @@ void hnp_window_invalidate(hnp_window *w);
 
 /* 标题(热更新后清单变化同步到窗口) */
 void hnp_window_set_title(hnp_window *w, const char *utf8);
+
+/* 运行期切换鼠标穿透(桌宠"幽灵模式": 穿透时点击落到桌面/下层窗口,
+   再切回来重新接收事件)。macOS 走 setIgnoresMouseEvents:; 其余平台
+   空实现(声明照常通过, 物化看平台)。幂等; NULL 安全。 */
+void hnp_window_set_click_through(hnp_window *w, int on);
 
 /* ---------------- 事件 ---------------- */
 

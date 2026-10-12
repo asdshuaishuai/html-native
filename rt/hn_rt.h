@@ -84,6 +84,12 @@ char *hn_rt_text(hn_rt *rt, const char *element_id);
    上下文, 媒体桥需要它)。返回值在下次 hn_rt_render 前有效。 */
 hn_doc *hn_rt_doc(hn_rt *rt);
 
+/* 文档的应用清单(meta 声明; 引擎侧 hn_doc_manifest 的同源封装)。
+   平台壳物化窗口形态用: 透明/无边框/层级/跨空间/投影/鼠标穿透 ——
+   桌宠形态的字段在这里被 hn_app 读走填进 hnp_window_desc。
+   rt 为 NULL 时写出缺省清单(不崩)。 */
+void hn_rt_manifest(const hn_rt *rt, hn_manifest *out);
+
 /* 引擎上下文(探针/宿主内省用: hn_context_display_list / hn_canvas_count
    等引擎 API 的入口)。所有权仍归 hn_rt —— 只读访问, 勿销毁。 */
 hn_context *hn_rt_context(hn_rt *rt);

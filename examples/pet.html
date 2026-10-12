@@ -1,0 +1,91 @@
+<html><head>
+<!-- pet — 桌宠形态(无背景 + 无边框 + 悬浮桌面)
+     ============================================
+     一份文档声明整个形态, 运行时按 meta 物化窗口:
+       hn-transparent="1"      逐像素 alpha(桌面从透明处透出)
+       hn-frameless="1"        无标题栏无边框(窗口矩形不可见)
+       hn-level="floating"     悬浮于普通窗口之上(另一档 desktop = 垫底桌面级)
+       hn-spaces="all"         跟随所有空间(切空间/全屏旁边都在)
+       hn-shadow="0"           关闭窗口投影(整窗是内容, 投影会勾出不存在的矩形)
+       hn-draggable="1"        整窗可拖(无边框时内容即拖动面)
+     内容: hn-mesh 摆动的立绘 + CSS keyframes 错相轮播的气泡 + 状态 dot。
+     没有 html/body 底色 —— 画面上只有角色与气泡, 其余是桌面。
+
+     渲染(离屏截图; HN_CLOCK=2000 取"第 1 条气泡全显 + 网格摆动到相位"的一帧)。
+     资产按**文档相对**解析(assets/avatar-a.png 相对 examples/), 因此渲染在
+     examples/ 目录里执行 —— 与真窗口同一口径(hnapp 启动先 chdir 文档目录):
+       (cd examples && HN_CLOCK=2000 ../dist/hncore-macos-arm64 render pet.html ../screenshots/pet.png 360 360)
+     透明文档走全透明画布口径(hncore render / hnapp --shot 同源), 四角 alpha=0。
+     真窗口(桌宠冒烟):
+       dist/hnapp-macos-arm64 examples/pet.html
+       HN_CLICK_THROUGH=1 dist/hnapp-macos-arm64 examples/pet.html   # 幽灵模式: 点击穿透到桌面
+
+     运行期切换穿透的 API: hnp_window_set_click_through(w, on)(platform/hn_platform.h);
+     本页不绑定热键 —— 穿透后窗口收不到点击, 切回来需要应用层给全局入口。
+-->
+<meta charset="utf-8">
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="360x360">
+<meta name="hn-title" content="hn 桌宠">
+<meta name="hn-transparent" content="1">
+<meta name="hn-frameless" content="1">
+<meta name="hn-level" content="floating">
+<meta name="hn-spaces" content="all">
+<meta name="hn-shadow" content="0">
+<meta name="hn-draggable" content="1">
+<style>
+  /* 无底色: 只有内容可见。html/body 不设 background —— 引擎声明透明时
+     也会主动剥离根底色, 这里不设是为了让"桌面透出"一目了然。 */
+  html, body { margin: 0; width: 100%; height: 100%; }
+
+  /* ---- 立绘: hn-mesh 正弦摆动(anchor=bottom: 根部固定、梢部摆动) ---- */
+  .petwrap { position: absolute; left: 70; top: 128; width: 220; height: 220;
+             animation: pet-bob 4.2s ease-in-out infinite; }
+  .pet { width: 220; height: 220; }
+
+  /* 落地阴影: 桌宠"站在桌面上"的锚 —— 透明背景下没有它角色像在漂浮 */
+  .shadow { position: absolute; left: 110; top: 330; width: 140; height: 18;
+            background: rgba(0, 0, 0, 0.30); border-radius: 50%; }
+
+  /* ---- 轮播气泡: 三条错相(负延迟)共用一条时间轴, 任一时刻一条可见 ---- */
+  .bubble { position: absolute; left: 40; top: 26; width: 280; box-sizing: border-box;
+            padding: 9 12; text-align: center; font-size: 12; color: #f2f5fb;
+            background: rgba(22, 27, 38, 0.88);
+            border: 1 solid rgba(130, 155, 225, 0.38);
+            border-radius: 14;
+            text-shadow: 0 1 6 rgba(0, 0, 0, 0.55);
+            animation: pet-bubble 12s linear infinite; }
+  .b2 { animation-delay: -4s; }
+  .b3 { animation-delay: -8s; }
+  @keyframes pet-bubble {
+    0%   { opacity: 0; translate-y: 10; }
+    6%   { opacity: 1; translate-y: 0; }
+    26%  { opacity: 1; translate-y: -7; }
+    36%  { opacity: 0; translate-y: -14; }
+    100% { opacity: 0; translate-y: -14; }
+  }
+
+  /* 呼吸: 整体轻微起伏(与网格摆动叠加, 幅度小 —— 两者都要看得见) */
+  @keyframes pet-bob { 0% { translate-y: 0; } 50% { translate-y: -7; } 100% { translate-y: 0; } }
+
+  /* ---- 状态 dot(右上肩): 常亮 + 呼吸, 桌宠"活着"的最小信号 ---- */
+  .dot { position: absolute; left: 234; top: 168; width: 14; height: 14;
+         border-radius: 7; background: #57e08f;
+         border: 2 solid rgba(255, 255, 255, 0.75);
+         animation: pet-pulse 2.2s ease-in-out infinite; }
+  @keyframes pet-pulse { 0% { opacity: 1; } 50% { opacity: 0.38; } 100% { opacity: 1; } }
+</style>
+</head><body>
+  <!-- 轮播气泡(内容 = 桌宠的三句自我介绍) -->
+  <div class="bubble b1">嗨, 我是 hn 桌宠 —— 整窗都是拖动面, 随时拖走</div>
+  <div class="bubble b2">无边框 · 逐像素透明 · 悬浮于所有窗口之上</div>
+  <div class="bubble b3">hn-level / hn-spaces / hn-click-through 一行声明</div>
+
+  <!-- 立绘(hn-mesh 摆动) + 落地阴影 + 状态 dot -->
+  <div class="petwrap">
+    <img class="pet" src="assets/avatar-a.png"
+         hn-mesh="12x12" hn-mesh-sway="7" hn-mesh-speed="1.1" hn-mesh-anchor="bottom">
+  </div>
+  <div class="shadow"></div>
+  <div class="dot"></div>
+</body></html>

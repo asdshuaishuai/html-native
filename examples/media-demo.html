@@ -71,6 +71,7 @@ video { border-radius: 8; background: #14171e; }
     <div class="ctrl main" id="c-toggle">暂停</div>
     <div class="ctrl" id="c-fwd">+5s</div>
     <div class="ctrl" id="c-home">回到开头</div>
+    <div class="ctrl" id="c-mute">静音开</div>
     <div class="time" id="c-time">--</div>
   </div>
   <div class="status" id="media-state">桥状态: <b>等待驱动</b>(见页尾跑法)</div>
@@ -148,6 +149,17 @@ video { border-radius: 8; background: #14171e; }
     note('hnMediaSeek(0)', hnMediaSeek(vid, 0));
   });
 
+  // ── 静音开关(walkthrough): 走 hnMediaVolume 桥(volume+静音联动,
+  // 与引擎 hn_media_set_muted 同一语义)。窗口里也可直接按 m 键
+  // (hn_app 的媒体静音快捷键, 不依赖点击→JS 接线)。
+  var muted = true;   // 与 <video muted> 声明一致(演示页缺省静音起步)
+  $('c-mute').addEventListener('click', function () {
+    muted = !muted;
+    hnMediaVolume(vid, muted ? 0 : 1);
+    this.textContent = muted ? '静音开' : '静音关';
+    note('hnMediaVolume(' + (muted ? 0 : 1) + ')', true);
+  });
+
   // ── WASM 段: 字符串参数按资产路径读(资产后端, 相对文档目录);
   // hnWasmCall 按导出签名转换(i32 的 add / f64 的 addf)。
   var mod = hnWasmLoad('wasm/add.wasm');
@@ -190,12 +202,20 @@ video { border-radius: 8; background: #14171e; }
     {"op":"eval","id":"demo","js":"var m=hnWasmLoad('examples/wasm/add.wasm');
      hnWasmCall(m,'add',20,22)"}                            # → 42
 
+  跑法(真窗口, 媒体已接线):
+    cd examples && HN_MEDIA_TRACE=1 ../dist/hnapp-macos-arm64 media-demo.html 520 820
+    视频在 <video> 盒里真播(AVFoundation 解码), 音频经 AVPlayer 直出;
+    页面 <video muted> 声明缺省静音, 按 m 键(or 控制条静音钮)开声。
+    [media] 行 t 前进 = 帧在动(自动化口径见 tools/media_window_probe.sh)。
+
   已知边界(诚实清单):
-    - <script> 的自动求值与"窗口内点击→JS"在当前壳尚未接线(脚本内容已
-      解析进 DOM, 求值入口是 daemon 的 eval op); 媒体宿主注入
-      (hn_rt_set_media)在窗口壳同样待接线 —— 见仓库 openIssues。
-      因此窗口里点控制条目前不动, 状态行如实显示 no-op。
+    - "窗口内点击→JS"在当前壳尚未接线(hn_rt_button 只派发 hx 与命中,
+      不调 JS 事件; 页面脚本的 addEventListener 是空函数 → 控制条点击
+      仍不动)。真窗里用 m 键切静音看状态行; JS 桥的权威入口是 daemon
+      eval op。
+    - 媒体宿主已接线(本轮): hnapp-macos-arm64 = AVFoundation 真宿主,
+      hnapp-headless/hnapp-linux = 合成替身(见 app/hn_media_platform.c)。
     - sys://cpu/memory 走 hn_rt 桥(hnapp-* 壳); hnweb-*/daemon 的 sys://
       只有 store/info 两个路由, 这两处卡面停在骨架屏。
-    - 真机播放需要媒体宿主接线后 + assets/demo.mp4(已入库, 320x180 H.264+AAC 4s)。
+    - 样片 assets/demo.mp4(已入库, 320x180 H.264+AAC 4s)。
 -->

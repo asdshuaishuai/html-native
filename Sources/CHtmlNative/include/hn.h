@@ -265,6 +265,14 @@ int hn_node_mesh_info(hn_node *n, int *cols, int *rows);
  *   <meta name="hn-window"  content="360x520">          或 "360x520@100,200"
  *   <meta name="hn-title"   content="标题">
  * title 指向文档 arena 内存, 文档存活期间有效。
+ *
+ * 桌宠形态(无背景 + 无边框 + 悬浮桌面; 见 README "桌宠形态"):
+ *   <meta name="hn-transparent"    content="1">       逐像素 alpha
+ *   <meta name="hn-frameless"      content="1">       无标题栏无边框
+ *   <meta name="hn-level"          content="floating|desktop|normal">
+ *   <meta name="hn-spaces"         content="all">     跟随所有空间
+ *   <meta name="hn-click-through"  content="1">       初始鼠标穿透
+ *   <meta name="hn-shadow"         content="0">       关闭窗口投影
  */
 
 typedef enum hn_surface_kind {
@@ -272,6 +280,15 @@ typedef enum hn_surface_kind {
     HN_SURFACE_POPUP,      /* 无边框浮动弹窗(HUD/通知/卡片) */
     HN_SURFACE_LAYER       /* 覆盖图层(依附宿主窗口或浮层) */
 } hn_surface_kind;
+
+/* 窗口层级(hn-level): 应用在窗口栈里"贴哪一层"。
+   normal 是普通应用窗口; floating 悬浮于普通窗口之上(HUD/桌宠);
+   desktop 落在桌面层(壁纸之上、桌面图标/普通窗口之下 —— 桌面小组件)。 */
+typedef enum {
+    HN_LEVEL_NORMAL = 0,   /* 普通窗口(缺省) */
+    HN_LEVEL_FLOATING,     /* 悬浮(置顶于普通窗口之上) */
+    HN_LEVEL_DESKTOP       /* 桌面级(垫底, 仅高于壁纸) */
+} hn_window_level;
 
 /* 存在感(presence): 应用在系统里"多像一个 App"。
    这是"引擎弱化存在感"的核心开关 —— 同一份文档可以只是桌面上的一张卡片,
@@ -300,6 +317,15 @@ typedef struct hn_manifest {
        会还原到原处, 而不是回到屏幕中央或上次的随机位置。
        NULL = 普通表面(不占槽位)。 */
     const char *applet;
+    /* ---- 桌宠形态(无背景 + 无边框 + 悬浮桌面; 见 README "桌宠形态") ----
+       与 popup/layer 的区别: 那两者是"存在感低的窗口", 本节是"几乎不以窗口
+       存在"—— 无边框 + 逐像素透明 + 不占系统身份, 连"窗口矩形"都不该被看见。
+       各平台按能力物化, 不支持时优雅忽略(声明是意图, 物化看平台)。 */
+    hn_window_level level;  /* hn-level: normal(缺省)/floating/desktop */
+    int frameless;          /* hn-frameless: 1 = 无标题栏无边框 */
+    int click_through;      /* hn-click-through: 1 = 初始鼠标穿透(幽灵模式);
+                               运行期切换见平台层 hnp_window_set_click_through */
+    int spaces_all;         /* hn-spaces="all": 1 = 跟随所有空间(含全屏空间旁) */
 } hn_manifest;
 
 /* 从文档解析清单(meta 缺省时给默认值: window / 自动) */

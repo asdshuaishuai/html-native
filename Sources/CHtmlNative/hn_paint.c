@@ -428,11 +428,81 @@ static const char *hn_attr_lottie_src(hn_node *n) {
     return v;
 }
 
+/* object-fit 的固有尺寸来源: 图片后端(运行时注入的尺寸查询)优先; 没有它
+   时引擎自己从**文件头**嗅探 —— 资产后端已是现成的字节通道, PNG 的 IHDR、
+   GIF 的逻辑屏、BMP 的 biWidth/biHeight 都在头 32 字节里, 无需解码像素。
+   只做嗅探(不引入解码依赖): 未识别格式返回 0 → 退回拉伸铺满(旧口径)。 */
+static int img_intrinsic_size(hn_context *c, const char *path, float *w, float *h) {
+    if (!c || !path || !*path) return 0;
+    if (c->images && c->images->size) {
+        float iw = 0, ih = 0;
+        if (c->images->size(c->images->ctx, path, &iw, &ih) && iw > 0 && ih > 0) {
+            *w = iw; *h = ih;
+            return 1;
+        }
+    }
+    if (!c->assets || !c->assets->load) return 0;
+    size_t n = 0;
+    const char *b = c->assets->load(c->assets->ctx, path, &n);
+    if (!b || n < 24) return 0;
+    const unsigned char *p = (const unsigned char *)b;
+    if (!memcmp(p, "\x89PNG\r\n\x1a\n", 8) && n >= 24 && !memcmp(p + 12, "IHDR", 4)) {
+        unsigned ww = ((unsigned)p[16] << 24) | ((unsigned)p[17] << 16) |
+                      ((unsigned)p[18] << 8) | (unsigned)p[19];
+        unsigned hh = ((unsigned)p[20] << 24) | ((unsigned)p[21] << 16) |
+                      ((unsigned)p[22] << 8) | (unsigned)p[23];
+        if (ww > 0 && hh > 0 && ww <= 65535 && hh <= 65535) {
+            *w = (float)ww; *h = (float)hh;
+            return 1;
+        }
+    } else if (n >= 10 && (!memcmp(p, "GIF87a", 6) || !memcmp(p, "GIF89a", 6))) {
+        int ww = p[6] | (p[7] << 8), hh = p[8] | (p[9] << 8);
+        if (ww > 0 && hh > 0) { *w = (float)ww; *h = (float)hh; return 1; }
+    } else if (n >= 26 && p[0] == 'B' && p[1] == 'M') {
+        int ww = p[18] | (p[19] << 8) | (p[20] << 16) | (p[21] << 24);
+        int hh = p[22] | (p[23] << 8) | (p[24] << 16) | (p[25] << 24);
+        if (hh < 0) hh = -hh;                 /* 自下而上的位图: 取绝对值 */
+        if (ww > 0 && hh > 0) { *w = (float)ww; *h = (float)hh; return 1; }
+    }
+    return 0;
+}
+
 /* 有效圆角: % 值按盒短边解析(border-radius:50% 即圆) */
 static float eff_radius(const hn_style *st, float w, float h) {
     if (!st->radius_pct || st->radius <= 0) return st->radius;
     float m = w < h ? w : h;
     return m * st->radius / 100.0f;
+}
+
+/* object-fit 是否显式声明(0=fill 与旧口径逐位一致 —— 未声明时完全走
+   原路径, 不付"查询图片固有尺寸"的代价)。其余档返回该档编号。 */
+static int object_fit_mode(const hn_style *st) {
+    return st->object_fit == 0 ? -1 : (int)st->object_fit;
+}
+
+/* object-fit 求贴图矩形: 盒 (bx,by,bw,bh) + 源图 (iw,ih) → 内容矩形。
+   口径与 CSS 替换元素一致: fill 拉伸铺满; contain 等比缩到**装得下**
+   (居中, 可能留边); cover 等比缩到**盖得住**(居中, 溢出部分由盒裁剪
+   兜住 —— 后端不裁剪时表现为溢出, 与浏览器的 overflow:visible 同观感);
+   none 用源图固有尺寸原样居中。 */
+static void object_fit_rect(const hn_style *st, int iw, int ih,
+                            float bx, float by, float bw, float bh,
+                            float *ox, float *oy, float *ow, float *oh) {
+    *ox = bx; *oy = by; *ow = bw; *oh = bh;
+    int mode = st->object_fit;
+    if (mode == 0 || iw <= 0 || ih <= 0 || bw <= 0 || bh <= 0) return;
+    float sw = (float)iw, sh = (float)ih;
+    float tw, th;
+    if (mode == 3) {                       /* none: 固有尺寸 */
+        tw = sw; th = sh;
+    } else {
+        float kx = bw / sw, ky = bh / sh;
+        float k = (mode == 2) ? (kx > ky ? kx : ky) : (kx < ky ? kx : ky);
+        tw = sw * k; th = sh * k;
+    }
+    *ox = bx + (bw - tw) * 0.5f;
+    *oy = by + (bh - th) * 0.5f;
+    *ow = tw; *oh = th;
 }
 
 /* 文本装饰线: underline / line-through / overline(随文本基线定位)。
@@ -1229,15 +1299,68 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         goto clip_done;
     }
 
-    /* 图片元素 */
+    /* 图片元素。
+       GIF 动图(GIF87a/89a; 显式 hn-gif 或 src 以 .gif 结尾, 见 hn_gif.c):
+       解码为帧序列, 当前帧按 ext_clock 取 —— 发 BITMAP 指令, 像素源是
+       上下文的 GIF 缓存(生命周期覆盖本次显示列表; 缓存随文档替换清空)。
+       单帧 GIF 走同一条路(等价静态图); 解码失败退到常规 IMAGE 分支,
+       由图片后端/占位把问题显式暴露出来, 不静默空白。
+       object-fit(contain/cover/fill/none, 含 img 的 object-fit 属性同义):
+       按**源图固有尺寸**算贴图矩形 —— IMAGE 指令给的是目标矩形, 缩放
+       语义只能在引擎侧解(后端只做拉伸)。fill 与旧口径一致(缺省)。 */
     if (n->tag && !strcmp(n->tag, "img")) {
         const char *src = hn_node_attr(n, "src");
+        const char *gif_src = hn_node_gif_src(n);
+        if (gif_src) {
+            hn_gif *gg = hn_context_gif(c, gif_src);
+            if (gg && hn_gif_frame_count(gg) > 0) {
+                float gspeed = 1.0f;
+                const char *gsp = hn_node_attr(n, "hn-gif-speed");
+                if (gsp && *gsp) { gspeed = (float)atof(gsp); if (gspeed <= 0.01f) gspeed = 1.0f; }
+                int fi = hn_gif_frame_index(gg, n->ext_clock * gspeed);
+                const unsigned char *px = hn_gif_frame_rgba(gg, fi);
+                if (px) {
+                    float bx0 = tfx(g, sx, n->bx, n->by), by0 = tfy(g, sy, n->bx, n->by);
+                    float bw = n->bw * g->scale * g->scale_x;
+                    float bh = n->bh * g->scale * g->scale_y;
+                    float tw = bw, th = bh, tx = bx0, ty = by0;
+                    object_fit_rect(st, hn_gif_width(gg), hn_gif_height(gg),
+                                    bx0, by0, bw, bh, &tx, &ty, &tw, &th);
+                    hn_cmd cmd;
+                    memset(&cmd, 0, sizeof(cmd));
+                    cmd.kind = HN_CMD_BITMAP;
+                    cmd.x = tx; cmd.y = ty; cmd.w = tw; cmd.h = th;
+                    cmd.radius = eff_radius(st, bw, bh);
+                    cmd.bitmap = px;
+                    cmd.bitmap_stride = hn_gif_width(gg) * 4;
+                    cmd.bitmap_w = hn_gif_width(gg);
+                    cmd.bitmap_h = hn_gif_height(gg);
+                    cmd.bitmap_pts = (double)n->ext_clock * 0.001;
+                    push_cmd(c, &cmd);
+                    goto clip_done;
+                }
+            }
+        }
         if (src) {
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_IMAGE;
-            cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by);
-            cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
+            float bx0 = tfx(g, sx, n->bx, n->by), by0 = tfy(g, sy, n->bx, n->by);
+            float bw = n->bw * g->scale * g->scale_x;
+            float bh = n->bh * g->scale * g->scale_y;
+            /* object-fit: 按源图固有尺寸算贴图矩形(查询失败则退回拉伸) */
+            float iw = 0, ih = 0;
+            int have_intrinsic = 0;
+            if (object_fit_mode(st) >= 0 && src)
+                have_intrinsic = img_intrinsic_size(c, src, &iw, &ih);
+            if (have_intrinsic) {
+                float tw = bw, th = bh, tx0 = bx0, ty0 = by0;
+                object_fit_rect(st, (int)iw, (int)ih, bx0, by0, bw, bh,
+                                &tx0, &ty0, &tw, &th);
+                cmd.x = tx0; cmd.y = ty0; cmd.w = tw; cmd.h = th;
+            } else {
+                cmd.x = bx0; cmd.y = by0; cmd.w = bw; cmd.h = bh;
+            }
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
             cmd.text = src;
             cmd.text_len = strlen(src);
