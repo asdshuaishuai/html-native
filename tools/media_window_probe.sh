@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# media_window_probe.sh — 真窗口媒体接线的验收探针(视频/音频/降级)
+# media_window_probe.sh — 真窗口媒体接线的验收探针(视频/音频/降级/资源有界)
 # ============================================================================
 # 断言"媒体宿主真的接进了 hn_app 主循环"(此前只有 ABI/后端, 没有宿主装配):
 #   ① 真窗起 examples/media-demo.html 3 秒 kill, 进程不崩, 且 HN_MEDIA_TRACE
@@ -7,12 +7,18 @@
 #   ② 音频: 合成 WAV(本脚本生成 440Hz 2s) + <audio autoplay loop> 真窗
 #      播 3 秒不崩, [media] 行 dur≈2.0 且 t 前进(AVPlayer 音频路径).
 #   ③ 帧像素: 对同页 --shot 两次(不同 --advance), 解码 PNG 取 <video> 盒
-#      中心/区域像素, 断言两帧不同 —— "视频在动"的确定性像素证据。
+#      中心/区域像素, 断言两帧不同 —— "视频在动"的确定性像素证据
+#      (事故硬断言⑦"帧仍在动"由本档钉住, 原样保留)。
 #      (daemon 路径对 window 应用不伺候 shot, 故用 hnapp 派生对比路线。)
 #   ④ headless 平台 --probe 不崩 + --shot --advance(合成宿主)出图 —— 平台
 #      媒体缺席时的降级语义(still plays: 合成梯度帧)达成。
 #   ⑤ 媒体宿主装配缺失的降级: 造一份 src 指向不存在文件的文档, 真窗 3 秒
 #      不崩(open 失败 → IDLE + 占位 RECT + stderr 一行, 不静默空白)。
+#   ⑦⑧⑨ 2026-10 事故硬断言(RSS 有界 / CPU 有界 / 非绿屏):
+#      真窗播 10s 的 RSS 差 < 300MB(事故②逐帧泄漏 22MB/s → 24.5GB 假死)、
+#      10s CPU 平均 < 250%(事故期 800%, 内存压缩抖动连带)、--shot 解码帧
+#      video 盒饱和纯绿占比 < 30%(事故①NV12 色度行距推错的雪花指纹)。
+#   ⑩ 收口自查: 无 hnapp 孤儿残留。
 #
 # 用法: bash tools/media_window_probe.sh [dist_dir]
 #   缺省 dist_dir = $ROOT/dist; 二进制名按 build-multiplatform.sh 产物名。
@@ -260,13 +266,108 @@ else
     echo "  (跳过 ⑤: 无真窗二进制)"
 fi
 
-# ---------- ⑥ 收口自查: 无 hnapp 孤儿残留 ----------
+# ---------- ⑦ 事故硬断言④: 真窗播 video 10 秒, 进程 RSS 有界 ----------
+# 2026-10 事故②: 真窗 media-demo 逐帧泄 CA 背衬(壳主循环无 autorelease
+# 池), 22MB/s → 24.5GB 假死。修后 RSS 必须有界: 起播稳定后(2s)与 12s 各
+# 采一次, 差 < 300MB(10s × 旧泄漏率 22MB/s = 220MB, 有界口径取 300MB)。
+# ---------- ⑧ 事故硬断言⑤: CPU 有界(同窗口 10s 平均 < 250%) ----------
+# AVFoundation 解码线程的合法占用留量到 250%; 事故期的 800% 来自内存
+# 压缩抖动(24.5GB 连带), 泄漏修掉后实测 ~30%。
+if [ -x "$HN_APP" ]; then
+    LOG="$SBX/bounded-win.log"
+    (cd "$ROOT/examples" && exec env HN_MEDIA_TRACE=1 HN_MEDIA_MUTE=1 "$HN_APP" media-demo.html 520 820) >"$LOG" 2>&1 &
+    WPID=$!
+    sleep 2
+    R0=$(ps -o rss= -p "$WPID" 2>/dev/null | tr -d ' ')
+    C0=$(ps -o cputime= -p "$WPID" 2>/dev/null | tr -d ' ')
+    sleep 10
+    R1=$(ps -o rss= -p "$WPID" 2>/dev/null | tr -d ' ')
+    C1=$(ps -o cputime= -p "$WPID" 2>/dev/null | tr -d ' ')
+    ALIVE=0
+    kill -0 "$WPID" 2>/dev/null && ALIVE=1
+    kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null; WPID=""
+    if [ -n "$R0" ] && [ -n "$R1" ] && [ "$ALIVE" = "1" ]; then
+        DRSS=$((R1 - R0))
+        [ "$DRSS" -lt 0 ] && DRSS=0   # 回落不算增长
+        [ "$DRSS" -lt 307200 ] && CK_RSS=1 || CK_RSS=0
+        ck "⑦ 真窗播 10s RSS 有界(Δ=$((DRSS / 1024))MB < 300MB)" "$CK_RSS"
+    else
+        ck "⑦ 真窗播 10s RSS 有界(采样失败)" 0
+    fi
+    if [ -n "$C0" ] && [ -n "$C1" ] && [ "$ALIVE" = "1" ]; then
+        SEC0=$(awk -F: -v s="$C0" 'BEGIN { split(s, a, ":"); printf "%.3f", a[1]*60 + a[2] }')
+        SEC1=$(awk -F: -v s="$C1" 'BEGIN { split(s, a, ":"); printf "%.3f", a[1]*60 + a[2] }')
+        ck "⑧ 真窗播 10s CPU 平均 <250% | core0=$C0 core10=$C1" \
+           "$(awk -v a="$SEC0" -v b="$SEC1" 'BEGIN { print ((b - a) / 10.0 < 2.5) ? 1 : 0 }')"
+    else
+        ck "⑧ 真窗播 10s CPU 平均 <250%(采样失败)" 0
+    fi
+else
+    echo "  (跳过 ⑦⑧: 无真窗二进制)"
+fi
+
+# ---------- ⑨ 事故硬断言⑥: 非绿屏(video 盒饱和纯绿占比 < 30%) ----------
+# 事故①: NV12 色度行距推错 → 雪花帧里饱和纯绿(>200,80,80)占比 >70%。
+# 实测修复后 0.0%。--shot --advance 取真解码帧, C99 采样器现场编译。
+if [ -x "$HN_APP" ]; then
+    SG="$SBX/green.png"
+    (cd "$ROOT/examples" && HN_MEDIA_MUTE=1 "$HN_APP" media-demo.html --shot "$SG" 520 820 --advance 1500 >/dev/null 2>&1)
+    if [ -s "$SG" ]; then
+        cat > "$SBX/pnggreen.c" <<'CEOF'
+/* pnggreen — 统计 PNG 矩形区域饱和纯绿(G>200, R<80, B<80)采样占比 */
+#include <stdio.h>
+#include <stdlib.h>
+#include "hn_png.h"
+static unsigned char *load(const char *p, int *w, int *h) {
+    FILE *f = fopen(p, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    unsigned char *buf = malloc((size_t)n);
+    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
+    fclose(f);
+    unsigned char *px = hn_png_decode(buf, (size_t)n, w, h);
+    free(buf); return px;
+}
+int main(int argc, char **argv) {
+    if (argc < 6) return 2;
+    int w, h;
+    unsigned char *A = load(argv[1], &w, &h);
+    if (!A) return 2;
+    int x0 = atoi(argv[2]), y0 = atoi(argv[3]), x1 = atoi(argv[4]), y1 = atoi(argv[5]);
+    long green = 0, tot = 0;
+    for (int y = y0; y < y1 && y < h; y += 2)
+        for (int x = x0; x < x1 && x < w; x += 2) {
+            long i = ((long)y * w + x) * 4; tot++;
+            if (A[i+1] > 200 && A[i] < 80 && A[i+2] < 80) green++;
+        }
+    printf("green=%ld/%ld (%.1f%%)", green, tot, 100.0 * green / (tot ? tot : 1));
+    return 0;
+}
+CEOF
+        cc -O2 -I "$ROOT/Sources/CHtmlNative/include" -I "$ROOT/Sources/CHtmlNative" \
+           "$SBX/pnggreen.c" "$ROOT/Sources/CHtmlNative/hn_png.c" -o "$SBX/pnggreen" || true
+        if [ -x "$SBX/pnggreen" ]; then
+            GR=$("$SBX/pnggreen" "$SG" 60 80 460 290)
+            GP=$(printf '%s' "$GR" | sed -E 's/.*\(([0-9.]+)%\)/\1/')
+            ck "⑨ video 盒非绿屏(纯绿占比 ${GP}% < 30%) | $GR" \
+               "$(awk -v p="$GP" 'BEGIN { print (p < 30.0) ? 1 : 0 }')"
+        else
+            ck "⑨ video 盒非绿屏(采样器编译失败)" 0
+        fi
+    else
+        ck "⑨ video 盒非绿屏(--shot 落盘失败)" 0
+    fi
+else
+    echo "  (跳过 ⑨: 无真窗二进制)"
+fi
+
+# ---------- ⑩ 收口自查: 无 hnapp 孤儿残留 ----------
 # 本脚本启动的 hnapp 全部带"探针特有文档名"参数 —— 按同模式 pgrep,
 # 有命中即说明收口漏了(exec 替换 + trap kill 的完整链路失效)。
+# (事故断言⑦"帧仍在动"由 ③ 的既有断言钉住 —— 两帧 diff > 50% 原样保留。)
 sleep 0.5
 LEFT=$(pgrep -f "hnapp-macos-arm64 (media-demo|audio|missing)\.html" 2>/dev/null | grep -c . || true)
-[ "$LEFT" = "0" ] && ck "⑥ 无 hnapp 孤儿残留(exec 收口 + trap 扫尾)" 1 \
-                  || ck "⑥ 无 hnapp 孤儿残留(残留 $LEFT 个)" 0
+[ "$LEFT" = "0" ] && ck "⑩ 无 hnapp 孤儿残留(exec 收口 + trap 扫尾)" 1 \
+                  || ck "⑩ 无 hnapp 孤儿残留(残留 $LEFT 个)" 0
 
 echo "----------------------------------------"
 if [ "$fails" = 0 ]; then echo "media-window-probe: 全部通过"; else echo "media-window-probe: 失败 $fails 项"; fi

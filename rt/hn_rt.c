@@ -1950,6 +1950,13 @@ static int ambient_beat_ms(void) {
     return beat;
 }
 
+/* 媒体-only 轻渲染判据(hn_media.c 实现; 本文件媒体时钟段的使用点):
+   有会话在播且在播 video 的首帧已过全路径落位(cur_time>0)。引擎的动画
+   (过渡/关键帧/入场)全部只写绘制期字段(opacity/transform/色彩), 轻路径
+   重建显示列表即重读它们 —— 唯一必须全路径的窗口是"首帧固有尺寸变化",
+   由 cur_time<=0 门挡住, 之后的视频帧推进只换像素, 免 relayout。 */
+extern int hn_media_light_render_ok(hn_context *c);
+
 int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     if (!rt) return -1;
     if (repaint) *repaint = 0;
@@ -1962,12 +1969,17 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
 
     /* 动画推进 + 活跃类别分级(性能治理): interactive(过渡/关键帧/媒体/
        平滑滚动)→ 全路径渲染 + 16ms 节拍; 仅 ambient(ext_clock 类)→
-       轻路径(免 relayout)+ HN_ANIM_FPS 节拍(缺省 33ms ≈ 30fps)。 */
+       轻路径(免 relayout)+ HN_ANIM_FPS 节拍(缺省 33ms ≈ 30fps)。
+       媒体-only 在播(interactive 且无首帧几何待落位)同走轻路径:
+       视频帧推进不改样式/几何, relayout 是纯浪费(事故③的 CPU 大头之一)。 */
     int anim_cls = HN_ANIM_NONE;
     int anim = hn_context_anim_tick_ex(rt->ctx, dt_ms, &anim_cls);
     if (anim) {
-        if (anim_cls == HN_ANIM_AMBIENT) rt_render_ambient(rt);
-        else rt_render(rt);
+        if (anim_cls == HN_ANIM_AMBIENT ||
+            (anim_cls == HN_ANIM_INTERACTIVE && hn_media_light_render_ok(rt->ctx)))
+            rt_render_ambient(rt);
+        else
+            rt_render(rt);
         if (repaint) *repaint = 1;
     }
 

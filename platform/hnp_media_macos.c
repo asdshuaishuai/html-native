@@ -83,6 +83,7 @@ static void    *(*f_CVPixelBufferGetBaseAddressOfPlane)(const void *, size_t);
 static size_t   (*f_CVPixelBufferGetBytesPerRowOfPlane)(const void *, size_t);
 static size_t   (*f_CVPixelBufferGetPlaneCount)(const void *);
 static size_t   (*f_CVPixelBufferGetDataSize)(const void *);
+static unsigned int (*f_CVPixelBufferGetPixelFormatType)(const void *);
 
 #define CV_LOCK_READONLY 1u       /* kCVPixelBufferLock_ReadOnly(CoreVideo) */
 
@@ -142,6 +143,7 @@ static int media_init_once(void) {
     f_CVPixelBufferGetBytesPerRowOfPlane = (size_t (*)(const void *, size_t))dlsym(RTLD_DEFAULT, "CVPixelBufferGetBytesPerRowOfPlane");
     f_CVPixelBufferGetPlaneCount     = (size_t (*)(const void *))dlsym(RTLD_DEFAULT, "CVPixelBufferGetPlaneCount");
     f_CVPixelBufferGetDataSize       = (size_t (*)(const void *))dlsym(RTLD_DEFAULT, "CVPixelBufferGetDataSize");
+    f_CVPixelBufferGetPixelFormatType = (unsigned int (*)(const void *))dlsym(RTLD_DEFAULT, "CVPixelBufferGetPixelFormatType");
     if (!o_getClass || !o_sel || !o_msgSend || !f_CMTimeGetSeconds || !f_CFRelease ||
         !f_CVPixelBufferGetWidth || !f_CVPixelBufferGetHeight ||
         !f_CVPixelBufferLockBaseAddress || !f_CVPixelBufferUnlockBaseAddress ||
@@ -169,6 +171,8 @@ struct hnp_media {
     double duration;               /* 最近确认的时长(秒); duration_known 时有效 */
     int duration_known, playing;   /* playing = play/pause 的内部记账(seek 序列用) */
     int last_w, last_h, has_dims;  /* 最近一帧尺寸(frame 返回 0 时仍须写出) */
+    double stall_pos;              /* 卡死自愈: 上一次 position 采样值 */
+    int stall_cnt;                 /* 同值连续采样计数(playing 态专用) */
 };
 
 int hnp_media_supported(void) { return 1; }
@@ -199,13 +203,31 @@ hnp_media *hnp_media_open(const char *url, char *err, size_t err_cap) {
     obj_t u = MSG1(obj_t, o_getClass("NSURL"), "fileURLWithPath:", nsstr(path));
     obj_t player = u ? MSG1(obj_t, o_getClass("AVPlayer"), "playerWithURL:", u) : NULL;
     obj_t item = player ? MSG0(obj_t, player, "currentItem") : NULL;
-    /* 帧输出对象: attributes 传 NULL —— 实测请求 BGRA 也会被忽略,
-       实际产 '420v' planar(§10.4), 索性不装。本运行时只有
-       initWithPixelBufferAttributes: 变体(无 dispatchQueue 变体, §10.8)。 */
+    /* 帧输出对象: **显式声明 kCVPixelFormatType_32BGRA**(事故①修复挂点)。
+       旧代码 attributes 传 NULL —— 实测产 '420v' planar, 而其平面行距
+       GetBytesPerRowOfPlane 在本运行时会谎报(§10.4), 旧兜底 sy/2 对 NV12
+       又是错的(事故①实证: Y stride=384 / UV 真实 320 / 谎报 5120 / 兜底
+       192 → 色度逐行错位 → 纯绿雪花帧)。请求 BGRA 后缓冲是单平面紧排
+       (bytesPerRow 就是权威), 转换只剩字节序重排, 雪花与绿屏一起消失。
+       BGRA = 0x42475241(CoreVideo/CVPixelBuffer.h 枚举, 非导出符号, 硬编码;
+       key 经 dlsym 取 kCVPixelBufferPixelFormatTypeKey 的 CFStringRef)。
+       查不到 key/类型(异常运行时)退回 NULL attributes —— 平面转换路径仍在。 */
     obj_t out = ns_alloc_init(o_getClass("AVPlayerItemVideoOutput"));
-    if (out)
+    obj_t attrs = NULL;
+    {
+        obj_t keyptr = dlsym(RTLD_DEFAULT, "kCVPixelBufferPixelFormatTypeKey");
+        if (keyptr && *(obj_t *)keyptr && o_getClass("NSNumber") && o_getClass("NSDictionary")) {
+            obj_t num = ((obj_t (*)(obj_t, sel_t, unsigned long))o_msgSend)(
+                o_getClass("NSNumber"), o_sel("numberWithUnsignedLong:"), 0x42475241UL);
+            obj_t objs[1] = { num };
+            obj_t keys[1] = { *(obj_t *)keyptr };
+            attrs = ((obj_t (*)(obj_t, sel_t, obj_t *, obj_t *, unsigned long))o_msgSend)(
+                o_getClass("NSDictionary"), o_sel("dictionaryWithObjects:forKeys:count:"),
+                objs, keys, 1);
+        }
         out = ((obj_t (*)(obj_t, sel_t, obj_t))o_msgSend)(
-            out, o_sel("initWithPixelBufferAttributes:"), NULL);
+            out, o_sel("initWithPixelBufferAttributes:"), attrs);
+    }
     if (out && item) MSG1(void, item, "addOutput:", out);
     if (pool) MSG0(void, pool, "drain");
 
@@ -283,8 +305,12 @@ int hnp_media_seek(hnp_media *m, double sec) {
     if (sec < 0) sec = 0;
     CMTime t = sec_to_cm(sec);
     if (m->playing) {
-        /* 播放态直接 seek(§10.5 只在 pause 态有问题) */
-        ((void (*)(obj_t, sel_t, CMTime))o_msgSend)(m->player, o_sel("seekToTime:"), t);
+        /* 播放态直接 seek(§10.5 只在 pause 态有问题); 零容差精seek ——
+           缺省 coarse 容差在回绕(结尾→0)时会向关键帧窗口妥协, 落位时间
+           不可预期, 与引擎的回绕抑制窗口相互踩(实证 30s 内第三次回绕卡死)。 */
+        ((void (*)(obj_t, sel_t, CMTime, CMTime, CMTime))o_msgSend)(
+            m->player, o_sel("seekToTime:toleranceBefore:toleranceAfter:"),
+            t, t, t);
         return 1;
     }
     /* pause 态: 实测直接 seek 视频轨停在 0.000 —— 统一走
@@ -329,7 +355,25 @@ int hnp_media_duration(hnp_media *m, double *sec_out) {
 int hnp_media_position(hnp_media *m, double *sec_out) {
     if (!m || !m->player || g_once <= 0) return 0;
     media_pump();
-    if (sec_out) *sec_out = cur_position(m);
+    double p = cur_position(m);
+    /* 回绕/重启卡死自愈(实证两轮: 结尾→0 的 seek 是异步的, 引擎侧已做
+       "落位窗口抑制"防 seek 风暴; 但 seek 落位前播放器可能先撞到结尾
+       自动 pause(rate→0), 此后引擎补发的 play 被吃掉 —— position 永久
+       停在 0, 引擎却按 PLAYING 驱动 60fps, t 恒 0)。playing 态却在 0
+       附近 ~0.5s 纹丝不动 → 再催一次 play。合法起点 0.5s 内早已前进;
+       paused 态(m->playing==0)不进这段。 */
+    if (m->playing) {
+        if (p < 0.05 && p == m->stall_pos) {
+            if (++m->stall_cnt >= 30) {
+                MSG0(void, m->player, "play");
+                m->stall_cnt = 0;
+            }
+        } else {
+            m->stall_cnt = 0;
+            m->stall_pos = p;
+        }
+    }
+    if (sec_out) *sec_out = p;
     return 1;
 }
 
@@ -363,39 +407,86 @@ static size_t sane_stride(size_t claim, size_t fallback, size_t w, size_t h, siz
    非双平面缓冲按 32bpp BGRA 兜底。色彩: BT.601 limited(video range)。 */
 static unsigned char clampb(int v) { return v < 0 ? 0 : v > 255 ? 255 : (unsigned char)v; }
 
-static void pb_to_rgba(const void *pb, unsigned char *dst, int w, int h) {
-    f_CVPixelBufferLockBaseAddress(pb, CV_LOCK_READONLY);
+/* 首帧几何日志(诊断实锤): format fourcc / planes / strides / base 地址 /
+   数据总长 / UV 头 16 字节 —— 锁内取数(锁前取 base 恒 0x0, 是 IOSurface
+   惰性映射)。每次进程一行, 不刷屏。 */
+static void pb_geometry_trace(const void *pb, int w, int h) {
+    static int traced = 0;
+    if (traced || !f_CVPixelBufferGetPixelFormatType) return;
+    traced = 1;
+    unsigned int fourcc = f_CVPixelBufferGetPixelFormatType(pb);
     size_t total = f_CVPixelBufferGetDataSize(pb);
     size_t planes = f_CVPixelBufferGetPlaneCount(pb);
+    fprintf(stderr, "[media-pb] fmt=%c%c%c%c planes=%zu %dx%d total=%zu "
+            "bpr=%zu p0stride=%zu p1stride=%zu p0=%p p1=%p\n",
+            (char)(fourcc & 255), (char)((fourcc >> 8) & 255),
+            (char)((fourcc >> 16) & 255), (char)((fourcc >> 24) & 255),
+            planes, w, h, total,
+            f_CVPixelBufferGetBytesPerRow(pb),
+            planes ? f_CVPixelBufferGetBytesPerRowOfPlane(pb, 0) : 0,
+            planes > 1 ? f_CVPixelBufferGetBytesPerRowOfPlane(pb, 1) : 0,
+            f_CVPixelBufferGetBaseAddressOfPlane(pb, 0),
+            planes > 1 ? f_CVPixelBufferGetBaseAddressOfPlane(pb, 1) : NULL);
+    if (planes > 1) {
+        const unsigned char *uv = f_CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+        if (uv) fprintf(stderr, "[media-pb] uv[0..15]=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                        uv[0], uv[1], uv[2], uv[3], uv[4], uv[5], uv[6], uv[7],
+                        uv[8], uv[9], uv[10], uv[11], uv[12], uv[13], uv[14], uv[15]);
+    }
+}
+
+/* CVPixelBuffer → RGBA8 非预乘, 原点左上、顶上到底下。**逐行**按各自
+   stride 走(事故①修复口径), 返回 1=转换完成 / 0=格式不支持或锁失败
+   —— 调用方跳过该帧沿用上一帧, **绝不硬读**(硬读 = 绿雪花/越界)。
+   主路径: open 时已请求 BGRA(单平面, bytesPerRow 权威) → 字节序重排。
+   兜底: '420v'/'420f' NV12 双平面 —— Y 行距优先 GetBytesPerRowOfPlane,
+   但它会说谎(§10.4, 400px 帧谎报 13312), sane_stride 以总长为界回退;
+   UV 行距**从总长推导**(总长 − Y 平面尺寸 = UV 平面尺寸, 除以行数),
+   旧代码的 sy/2 兜底对 NV12 是错的(实证 192 vs 真实 320)。
+   色彩: BT.601 limited(video range)。 */
+static int pb_to_rgba(const void *pb, unsigned char *dst, int w, int h) {
+    if (f_CVPixelBufferLockBaseAddress(pb, CV_LOCK_READONLY) != 0) return 0;
+    pb_geometry_trace(pb, w, h);
+    size_t total = f_CVPixelBufferGetDataSize(pb);
+    size_t planes = f_CVPixelBufferGetPlaneCount(pb);
+    unsigned int fmt = f_CVPixelBufferGetPixelFormatType
+                       ? f_CVPixelBufferGetPixelFormatType(pb) : 0;
+    int ok = 0;
     if (planes >= 2) {
         const unsigned char *Y  = (const unsigned char *)f_CVPixelBufferGetBaseAddressOfPlane(pb, 0);
         const unsigned char *UV = (const unsigned char *)f_CVPixelBufferGetBaseAddressOfPlane(pb, 1);
         size_t sy  = sane_stride(f_CVPixelBufferGetBytesPerRowOfPlane(pb, 0),
                                  f_CVPixelBufferGetBytesPerRow(pb), (size_t)w, (size_t)h, total);
-        size_t suv = sane_stride(f_CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
-                                 sy / 2, (size_t)w / 2, (size_t)(h + 1) / 2, total);
-        for (int y = 0; y < h; y++) {
-            const unsigned char *yrow  = Y + (size_t)y * sy;
-            const unsigned char *uvrow = UV + (size_t)(y >> 1) * suv;
-            unsigned char *d = dst + (size_t)y * (size_t)w * 4;
-            for (int x = 0; x < w; x++) {
-                double yv = ((int)yrow[x] - 16) * (255.0 / 219.0);
-                int u = (int)uvrow[(x >> 1) << 1] - 128;
-                int v = (int)uvrow[((x >> 1) << 1) + 1] - 128;
-                double uf = u * (255.0 / 224.0), vf = v * (255.0 / 224.0);
-                d[0] = clampb((int)(yv + 1.402 * vf + 0.5));                 /* R */
-                d[1] = clampb((int)(yv - 0.344136 * uf - 0.714136 * vf + 0.5)); /* G */
-                d[2] = clampb((int)(yv + 1.772 * uf + 0.5));                 /* B */
-                d[3] = 255;   /* 媒体帧无 alpha, 输出不透明 */
-                d += 4;
+        size_t ch_rows = ((size_t)h + 1) / 2;
+        size_t y_size = sy * (size_t)h;
+        size_t p1 = (total > y_size) ? total - y_size : 0;
+        size_t suv = p1 ? sane_stride(f_CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
+                                      p1 / ch_rows, (size_t)w / 2, ch_rows, p1)
+                        : sy;
+        if (Y && UV && sy >= (size_t)w && suv >= (size_t)(w / 2)) {
+            for (int y = 0; y < h; y++) {
+                const unsigned char *yrow  = Y + (size_t)y * sy;
+                const unsigned char *uvrow = UV + (size_t)(y >> 1) * suv;
+                unsigned char *d = dst + (size_t)y * (size_t)w * 4;
+                for (int x = 0; x < w; x++) {
+                    double yv = ((int)yrow[x] - 16) * (255.0 / 219.0);
+                    int u = (int)uvrow[(x >> 1) << 1] - 128;
+                    int v = (int)uvrow[((x >> 1) << 1) + 1] - 128;
+                    double uf = u * (255.0 / 224.0), vf = v * (255.0 / 224.0);
+                    d[0] = clampb((int)(yv + 1.402 * vf + 0.5));                 /* R */
+                    d[1] = clampb((int)(yv - 0.344136 * uf - 0.714136 * vf + 0.5)); /* G */
+                    d[2] = clampb((int)(yv + 1.772 * uf + 0.5));                 /* B */
+                    d[3] = 255;   /* 媒体帧无 alpha, 输出不透明 */
+                    d += 4;
+                }
             }
+            ok = 1;
         }
-    } else {
+    } else if (planes == 0 && fmt == 0x42475241u /* 'BGRA' */) {
         const unsigned char *base = (const unsigned char *)f_CVPixelBufferGetBaseAddress(pb);
         size_t stride = f_CVPixelBufferGetBytesPerRow(pb);
-        if (base) {
-            if (stride < (size_t)w * 4) stride = (size_t)w * 4;
-            if ((size_t)(h - 1) * stride + (size_t)w * 4 > total) stride = (size_t)w * 4;
+        if (base && stride >= (size_t)w * 4 &&
+            (size_t)(h - 1) * stride + (size_t)w * 4 <= total) {
             for (int y = 0; y < h; y++) {
                 const unsigned char *s = base + (size_t)y * stride;
                 unsigned char *d = dst + (size_t)y * (size_t)w * 4;
@@ -404,9 +495,12 @@ static void pb_to_rgba(const void *pb, unsigned char *dst, int w, int h) {
                     s += 4; d += 4;
                 }
             }
+            ok = 1;
         }
     }
+    /* 其余格式(2vuy/444/…): 不认识就跳过 —— 沿用上一帧, 绝不硬读。 */
     f_CVPixelBufferUnlockBaseAddress(pb, CV_LOCK_READONLY);
+    return ok;
 }
 
 int hnp_media_frame(hnp_media *m, unsigned char *rgba, size_t cap,
@@ -449,7 +543,13 @@ int hnp_media_frame(hnp_media *m, unsigned char *rgba, size_t cap,
         f_CFRelease(pb);
         return -1;
     }
-    pb_to_rgba(pb, rgba, pw, ph);
+    if (!pb_to_rgba(pb, rgba, pw, ph)) {
+        /* 格式不支持/锁失败: 跳过该帧(沿用上一帧), 绝不把没转换的缓冲交出去 */
+        f_CFRelease(pb);
+        if (w) *w = m->last_w;
+        if (h) *h = m->last_h;
+        return 0;
+    }
     f_CFRelease(pb);   /* copy 出来的 buffer 归调用方释放 */
     return 1;
 }

@@ -94,6 +94,23 @@ static obj_t nsstr(const char *s) {
         o_getClass("NSString"), o_sel("stringWithUTF8String:"), s);
 }
 
+/* 有界 autorelease 池(与 hnp_media_macos.c 的 media_pump 同款手法)。
+   事故②(2026-10 真窗 media-demo 24.5GB 假死)的根因实锤: 本壳手撸 MRC +
+   自管事件循环, 主循环**从来没有 NSAutoreleasePool** —— AppKit/CA 内部
+   大量按 autorelease 归还的对象(图层背衬、CA 事务、NSImage 拷贝)落不进
+   任何池, macOS 运行时对无池 autorelease 的处置是直接泄漏。静态页不
+   blit 时 RSS 纹丝不动, pet.html(30fps)与 media-demo(60fps)同速上涨
+   (实测 22-26MB/s, vmmap 脏页全堆在 CoreAnimation 段, malloc 堆干净)
+   —— 即"每 blit 一次泄一帧背衬"。媒体只是让 blit 连续化, 元凶在壳。 */
+static obj_t pool_push(void) {
+    obj_t cls = o_getClass("NSAutoreleasePool");
+    obj_t o = cls ? MSG0(obj_t, cls, "alloc") : NULL;
+    return o ? MSG0(obj_t, o, "init") : NULL;
+}
+static void pool_pop(obj_t pool) {
+    if (pool) MSG0(void, pool, "drain");
+}
+
 /* 主屏(frame)高度: AppKit 全局坐标原点在主屏左下, 与引擎的左上原点
    口径互翻时用它(y_top = 主屏高 − y_appkit − h)。取 NSScreen.screens[0]
    (= 带菜单栏的主屏; mainScreen 只是"有键盘焦点的屏", 多屏时不一定主)。
@@ -257,32 +274,41 @@ void hnp_window_resize(hnp_window *w, int nw, int nh) {
 
 void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int bh, size_t stride) {
     if (!w || !w->win || !bgra_pre) return;
-    CGColorSpaceRef cs = ((CGColorSpaceRef (*)(void))dlsym(RTLD_DEFAULT, "CGColorSpaceCreateDeviceRGB"))();
+    /* 事故②修复挂点: blit 全程套有界池(setImage:/display 触发的 AppKit/
+       CA 内部 autorelease 对象由此回收), 见 pool_push 注释。 */
+    obj_t pool = pool_push();
+    /* DeviceRGB 是不可变全局对象: 复用一份, 不再每次 blit 泄一个
+       CGColorSpaceRef(旧代码 Create 后无人 Release)。 */
+    static CGColorSpaceRef g_cs;
+    if (!g_cs)
+        g_cs = ((CGColorSpaceRef (*)(void))dlsym(RTLD_DEFAULT, "CGColorSpaceCreateDeviceRGB"))();
     CGDataProviderRef prov = ((CGDataProviderRef (*)(void *, const void *, size_t, void (*)(void *, const void *, size_t)))
         dlsym(RTLD_DEFAULT, "CGDataProviderCreateWithData"))(NULL, bgra_pre, (size_t)bw * bh * 4, NULL);
     /* stride 此处要求 == w*4(hn_rt 保证); kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little */
     CGImageRef cg = ((CGImageRef (*)(size_t, size_t, size_t, size_t, size_t, CGColorSpaceRef,
                                      uint32_t, CGDataProviderRef, const double *, int, int))
         dlsym(RTLD_DEFAULT, "CGImageCreate"))(
-        (size_t)bw, (size_t)bh, 8, 32, stride, cs, 2u | 8192u, prov, NULL, 0, 0);
-    if (!cg) return;
-    obj_t nsimg = MSG0(obj_t, o_getClass("NSImage"), "alloc");
-    /* HiDPI 口径(真窗 2x 渲染的关键一环): NSImage 的**点尺寸**取窗口内容区
-       逻辑尺寸, 位图像素照实(bw×bh 可为逻辑的 2 倍) —— AppKit 在 Retina 上
-       把 720x720 物理像素画进 360x360 点的视图 = 1:1 物理像素, 不经系统
-       放大(1x 屏 bw==w->w, 与旧版行为逐位一致)。拿不到逻辑尺寸时回退
-       位图尺寸(探针喂任意位图的防御)。 */
-    int lw = w->w > 0 ? w->w : bw;
-    int lh = w->h > 0 ? w->h : bh;
-    CGSize sz = { (double)lw, (double)lh };
-    nsimg = ((obj_t (*)(obj_t, sel_t, CGImageRef, CGSize))o_msgSend)(
-        nsimg, o_sel("initWithCGImage:size:"), cg, sz);
-    MSG1(void, w->iv, "setImage:", nsimg);
-    if (w->img) MSG0(void, w->img, "release");
-    w->img = nsimg;
-    ((void (*)(CGImageRef))dlsym(RTLD_DEFAULT, "CGImageRelease"))(cg);
+        (size_t)bw, (size_t)bh, 8, 32, stride, g_cs, 2u | 8192u, prov, NULL, 0, 0);
+    if (cg) {
+        obj_t nsimg = MSG0(obj_t, o_getClass("NSImage"), "alloc");
+        /* HiDPI 口径(真窗 2x 渲染的关键一环): NSImage 的**点尺寸**取窗口内容区
+           逻辑尺寸, 位图像素照实(bw×bh 可为逻辑的 2 倍) —— AppKit 在 Retina 上
+           把 720x720 物理像素画进 360x360 点的视图 = 1:1 物理像素, 不经系统
+           放大(1x 屏 bw==w->w, 与旧版行为逐位一致)。拿不到逻辑尺寸时回退
+           位图尺寸(探针喂任意位图的防御)。 */
+        int lw = w->w > 0 ? w->w : bw;
+        int lh = w->h > 0 ? w->h : bh;
+        CGSize sz = { (double)lw, (double)lh };
+        nsimg = ((obj_t (*)(obj_t, sel_t, CGImageRef, CGSize))o_msgSend)(
+            nsimg, o_sel("initWithCGImage:size:"), cg, sz);
+        MSG1(void, w->iv, "setImage:", nsimg);
+        if (w->img) MSG0(void, w->img, "release");
+        w->img = nsimg;
+        ((void (*)(CGImageRef))dlsym(RTLD_DEFAULT, "CGImageRelease"))(cg);
+    }
     MSG0(void, (obj_t)prov, "release");
     MSG0(void, w->win, "display");
+    pool_pop(pool);
 }
 
 void hnp_window_invalidate(hnp_window *w) { if (w && w->win) MSG0(void, w->win, "display"); }
@@ -351,6 +377,9 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     if (!ev) return 0;
     ev->kind = HNP_EV_NONE;
     ev->utf8 = NULL;
+    /* 事故②同款修复: 每次泵的 NSDate/NSEvent 及 AppKit 事件分派内部
+       autorelease 对象, 落进本次有界池统一回收(无池时逐事件泄漏)。 */
+    obj_t pool = pool_push();
     obj_t app = MSG0(obj_t, o_getClass("NSApplication"), "sharedApplication");
     obj_t NSDate = o_getClass("NSDate");
     obj_t lim;
@@ -361,7 +390,7 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     obj_t mode = nsstr("kCFRunLoopDefaultMode");
     obj_t e = ((obj_t (*)(obj_t, sel_t, unsigned long, obj_t, obj_t, int))o_msgSend)(
         app, o_sel("nextEventMatchingMask:untilDate:inMode:dequeue:"), ~0UL, lim, mode, 1);
-    if (!e) return 0;
+    if (!e) { pool_pop(pool); return 0; }
     unsigned long ty = MSG0(unsigned long, e, "type");
     CGPoint p = MSG0(CGPoint, e, "locationInWindow");
     /* AppKit 原点在左下 → 内容区左上原点(y 翻转由窗口高度决定, 用 iv 的 frame) */
@@ -413,11 +442,13 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     default:
         /* AppKitDefined/SystemDefined/ApplicationDefined/Periodic(13..16)是
            AppKit 内部消息, 不可 sendEvent:(实测抛异常); 跳过。 */
+        pool_pop(pool);
         if (ty >= EV_APPKITDEF && ty <= EV_PERIODIC) return 0;
         return 0;
     }
     /* 用户输入交回 AppKit(窗口移动/关闭/重绘) */
     MSG1(void, app, "sendEvent:", e);
+    pool_pop(pool);
     return 1;
 }
 
