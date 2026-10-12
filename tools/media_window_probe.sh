@@ -32,8 +32,28 @@ ck() { # ck <描述> <0|1 通过>
     else printf '  X %s\n' "$1"; fails=$((fails + 1)); fi
 }
 
+# 临时 HOME 隔离: 探针起的所有 hnapp 的 geometry/store 都落在沙箱,
+# 与开发者正在用的窗口/daemon 账本互不可见(收口也不会误伤)。
+export HOME="$SBX/home"
+mkdir -p "$HOME"
+
+# 收口纪律(性能治理同期修复: 此前 kill 的是 (…) 子壳, hnapp 本体成了
+# 孤儿常驻 —— 真窗一开就是一晚上的"假死"元凶之一):
+#   1. 后台启动一律 `exec env …`, 子壳当场被 hnapp 本体替换 → $!/WPID
+#      就是 hnapp 的真 PID, kill 打得中;
+#   2. cleanup 先 TERM(优雅关闭路径, 与 daemon win_kill 同一信号)再
+#      KILL 兜底, 最后按"本 dist 二进制 + 本脚本启动的文档名"pkill 扫尾
+#      —— 模式带探针特有参数, 不会命中用户自己开的窗口(pet.html 等)。
 cleanup() {
-    [ -n "${WPID:-}" ] && kill -9 "$WPID" 2>/dev/null
+    if [ -n "${WPID:-}" ]; then
+        kill "$WPID" 2>/dev/null
+        sleep 0.2
+        kill -9 "$WPID" 2>/dev/null
+        WPID=""
+    fi
+    pkill -f "hnapp-macos-arm64 media-demo.html" 2>/dev/null
+    pkill -f "hnapp-macos-arm64 audio.html" 2>/dev/null
+    pkill -f "hnapp-macos-arm64 missing.html" 2>/dev/null
     rm -rf "$SBX"
 }
 trap cleanup EXIT INT TERM
@@ -47,24 +67,39 @@ if [ ! -f "$DEMO" ]; then
     echo "  X 缺少 $DEMO"; exit 1
 fi
 
-# ---------- 合成 WAV(与 tools/media_probe.c 的生成逻辑同口径) ----------
-python3 - "$SBX/tone.wav" <<'PY'
-import math, struct, sys, wave
-w = wave.open(sys.argv[1], "wb")
-w.setnchannels(1); w.setsampwidth(2); w.setframerate(44100)
-n = int(44100 * 2.0)
-fr = bytearray()
-for i in range(n):
-    s = math.sin(2.0 * math.pi * 440.0 * i / 44100.0) * 0.4
-    fr += struct.pack("<h", int(s * 32767.0))
-w.writeframes(bytes(fr)); w.close()
-PY
+# ---------- 合成 WAV(与 tools/media_probe.c 的生成逻辑同口径; C99 现场编译, NUL 安全) ----------
+cat > "$SBX/tonegen.c" <<'CEOF'
+/* tonegen — 合成 440Hz/2s 单声道 16bit PCM WAV */
+#include <stdio.h>
+#include <math.h>
+static void wr4(FILE *w, long x) {
+    fputc((int)(x & 255), w); fputc((int)((x >> 8) & 255), w);
+    fputc((int)((x >> 16) & 255), w); fputc((int)((x >> 24) & 255), w);
+}
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    FILE *w = fopen(argv[1], "wb"); if (!w) return 2;
+    int sr = 44100; long n = (long)sr * 2;
+    fputc('R',w); fputc('I',w); fputc('F',w); fputc('F',w); wr4(w, 36 + n * 2);
+    fputc('W',w); fputc('A',w); fputc('V',w); fputc('E',w);
+    fputc('f',w); fputc('m',w); fputc('t',w); fputc(' ',w); wr4(w, 16);
+    fputc(1,w); fputc(0,w); fputc(1,w); fputc(0,w); wr4(w, sr); wr4(w, sr * 2);
+    fputc(2,w); fputc(0,w); fputc(16,w); fputc(0,w);
+    fputc('d',w); fputc('a',w); fputc('t',w); fputc('a',w); wr4(w, n * 2);
+    for (long i = 0; i < n; i++) {
+        int v = (int)(sin(2 * 3.14159265358979 * 440.0 * i / sr) * 0.4 * 32767.0);
+        fputc(v & 255, w); fputc((v >> 8) & 255, w);
+    }
+    fclose(w); return 0;
+}
+CEOF
+cc -O2 "$SBX/tonegen.c" -o "$SBX/tonegen" -lm && "$SBX/tonegen" "$SBX/tone.wav"
 [ -s "$SBX/tone.wav" ] && ck "合成 440Hz/2s WAV 就绪" 1 || ck "合成 440Hz/2s WAV 就绪" 0
 
 # ---------- ① 真窗起 media-demo 3 秒: 不崩 + PLAYING + t 前进 ----------
 if [ -x "$HN_APP" ]; then
     LOG="$SBX/video-win.log"
-    (cd "$ROOT/examples" && HN_MEDIA_TRACE=1 "$HN_APP" media-demo.html 520 820) >"$LOG" 2>&1 &
+    (cd "$ROOT/examples" && exec env HN_MEDIA_TRACE=1 "$HN_APP" media-demo.html 520 820) >"$LOG" 2>&1 &
     WPID=$!
     sleep 3
     ALIVE=0
@@ -81,7 +116,7 @@ if [ -x "$HN_APP" ]; then
     if [ "$NTS" -ge 2 ]; then
         T0=$(printf '%s\n' "$TS" | head -1)
         T1=$(printf '%s\n' "$TS" | tail -1)
-        ADV=$(python3 -c "print(1 if float('$T1') > float('$T0') + 0.2 else 0)")
+        ADV=$(awk -v a="$T0" -v b="$T1" 'BEGIN { print (b > a + 0.2) ? 1 : 0 }')
     fi
     ck "① state=PLAYING 且 t 前进(样本 $NTS 条, Δt>0.2s)" "$ADV"
     grep -q "state=PLAYING" "$LOG" || sed 's/^/      /' "$LOG" | head -6
@@ -101,7 +136,7 @@ cat > "$SBX/audio.html" <<'HTML'
 HTML
 if [ -x "$HN_APP" ]; then
     LOG="$SBX/audio-win.log"
-    (cd "$SBX" && HN_MEDIA_TRACE=1 HN_MEDIA_MUTE=1 "$HN_APP" audio.html 420 300) >"$LOG" 2>&1 &
+    (cd "$SBX" && exec env HN_MEDIA_TRACE=1 HN_MEDIA_MUTE=1 "$HN_APP" audio.html 420 300) >"$LOG" 2>&1 &
     WPID=$!
     sleep 3
     ALIVE=0
@@ -127,53 +162,44 @@ if [ -x "$HN_APP" ]; then
     echo "$O0" | grep -q "shot OK" && ck "③ --shot advance=0 落盘" 1 || ck "③ --shot advance=0 落盘" 0
     echo "$O1" | grep -q "shot OK" && ck "③ --shot advance=1500 落盘" 1 || ck "③ --shot advance=1500 落盘" 0
     if [ -s "$S0" ] && [ -s "$S1" ]; then
-        REPORT=$(python3 - "$S0" "$S1" <<'PYEOF'
-import struct, zlib, sys
-def pixels(p):
-    d = open(p, "rb").read()
-    pos, idat, w, h = 8, b"", 0, 0
-    while pos < len(d):
-        ln = struct.unpack(">I", d[pos:pos+4])[0]
-        t = d[pos+4:pos+8]
-        if t == b"IHDR": w, h = struct.unpack(">II", d[pos+8:pos+16])
-        if t == b"IDAT": idat += d[pos+8:pos+8+ln]
-        pos += 12 + ln
-    raw = zlib.decompress(idat); stride = w*4
-    o = bytearray(); prev = bytearray(stride); i = 0
-    for _y in range(h):
-        f = raw[i]; i += 1
-        line = bytearray(raw[i:i+stride]); i += stride
-        for x in range(stride):
-            a = line[x-4] if x >= 4 else 0
-            b = prev[x]; c = prev[x-4] if x >= 4 else 0
-            if f == 1: line[x] = (line[x]+a) & 255
-            elif f == 2: line[x] = (line[x]+b) & 255
-            elif f == 3: line[x] = (line[x]+(a+b)//2) & 255
-            elif f == 4:
-                pp = a+b-c; pa, pb, pc = abs(pp-a), abs(pp-b), abs(pp-c)
-                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-                line[x] = (line[x]+pr) & 255
-        o += line; prev = line
-    return w, h, o
+        # C99 像素对比器(链引擎自带 hn_png.c, 与 hn-pngstats 同手法; 现场编译进沙箱)
+        cat > "$SBX/pngdiff.c" <<'CEOF'
+/* pngdiff — 两张 RGBA PNG 的矩形区域逐像素比较(步进 4 采样) */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "hn_png.h"
+static unsigned char *load(const char *p, int *w, int *h) {
+    FILE *f = fopen(p, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    unsigned char *buf = malloc((size_t)n);
+    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
+    fclose(f);
+    unsigned char *px = hn_png_decode(buf, (size_t)n, w, h);
+    free(buf); return px;
+}
+int main(int argc, char **argv) {
+    if (argc < 7) { fprintf(stderr, "usage: pngdiff a.png b.png x0 y0 x1 y1\n"); return 2; }
+    int wa, ha, wb, hb;
+    unsigned char *A = load(argv[1], &wa, &ha), *B = load(argv[2], &wb, &hb);
+    if (!A || !B || wa != wb || ha != hb) { fprintf(stderr, "load/size mismatch\n"); return 2; }
+    int x0 = atoi(argv[3]), y0 = atoi(argv[4]), x1 = atoi(argv[5]), y1 = atoi(argv[6]);
+    long diff = 0, tot = 0;
+    for (int y = y0; y < y1 && y < ha; y += 4)
+        for (int x = x0; x < x1 && x < wa; x += 4) {
+            long i = ((long)y * wa + x) * 4; tot++;
+            if (memcmp(A + i, B + i, 4) != 0) diff++;
+        }
+    long ci = ((long)183 * wa + 260) * 4;   /* 视频盒中心(44,62 432x243) */
+    printf("video区 diff=%ld/%ld  center f0=%d,%d,%d,%d f1=%d,%d,%d,%d\n",
+           diff, tot, A[ci], A[ci+1], A[ci+2], A[ci+3], B[ci], B[ci+1], B[ci+2], B[ci+3]);
+    return diff > tot / 2 ? 0 : 1;
+}
+CEOF
+        cc -O2 -I "$ROOT/Sources/CHtmlNative/include" -I "$ROOT/Sources/CHtmlNative" \
+           "$SBX/pngdiff.c" "$ROOT/Sources/CHtmlNative/hn_png.c" -o "$SBX/pngdiff" || true
+        REPORT=$([ -x "$SBX/pngdiff" ] && "$SBX/pngdiff" "$S0" "$S1" 60 80 460 290 2>&1)
 
-# <video> 盒 = 44,62 432x243(examples/media-demo.html 的属性尺寸,
-# 与 hncore boxes 输出逐值一致); 取内缩一点的区域避开圆角/边框
-X0, Y0, X1, Y1 = 60, 80, 460, 290
-w, h, a = pixels(sys.argv[1])
-_, _, b = pixels(sys.argv[2])
-diff = tot = 0
-for y in range(Y0, Y1, 4):
-    for x in range(X0, X1, 4):
-        i = (y*w+x)*4
-        tot += 1
-        if a[i:i+4] != b[i:i+4]: diff += 1
-cx, cy = 260, 183   # 视频盒中心
-ci = (cy*w+cx)*4
-print("video区 diff=%d/%d  center f0=%d,%d,%d,%d f1=%d,%d,%d,%d" % (
-    diff, tot, a[ci], a[ci+1], a[ci+2], a[ci+3], b[ci], b[ci+1], b[ci+2], b[ci+3]))
-sys.exit(0 if diff > tot * 0.5 else 1)
-PYEOF
-)
         if [ $? -eq 0 ]; then
             ck "③ video 盒区域两帧不同(>50% 像素变) | $REPORT" 1
         else
@@ -219,7 +245,7 @@ if [ -x "$HN_APP" ]; then
 </body></html>
 HTML
     LOG="$SBX/missing-win.log"
-    (cd "$SBX" && HN_MEDIA_TRACE=1 "$HN_APP" missing.html 400 240) >"$LOG" 2>&1 &
+    (cd "$SBX" && exec env HN_MEDIA_TRACE=1 "$HN_APP" missing.html 400 240) >"$LOG" 2>&1 &
     WPID=$!
     sleep 3
     ALIVE=0
@@ -233,6 +259,14 @@ HTML
 else
     echo "  (跳过 ⑤: 无真窗二进制)"
 fi
+
+# ---------- ⑥ 收口自查: 无 hnapp 孤儿残留 ----------
+# 本脚本启动的 hnapp 全部带"探针特有文档名"参数 —— 按同模式 pgrep,
+# 有命中即说明收口漏了(exec 替换 + trap kill 的完整链路失效)。
+sleep 0.5
+LEFT=$(pgrep -f "hnapp-macos-arm64 (media-demo|audio|missing)\.html" 2>/dev/null | grep -c . || true)
+[ "$LEFT" = "0" ] && ck "⑥ 无 hnapp 孤儿残留(exec 收口 + trap 扫尾)" 1 \
+                  || ck "⑥ 无 hnapp 孤儿残留(残留 $LEFT 个)" 0
 
 echo "----------------------------------------"
 if [ "$fails" = 0 ]; then echo "media-window-probe: 全部通过"; else echo "media-window-probe: 失败 $fails 项"; fi

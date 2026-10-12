@@ -10,7 +10,7 @@
  * 不断具体像素宽度(FreeType 有无会改变排版宽度, 与 render_probe 同口径)。
  *
  * 用法(直接 cc, 无 SPM; 由 tools/md_probe.py 薄封装编译运行):
- *   python3 tools/md_probe.py [已编译产物路径]
+ *   bash tools/tools/md_probe.sh [已编译产物路径]
  */
 #include <stdio.h>
 #include <stdlib.h>

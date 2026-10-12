@@ -7,13 +7,14 @@
 #include "hn_internal.h"
 
 const char *hn_ua_css(void); /* hn_style.c */
-static int anim_walk(hn_context *c, hn_node *n, float dt_ms);
+static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inter);
 static void stream_anchor_walk(hn_context *c, hn_node *n); /* hn-stream 贴底/让出(滚动节) */
 static int  stream_loop_walk(hn_node *n);   /* hn-stream-loop 滑窗摘除(滚动节) */
 static int  stream_anim_walk(hn_node *n, float dt_ms); /* 平滑追上推进(滚动节) */
 static int  scroll_anim_walk(hn_node *n, float dt_ms); /* 锚点平滑滚动推进(滚动节) */
 static int  doc_scroll_to_now(hn_doc *doc, const char *id);  /* 锚点瞬跳(离屏口径) */
 static int  doc_scroll_to_anim(hn_context *c, const char *id); /* 锚点武装(实时口径) */
+static void gif_grave_flush(hn_context *c); /* GIF 逐出坟场冲刷(重绘后释放) */
 
 hn_context *hn_context_create(void) {
     hn_context *c = calloc(1, sizeof(hn_context));
@@ -32,6 +33,7 @@ void hn_context_destroy(hn_context *c) {
     free(c->lot);
     hn_context_gif_clear(c);      /* GIF 缓存与 Lottie 同一纪律: 先于结构释放 */
     free(c->gifs);
+    free(c->gif_grave);           /* 坟场槽位数组(对象已在 clear 里释放) */
     hn_media_sessions_clear(c);   /* 媒体会话持宿主句柄与帧缓存, 必须先于结构释放 */
     free(c->med_sessions);
     hn_canvas_dispose(c);         /* <canvas> op 账本持堆顶点/字符串, 随上下文销毁 */
@@ -108,6 +110,7 @@ void hn_context_layout(hn_context *c, float width, float height,
     hn_paint_root(c);
     c->dl.cmds = c->cmds;
     c->dl.count = c->n_cmds;
+    gif_grave_flush(c);   /* 显示列表已重建: 逐出 GIF 的旧引用必已消亡, 放心释放 */
 }
 
 void hn_context_repaint(hn_context *c) {
@@ -115,6 +118,23 @@ void hn_context_repaint(hn_context *c) {
     hn_paint_root(c);
     c->dl.cmds = c->cmds;
     c->dl.count = c->n_cmds;
+    gif_grave_flush(c);
+}
+
+/* 轻重画(ambient 帧): 不动级联/布局 —— 环境动画(纯 ext_clock 类)不改
+   样式字段, 重建显示列表即可, 省掉整遍 relayout(30fps 帧循环下渲染
+   成本减半; 静态立绘桌宠的 CPU 大头)。tmp 区与显示列表同生命周期
+   (指令引用的顶点/文本副本从这里分配), 必须一并翻新, 否则逐帧无界
+   增长。调用纪律: 仅在 anim_tick_ex 报 AMBIENT 时使用 —— 任何写样式
+   字段的动画(interactive)必须走 hn_context_layout 全路径。 */
+void hn_context_repaint_light(hn_context *c) {
+    if (!c || !c->doc) return;
+    hn_arena_destroy(c->tmp);
+    c->tmp = hn_arena_create();
+    hn_paint_root(c);
+    c->dl.cmds = c->cmds;
+    c->dl.count = c->n_cmds;
+    gif_grave_flush(c);
 }
 
 void hn_context_set_images(hn_context *c, const hn_image_backend *backend) {
@@ -181,14 +201,87 @@ void hn_context_lottie_clear(hn_context *c) {
     c->n_lot = 0;
 }
 
-/* ---- GIF 动图缓存(按路径) ----
+/* ---- GIF 动图缓存(按路径, 带总量预算 + LRU 逐出) ----
    与 Lottie 缓存同构: 命中即返回(含负缓存); 解码走资产后端(引擎自身
    不做 I/O)。帧序列较大, 但一个文档里 GIF 数量有限, 每路径一份是
-   正确的平衡(比每帧重解省掉 LZW 全量重跑)。 */
+   正确的平衡(比每帧重解省掉 LZW 全量重跑)。
+   内存治理(性能治理): 帧序列是"合成好的整幅 RGBA8", 大图/多图的占用
+   无界会吃光内存 —— 缓存带总量预算(帧数×宽×高×4 估算, 缺省 64MB,
+   HN_GIF_CACHE_MB 可覆盖, 探针用小预算验逐出策略)。超限按最久未用
+   (last_use 触达序号)逐出。逐出**不立即** hn_gif_free: 摘出缓存表、
+   挂进坟场(gif_grave), 延迟到下一次重绘(重建显示列表)之后再统一
+   释放 —— 本帧已装进显示列表的帧指针必须活到重绘读完(重绘之后坟场
+   里的对象必然不再被任何指令引用, 释放无悬空)。 */
+#define HN_GIF_CACHE_BUDGET_DEFAULT ((size_t)64 * 1024 * 1024)
+
+/* 预算(MB): 环境钮 HN_GIF_CACHE_MB 覆盖(值变即重算, 探针可同进程改) */
+static size_t gif_budget(void) {
+    static char memo[24] = "\x01";      /* 首次必不相等 → 走一次换算 */
+    static size_t cap = 0;
+    const char *e = getenv("HN_GIF_CACHE_MB");
+    const char *cur = (e && *e) ? e : "";
+    if (strcmp(cur, memo) != 0) {
+        snprintf(memo, sizeof(memo), "%s", cur);
+        long mb = atol(cur);
+        cap = mb > 0 ? (size_t)mb * 1024 * 1024 : HN_GIF_CACHE_BUDGET_DEFAULT;
+    }
+    return cap;
+}
+
+/* LRU 触达序号(进程级单调; 简单时间戳口径) */
+static unsigned long g_gif_clock = 0;
+
+/* 单条 GIF 的估算占用(合成帧 = 帧数×宽×高×4 字节) */
+static size_t gif_bytes_of(const hn_gif *g) {
+    return (size_t)hn_gif_frame_count(g) * (size_t)hn_gif_width(g)
+         * (size_t)hn_gif_height(g) * 4;
+}
+
+/* 坟场里的 GIF 统一释放(重绘之后调 —— 旧显示列表那时已整体作废) */
+static void gif_grave_flush(hn_context *c) {
+    if (!c || c->n_grave == 0) return;
+    for (int i = 0; i < c->n_grave; i++) hn_gif_free(c->gif_grave[i]);
+    c->n_grave = 0;
+}
+
+/* 超预算时逐出最久未用(腾到装得下 need 为止; 全空则止 —— 单条超预算
+   的大 GIF 保留, 预算是软上限, 总占用仍有界 = 预算 + 单条)。 */
+static void gif_cache_evict(hn_context *c, size_t need) {
+    size_t budget = gif_budget();
+    while (c->gif_bytes + need > budget) {
+        int victim = -1;
+        for (int i = 0; i < c->n_gif; i++) {
+            if (!c->gifs[i].gif) continue;
+            if (victim < 0 || c->gifs[i].last_use < c->gifs[victim].last_use)
+                victim = i;
+        }
+        if (victim < 0) break;
+        c->gif_bytes -= c->gifs[victim].bytes;
+        if (c->n_grave == c->cap_grave) {
+            int nc = c->cap_grave ? c->cap_grave * 2 : 8;
+            void *nv = realloc(c->gif_grave, sizeof(hn_gif *) * (size_t)nc);
+            if (!nv) { hn_gif_free(c->gifs[victim].gif); }   /* 坟场扩不动: 立即释放 */
+            else { c->gif_grave = nv; c->cap_grave = nc; c->gif_grave[c->n_grave++] = c->gifs[victim].gif; }
+        } else {
+            c->gif_grave[c->n_grave++] = c->gifs[victim].gif;
+        }
+        free(c->gifs[victim].path);
+        c->gifs[victim] = c->gifs[c->n_gif - 1];
+        c->n_gif--;
+    }
+}
+
+size_t hn_context_gif_bytes(const hn_context *c) { return c ? c->gif_bytes : 0; }
+int hn_context_gif_count(const hn_context *c) { return c ? c->n_gif : 0; }
+
 hn_gif *hn_context_gif(hn_context *c, const char *path) {
     if (!c || !path || !*path) return NULL;
-    for (int i = 0; i < c->n_gif; i++)
-        if (c->gifs[i].path && !strcmp(c->gifs[i].path, path)) return c->gifs[i].gif;
+    for (int i = 0; i < c->n_gif; i++) {
+        if (c->gifs[i].path && !strcmp(c->gifs[i].path, path)) {
+            c->gifs[i].last_use = ++g_gif_clock;   /* 命中即刷新 LRU 序 */
+            return c->gifs[i].gif;
+        }
+    }
     hn_gif *g = NULL;
     const hn_asset_backend *ab = c->assets;
     if (ab && ab->load) {
@@ -196,6 +289,7 @@ hn_gif *hn_context_gif(hn_context *c, const char *path) {
         const char *bytes = ab->load(ab->ctx, path, &len);
         if (bytes && len) g = hn_gif_decode((const unsigned char *)bytes, len);
     }
+    if (g) gif_cache_evict(c, gif_bytes_of(g));   /* 先腾地方再入表(新条目最年轻) */
     if (c->n_gif == c->cap_gif) {
         int nc = c->cap_gif ? c->cap_gif * 2 : 8;
         void *nv = realloc(c->gifs, sizeof(*c->gifs) * (size_t)nc);
@@ -205,6 +299,9 @@ hn_gif *hn_context_gif(hn_context *c, const char *path) {
     }
     c->gifs[c->n_gif].path = hn_strdup(path);
     c->gifs[c->n_gif].gif = g;      /* 失败也入表(负缓存) */
+    c->gifs[c->n_gif].last_use = ++g_gif_clock;
+    c->gifs[c->n_gif].bytes = g ? gif_bytes_of(g) : 0;
+    c->gif_bytes += c->gifs[c->n_gif].bytes;
     c->n_gif++;
     return g;
 }
@@ -216,6 +313,9 @@ void hn_context_gif_clear(hn_context *c) {
         if (c->gifs[i].gif) hn_gif_free(c->gifs[i].gif);
     }
     c->n_gif = 0;
+    c->gif_bytes = 0;
+    /* 坟场一并清(文档替换/销毁时旧显示列表本就整体作废, 无悬空窗口) */
+    gif_grave_flush(c);
 }
 
 /* ---- 脚本驱动网格 ---- */
@@ -265,17 +365,36 @@ int hn_node_mesh_info(hn_node *n, int *cols, int *rows) {
    收敛前帧循环不熄火, 否则追上动画停在半途。
    锚点平滑滚动(#锚导航)同一帧循环: 实时帧下武装的容器逐帧向目标偏移
    指数逼近, 返回值并入 —— 收敛前帧循环不熄火, 否则滚动停在半途。 */
-int hn_context_anim_tick(hn_context *c, float dt_ms) {
-    if (!c->doc || !c->doc->root) return 0;
+int hn_context_anim_tick_ex(hn_context *c, float dt_ms, int *cls) {
+    if (!c->doc || !c->doc->root) {
+        if (cls) *cls = HN_ANIM_NONE;
+        return 0;
+    }
+    /* 活跃类别(性能治理): interactive = 写样式字段的动画(过渡/关键帧/
+       入场/媒体在播/平滑滚动在途), ambient = 纯 ext_clock 类(hn-mesh/
+       GIF/Lottie 循环, 不碰样式字段)。二者并存按 interactive 计 ——
+       帧节拍与渲染路径必须按最严格的一档走。 */
+    int inter = 0, amb = 0;
     int media = 0;
-    if (dt_ms >= 0) media = hn_media_tick_ret(c, dt_ms);
+    if (dt_ms >= 0) {
+        media = hn_media_tick_ret(c, dt_ms);
+        if (media) inter = 1;            /* 媒体在播 = interactive */
+    }
     int streams = 0, anchors = 0;
     if (dt_ms > 0) {
         c->live_frame = 1;
         streams = stream_anim_walk(c->doc->root, dt_ms);
         anchors = scroll_anim_walk(c->doc->root, dt_ms);
+        if (streams || anchors) inter = 1;   /* 平滑滚动在途 = interactive */
     }
-    return anim_walk(c, c->doc->root, dt_ms) || media || streams || anchors;
+    int act = anim_walk(c, c->doc->root, dt_ms, &amb, &inter);
+    if (cls) *cls = inter ? HN_ANIM_INTERACTIVE
+                          : (amb ? HN_ANIM_AMBIENT : HN_ANIM_NONE);
+    return act || media || streams || anchors;
+}
+
+int hn_context_anim_tick(hn_context *c, float dt_ms) {
+    return hn_context_anim_tick_ex(c, dt_ms, NULL);
 }
 
 void hn_context_set_hover(hn_context *c, hn_node *n) { c->hover_node = n; }
@@ -1031,7 +1150,7 @@ static void slot_settle(hn_anim *a, int s) {
     }
 }
 
-static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
+static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inter) {
     int active = 0;
     if (n->kind == HN_ELEM) {
         hn_style *st = &n->style;
@@ -1048,10 +1167,13 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
            循环, 但独立累加。CSS 动画有"播完"概念, Lottie 与 GIF 需要持续
            时钟(自身循环取模)。有声明就把节点标记为活跃, 帧驱动才会持续
            调用 repaint。GIF 只在**真的解出多帧**时才算活跃(单帧 GIF 或
-           解码失败退化为静态图, 不该让帧循环空转)。 */
+           解码失败退化为静态图, 不该让帧循环空转)。
+           这一类是"环境动画"(amb): 只前进 ext_clock, 不写样式字段 ——
+           帧节拍可放宽(~30fps)、渲染可走轻路径(免 relayout)。 */
         if (dt_ms > 0 &&
             (hn_node_attr(n, "hn-lottie") || hn_node_attr(n, "hn-mesh") || n->mesh_verts)) {
             n->ext_clock += dt_ms;
+            *amb = 1;
             active = 1;
         } else if (dt_ms > 0 && hn_node_gif_src(n)) {
             hn_gif *gg = hn_context_gif(c, hn_node_gif_src(n));
@@ -1060,6 +1182,7 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
                    时钟本身保持统一推进, 取帧时按倍速缩放 —— 与 Lottie 在
                    绘制点乘 speed 的做法一致(节点时钟不因倍速而不同频)。 */
                 n->ext_clock += dt_ms;
+                *amb = 1;
                 active = 1;
             }
         }
@@ -1097,7 +1220,10 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
                     a->sc = st->scale;       a->rot = st->rotate;
                     a->dirty_written = 1;
                 }
-                if (still) active = 1;
+                if (still) {
+                    active = 1;
+                    *inter = 1;   /* 关键帧在采样/保持: 写样式字段 = interactive */
+                }
                 goto children;
             }
         }
@@ -1124,6 +1250,7 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
             st->scale = a->sc;
             a->dirty_written = 1;
             active = 1;
+            *inter = 1;   /* 入场过渡在跑 = interactive */
             goto children;
         }
         if (a->fresh && st->anim_enter != HN_ENTER_NONE && st->enter_ms > 0) {
@@ -1280,7 +1407,10 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
                 st->scale = a->sc;
                 st->rotate = a->rot;
                 a->dirty_written = 1;
-                if (any_active) active = 1;
+                if (any_active) {
+                    active = 1;
+                    *inter = 1;   /* 按槽过渡在途 = interactive */
+                }
             } else {
                 /* ---- 单一配置过渡(旧路径 + rotate + 延迟) ---- */
                 int changed = 0;
@@ -1341,11 +1471,14 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms) {
                 a->dirty_written = 1;
             }
         }
-        if (a->active) active = 1;
+        if (a->active) {
+            active = 1;
+            *inter = 1;   /* 单一配置过渡在途 = interactive */
+        }
     }
 children:
     for (hn_node *ch = n->first; ch; ch = ch->next)
-        if (anim_walk(c, ch, dt_ms)) active = 1;
+        if (anim_walk(c, ch, dt_ms, amb, inter)) active = 1;
     return active;
 }
 

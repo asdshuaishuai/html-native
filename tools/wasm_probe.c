@@ -4,7 +4,7 @@
  * 与媒体无关, 一个最小宿主即可钉死行为。语义断言全在本文件, 退出码 =
  * 失败项数(0 = 通过), 与 rt_probe.c/sysbridge_probe.c 同一口径。
  *
- * 用法(python3 tools/wasm_probe.py 是本文件的门禁薄封装):
+ * 用法(bash tools/tools/wasm_probe.sh 是本文件的门禁薄封装):
  *   cc -std=c99 -O1 -Wall -I Sources/CHtmlNative/include -I vendor/wasm3 \
  *      tools/wasm_probe.c vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c \
  *      vendor/wasm3/m3_compile.c vendor/wasm3/m3_core.c vendor/wasm3/m3_env.c \

@@ -16,12 +16,18 @@
  *      异常回调不拖垮同帧后续回调;
  *   5. 桥联动: 定时器里 hnSetText → repaint 置位 + 文本真的变了;
  *      RAF 里画 canvas → 账本 op 落账;
- *   6. 节拍: RAF 待决 → 16; 定时器表非空 → min(16, 最近到期-现在);
+ *   6. 节拍: RAF 待决 → 16; 定时器表非空 → min(250, 最近到期-现在)
+ *      (上限治理: 表非空不再钉死 16ms —— 远期定时器 4Hz 醒来到期即触发);
  *      空表无动画 → -1(回归既有口径);
- *   7. hn_rt_close: 带活定时器/RAF/闭包环的表清理无崩溃。
+ *   7. hn_rt_close: 带活定时器/RAF/闭包环的表清理无崩溃;
+ *   8. 动画分级节拍(性能治理): 仅 ambient(hn-mesh)活跃 → 33ms
+ *      (HN_ANIM_FPS=60 → 16 / =16 → 62); interactive(@keyframes 无限循环)
+ *      恒 16, 不受环境钮影响; ambient + 远期定时器 → 62(ambient 压过 250);
+ *   9. GIF 缓存预算(内存治理): HN_GIF_CACHE_MB=1 下超限旧条目被逐出,
+ *      条数与估算总占用有界(≤ 预算), 逐出后重访问可重解(不悬空)。
  *
  * 用法(py 薄封装编好即跑; 手工编译见 tools/timer_probe.py):
- *   python3 tools/timer_probe.py
+ *   bash tools/tools/timer_probe.sh
  * 断言失败打印 got/want, 退出码 1; 全绿退出 0。
  */
 #include <stdio.h>
@@ -29,6 +35,8 @@
 #include <string.h>
 #include "hn.h"
 #include "hn_rt.h"
+#include "hn_internal.h"   /* hn_context_anim_tick_ex/repaint_light 的宿主: GIF 缓存验收用 hn_context_gif/统计 */
+#include "hn_gif.h"
 
 static int g_pass = 0, g_fail = 0;
 
@@ -86,6 +94,39 @@ static const char *DOC_HTML =
 "</script>"
 "</body></html>";
 
+/* 分级探针文档(节拍断言互不干扰):
+   AMBIENT: 只有 hn-mesh 环境摆动(ext_clock 类, 不写样式字段);
+   KF:      只有 @keyframes 无限循环(每帧写样式字段 = interactive)。 */
+static const char *AMBIENT_HTML =
+"<html><body><div id=\"m\" hn-mesh=\"8x8\" hn-mesh-sway=\"6\" "
+"style=\"width:80;height:80\"></div></body></html>";
+static const char *KF_HTML =
+"<html><head><style>"
+"@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }"
+"#k { width:40;height:40; animation: spin 1s linear infinite; }"
+"</style></head><body><div id=\"k\">x</div></body></html>";
+
+/* GIF 缓存预算夹具: 4x4 两帧(解码后 2*4*4*4 = 128B/条), 资产后端对
+   任意路径都吐这份字节 —— 每个唯一路径解出独立 hn_gif, 小预算下即可
+   验证"超限逐出最久未用 + 总占用有界"。字节与 tools/gif_probe.c 的
+   GIF_DISP1 同源(生成器见其头部注释)。 */
+static const unsigned char GIF_2F[] = {
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x04, 0x00, 0x04, 0x00, 0x81, 0x00, 0x00, 0xff, 0x00, 0x00,
+    0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0xff, 0x00, 0x21, 0xff, 0x0b, 0x4e, 0x45, 0x54, 0x53,
+    0x43, 0x41, 0x50, 0x45, 0x32, 0x2e, 0x30, 0x03, 0x01, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x04,
+    0x0a, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0x81, 0xff, 0x00,
+    0x00, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0xff, 0x00, 0x02, 0x04, 0x84, 0x8f, 0x09, 0x05,
+    0x00, 0x21, 0xf9, 0x04, 0x04, 0x14, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x04, 0x00, 0x81, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0xff, 0x00, 0x02,
+    0x04, 0x8c, 0x8f, 0x19, 0x05, 0x00, 0x3b,
+};
+
+static const char *gif_fixture_load(void *ctx, const char *path, size_t *len) {
+    (void)ctx; (void)path;
+    *len = sizeof(GIF_2F);
+    return (const char *)GIF_2F;
+}
+
 int main(void) {
     printf("timer_probe — JS 定时器与 RAF(帧驱动: setTimeout/setInterval/requestAnimationFrame)\n\n");
 
@@ -103,12 +144,12 @@ int main(void) {
     int rp = -1;
     int b = hn_rt_frame(rt, 16.0f, &rp);
     check_int(eval_int(rt, "globalThis.hits"), 0, "帧 1(clock 16): 未触发");
-    check_int(b, 16, "帧 1 节拍 = 16(min(16, 到期 34))");
+    check_int(b, 34, "帧 1 节拍 = 34(min(250, 到期 50-16) — 定时器不钉死 16)");
     hn_rt_frame(rt, 16.0f, &rp);
     check_int(eval_int(rt, "globalThis.hits"), 0, "帧 2(clock 32): 未触发");
     b = hn_rt_frame(rt, 16.0f, &rp);
     check_int(eval_int(rt, "globalThis.hits"), 0, "帧 3(clock 48): 未触发");
-    check_int(b, 2, "帧 3 节拍 = 2(min(16, 50-48) — 定时器压低节拍)");
+    check_int(b, 2, "帧 3 节拍 = 2(min(250, 50-48) — 近期到期压低节拍)");
     b = hn_rt_frame(rt, 16.0f, &rp);
     check_int(eval_int(rt, "globalThis.hits"), 1, "帧 4(clock 64): 恰好触发一次");
     b = hn_rt_frame(rt, 16.0f, &rp);
@@ -228,17 +269,141 @@ int main(void) {
     check_int(b, -1, "空表无动画无轮询 → -1(既有空闲口径)");
     eval_int(rt, "setTimeout(function(){}, 20); 0");
     b = hn_rt_frame(rt, 16.0f, &rp);
-    check_int(b, 4, "到期定时器: 节拍 = min(16, 20-16) = 4");
+    check_int(b, 4, "到期定时器: 节拍 = min(250, 20-16) = 4");
     hn_rt_frame(rt, 16.0f, &rp);   /* 跑掉它 */
     eval_int(rt, "globalThis.__far = setTimeout(function(){}, 5000); 0");
     b = hn_rt_frame(rt, 16.0f, &rp);
-    check_int(b, 16, "远期定时器: 节拍仍封顶 16(定时器表非空 ⇒ 16ms 帧节拍)");
+    check_int(b, 250, "远期定时器: 节拍 = min(250, 4984) = 250(治理: 表非空不再 60fps 空转)");
     eval_int(rt, "clearTimeout(globalThis.__far); 0");
     hn_rt_frame(rt, 16.0f, &rp);
     b = hn_rt_frame(rt, 16.0f, &rp);
     check_int(b, -1, "全清后回到 -1");
 
     hn_rt_close(rt);
+
+    /* == 8b. 动画分级节拍(性能治理) ==
+       仅 ambient(hn-mesh ext_clock)活跃 → 33ms 缺省, HN_ANIM_FPS 覆盖;
+       interactive(@keyframes 无限循环, 每帧写样式)恒 16, 不受钮影响;
+       ambient + 远期定时器并存 → 62(ambient 节拍压过定时器的 250)。 */
+    printf("== 动画分级节拍(ambient 33 / interactive 16) ==\n");
+    {
+        hn_rt_desc ad = { "timer-probe-ambient", AMBIENT_HTML, strlen(AMBIENT_HTML), NULL, 0, 200, 120 };
+        hn_rt *art = hn_rt_open(&ad);
+        check(art != NULL, "hn_rt_open(ambient 文档)");
+        if (art) {
+            int rp = 0;
+            int b0 = hn_rt_frame(art, 16.0f, &rp);
+            check_int(b0, 33, "仅 ambient 活跃 → 节拍 33(缺省 ~30fps)");
+            check(rp == 1, "ambient 帧仍报告 repaint(画面在动)");
+
+            setenv("HN_ANIM_FPS", "60", 1);
+            b0 = hn_rt_frame(art, 16.0f, &rp);
+            check_int(b0, 16, "HN_ANIM_FPS=60 → ambient 节拍 16(回到 60fps)");
+            setenv("HN_ANIM_FPS", "16", 1);
+            b0 = hn_rt_frame(art, 16.0f, &rp);
+            check_int(b0, 62, "HN_ANIM_FPS=16 → ambient 节拍 62");
+            setenv("HN_ANIM_FPS", "30", 1);
+            b0 = hn_rt_frame(art, 16.0f, &rp);
+            check_int(b0, 33, "HN_ANIM_FPS=30 → ambient 节拍 33");
+            unsetenv("HN_ANIM_FPS");
+            b0 = hn_rt_frame(art, 16.0f, &rp);
+            check_int(b0, 33, "未设环境钮 → 回落缺省 33");
+
+            /* ambient + 远期定时器并存: ambient 33 压过定时器封顶 250,
+               定时器到期仍精确触发(表非空只提供 min 上限信号)。 */
+            hn_rt_close(art);
+        }
+        hn_rt *art2 = hn_rt_open(&ad);
+        if (art2) {
+            int rp = 0;
+            /* 定时器必须注册到本 rt 的 scope(桥按 scope_key 反查宿主 rt) */
+            char *r = hn_rt_eval("setTimeout(function(){}, 5000); 0",
+                                 "timer-probe-ambient", hn_rt_doc(art2));
+            free(r);
+            int b0 = hn_rt_frame(art2, 16.0f, &rp);
+            check_int(b0, 33, "ambient + 远期定时器 → 节拍 33(ambient 信号最小)");
+            hn_rt_close(art2);
+        }
+        hn_rt_desc kd = { "timer-probe-kf", KF_HTML, strlen(KF_HTML), NULL, 0, 200, 120 };
+        setenv("HN_ANIM_FPS", "16", 1);   /* 钮已放宽到 62ms —— interactive 不受影响 */
+        hn_rt *krt = hn_rt_open(&kd);
+        check(krt != NULL, "hn_rt_open(keyframes 文档)");
+        if (krt) {
+            int rp = 0;
+            int b0 = hn_rt_frame(krt, 16.0f, &rp);
+            check_int(b0, 16, "interactive(keyframes 无限循环) → 恒 16, 不受 HN_ANIM_FPS 影响");
+            hn_rt_close(krt);
+        }
+        unsetenv("HN_ANIM_FPS");
+    }
+
+    /* == 8c. ambient 轻路径的像素正确性 ==
+       GIF(纯 ambient)经 hn_rt_frame 的轻路径(免 relayout)渲染后,
+       帧必须随 ext_clock 逐帧前进、逐帧位图可取且帧间不同 —— 轻路径
+       省掉的是 relayout, 不是画面更新。 */
+    printf("== ambient 轻路径像素(GIF 帧前进) ==\n");
+    {
+        const char *gif_path = "timer-probe-anim.gif";
+        FILE *fp = fopen(gif_path, "wb");
+        check(fp != NULL, "8c: GIF 夹具落盘(资产按 cwd 相对路径解析)");
+        if (fp) { fwrite(GIF_2F, 1, sizeof(GIF_2F), fp); fclose(fp); }
+        const char *GIFDOC =
+            "<html><body><img id=\"g\" src=\"timer-probe-anim.gif\" "
+            "width=\"64\" height=\"64\"></body></html>";
+        hn_rt_desc gd = { "timer-probe-gif", GIFDOC, strlen(GIFDOC), NULL, 0, 96, 96 };
+        hn_rt *grt = hn_rt_open(&gd);
+        check(grt != NULL, "8c: hn_rt_open(GIF 文档)");
+        if (grt) {
+            int rp = 0;
+            /* 位图缓冲在每次光栅后整体重分配 —— 先快照再推进, 别持旧指针 */
+            unsigned char snap[96 * 96 * 4];
+            const unsigned char *p0 = hn_rt_pixels(grt);
+            check(p0 != NULL, "8c: 初始位图就绪(clock 0 → 帧 0)");
+            if (p0) memcpy(snap, p0, sizeof(snap));
+            int b0 = hn_rt_frame(grt, 150.0f, &rp);
+            const unsigned char *p1 = hn_rt_pixels(grt);
+            check_int(b0, 33, "8c: GIF 页节拍 33(ambient 轻路径)");
+            check(rp == 1, "8c: 轻路径帧报告 repaint");
+            check(p1 != NULL && memcmp(snap, p1, sizeof(snap)) != 0,
+                  "8c: 帧 0 → 帧 1 位图真的变了(150ms 跨过 delay 100)");
+            if (p1) memcpy(snap, p1, sizeof(snap));
+            hn_rt_frame(grt, 150.0f, &rp);
+            const unsigned char *p2 = hn_rt_pixels(grt);
+            check(p2 != NULL && memcmp(snap, p2, sizeof(snap)) != 0,
+                  "8c: 帧 1 → 帧 0 循环回绕(300ms 总时长取模)");
+            hn_rt_close(grt);
+        }
+        remove(gif_path);
+    }
+
+    /* == 9. GIF 缓存预算(内存治理) ==
+       HN_GIF_CACHE_MB=1: 128B/条夹具连灌 2 万条唯一路径 → 最久未用被
+       逐出, 条数/估算总占用有界(≤ 预算), 旧条目重访问可重解。 */
+    printf("== GIF 缓存预算(超限逐出, 总占用有界) ==\n");
+    {
+        setenv("HN_GIF_CACHE_MB", "1", 1);
+        hn_context *gc = hn_context_create();
+        const hn_asset_backend be = { NULL, gif_fixture_load };
+        hn_context_set_assets(gc, &be);
+        const int N = 20000;
+        const size_t PER = (size_t)2 * 4 * 4 * 4;   /* 2 帧×4×4×4B = 128 */
+        char p[64];
+        for (int i = 0; i < N; i++) {
+            snprintf(p, sizeof(p), "budget-fixture-%05d.gif", i);
+            if (!hn_context_gif(gc, p)) break;
+        }
+        size_t bytes = hn_context_gif_bytes(gc);
+        int cnt = hn_context_gif_count(gc);
+        check(cnt < N, "超预算触发逐出(条数远小于灌入数)");
+        check(bytes <= 1024 * 1024, "估算总占用有界(≤ 1MB 预算)");
+        check((size_t)cnt * PER <= 1024 * 1024 + PER, "条数×单条占用 ≤ 预算 + 单条");
+        /* 最旧条目已被逐出: 重访问 → 重解成功, 总占用仍有界 */
+        hn_gif *old = hn_context_gif(gc, "budget-fixture-00000.gif");
+        check(old != NULL && hn_gif_frame_count(old) == 2, "逐出条目重访问 → 重新解码(不悬空)");
+        check(hn_context_gif_bytes(gc) <= 1024 * 1024, "重访问后总占用仍有界");
+        hn_context_destroy(gc);
+        unsetenv("HN_GIF_CACHE_MB");
+    }
 
     /* == 9. close 纪律: 带活定时器/RAF/闭包环的表清理无崩溃无泄漏 == */
     printf("== hn_rt_close(持有 JS 引用的表清理) ==\n");

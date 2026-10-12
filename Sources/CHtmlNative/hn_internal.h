@@ -566,9 +566,22 @@ struct hn_context {
     /* GIF 动图缓存(hn_gif.c): 与 Lottie 同一纪律 —— 按路径惰性解码一次,
        键用副本, 文档替换/compact/destroy/换资产后端时全部清空。
        帧序列(合成后的整幅 RGBA)生命周期跟随本缓存, 显示列表的 BITMAP
-       指令直接引用它 —— 下次 repaint 前不会被回收。 */
-    struct { char *path; hn_gif *gif; } *gifs;
+       指令直接引用它 —— 下次 repaint 前不会被回收。
+       内存治理(性能治理): 缓存带总量预算(帧数×宽×高×4 估算, 缺省 64MB,
+       HN_GIF_CACHE_MB 可覆盖), 超限按最久未用逐出 —— 逐出 = 摘出缓存表
+       并把 hn_gif 挂进"坟场"(gif_grave), 延迟到下一次重绘**之后**才
+       hn_gif_free: 本帧已装进显示列表的帧指针必须活到重绘读完(摘表不
+       释放 = 引用仍有效; 重绘重建显示列表后坟场里的对象必然不再被引用,
+       此时释放无悬空)。 */
+    struct {
+        char *path; hn_gif *gif;
+        unsigned long last_use;   /* 最近触达序号(g_gif_clock; LRU 逐出序) */
+        size_t bytes;             /* 帧数×宽×高×4 估算占用 */
+    } *gifs;
     int n_gif, cap_gif;
+    size_t gif_bytes;             /* 缓存当前估算总占用(预算逐出用) */
+    hn_gif **gif_grave;           /* 已逐出待释放(下一次重绘后统一 hn_gif_free) */
+    int n_grave, cap_grave;
     /* 媒体宿主与会话表(hn_media.c)。宿主指针由运行时持有(NULL = 禁用);
        会话随文档替换/compact/destroy 全部 close+free —— 与 Lottie 缓存同一
        清理纪律(节点指针随旧文档 arena 失效)。 */
@@ -618,15 +631,41 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path);
 void hn_lottie_free(struct hn_lottie *l);
 
 /* GIF 动图(hn_gif.c 解码 + hn_context.c 缓存)。
-   缓存口径与 Lottie 一致: 按路径惰性解码一次, 负结果也缓存(避免每帧重试)。 */
+   缓存口径与 Lottie 一致: 按路径惰性解码一次, 负结果也缓存(避免每帧重试)。
+   带总量预算(HN_GIF_CACHE_MB, 缺省 64MB): 超限按最久未用逐出, 释放延迟到
+   下一次重绘之后(见 struct hn_context 的 gif 字段注释)。 */
 hn_gif *hn_context_gif(hn_context *c, const char *path);
 void hn_context_gif_clear(hn_context *c);
+/* 缓存现状(探针/诊断; 预算逐出的验收面) */
+size_t hn_context_gif_bytes(const hn_context *c);
+int    hn_context_gif_count(const hn_context *c);
 /* 该元素要按 GIF 播放的源(见 hn_gif.c 尾部注释); 非 GIF 返回 NULL */
 const char *hn_node_gif_src(hn_node *n);
 
 /* 网格变形(hn_mesh.c): 发射 MESH 指令 */
 void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
                   float bw, float bh, float sx, float sy, float alpha);
+
+/* ---------- 动画活跃类别(性能治理: 帧节拍分级) ----------
+ * hn_context_anim_tick_ex 的类别出口。hn_rt 据此合成唤醒节拍与渲染路径:
+ *   NONE        本帧无活跃动画 → 帧循环可熄火(节拍 -1, 宿主按空闲节奏醒)
+ *   AMBIENT     仅"环境动画"在跑(ext_clock 类: hn-mesh sway/GIF/Lottie
+ *               循环)—— 不写任何样式字段, 节拍可放宽到 ~30fps, 渲染走
+ *               轻路径(免 relayout, 见 hn_context_repaint_light)
+ *   INTERACTIVE 有"交互动画"在跑(CSS 过渡/@keyframes/入场预设/媒体在播/
+ *               平滑滚动在途)—— 每帧写样式字段, 必须 16ms 节拍 + 全路径
+ *               渲染(relayout + tick(0) 重采样, 既有口径)。 */
+enum { HN_ANIM_NONE = 0, HN_ANIM_AMBIENT = 1, HN_ANIM_INTERACTIVE = 2 };
+
+/* 带类别出口的动画推进(行为与 hn_context_anim_tick 完全一致, 多回填 *cls;
+   cls 可为 NULL)。hn_context_anim_tick 即本函数的 NULL 出口薄封装。 */
+int hn_context_anim_tick_ex(hn_context *c, float dt_ms, int *cls);
+
+/* 轻重画(ambient 帧): 不动级联/布局 —— 环境动画只前进 ext_clock, 样式
+   字段无变化, 重建显示列表即可。tmp 区与显示列表同生命周期(指令引用的
+   顶点/文本副本从这里分配), 必须一并翻新, 否则 ambient 帧循环下逐帧
+   无界增长。GIF 缓存的坟场也在此冲刷(重绘后旧引用必已消亡)。 */
+void hn_context_repaint_light(hn_context *c);
 
 /* 媒体(hn_media.c): 推进会话(宿主 tick + 状态机轮询), 返回 1 = 有活跃
    会话(PLAYING 或待起播) —— hn_context_anim_tick 据此保持帧循环 */

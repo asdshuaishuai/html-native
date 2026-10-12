@@ -12,7 +12,7 @@
  * 不断具体像素宽度(与 md_probe 同口径)。
  *
  * 用法(由 tools/fmt_probe.py 薄封装编译运行):
- *   python3 tools/fmt_probe.py [已编译产物路径]
+ *   bash tools/tools/fmt_probe.sh [已编译产物路径]
  */
 #include <stdio.h>
 #include <stdlib.h>

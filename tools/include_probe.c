@@ -15,7 +15,7 @@
  *       结束时删除, 不留在仓库里。
  *
  * 用法(py 薄封装编好即跑; 手工编译见 tools/include_probe.py):
- *   python3 tools/include_probe.py
+ *   bash tools/tools/include_probe.sh
  * 断言失败打印 got/want, 退出码 1; 全绿退出 0。
  */
 #include <stdio.h>

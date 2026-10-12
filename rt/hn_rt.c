@@ -24,6 +24,10 @@
 #endif
 
 #include "hn_rt.h"
+/* 引擎内部接口(动画活跃类别 + ambient 轻重画): 性能治理需要
+   hn_context_anim_tick_ex 的类别出口与 hn_context_repaint_light ——
+   这两个钩子是引擎专为帧节拍分级开的缝, 不触及其他内部结构。 */
+#include "hn_internal.h"
 #ifdef HN_HAVE_QUICKJS
 #include <quickjs.h>
 #endif
@@ -602,13 +606,8 @@ static void run_load_actions(hn_rt *rt) {
 
 /* ---------------- 渲染 ---------------- */
 
-static int rt_render(hn_rt *rt) {
-    hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
-    /* relayout 会把动画采样值从级联重算冲掉(每帧 tick 后紧跟 render,
-       kf_clock 不变)—— 零步进重采样一次再建显示列表, 过渡/关键帧的
-       中间态才真正落到像素(与 tools/hncore.c render 路径同一修法)。 */
-    hn_context_anim_tick(rt->ctx, 0);
-    hn_context_repaint(rt->ctx);
+/* 光栅段(全路径/ambient 轻路径共用): 显示列表 → RGBA → 预乘 BGRA */
+static int rt_raster(hn_rt *rt) {
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
     hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
@@ -626,6 +625,25 @@ static int rt_render(hn_rt *rt) {
     }
     free(rgba);
     return 1;
+}
+
+static int rt_render(hn_rt *rt) {
+    hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+    /* relayout 会把动画采样值从级联重算冲掉(每帧 tick 后紧跟 render,
+       kf_clock 不变)—— 零步进重采样一次再建显示列表, 过渡/关键帧的
+       中间态才真正落到像素(与 tools/hncore.c render 路径同一修法)。 */
+    hn_context_anim_tick(rt->ctx, 0);
+    hn_context_repaint(rt->ctx);
+    return rt_raster(rt);
+}
+
+/* ambient 轻路径: 本帧只有 ext_clock 类动画前进(anim_tick_ex 报
+   AMBIENT)—— 样式/几何字段无变化, 免整遍 relayout(hn_context_layout),
+   只重建显示列表 + 光栅。静态立绘桌宠 + GIF/网格摆动的 CPU 大头就在
+   relayout: 30fps 节拍 × 轻路径, 渲染成本降到全路径的约 1/4。 */
+static int rt_render_ambient(hn_rt *rt) {
+    hn_context_repaint_light(rt->ctx);
+    return rt_raster(rt);
 }
 
 /* ---------------- 公开 API ---------------- */
@@ -1859,6 +1877,25 @@ static double now_s(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/* ambient 节拍(纯环境动画页面的帧间隔): 环境钮 HN_ANIM_FPS = 16/30/60
+   覆盖(62/33/16ms), 缺省 30 ≈ 33ms。只作用于"仅 ambient 活跃"的帧 ——
+   interactive(过渡/关键帧/媒体/滚动)恒 16ms, 不受此钮影响。按值失效的
+   记忆: 探针可同进程改钮(其余情况 getenv 只在值变时真正换算)。 */
+static int ambient_beat_ms(void) {
+    static char memo[24] = "\x01";      /* 首次必不相等 → 走一次换算 */
+    static int beat = 33;
+    const char *e = getenv("HN_ANIM_FPS");
+    const char *cur = (e && *e) ? e : "";
+    if (strcmp(cur, memo) != 0) {
+        snprintf(memo, sizeof(memo), "%s", cur);
+        long fps = atol(cur);
+        beat = 33;                       /* 缺省 ~30fps */
+        if (fps == 16) beat = 62;
+        else if (fps == 60) beat = 16;
+    }
+    return beat;
+}
+
 int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     if (!rt) return -1;
     if (repaint) *repaint = 0;
@@ -1869,8 +1906,16 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
        渲染并置 repaint。 */
     js_timers_drain(rt, repaint);
 
-    int anim = hn_context_anim_tick(rt->ctx, dt_ms);
-    if (anim) { rt_render(rt); if (repaint) *repaint = 1; }
+    /* 动画推进 + 活跃类别分级(性能治理): interactive(过渡/关键帧/媒体/
+       平滑滚动)→ 全路径渲染 + 16ms 节拍; 仅 ambient(ext_clock 类)→
+       轻路径(免 relayout)+ HN_ANIM_FPS 节拍(缺省 33ms ≈ 30fps)。 */
+    int anim_cls = HN_ANIM_NONE;
+    int anim = hn_context_anim_tick_ex(rt->ctx, dt_ms, &anim_cls);
+    if (anim) {
+        if (anim_cls == HN_ANIM_AMBIENT) rt_render_ambient(rt);
+        else rt_render(rt);
+        if (repaint) *repaint = 1;
+    }
 
     /* 轮询表(懒建: 内容变化后重建) */
     hn_doc *doc = hn_context_doc(rt->ctx);
@@ -1906,11 +1951,17 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     }
 
     /* ---- 唤醒节拍合成(取各信号的最小者; -1 = 无事可睡) ----
-       RAF 待决        → 16 (活画面: 60fps 帧循环)
-       定时器表非空    → min(16, 最近到期-现在) (到期即先跑回调)
-       动画在跑        → 16 (过渡/keyframes/Lottie/媒体)
-       hx 轮询期限     → 距最近到期的毫秒数
-       全无            → -1 (宿主按自己的空闲节奏低频醒来) */
+       RAF 待决          → 16 (活画面: 60fps 帧循环)
+       interactive 动画  → 16 (过渡/keyframes/媒体/平滑滚动: 每帧写样式)
+       仅 ambient 动画   → HN_ANIM_FPS 节拍(缺省 33 ≈ 30fps; 桌宠环境
+                           动画肉眼平滑度无损, layout+渲染次数减半)
+       定时器表非空      → min(最近到期-现在, 250) —— 上限治理: 无 RAF/
+                           动画时不再为一张远期定时器表 60fps 空转(5s 的
+                           setTimeout 页面 4Hz 醒来, 到期即触发后自然回
+                           短节拍); 封顶 250 与 hn_app 的空闲 pump 同拍,
+                           mtime watch 的 300ms 节奏不被拖慢
+       hx 轮询期限       → 距最近到期的毫秒数
+       全无              → -1 (宿主按自己的空闲节奏低频醒来) */
     int beat = -1;
 #ifdef HN_HAVE_QUICKJS
     if (rt->raf_n > 0) beat = 16;
@@ -1925,12 +1976,15 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
         if (dmin >= 0) {
             int tb = (int)dmin;
             if (tb < 1) tb = 1;
-            if (tb > 16) tb = 16;
+            if (tb > 250) tb = 250;                  /* 定时器不钉死帧节拍 */
             if (beat < 0 || tb < beat) beat = tb;
         }
     }
 #endif
-    if (anim && (beat < 0 || 16 < beat)) beat = 16;
+    if (anim) {
+        int ab = (anim_cls == HN_ANIM_AMBIENT) ? ambient_beat_ms() : 16;
+        if (beat < 0 || ab < beat) beat = ab;
+    }
     if (next > 0) {
         int pb = (int)(next * 1000.0);
         if (beat < 0 || pb < beat) beat = pb;

@@ -46,7 +46,7 @@
  * FreeType 有无而不同, 不进断言)。像素采样直接读 hnsoft_render 的
  * 内存位图, 不经 PNG。
  *
- * 用法(与其他 C 探针同口径, 直接 cc, 无 SPM; python3 tools/quad3d_probe.py
+ * 用法(与其他 C 探针同口径, 直接 cc, 无 SPM; bash tools/tools/quad3d_probe.sh
  * 是本文件的门禁薄封装):
  *   cc -O2 -I Sources/CHtmlNative/include -I Sources/CHtmlNative \
  *      -I /opt/homebrew/include/freetype2 tools/quad3d_probe.c \

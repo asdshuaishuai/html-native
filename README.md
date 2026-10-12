@@ -166,7 +166,7 @@ tools/hn_daemon.c      C99 常驻宿主(Unix socket JSON-lines, agent 入口)
 tools/hn_cli.c         C99 命令行客户端(与 daemon 配对)
 tools/build-multiplatform.sh  交叉构建(zig cc, 三平台产物 + 跨架构确定性门禁)
 tools/build-daemon-cli.sh     daemon/CLI 本机构建
-tools/*_probe.c/.py    探针(render/alpha/cairo/mesh/sysbridge/rt + 布局/CSS/HTML/Lottie/GIF)
+tools/*_probe.c/.sh    探针(render/alpha/cairo/mesh/sysbridge/rt + 布局/CSS/HTML/Lottie/GIF)
 screenshots/           引擎效果截图
 ```
 
@@ -288,6 +288,12 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 就是你自己的应用容器; `tools/hncore.c` 演示零 GUI 嵌入(离屏渲染出 PNG)。
 
 ## 支持的子集(v1)
+
+> **实现语言盘点(语言纯度口径)**: **引擎与全部工具 = C99**(Sources/ + rt/ +
+> tools/ 全部 `.c`; 无 Python/Node/Swift); **构建与验证链 = bash**
+> (`tools/build-multiplatform.sh`、`tools/*_probe.sh`, 探针共享
+> `tools/_engine_sources.sh` 的源清单); **页面 = hn 编码**(HTML/CSS/JS,
+> 产品语言, JS 为可选内嵌 QuickJS 桥)。
 
 - **hn 编码**: HTML 语法——元素/属性/void/自闭合、DOCTYPE/注释、`<style>` 内联、
   **`<link rel="stylesheet">` 本地外链样式(相对路径, 预处理层内联)**、
@@ -588,7 +594,7 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   动画→16 / hx 轮询→期限 / 全无→-1**(空闲零空转口径不变)。
   桌宠自己换句、canvas 折线自己滚 —— `examples/pet.html`(气泡 3s 轮播 +
   `hnMeshParam` 眨眼)与 `examples/canvas-demo.html`(500ms 实时折线);
-  口径由 `tools/timer_probe.py` 37 断言钉死
+  口径由 `tools/timer_probe.sh` 37 断言钉死
 - **媒体元素(`<video>`/`<audio>`, 解码委托平台)**: 元素解析照常, 语义是仿
   HTMLMediaElement 的**六态状态机**(IDLE/LOADING/READY/PLAYING/PAUSED/ENDED),
   声明属性即语义(`src`/`autoplay`/`loop`/`muted`/`volume`, seek 钳制到
@@ -601,7 +607,7 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   入口两层: C 端 `hn_media_play/pause/seek/…`(元素寻址)与 QuickJS 桥
   `hnMediaPlay/Pause/Seek/Time/Duration/Volume`(daemon `eval` op 即可驱动)。
   测试双轨: hncore **合成宿主**(梯度帧+假时钟, 确定性)供
-  `media_element_probe.py` 40 断言全绿; 真机 AVFoundation 由 `media_probe.py`
+  `media_element_probe.sh` 40 断言全绿; 真机 AVFoundation 由 `media_probe.sh`
   实测(播放推进/seek 落位/pause 恒定/纯音频无帧/系统样例抽真帧,
   18 ok 0 fail)。**真窗口播放已接线**: `app/hn_media_platform.c` 把平台
   ABI(`hnp_media_*`)适配成 `hn_media_host` 交 `hn_rt_set_media` ——
@@ -617,7 +623,7 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   i32/f32/f64), 不做 WASI、不用 WASM 解码媒体。QuickJS 桥
   `hnWasmLoad(bytesOrPath)` → id、`hnWasmCall(id, fn, ...args)` → 结果
   (失败 NaN, 不抛异常)。demo 模块 `examples/wasm/add.c`(zig cc
-  wasm32-freestanding, `add.wasm` 已入库); `wasm_probe.py` 19 断言(装载/
+  wasm32-freestanding, `add.wasm` 已入库); `wasm_probe.sh` 19 断言(装载/
   调用/签名转换/错误路径)全绿。
 - **媒体/WASM 端到端示例**: `examples/media-demo.html` —— `<video>` 播放区
   (真窗口里 AVFoundation 真播, 自绘控制条 + 静音钮; 引擎不做浏览器控件 UI,

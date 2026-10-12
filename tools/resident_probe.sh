@@ -17,6 +17,7 @@
 # daemon), 自起 daemon 记 PID, 退出 trap 清理。
 set -u
 cd "$(dirname "$0")/.."
+. "tools/_engine_sources.sh"   # hn_rpc(现场编译的 C99 Unix socket 客户端)
 
 HN="dist/hn"
 DAEMON="dist/hn-daemon"
@@ -46,21 +47,36 @@ alive_nonzombie() {
   [ -n "$st" ] && [ "${st:0:1}" != "Z" ]
 }
 
-# 单发裸 socket JSON-lines 请求(resident op 未进 hn CLI, 直连协议)
+# 单发裸 socket JSON-lines 请求(resident op 未进 hn CLI, 直连协议;
+# hn_rpc: _engine_sources.sh 现场编译的 C99 客户端, 替代原 python 版)
 raw_rpc() {
-  python3 - "$1" <<'PY'
-import socket, os, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(os.path.join(os.environ["HOME"], ".html-native/hn-daemon.sock"))
-s.sendall(sys.argv[1].encode() + b"\n")
-buf = b""
-while not buf.endswith(b"\n"):
-    c = s.recv(4096)
-    if not c:
-        break
-    buf += c
-print(buf.decode().strip())
-PY
+  hn_rpc "$HOME/.html-native/hn-daemon.sock" "$1"
+}
+
+# geo_parse <geometry.json> → "x=N y=N w=N h=N"(字段合法时)或
+# "bad-json"/"bad-fields"/"bad-range"/"bad-size"(与原 python 解析同口径:
+# x/y/w/h 必须是整数, |x|,|y| < 100000, 0 < w,h < 10000)
+geo_parse() {
+  local line fx fy fw fh
+  line="$(head -c 4096 "$1" 2>/dev/null | tr -d '\r\n')"
+  case "$line" in
+    '{'*'}') : ;;
+    *) echo "bad-json"; return ;;
+  esac
+  fx="$(printf '%s' "$line" | sed -n 's/.*"x":\(-\{0,1\}[0-9]\{1,9\}\).*/\1/p')"
+  fy="$(printf '%s' "$line" | sed -n 's/.*"y":\(-\{0,1\}[0-9]\{1,9\}\).*/\1/p')"
+  fw="$(printf '%s' "$line" | sed -n 's/.*"w":\(-\{0,1\}[0-9]\{1,9\}\).*/\1/p')"
+  fh="$(printf '%s' "$line" | sed -n 's/.*"h":\(-\{0,1\}[0-9]\{1,9\}\).*/\1/p')"
+  if [ -z "$fx" ] || [ -z "$fy" ] || [ -z "$fw" ] || [ -z "$fh" ]; then
+    echo "bad-fields"; return
+  fi
+  if ! awk -v x="$fx" -v y="$fy" 'BEGIN { exit !(x > -100000 && x < 100000 && y > -100000 && y < 100000) }'; then
+    echo "bad-range"; return
+  fi
+  if ! awk -v w="$fw" -v h="$fh" 'BEGIN { exit !(w > 0 && w < 10000 && h > 0 && h < 10000) }'; then
+    echo "bad-size"; return
+  fi
+  echo "x=$fx y=$fy w=$fw h=$fh"
 }
 
 cat > "$DEMO" <<'HTML'
@@ -87,24 +103,7 @@ echo "$R" | grep -q '"ok":true' && ok "open --window ok:true" || bad "open --win
 GEO_OK=0; GEO_DESC=""
 for _ in $(seq 1 60); do
   if [ -s "$GEO_FILE" ]; then
-    GEO_DESC=$(python3 - "$GEO_FILE" <<'PY'
-import json, sys
-try:
-    g = json.load(open(sys.argv[1]))
-    ks = ("x", "y", "w", "h")
-    if not all(isinstance(g.get(k), int) for k in ks):
-        print("bad-fields"); raise SystemExit
-    if not (-100000 < g["x"] < 100000 and -100000 < g["y"] < 100000):
-        print("bad-range"); raise SystemExit
-    if not (0 < g["w"] < 10000 and 0 < g["h"] < 10000):
-        print("bad-size"); raise SystemExit
-    print("x=%d y=%d w=%d h=%d" % (g["x"], g["y"], g["w"], g["h"]))
-except SystemExit:
-    pass
-except Exception:
-    print("bad-json")
-PY
-)
+    GEO_DESC="$(geo_parse "$GEO_FILE")"
     case "$GEO_DESC" in x=*) GEO_OK=1; break ;; esac
   fi
   sleep 0.1
@@ -131,18 +130,10 @@ DAEMON_PID=$!
 for _ in $(seq 1 50); do "$HN" ping >/dev/null 2>&1 && break; sleep 0.1; done
 NEWPID=""
 for _ in $(seq 1 50); do
-  # hn list 带人读前缀("N 个应用: {json}"), 从第一个 '{' 起解析
-  NEWPID=$("$HN" list | python3 -c '
-import json, sys
-t = sys.stdin.read()
-try:
-    d = json.loads(t[t.find("{"):])
-    for a in d.get("apps", []):
-        if a.get("kind") == "window":
-            print(a.get("pid", "")); break
-except Exception:
-    pass
-')
+  # hn list 带人读前缀("N 个应用: {json}"), 取首个 window 应用条目的 pid
+  # (window 条目形如 {"id":...,"kind":"window","pid":N,"w":W,"h":H})
+  NEWPID=$("$HN" list | grep -o '"kind":"window"[^}]*' | head -n 1 \
+           | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
   [ -n "$NEWPID" ] && break
   sleep 0.1
 done

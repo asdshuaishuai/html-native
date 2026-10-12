@@ -22,6 +22,7 @@
 set -u  # 不用 -e: 断言里要自己收 failed 计数
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/tools/_engine_sources.sh"   # hn_pngstats(现场编译的 C99 PNG 统计)
 DIST="${1:-$ROOT/dist}"
 HN_CORE="$DIST/hncore-macos-arm64"
 HN_APP="$DIST/hnapp-macos-arm64"
@@ -55,52 +56,33 @@ else
 fi
 
 if [ -s "$SHOT" ]; then
-    # 四角 alpha + 透明占比 + 尺寸 + 内容量(css_probe.py 同款 PNG 逐行反 filters)
-    REPORT=$(python3 - "$SHOT" <<'PYEOF'
-import struct, zlib, sys
-p = sys.argv[1]
-d = open(p, "rb").read()
-pos, idat, w, h = 8, b"", 0, 0
-while pos < len(d):
-    ln = struct.unpack(">I", d[pos:pos+4])[0]
-    t = d[pos+4:pos+8]
-    if t == b"IHDR": w, h = struct.unpack(">II", d[pos+8:pos+16])
-    if t == b"IDAT": idat += d[pos+8:pos+8+ln]
-    pos += 12 + ln
-raw = zlib.decompress(idat); stride = w*4
-o = bytearray(); prev = bytearray(stride); i = 0
-for _y in range(h):
-    f = raw[i]; i += 1
-    line = bytearray(raw[i:i+stride]); i += stride
-    for x in range(stride):
-        a = line[x-4] if x >= 4 else 0
-        b = prev[x]; c = prev[x-4] if x >= 4 else 0
-        if f == 1: line[x] = (line[x]+a) & 255
-        elif f == 2: line[x] = (line[x]+b) & 255
-        elif f == 3: line[x] = (line[x]+(a+b)//2) & 255
-        elif f == 4:
-            pp = a+b-c; pa, pb, pc = abs(pp-a), abs(pp-b), abs(pp-c)
-            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-            line[x] = (line[x]+pr) & 255
-    o += line; prev = line
-corner = [o[((y*w+x))*4+3] for (x, y) in [(0,0),(w-1,0),(0,h-1),(w-1,h-1)]]
-tot = tr = 0
-for i in range(0, w*h, 7):
-    a = o[i*4+3]; tot += 1
-    if a == 0: tr += 1
-pct = tr * 100.0 / tot
-content = sum(1 for i in range(w*h) if o[i*4+3] > 16)
-print("%dx%d corners=%s transparent=%.1f%% content=%d" %
-      (w, h, ",".join(str(c) for c in corner), pct, content))
-ok = (all(c == 0 for c in corner) and pct > 20 and content > 4000
-      and (w, h) == (360, 360))
-sys.exit(0 if ok else 1)
-PYEOF
-)
-    if [ $? -eq 0 ]; then
-        ck "360x360 / 四角 alpha=0 / 透明占比 >20% / 内容非空 | $REPORT" 1
+    # 四角 alpha + 透明占比 + 尺寸 + 内容量(css_probe 同款逐像素口径;
+    # hn-pngstats: _engine_sources.sh 现场编译的 C99 解码器, 链引擎自带的
+    # hn_png.c —— 替代原 python zlib 逐行反 filters 版)
+    RAW=""
+    if PNGSTATS="$(hn_pngstats_build 2>/dev/null)"; then
+        RAW="$("$PNGSTATS" "$SHOT" 2>/dev/null || true)"
+    fi
+    if [ -n "$RAW" ]; then
+        REPORT="$(printf '%s\n' "$RAW" | awk '{
+            w = $1; sub(/^w=/, "", w)
+            h = $2; sub(/^h=/, "", h)
+            c = $3; sub(/^corners=/, "", c); gsub(/,/, " ", c)
+            t = $4; sub(/^trpct=/, "", t)
+            ct = $6; sub(/^content=/, "", ct)
+            printf "%dx%d corners=[%s] transparent=%.1f%% content=%d", w, h, c, t, ct
+        }')"
+        OK="$(printf '%s\n' "$REPORT" | awk '
+            {
+                t = $0; sub(/.*transparent=/, "", t); sub(/%.*/, "", t)
+                c = $0; sub(/.*content=/, "", c)
+                ok = ($0 ~ /corners=\[0 0 0 0\]/ && t + 0 > 20 && c + 0 > 4000 &&
+                      $0 ~ /^360x360 /)
+            }
+            END { print ok ? 1 : 0 }')"
+        ck "360x360 / 四角 alpha=0 / 透明占比 >20% / 内容非空 | $REPORT" "$OK"
     else
-        ck "360x360 / 四角 alpha=0 / 透明占比 >20% / 内容非空 | $REPORT" 0
+        ck "360x360 / 四角 alpha=0 / 透明占比 >20% / 内容非空" 0
     fi
 else
     ck "出图非空" 0

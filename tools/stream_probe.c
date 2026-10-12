@@ -13,7 +13,7 @@
  * hn_node_scroll_range / hn_context_anim_tick(帧时钟)。
  *
  * 用法(由 tools/stream_probe.py 薄封装编译运行):
- *   python3 tools/stream_probe.py [二进制路径]
+ *   bash tools/tools/stream_probe.sh [二进制路径]
  */
 #include <stdio.h>
 #include <stdlib.h>

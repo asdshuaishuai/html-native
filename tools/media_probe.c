@@ -4,7 +4,7 @@
  * 用法:
  *   cc -O1 -Wall -I platform tools/media_probe.c platform/hnp_media_macos.c \
  *      -o /tmp/hn_media_probe && /tmp/hn_media_probe [<样例视频路径>]
- * (python3 tools/media_probe.py 是本文件的门禁薄封装。)
+ * (bash tools/tools/media_probe.sh 是本文件的门禁薄封装。)
  *
  * 检查项(docs/media-design.md §8.2 口径, 断言用范围不用精确值 —— 真解码
  * 非逐字节确定):

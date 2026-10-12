@@ -39,8 +39,8 @@ Neb(NO-WEB)的跨平台策略不是"每个平台移植一遍", 而是**契约先
 
 | 锚 | 覆盖 |
 |---|---|
-| `tools/media_element_probe.py` | synth 宿主行为口径(梯度帧逐字节/假时钟/状态机)—— 40 断言 |
-| `tools/media_probe.py` | macOS 真宿主(AVFoundation)18 断言 |
+| `tools/media_element_probe.sh` | synth 宿主行为口径(梯度帧逐字节/假时钟/状态机)—— 40 断言 |
+| `tools/media_probe.sh` | macOS 真宿主(AVFoundation)18 断言 |
 | `tools/media_window_probe.sh` | 真窗 + synth 降级(④档)17 断言 |
 | `tools/window_probe.sh` / `tools/resident_probe.sh` | daemon 开窗(壳候选表)/常驻/几何记忆 25+16 断言 |
 | `tools/build-multiplatform.sh` 自检 | 跨架构确定性 + 布局不变量 |

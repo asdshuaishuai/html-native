@@ -15,7 +15,7 @@
  * hn_node_scroll_by / hn_node_scroll_get / hn_node_scroll_range。
  *
  * 用法(由 tools/anim_probe.py 薄封装编译运行):
- *   python3 tools/anim_probe.py [二进制路径]
+ *   bash tools/tools/anim_probe.sh [二进制路径]
  */
 #include <stdio.h>
 #include <stdlib.h>

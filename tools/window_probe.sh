@@ -15,6 +15,7 @@
 # 自起 daemon 记 PID, 退出 trap 清理。
 set -u
 cd "$(dirname "$0")/.."
+. "tools/_engine_sources.sh"   # hn_rpc(现场编译的 C99 Unix socket 客户端)
 
 HN="dist/hn"
 DAEMON="dist/hn-daemon"
@@ -97,21 +98,11 @@ sleep 1
 if alive_nonzombie "$PID"; then ok "热重载(第 2 帧)后子进程仍存活(pid=$PID)"; else bad "热重载(第 2 帧)后子进程仍存活(pid=$PID)"; fi
 # 分工错误信息: window 应用不伺候渲染/截图管线 op(eval/shot/dump/text)。
 # CLI 只暴露 dump/text/shot 且会把错误体吞掉, 这里走裸 socket JSON-lines
-# 逐个断言错误回包。
+# 逐个断言错误回包(hn_rpc: _engine_sources.sh 现场编译的 C99 单发客户端,
+# 原 python socket 客户端的替代)。
+SOCK="$HOME/.html-native/hn-daemon.sock"
 raw_rpc() {  # 单发请求 → 回一行 JSON(与 hn_cli 的 rpc 同款协议)
-  python3 - "$1" <<'PY'
-import socket, os, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(os.path.join(os.environ["HOME"], ".html-native/hn-daemon.sock"))
-s.sendall(sys.argv[1].encode() + b"\n")
-buf = b""
-while not buf.endswith(b"\n"):
-    c = s.recv(4096)
-    if not c:
-        break
-    buf += c
-print(buf.decode().strip())
-PY
+  hn_rpc "$SOCK" "$1"
 }
 E=$(raw_rpc '{"op":"eval","id":"probe","js":"1+1"}')
 echo "$E" | grep -q 'unsupported for window apps' && ok "eval 对 window 回 unsupported(headless only)" || bad "eval 对 window 回 unsupported($E)"
