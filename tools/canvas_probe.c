@@ -12,6 +12,11 @@
  *   6. 账本有界化: 满幅不透明 fillRect 视同清账(新帧语义) —— op 数稳态
  *      有界、半透明/渐变/裁剪中不满幅不清、clearRect 后再满幅正常、
  *      半像素容差边界(详见 hn_canvas.c 的 frect_frame_reset)。
+ *   7. 深化特性: getImageData(离屏栅格化, 非预乘 RGBA)、putImageData
+ *      (透明透底/脏矩形/满幅新帧/4MB 超限拒录)、createPattern(repeat/
+ *      repeat-x/no-repeat/fill() 多边形)、drawImage 源矩形(9/5 参)、
+ *      globalCompositeOperation(lighter/multiply/screen/未列回落)、
+ *      clip() 精确路径裁剪(多边形内外判定)。
  *
  * 用法(py 薄封装编好即跑; 手工编译见 tools/canvas_probe.py):
  *   bash tools/tools/canvas_probe.sh
@@ -69,7 +74,13 @@ static int rec_op(hn_context *c, const char *json) {
  *  与 JS 桥同一条落账路径; 无脚本 → 首帧渲染时无账本, 不扰动前 95 断言):
  *   cvf (0,1440)  满幅不透明 frect ×N 新帧语义   cvh (0,1560) 半透明满幅不清
  *   cvg (0,1680)  渐变满幅不清                   cvc (0,1800) clip 中满幅不清
- *   cvf2(0,1920)  clearRect 后再满幅 + 容差边界 */
+ *   cvf2(0,1920)  clearRect 后再满幅 + 容差边界
+ *  再追加七块**无脚本**画布(深化探针用, JS glue / C 直录混用, 断言全部
+ *  排在既有 115 条之后 —— 不扰动既有像素锚与计数):
+ *   cvG (0,2040)  getImageData(离屏栅格化)       cvP (0,2160) putImageData+脏矩形
+ *   cvQ (0,2280)  createPattern 四种平铺         cvD (0,2400) drawImage 9/5 参
+ *   cvB (0,2520)  globalCompositeOperation       cvC (0,2640) clip() 精确路径
+ *   cvH (0,2760)  pdata 满幅新帧 / 超限拒录(C 直录) */
 static const char *DOC_HTML =
 "<html><head><style>body{margin:0}canvas{display:block}</style></head>"
 "<body>"
@@ -91,6 +102,15 @@ static const char *DOC_HTML =
 "<canvas id=\"cvg\" width=\"200\" height=\"120\"></canvas>"
 "<canvas id=\"cvc\" width=\"200\" height=\"120\"></canvas>"
 "<canvas id=\"cvf2\" width=\"200\" height=\"120\"></canvas>"
+/* 深化探针画布: 无脚本(getImageData/putImageData/pattern/drawImage/混合/
+   精确裁剪/pdata 新帧), 排在 cvf2 之下 */
+"<canvas id=\"cvG\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvP\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvQ\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvD\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvB\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvC\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvH\" width=\"200\" height=\"120\"></canvas>"
 "<script>\n"
 "var ctx = hnGet2D('cv');\n"
 "ctx.translate(10, 5);\n"
@@ -223,9 +243,10 @@ static int pix_b(int x, int y) { return g_px[((long)y * g_w + x) * 4]; }
 int main(void) {
     printf("canvas_probe — <canvas> 2D 账本全链路(脚本自动执行→落账→重放→位图)\n\n");
 
-    /* 窗口 640x2040: 原十二块画布(0..1440)像素锚逐值不动, 其下再排五块
-       200x120 无脚本画布(cvf..cvf2, 1440..2040)给有界化探针用 */
-    hn_rt_desc d = { "canvas-probe", DOC_HTML, strlen(DOC_HTML), NULL, 0, 640, 2040 };
+    /* 窗口 640x2880: 原十二块画布(0..1440)像素锚逐值不动, 其下五块有界化
+       探针画布(cvf..cvf2, 1440..2040), 再下七块深化探针画布
+       (cvG..cvH, 2040..2880, 断言全部在既有断言之后) */
+    hn_rt_desc d = { "canvas-probe", DOC_HTML, strlen(DOC_HTML), NULL, 0, 640, 2880 };
     hn_rt *rt = hn_rt_open(&d);
     check(rt != NULL, "hn_rt_open 成功(文档 + 内联 <script> 自动执行)");
     if (!rt) return 1;
@@ -684,6 +705,340 @@ int main(void) {
                "\"h\":120.5,\"col\":4278255615}");
         check_int(hn_canvas_count(c, "cvf2"), 1,
                   "欠覆盖 ≤ 半像素容差(-0.4/出血 0.5): 视为满幅, 清账");
+    }
+
+    /* == 16. getImageData: 账本离屏栅格化 → 非预乘 RGBA(标准 ImageData) ==
+       cvG @2040: 不透明蓝矩形(0,0,40,30) + 半透明红 rgba(255,0,0,0.5)
+       (50,0,20,20)。非预乘口径: 半透明像素 R 仍是 255(预乘会折半成 128)。 */
+    printf("== getImageData(离屏栅格化, 非预乘 RGBA) ==\n");
+    {
+        char *r = hn_rt_eval(
+            "var gg=hnGet2D('cvG');"
+            "gg.fillStyle='#3366ff';gg.fillRect(0,0,40,30);"
+            "gg.fillStyle='rgba(255,0,0,0.5)';gg.fillRect(50,0,20,20);"
+            "var gd=gg.getImageData(0,0,200,120);"
+            "gd.width+','+gd.height+','"
+            "+gd.data[(15*200+10)*4]+','+gd.data[(15*200+10)*4+1]"
+            "+','+gd.data[(15*200+10)*4+2]+','+gd.data[(15*200+10)*4+3]"
+            "+','+gd.data[(5*200+60)*4]+','+gd.data[(5*200+60)*4+3]"
+            "+','+gd.data[(100*200+100)*4+3]",
+            "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "200,120,51,102,255,255,255,128,0") == 0,
+              "getImageData: 尺寸 + 中心像素 #3366ff + 半透明 R=255,A=128(非预乘) + 角落透明");
+        free(r);
+        /* 引擎 C API 直调: 越界子区补透明黑(浏览器同口径) */
+        unsigned char *sub = NULL;
+        int ow = 0, oh = 0;
+        int got = hn_canvas_get_image_data(c, "cvG", -5, -5, 60, 50, &sub, &ow, &oh);
+        check(got == 1 && ow == 60 && oh == 50, "C API: getImageData(-5,-5,60,50) 出图");
+        if (sub) {
+            check(sub[((5 * 60 + 5) * 4) + 0] == 51 && sub[((5 * 60 + 5) * 4) + 1] == 102 &&
+                  sub[((5 * 60 + 5) * 4) + 2] == 255 && sub[((5 * 60 + 5) * 4) + 3] == 255,
+                  "C API: 子区内 (5,5)=画布 (0,0) 的 #3366ff");
+            check(sub[0] == 0 && sub[1] == 0 && sub[2] == 0 && sub[3] == 0,
+                  "C API: 子区角 (0,0)=画布外 → 透明黑");
+            check(sub[((49 * 60 + 59) * 4) + 3] == 0,
+                  "C API: 子区右下角(画布外)→ 透明黑");
+            free(sub);
+        }
+        check_int(hn_canvas_get_image_data(c, "nope", 0, 0, 4, 4, &sub, &ow, &oh), 0,
+                  "C API: 未知画布返回 0");
+    }
+
+    /* == 17. putImageData: 透明处透底 / 不透明覆盖 / 脏矩形 / 满幅新帧 ==
+       cvP @2160: 底色 #224466; 4x4 块(左上 2x2 透明, 其余青色 0,255,255)
+       贴 (20,20); 同块带脏矩形 (2,2,2,2) 贴 (100,40) —— 只出现块内 (2..3,2..3)。 */
+    printf("== putImageData(透明透底 / 脏矩形 / 满幅新帧 / 超限拒录) ==\n");
+    {
+        char *r = hn_rt_eval(
+            "var pc=hnGet2D('cvP');"
+            "pc.fillStyle='#224466';pc.fillRect(0,0,200,120);"
+            "var im={width:4,height:4,data:["
+            "0,0,0,0, 0,0,0,0, 0,255,255,255, 0,255,255,255,"
+            "0,0,0,0, 0,0,0,0, 0,255,255,255, 0,255,255,255,"
+            "0,255,255,255, 0,255,255,255, 0,255,255,255, 0,255,255,255,"
+            "0,255,255,255, 0,255,255,255, 0,255,255,255, 0,255,255,255]};"
+            "pc.putImageData(im,20,20);"
+            "pc.putImageData(im,100,40,2,2,2,2);"
+            "1", "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "putImageData 落账(整块 + 脏矩形)");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvP)");
+        g_px = hn_rt_pixels(rt);
+        check(g_px != NULL, "位图就绪");
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(21, 2181) == 0x22 && pix_g(21, 2181) == 0x44 &&
+                  pix_b(21, 2181) == 0x66,
+                  "putImageData: 块内透明像素透出底色 #224466");
+            check(pix_r(23, 2183) == 0 && pix_g(23, 2183) == 255 && pix_b(23, 2183) == 255,
+                  "putImageData: 块内不透明像素覆盖(青)");
+            check(pix_r(100, 2200) == 0x22 && pix_g(100, 2200) == 0x44,
+                  "putImageData: 脏矩形外不贴(露底)");
+            check(pix_g(102, 2202) == 255 && pix_b(102, 2202) == 255 && pix_r(102, 2202) == 0,
+                  "putImageData: 脏矩形内贴入(青)");
+        }
+        /* -- cvH @2760: 满幅不透明 pdata = 新帧(C 直录, 与 frect 同口径) -- */
+        rec_op(c, "{\"cv\":\"cvH\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvH"), 1, "cvH: 底色 1 op");
+        /* 200x120 全不透明块 #102030FF(96KB 像素 → JSON 直录) */
+        {
+            size_t cap = 96000 * 5 + 256;
+            char *big = (char *)malloc(cap);
+            if (big) {
+                int n = snprintf(big, cap,
+                    "{\"cv\":\"cvH\",\"op\":\"pdata\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,\"px\":[");
+                for (int i = 0; i < 96000; i++) {
+                    static const unsigned char v[4] = { 0x10, 0x20, 0x30, 0xFF };
+                    n += snprintf(big + n, cap - (size_t)n, "%s%u",
+                                  i ? "," : "", v[i % 4]);
+                }
+                snprintf(big + n, cap - (size_t)n, "]}");
+                int rec = hn_canvas_record(c, big, strlen(big));
+                check_int(rec, 1, "满幅不透明 pdata 清账(新帧, 账本仅余该 op)");
+                free(big);
+            }
+        }
+        check_int(hn_canvas_overflow(c, "cvH"), 0, "cvH 未溢出");
+        rec_op(c, "{\"cv\":\"cvH\",\"op\":\"frect\",\"x\":10,\"y\":10,\"w\":8,\"h\":8,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvH"), 2, "新帧之上正常追加增量 op");
+        /* -- 超限拒录(单块上限 4MB): w*h*4 = 4.8MB > 上限 → -1 + 溢出标志 -- */
+        int rec2 = hn_canvas_record(c,
+            "{\"cv\":\"cvH\",\"op\":\"pdata\",\"x\":0,\"y\":0,\"w\":2000,\"h\":600,\"px\":[]}",
+            strlen("{\"cv\":\"cvH\",\"op\":\"pdata\",\"x\":0,\"y\":0,\"w\":2000,\"h\":600,\"px\":[]}"));
+        check_int(rec2, -1, "超限 pdata 拒录(返回 -1)");
+        check_int(hn_canvas_count(c, "cvH"), 2, "拒录后账本不变");
+        check_int(hn_canvas_overflow(c, "cvH"), 1, "拒录置溢出标志(内省可见)");
+        hn_canvas_clear(c, "cvH");
+    }
+
+    /* == 18. createPattern: repeat / repeat-x / no-repeat / fill() 多边形 ==
+       cvQ @2280。瓦片 8x8: 左半(x<4)红、右半绿, 全不透明; 图案锚定画布
+       原点(canvas pattern space 语义)。 */
+    printf("== createPattern(平铺) ==\n");
+    {
+        char pat[512], ev[1024];
+        const char *tmp = getenv("TMPDIR");
+        if (!tmp || !*tmp) tmp = "/tmp";
+        snprintf(pat, sizeof(pat), "%s/hn_probe_pat8.png", tmp);
+        unsigned char tile[8 * 8 * 4];
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++) {
+                unsigned char *p = &tile[(y * 8 + x) * 4];
+                p[0] = x < 4 ? 255 : 0;      /* R */
+                p[1] = x < 4 ? 0 : 255;      /* G */
+                p[2] = 0;                    /* B */
+                p[3] = 255;                  /* A */
+            }
+        size_t plen = 0;
+        unsigned char *png = hnsoft_encode_png(tile, 8, 8, &plen);
+        FILE *fp = fopen(pat, "wb");
+        if (fp && png) { fwrite(png, 1, plen, fp); fclose(fp); }
+        else if (fp) fclose(fp);
+        free(png);
+        /* -- repeat: 双向平铺 -- */
+        snprintf(ev, sizeof(ev),
+            "var q=hnGet2D('cvQ');var pt=q.createPattern('%s','repeat');"
+            "q.fillStyle=pt;q.fillRect(0,0,200,120);1", pat);
+        char *r = hn_rt_eval(ev, "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "createPattern(repeat) fillRect 落账");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvQ repeat)");
+        g_px = hn_rt_pixels(rt);
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(3, 2283) == 255 && pix_g(3, 2283) == 0,
+                  "repeat: 瓦片(0,0)-(3,3) 红");
+            check(pix_r(5, 2283) == 0 && pix_g(5, 2283) == 255,
+                  "repeat: 瓦片右半 (5,3) 绿");
+            check(pix_r(11, 2283) == 255 && pix_g(11, 2283) == 0,
+                  "repeat: 第二列瓦片 (11,3) 红(x=11 → 11%8=3)");
+            check(pix_r(3, 2291) == 255 && pix_g(3, 2291) == 0,
+                  "repeat: 第二行瓦片 (3,11) 红(y=11 → 11%8=3)");
+            check(pix_r(100, 2340) == 0 && pix_g(100, 2340) == 255,
+                  "repeat: (100,60) 绿(平铺铺满)");
+        }
+        /* -- repeat-x: 只横排(y≥8 无瓦片) -- */
+        snprintf(ev, sizeof(ev),
+            "q.clearRect(0,0,200,120);"
+            "q.fillStyle=q.createPattern('%s','repeat-x');q.fillRect(0,0,200,120);1", pat);
+        r = hn_rt_eval(ev, "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "createPattern(repeat-x) 落账");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvQ repeat-x)");
+        g_px = hn_rt_pixels(rt);
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(3, 2283) == 255 && pix_g(11, 2283) == 0,
+                  "repeat-x: 首行横排(3,3) 红 / (11,3) 红");
+            check(pix_r(5, 2283) == 0 && pix_g(5, 2283) == 255, "repeat-x: (5,3) 绿");
+            check(pix_r(3, 2295) < 40 && pix_g(3, 2295) < 40,
+                  "repeat-x: y=15 越出单行瓦片 → 露渲染底色");
+        }
+        /* -- no-repeat: 单贴 -- */
+        snprintf(ev, sizeof(ev),
+            "q.clearRect(0,0,200,120);"
+            "q.fillStyle=q.createPattern('%s','no-repeat');q.fillRect(0,0,200,120);1", pat);
+        r = hn_rt_eval(ev, "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "createPattern(no-repeat) 落账");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvQ no-repeat)");
+        g_px = hn_rt_pixels(rt);
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(3, 2283) == 255 && pix_g(3, 2283) == 0, "no-repeat: (3,3) 红");
+            check(pix_r(5, 2283) == 0 && pix_g(5, 2283) == 255, "no-repeat: (5,3) 绿");
+            check(pix_r(3, 2291) < 40 && pix_g(3, 2291) < 40,
+                  "no-repeat: (3,11) 越出单贴 → 露渲染底色");
+        }
+        /* -- fill() 多边形 + repeat(ppath 路径): 三角形内平铺、外露底 -- */
+        snprintf(ev, sizeof(ev),
+            "q.clearRect(0,0,200,120);"
+            "q.fillStyle=q.createPattern('%s','repeat');"
+            "q.beginPath();q.moveTo(100,10);q.lineTo(190,110);q.lineTo(10,110);"
+            "q.closePath();q.fill();1", pat);
+        r = hn_rt_eval(ev, "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "createPattern + fill() 多边形落账");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvQ ppath)");
+        g_px = hn_rt_pixels(rt);
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(99, 2360) == 255 && pix_g(99, 2360) == 0,
+                  "ppath: 三角形内 (99,80) 红瓦片(x=99 → 99%8=3)");
+            check(pix_r(101, 2360) == 0 && pix_g(101, 2360) == 255,
+                  "ppath: 三角形内 (101,80) 绿瓦片");
+            check(pix_r(10, 2290) < 40 && pix_g(10, 2290) < 40,
+                  "ppath: 三角形外 (10,10) 露渲染底色");
+        }
+    }
+
+    /* == 19. drawImage 源矩形(9 参)与 5 参 ==
+       cvD @2400。源图 16x16 四象限: 左上红/右上绿/左下蓝/右下黄。 */
+    printf("== drawImage 源矩形 ==\n");
+    {
+        char p16[512], ev[1024];
+        const char *tmp = getenv("TMPDIR");
+        if (!tmp || !*tmp) tmp = "/tmp";
+        snprintf(p16, sizeof(p16), "%s/hn_probe_img16.png", tmp);
+        unsigned char src16[16 * 16 * 4];
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++) {
+                unsigned char *p = &src16[(y * 16 + x) * 4];
+                if (y < 8 && x < 8)      { p[0] = 255; p[1] = 0;   p[2] = 0;   }
+                else if (y < 8)          { p[0] = 0;   p[1] = 255; p[2] = 0;   }
+                else if (x < 8)          { p[0] = 0;   p[1] = 0;   p[2] = 255; }
+                else                     { p[0] = 255; p[1] = 255; p[2] = 0;   }
+                p[3] = 255;
+            }
+        size_t plen = 0;
+        unsigned char *png = hnsoft_encode_png(src16, 16, 16, &plen);
+        FILE *fp = fopen(p16, "wb");
+        if (fp && png) { fwrite(png, 1, plen, fp); fclose(fp); }
+        else if (fp) fclose(fp);
+        free(png);
+        snprintf(ev, sizeof(ev),
+            "var dd=hnGet2D('cvD');"
+            "dd.drawImage('%s',8,0,8,8, 0,0,16,16);"      /* 绿象限 → (0,0,16,16) 2x */
+            "dd.drawImage('%s',0,8,8,8, 100,20,24,24);"   /* 蓝象限 → (100,20,24,24) 3x */
+            "dd.drawImage('%s',20,90,32,32);1",            /* 5 参整图 → (20,90,32,32) */
+            p16, p16, p16);
+        char *r = hn_rt_eval(ev, "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "drawImage 9 参 + 5 参落账");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvD)");
+        g_px = hn_rt_pixels(rt);
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(4, 2404) == 0 && pix_g(4, 2404) == 255,
+                  "9 参: (0,0,16,16) 处取样 (4,4) → 源绿象限");
+            check(pix_g(12, 2412) == 255, "9 参: (12,12) 仍绿(2x 拉伸)");
+            check(pix_r(112, 2432) == 0 && pix_b(112, 2432) == 255,
+                  "9 参: (12,12)@目标(100,20) → 源蓝象限");
+            check(pix_r(22, 2492) == 255 && pix_g(22, 2492) == 0,
+                  "5 参: (2,2)@目标(20,90) → 源左上红");
+            check(pix_r(48, 2518) == 255 && pix_g(48, 2518) == 255 && pix_b(48, 2518) == 0,
+                  "5 参: (28,28)@目标(20,90) → 源右下黄");
+        }
+    }
+
+    /* == 20. globalCompositeOperation: lighter / multiply / screen ==
+       cvB @2520。白底; 三块补丁: multiply(红×绿=黑)、screen(黑底+灰=128)、
+       lighter(白+白=白不溢出; 灰+灰=128); 未列模式(color-burn)回落
+       source-over。 */
+    printf("== globalCompositeOperation(lighter/multiply/screen) ==\n");
+    {
+        char *r = hn_rt_eval(
+            "var b=hnGet2D('cvB');"
+            "b.fillStyle='#ffffff';b.fillRect(0,0,200,120);"
+            "b.fillStyle='#00ff00';b.fillRect(10,10,40,40);"
+            "b.globalCompositeOperation='multiply';"
+            "b.fillStyle='#ff0000';b.fillRect(10,10,40,40);"
+            "b.fillStyle='#000000';b.fillRect(60,10,40,40);"
+            "b.globalCompositeOperation='screen';"
+            "b.fillStyle='#808080';b.fillRect(60,10,40,40);"
+            "b.globalCompositeOperation='lighter';"
+            "b.fillStyle='#ffffff';b.fillRect(110,10,40,40);"
+            "b.globalCompositeOperation='source-over';"
+            "b.fillStyle='#000000';b.fillRect(110,60,40,40);"   /* 黑底(供加法取样) */
+            "b.globalCompositeOperation='lighter';"
+            "b.fillStyle='#404040';b.fillRect(110,60,40,40);"   /* 0+64 = 64 */
+            "b.fillStyle='#404040';b.fillRect(110,60,40,40);"   /* 64+64 = 128 */
+            "b.globalCompositeOperation='color-burn';"
+            "b.fillStyle='#123456';b.fillRect(160,90,20,20);"
+            "b.globalCompositeOperation='source-over';"
+            "1", "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "混合模式落账(含未列模式 color-burn)");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvB)");
+        g_px = hn_rt_pixels(rt);
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(30, 2550) == 0 && pix_g(30, 2550) == 0 && pix_b(30, 2550) == 0,
+                  "multiply: 红×绿 = 黑(src·dst/255)");
+            check(pix_r(80, 2550) == 128 && pix_g(80, 2550) == 128 && pix_b(80, 2550) == 128,
+                  "screen: 黑底×灰 = 128(255-(255-0)(255-128)/255)");
+            check(pix_r(130, 2550) == 255 && pix_g(130, 2550) == 255 && pix_b(130, 2550) == 255,
+                  "lighter: 白+白 = 白(min(255,510) 不溢出)");
+            check(pix_r(130, 2600) == 128 && pix_g(130, 2600) == 128 && pix_b(130, 2600) == 128,
+                  "lighter: 灰64+灰64 = 128(加法)");
+            check(pix_r(170, 2616) == 0x12 && pix_g(170, 2616) == 0x34 && pix_b(170, 2616) == 0x56,
+                  "未列模式 color-burn 回落 source-over(纯覆盖)");
+        }
+    }
+
+    /* == 21. clip() 精确路径裁剪 ==
+       cvC @2640。红底; 三角形 (100,10)-(190,110)-(10,110) 裁剪后全幅蓝 ——
+       路径内蓝、路径外保留红(此前包围盒口径会把三角形外的角落也涂蓝)。 */
+    printf("== clip() 精确路径裁剪 ==\n");
+    {
+        char *r = hn_rt_eval(
+            "var cc=hnGet2D('cvC');"
+            "cc.fillStyle='#ff0000';cc.fillRect(0,0,200,120);"
+            "cc.beginPath();cc.moveTo(100,10);cc.lineTo(190,110);cc.lineTo(10,110);"
+            "cc.closePath();cc.clip();"
+            "cc.fillStyle='#0000ff';cc.fillRect(0,0,200,120);"
+            "1", "canvas-probe-x", hn_rt_doc(rt));
+        check(r != NULL && strcmp(r, "1") == 0, "clip() 精确路径落账(cpath)");
+        free(r);
+        check(hn_rt_reflow(rt) == 1, "重光栅(cvC)");
+        dl = hn_context_display_list(c);
+        int cpaths = 0;
+        for (int i = 0; i < dl->count; i++)
+            if (dl->cmds[i].kind == HN_CMD_CLIP_PATH_PUSH) cpaths++;
+        check(cpaths >= 1, "显示列表含 CLIP_PATH_PUSH(精确路径裁剪指令)");
+        g_px = hn_rt_pixels(rt);
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(100, 2720) == 0 && pix_b(100, 2720) == 255,
+                  "路径内 (100,80) = 蓝");
+            check(pix_b(100, 2745) == 255, "路径内 (100,105) = 蓝");
+            check(pix_r(30, 2670) == 255 && pix_b(30, 2670) == 0,
+                  "路径外 (30,30) = 红(包围盒角落不被涂蓝)");
+            check(pix_r(5, 2645) == 255, "路径外角 (5,5) = 红");
+        }
     }
 
     hn_rt_close(rt);

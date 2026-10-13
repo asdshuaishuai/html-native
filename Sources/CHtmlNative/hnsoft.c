@@ -80,6 +80,57 @@ static void blend(unsigned char *px, fcolor c) {
     px[3] = (unsigned char)(oa * 255.0f + 0.5f);
 }
 
+/* 带混合模式的合成(canvas globalCompositeOperation 子集; mode 为
+   HN_BLEND_*, source-over 时与上面 blend 逐位一致)。
+   公式口径(与 Canvas 2D 规范的可分离混合项一致, 在非预乘 RGB 上计算):
+     multiply: B(s,d) = s·d
+     screen:   B(s,d) = s + d - s·d        (= 255-(255-s)(255-d)/255 同式)
+     几何合成 = source-over: out.rgb = sa·B + (1-sa)·d, out.a = sa+da(1-sa)
+     lighter: 预乘加法(plus-lighter): 预乘通道相加并钳制, 再反预乘。
+   双不透明时即任务口径的逐通道公式: multiply=src·dst/255、
+   screen=255-(255-src)(255-dst)/255、lighter=min(255,src+dst)。 */
+static void blend_mode(unsigned char *px, fcolor c, int mode) {
+    if (mode == HN_BLEND_SRC_OVER) { blend(px, c); return; }
+    float sa = c.a;
+    if (sa <= 0.0f) return;
+    float sr = c.r, sg = c.g, sb = c.b;
+    float dr = px[0] / 255.0f, dg = px[1] / 255.0f, db = px[2] / 255.0f;
+    float da = px[3] / 255.0f;
+    if (mode == HN_BLEND_LIGHTER) {
+        float oa = sa + da;
+        if (oa > 1.0f) oa = 1.0f;
+        float orr = sr * sa + dr * da;
+        float og = sg * sa + dg * da;
+        float ob = sb * sa + db * da;
+        if (orr > 1.0f) orr = 1.0f;
+        if (og > 1.0f) og = 1.0f;
+        if (ob > 1.0f) ob = 1.0f;
+        px[0] = (unsigned char)(orr * 255.0f + 0.5f);
+        px[1] = (unsigned char)(og * 255.0f + 0.5f);
+        px[2] = (unsigned char)(ob * 255.0f + 0.5f);
+        px[3] = (unsigned char)(oa * 255.0f + 0.5f);
+        return;
+    }
+    /* multiply / screen: 可分离混合项 + source-over 几何合成 */
+    float br, bg2, bb;
+    if (mode == HN_BLEND_MULTIPLY) {
+        br = sr * dr; bg2 = sg * dg; bb = sb * db;
+    } else {                                     /* HN_BLEND_SCREEN */
+        br = sr + dr - sr * dr;
+        bg2 = sg + dg - sg * dg;
+        bb = sb + db - sb * db;
+    }
+    float oa = sa + da * (1.0f - sa);
+    if (oa <= 0.0005f) { px[0]=px[1]=px[2]=px[3]=0; return; }
+    float orr = (sa * br + da * (1.0f - sa) * dr) / oa;
+    float og = (sa * bg2 + da * (1.0f - sa) * dg) / oa;
+    float ob = (sa * bb + da * (1.0f - sa) * db) / oa;
+    px[0] = (unsigned char)(orr * 255.0f + 0.5f);
+    px[1] = (unsigned char)(og * 255.0f + 0.5f);
+    px[2] = (unsigned char)(ob * 255.0f + 0.5f);
+    px[3] = (unsigned char)(oa * 255.0f + 0.5f);
+}
+
 /* ---------------- 分配计数(HN_ALLOC_TRACE churn 实证口径) ----------------
  * 渲染热路径的堆分配累计: fb 位图缓冲(一次性变体每帧新分配 / 复用变体
  * 仅扩容)、超长多边形堆缓冲、新字形位图。动画宿主接复用缓冲后稳态增量
@@ -97,9 +148,22 @@ typedef struct {
                              "局部清空 = 露出画布底"而非全图重置) */
     /* 裁剪栈(轴对齐交叠 + 圆角半径; radius>0 时按 SDF 精确判内 ——
        clip-path: circle 借 CLIP_PUSH 的圆角方盒表达, 帧缓冲必须认半径,
-       否则方盒四角漏出, 圆形头像/圆形按钮裁不动)。 */
-    struct { float x0, y0, x1, y1, r; } clip[32];
+       否则方盒四角漏出, 圆形头像/圆形按钮裁不动)。
+       poly != NULL 的条目(canvas cpath 精确路径裁剪)在 bbox 之上再按
+       多边形内外判定(非零环绕, 子路径按 segs 分段闭合); poly 指向显示
+       列表的顶点数组(逻辑 px), scale 存条目里按像素现场换算 —— 免拷贝,
+       生命周期 = 渲染期间显示列表必然存活。bbox 已在 push 时与前层交叠,
+       多边形判定只对 poly 条目追加(纯矩形帧不付逐像素 PIP 的代价)。 */
+    struct {
+        float x0, y0, x1, y1, r;
+        const float *poly; int poly_n;
+        const int *segs; int nsegs;
+        float scale;
+    } clip[32];
     int clip_n;
+    int poly_clips;       /* 栈内 poly 条目数(fb_clip_ok 的快速开关) */
+    unsigned char blend;  /* 当前指令的混合模式(HN_CMD_* 的 blend 字段,
+                             render_cmds 逐指令装填; fb_blend 消费) */
 } fb;
 
 /* 圆角矩形 SDF(定义在下方"圆角矩形 SDF"一节; 裁剪判定先用) */
@@ -135,13 +199,86 @@ static void fb_push_clip(fb *f, float x0, float y0, float x1, float y1, float r)
     f->clip[f->clip_n].x1 = x1 < bx1 ? x1 : bx1;
     f->clip[f->clip_n].y1 = y1 < by1 ? y1 : by1;
     f->clip[f->clip_n].r = r > 0 ? r : 0;
+    f->clip[f->clip_n].poly = NULL;
+    f->clip[f->clip_n].poly_n = 0;
+    f->clip[f->clip_n].segs = NULL;
+    f->clip[f->clip_n].nsegs = 0;
+    f->clip[f->clip_n].scale = 1.0f;
     f->clip_n++;
+}
+
+/* 精确路径裁剪入栈: bbox = 顶点包围盒与前层的交叠(快速拒绝),
+   poly 判定在 fb_clip_ok 里追加。 */
+static void fb_push_clip_poly(fb *f, const float *poly, int n,
+                              const int *segs, int nsegs, float scale) {
+    if (!poly || n < 3 || f->clip_n >= 32) return;
+    float minx = poly[0] * scale, maxx = minx, miny = poly[1] * scale, maxy = miny;
+    for (int i = 1; i < n; i++) {
+        float x = poly[i * 2] * scale, y = poly[i * 2 + 1] * scale;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+    }
+    float bx0 = 0, by0 = 0, bx1 = (float)f->w, by1 = (float)f->h;
+    if (f->clip_n > 0) {
+        bx0 = f->clip[f->clip_n - 1].x0; by0 = f->clip[f->clip_n - 1].y0;
+        bx1 = f->clip[f->clip_n - 1].x1; by1 = f->clip[f->clip_n - 1].y1;
+    }
+    f->clip[f->clip_n].x0 = minx > bx0 ? minx : bx0;
+    f->clip[f->clip_n].y0 = miny > by0 ? miny : by0;
+    f->clip[f->clip_n].x1 = maxx < bx1 ? maxx : bx1;
+    f->clip[f->clip_n].y1 = maxy < by1 ? maxy : by1;
+    f->clip[f->clip_n].r = 0;
+    f->clip[f->clip_n].poly = poly;
+    f->clip[f->clip_n].poly_n = n;
+    f->clip[f->clip_n].segs = segs;
+    f->clip[f->clip_n].nsegs = nsegs;
+    f->clip[f->clip_n].scale = scale;
+    f->clip_n++;
+    f->poly_clips++;
 }
 
 /* 此前是 `if (clip_n > 1)` —— 第一层裁剪永远弹不掉: 文档里第一个 overflow
    容器(或 clip-path)POP 之后, 后续所有绘制仍被裁在它的盒内, 表现为
    "第一个可滚动区块之后的兄弟内容整块消失"。栈平衡由引擎保证, 归零合法。 */
-static void fb_pop_clip(fb *f) { if (f->clip_n > 0) f->clip_n--; }
+static void fb_pop_clip(fb *f) {
+    if (f->clip_n <= 0) return;
+    f->clip_n--;
+    if (f->clip[f->clip_n].poly) f->poly_clips--;
+}
+
+/* 点在折线多边形内(非零环绕, 逐条子路径闭合; canvas clip 的填充规则)。
+   子路径按 segs 表分段(segs 缺省 = 全部顶点一条路径); 每条子路径末点→
+   首点补闭合边。坐标已按条目 scale 换算到设备域。 */
+static int pip_poly(const float *poly, int n, const int *segs, int nsegs,
+                    float scale, float px, float py) {
+    int wind = 0;
+    int start = 0;
+    for (int s = 0; s <= (segs ? nsegs : 0); s++) {
+        int cnt = segs ? segs[s] : n;
+        if (cnt < 0) cnt = 0;
+        if (start + cnt > n) cnt = n - start;
+        if (cnt >= 3) {
+            for (int e = 0; e < cnt; e++) {
+                int e2 = (e + 1) % cnt;
+                float ax = poly[(start + e) * 2] * scale;
+                float ay = poly[(start + e) * 2 + 1] * scale;
+                float bx = poly[(start + e2) * 2] * scale;
+                float by = poly[(start + e2) * 2 + 1] * scale;
+                if ((ay <= py && by > py) || (by <= py && ay > py)) {
+                    /* 交点在像素右侧 → 按边方向计环绕 */
+                    float t = (py - ay) / (by - ay);
+                    if (ax + t * (bx - ax) > px)
+                        wind += (by > ay) ? 1 : -1;
+                }
+            }
+        }
+        start += segs ? segs[s] : n;
+        if (start >= n) break;
+    }
+    return wind != 0;
+}
 
 static int fb_clip_ok(fb *f, int x, int y) {
     if (x < 0 || y < 0 || x >= f->w || y >= f->h) return 0;
@@ -155,12 +292,23 @@ static int fb_clip_ok(fb *f, int x, int y) {
         float d = sd_rounded(fx, fy, cx0, cy0, cx1 - cx0, cy1 - cy0, cr);
         if (d > 0) return 0;
     }
+    if (f->poly_clips > 0) {
+        /* 路径裁剪条目逐层判定(bbox 已在 push 时交叠, 只补内外测试) */
+        for (int i = 0; i < f->clip_n; i++) {
+            if (!f->clip[i].poly) continue;
+            if (fx < f->clip[i].x0 || fy < f->clip[i].y0 ||
+                fx >= f->clip[i].x1 || fy >= f->clip[i].y1) return 0;
+            if (!pip_poly(f->clip[i].poly, f->clip[i].poly_n,
+                          f->clip[i].segs, f->clip[i].nsegs,
+                          f->clip[i].scale, fx, fy)) return 0;
+        }
+    }
     return 1;
 }
 
 static void fb_blend(fb *f, int x, int y, fcolor c) {
     if (!fb_clip_ok(f, x, y)) return;
-    blend(&f->px[(y * f->w + x) * 4], c);
+    blend_mode(&f->px[(y * f->w + x) * 4], c, f->blend);
 }
 
 /* ---------------- 圆角矩形 SDF ---------------- */
@@ -320,6 +468,8 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
         const float cr = f->clip[f->clip_n - 1].r;
         if (!(cx0 == cx0) || !(cy0c == cy0c) || !(cx1 == cx1) || !(cy1c == cy1c) || cr > 0) {
             fast = 0;
+        } else if (f->poly_clips > 0) {
+            fast = 0;   /* 路径裁剪: 行级外提覆盖不了, 退回逐像素 fb_clip_ok */
         } else {
             cy0 = cy0c;
             cy1 = cy1c;
@@ -1113,9 +1263,12 @@ static const unsigned char *image_pixels_cached(const char *path, int *w, int *h
     return px;
 }
 
-/* RGBA8(非预乘) → 画布拉伸混合。IMAGE(解码文件)与 BITMAP(媒体当前帧)
-   共用同一条像素路径 —— 两者的差别只在"像素从哪来"(stride 分开给:
-   文件 = iw*4 紧排, 媒体帧 = 引擎会话的 stride)。
+/* RGBA8(非预乘) → 画布拉伸混合。IMAGE(解码文件)/BITMAP(媒体当前帧)/
+   PDATA(putImageData 块)共用同一条像素路径 —— 三者的差别只在"像素从哪来"
+   与"取源图的哪一块"(sx0/sy0/sw0/sh0 = 源图像素子矩形; 整图调用传
+   (0,0,iw,ih), 行为与旧口径逐位一致; 9 参 drawImage 与 putImageData 的
+   脏矩形裁剪都化归到这里)。
+   目标 rect (x0,y0,w,h) 拉伸贴出源子矩形。
 
    扫描线快路(profile: fb_blend/fb_clip_ok 是三页共同的 Top 叶子 ——
    全幅 blit 每像素都重跑一遍浮点剪裁判定): 把 fb_clip_ok 的接受域
@@ -1124,12 +1277,16 @@ static const unsigned char *image_pixels_cached(const char *path, int *w, int *h
    浮点谓词单调走查(x+0.5f >= cx0 / x+0.5f < cx1), 不引入任何新的
    舍入路径 → 接受集逐位相同。不透明快路(源 alpha=255、组 alpha≥0.999、
    目底 alpha=255 → blend 走双不透明直写)已对 0..255 全值验证
-   round(v/255*255+0.5)==v 逐位成立, 直拷贝与 blend 输出一致。 */
+   round(v/255*255+0.5)==v 逐位成立, 直拷贝与 blend 输出一致。
+   混合模式非 source-over 时禁用直写快路(逐像素走 blend_mode)。 */
 static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int ih,
+                       float sx0, float sy0, float sw0, float sh0,
                        int x0, int y0, int w, int h, float alpha) {
     if (w <= 0 || h <= 0) return;
     int fast = 1, xlo = 0, xhi = f->w - 1;
     float cy0 = 0, cy1 = 0;
+    if (f->blend != HN_BLEND_SRC_OVER) fast = 0;      /* 混合模式: 无直写 */
+    if (f->poly_clips > 0) fast = 0;                  /* 路径裁剪: 逐像素判定 */
     if (f->clip_n > 0) {
         const float cx0 = f->clip[f->clip_n - 1].x0, cy0c = f->clip[f->clip_n - 1].y0;
         const float cx1 = f->clip[f->clip_n - 1].x1, cy1c = f->clip[f->clip_n - 1].y1;
@@ -1156,7 +1313,7 @@ static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int i
             const float fy = (float)dy + 0.5f;
             if (!(fy >= cy0) || !(fy < cy1)) continue;
         }
-        const int sy = yy * ih / hdiv;
+        const int sy = (int)(sy0 + (float)yy * sh0 / hdiv);
         const unsigned char *srow = px + (size_t)sy * stride;
         unsigned char *drow = f->px + (size_t)dy * f->w * 4;
         if (fast) {
@@ -1165,7 +1322,8 @@ static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int i
             if (a < 0) a = 0;
             if (b > w - 1) b = w - 1;
             for (int xx = a; xx <= b; xx++) {
-                const unsigned char *p = srow + (size_t)(xx * iw / wdiv) * 4;
+                const int sx = (int)(sx0 + (float)xx * sw0 / wdiv);
+                const unsigned char *p = srow + (size_t)sx * 4;
                 unsigned char *d = drow + (size_t)(x0 + xx) * 4;
                 if (opaque && p[3] == 255 && d[3] == 255) {
                     /* 双不透明直写: blend 快路的输出对 0..255 全值逐位等于源 */
@@ -1179,9 +1337,10 @@ static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int i
                 }
             }
         } else {
-            /* 原路(圆角/病态剪裁): 逐像素 fb_clip_ok + blend, 逐位不变 */
+            /* 原路(圆角/病态剪裁/混合模式): 逐像素 fb_clip_ok + blend_mode,
+               source-over 下逐位不变 */
             for (int xx = 0; xx < w; xx++) {
-                int sx = xx * iw / wdiv;
+                int sx = (int)(sx0 + (float)xx * sw0 / wdiv);
                 const unsigned char *p = srow + (size_t)sx * 4;
                 fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f,
                                p[3] / 255.0f * alpha };
@@ -1210,7 +1369,17 @@ static void paint_image(fb *f, const hn_cmd *c, float scale, float ox, float oy,
     }
     int x0 = (int)((c->x - ox) * scale + ox), y0 = (int)((c->y - oy) * scale + oy);
     int w = (int)(c->w * scale), h = (int)(c->h * scale);
-    blend_rgba(f, px, iw * 4, iw, ih, x0, y0, w, h, alpha);
+    /* 源子矩形(9 参 drawImage); 缺省整图(3/5 参, 旧口径逐位一致) */
+    float sx0 = 0, sy0 = 0, sw0 = (float)iw, sh0 = (float)ih;
+    if (c->has_isrc) {
+        sx0 = c->isx; sy0 = c->isy; sw0 = c->isw; sh0 = c->ish;
+        if (sx0 < 0) { sw0 += sx0; sx0 = 0; }
+        if (sy0 < 0) { sh0 += sy0; sy0 = 0; }
+        if (sx0 + sw0 > (float)iw) sw0 = (float)iw - sx0;
+        if (sy0 + sh0 > (float)ih) sh0 = (float)ih - sy0;
+        if (sw0 <= 0 || sh0 <= 0) return;
+    }
+    blend_rgba(f, px, iw * 4, iw, ih, sx0, sy0, sw0, sh0, x0, y0, w, h, alpha);
 }
 
 /* BITMAP: 媒体当前帧(RGBA8 非预乘, 引擎持有缓存)。位图为空时忽略 ——
@@ -1220,7 +1389,156 @@ static void paint_bitmap(fb *f, const hn_cmd *c, float scale, float ox, float oy
     int x0 = (int)((c->x - ox) * scale + ox), y0 = (int)((c->y - oy) * scale + oy);
     int w = (int)(c->w * scale), h = (int)(c->h * scale);
     blend_rgba(f, c->bitmap, c->bitmap_stride, c->bitmap_w, c->bitmap_h,
+               0, 0, (float)c->bitmap_w, (float)c->bitmap_h,
                x0, y0, w, h, alpha);
+}
+
+/* PDATA: putImageData 的 RGBA 块(引擎账本持有, 1:1 贴入; 源子矩形 =
+   脏矩形裁剪, 记录侧已装进 isrc)。标准口径: 不受 gco 影响 —— 引擎侧
+   blend 恒缺省 source-over。 */
+static void paint_pdata(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
+    if (!c->bitmap || c->bitmap_w <= 0 || c->bitmap_h <= 0 || c->bitmap_stride <= 0) return;
+    int x0 = (int)((c->x - ox) * scale + ox), y0 = (int)((c->y - oy) * scale + oy);
+    int w = (int)(c->w * scale), h = (int)(c->h * scale);
+    blend_rgba(f, c->bitmap, c->bitmap_stride, c->bitmap_w, c->bitmap_h,
+               c->isx, c->isy, c->isw, c->ish, x0, y0, w, h, alpha);
+}
+
+/* ---------------- pattern 平铺填充(createPattern) ---------------- */
+
+/* 平铺采样: 目标像素 (u,v) 相对图案原点的偏移 → 按平铺模式折回源图像素。
+   返回 0 = 该偏移无像素(repeat-x 的纵越界 / no-repeat 的越界)。 */
+static int pattern_sample(const unsigned char *px, int iw, int ih, int rep,
+                          float du, float dv, fcolor *out) {
+    int u, v;
+    switch (rep) {
+    case HN_PAT_REPEAT:
+        u = (int)fmodf(du, (float)iw);
+        v = (int)fmodf(dv, (float)ih);
+        if (u < 0) u += iw;
+        if (v < 0) v += ih;
+        break;
+    case HN_PAT_REPEAT_X:
+        u = (int)fmodf(du, (float)iw);
+        if (u < 0) u += iw;
+        v = (int)dv;
+        if (v < 0 || v >= ih) return 0;
+        break;
+    case HN_PAT_REPEAT_Y:
+        v = (int)fmodf(dv, (float)ih);
+        if (v < 0) v += ih;
+        u = (int)du;
+        if (u < 0 || u >= iw) return 0;
+        break;
+    default:                                     /* HN_PAT_NONE */
+        u = (int)du;
+        v = (int)dv;
+        if (u < 0 || v < 0 || u >= iw || v >= ih) return 0;
+        break;
+    }
+    const unsigned char *p = px + ((size_t)v * iw + (size_t)u) * 4;
+    out->r = p[0] / 255.0f;
+    out->g = p[1] / 255.0f;
+    out->b = p[2] / 255.0f;
+    out->a = p[3] / 255.0f;
+    return 1;
+}
+
+/* PATTERN 指令: 目标 = 矩形(poly==NULL, 行列直铺)或闭合多边形(扫描线
+   求交区间, 与 paint_polygon 的交点机制同款)。逐像素按平铺模式采样源图,
+   经 fb_blend 落画布(裁剪栈/混合模式照常生效)。
+   锚定口径: 图案原点 = 画布坐标原点(逻辑 px; HiDPI 下采样坐标先除回
+   scale)—— 与 canvas 的 pattern space 语义一致(不随 fillRect 位置平移);
+   createPattern 时刻的 CTM 简化为不参与(与折线路径模型同一既定档)。 */
+static void paint_pattern(fb *f, const hn_cmd *c, float scale) {
+    int iw = 0, ih = 0;
+    const unsigned char *px = image_pixels_cached(c->text ? c->text : "", &iw, &ih);
+    if (!px || iw <= 0 || ih <= 0) return;   /* 缺图: 无覆盖(而非静默涂黑) */
+    int rep = c->pattern_rep;
+    if (!c->poly) {
+        /* 矩形目标: 行列直铺(采样坐标 = 相对图案锚点/画布原点的逻辑偏移) */
+        int x0 = (int)floorf(c->x * scale), y0 = (int)floorf(c->y * scale);
+        int x1 = (int)ceilf((c->x + c->w) * scale), y1 = (int)ceilf((c->y + c->h) * scale);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > f->w) x1 = f->w;
+        if (y1 > f->h) y1 = f->h;
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                fcolor col;
+                if (!pattern_sample(px, iw, ih, rep,
+                                    ((float)x - c->pat_ox) / scale,
+                                    ((float)y - c->pat_oy) / scale, &col)) continue;
+                fb_blend(f, x, y, col);
+            }
+        return;
+    }
+    /* 多边形目标: 逐扫描线求交, 非零环绕区间内逐像素采样 */
+    int n = c->poly_n;
+    if (n < 3) return;
+    enum { PST_STACK = 256 };
+    float vx_stack[PST_STACK], vy_stack[PST_STACK];
+    float *vx = vx_stack, *vy = vy_stack;
+    xhit *hits = NULL;
+    if (n > PST_STACK) {
+        float *d1 = NULL, *d2 = NULL;
+        if (!poly_scratch_ensure(n, &d1, &d2, &hits)) return;
+        vx = d1; vy = d2;
+    } else {
+        float *d1 = NULL, *d2 = NULL;
+        poly_scratch_ensure(1, &d1, &d2, &hits);     /* hits 槽(顶点走栈) */
+        if (!hits) return;
+    }
+    float miny = 1e9f, maxy = -1e9f;
+    for (int i = 0; i < n; i++) {
+        vx[i] = c->poly[i * 2] * scale;
+        vy[i] = c->poly[i * 2 + 1] * scale;
+        if (vy[i] < miny) miny = vy[i];
+        if (vy[i] > maxy) maxy = vy[i];
+    }
+    int y0 = (int)floorf(miny), y1 = (int)ceilf(maxy);
+    for (int s = y0; s <= y1; s++) {
+        if (s < 0 || s >= f->h) continue;
+        float fy = (float)s + 0.5f;
+        int nh = 0;
+        for (int e = 0; e < n; e++) {
+            int e2 = (e + 1) % n;
+            float ay = vy[e], by = vy[e2];
+            if (fabsf(by - ay) < 1e-6f) continue;
+            if ((ay <= fy && by > fy) || (by <= fy && ay > fy)) {
+                float t = (fy - ay) / (by - ay);
+                hits[nh].x = vx[e] + t * (vx[e2] - vx[e]);
+                hits[nh].wind = (by > ay) ? 1 : -1;
+                nh++;
+            }
+        }
+        if (nh < 2) continue;
+        for (int a2 = 1; a2 < nh; a2++) {
+            xhit k = hits[a2];
+            int b2 = a2 - 1;
+            while (b2 >= 0 && hits[b2].x > k.x) { hits[b2 + 1] = hits[b2]; b2--; }
+            hits[b2 + 1] = k;
+        }
+        for (int k = 0; k < nh - 1; k++) {
+            int wsum = 0;
+            for (int q = 0; q <= k; q++) wsum += hits[q].wind;
+            if (wsum == 0) continue;                 /* 非零环绕外 */
+            float lx = hits[k].x, rx = hits[k + 1].x;
+            if (rx <= lx) continue;
+            int xi0 = (int)floorf(lx), xi1 = (int)ceilf(rx);
+            if (xi0 < 0) xi0 = 0;
+            if (xi1 > f->w) xi1 = f->w;
+            for (int x = xi0; x < xi1; x++) {
+                float fx = (float)x + 0.5f;
+                if (fx < lx || fx >= rx) continue;
+                fcolor col;
+                if (!pattern_sample(px, iw, ih, rep,
+                                    (fx - c->pat_ox) / scale,
+                                    (fy - c->pat_oy) / scale, &col)) continue;
+                fb_blend(f, x, s, col);
+            }
+        }
+    }
 }
 
 /* 局部清空(canvas clearRect 的矩形): 矩形内**就地回填渲染底色**
@@ -1257,6 +1575,7 @@ static void render_cmds(fb *f, const hn_display_list *dl, float rs) {
        根本活不到脚本执行。 */
     for (int i = 0; i < dl->count; i++) {
         const hn_cmd *c = &dl->cmds[i];
+        f->blend = c->blend;   /* 每指令混合模式(fb_blend/blend_rgba 消费) */
         switch (c->kind) {
         case HN_CMD_RECT:
             if (c->shadow) {
@@ -1275,12 +1594,22 @@ static void render_cmds(fb *f, const hn_display_list *dl, float rs) {
         case HN_CMD_BITMAP:
             paint_bitmap(f, c, rs, 0, 0, 1.0f);
             break;
+        case HN_CMD_PDATA:
+            paint_pdata(f, c, rs, 0, 0, 1.0f);
+            break;
+        case HN_CMD_PATTERN:
+            paint_pattern(f, c, rs);
+            break;
         case HN_CMD_CLEAR_RECT:
             paint_clear_rect(f, c, rs);
             break;
         case HN_CMD_CLIP_PUSH:
             fb_push_clip(f, c->x * rs, c->y * rs,
                          (c->x + c->w) * rs, (c->y + c->h) * rs, c->radius * rs);
+            break;
+        case HN_CMD_CLIP_PATH_PUSH:
+            fb_push_clip_poly(f, c->poly, c->poly_n,
+                              c->clip_segs, c->clip_nsegs, rs);
             break;
         case HN_CMD_QUAD:
             paint_quad(f, c, 1.0f, rs);
@@ -1296,6 +1625,7 @@ static void render_cmds(fb *f, const hn_display_list *dl, float rs) {
             break;
         }
     }
+    f->blend = HN_BLEND_SRC_OVER;
 }
 
 /* 公开变体①: 每次调用 malloc 一张新位图(一次性口径; shot/CLI/探针用)。
@@ -1308,6 +1638,7 @@ unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int he
     float rs = (scale >= 0.5f) ? scale : 1.0f;
     fb f;
     f.w = width; f.h = height; f.clip_n = 0; f.bg = bg;
+    f.poly_clips = 0; f.blend = HN_BLEND_SRC_OVER;
     f.px = (unsigned char *)malloc((size_t)width * height * 4);
     g_soft_allocs++;
     if (!f.px) return NULL;
@@ -1336,6 +1667,7 @@ unsigned char *hnsoft_render_reuse_scaled(const hn_display_list *dl, int width, 
     }
     fb f;
     f.w = width; f.h = height; f.clip_n = 0; f.bg = bg; f.px = *slot;
+    f.poly_clips = 0; f.blend = HN_BLEND_SRC_OVER;
     fb_fill_bg(&f, bg);
     float rs = (scale >= 0.5f) ? scale : 1.0f;
     render_cmds(&f, dl, rs);

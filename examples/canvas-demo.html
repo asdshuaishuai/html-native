@@ -4,10 +4,14 @@
      深色底 → 网格线(stroke 折线) → 渐变面积(createLinearGradient **多 stop**)
      → 指标折线(moveTo/lineTo/arc 圆点 + stroke) → 半圆仪表(createRadialGradient
      **径向渐变表盘底** + arc 120° 段) → 光晕徽章(径向渐变多 stop 圆)
-     → 文字标签(fillText + textAlign center)。
+     → 文字标签(fillText + textAlign center)
+     → 底部状态条三件新能力:
+         数据热力块(putImageData, 128x10 RGBA 逐列色温)
+         AI 视野(drawImage **9 参源矩形**: 从 assets/avatar-a.png 裁 64x64 贴出)
+         纹理样例(createPattern('assets/avatar-a.png','repeat') 平铺填充)
      **活的画面**: setInterval(500ms) 每 0.5s 推一个新数据点并整幅重绘 ——
      引擎账本是"重录"模型, 每个 tick 全量重画(fillRect 盖底, 富余); 折线向左
-     滚动、读数随动。这是 canvas 连续动画在真窗口的首个实证:
+     滚动、读数随动、热力块逐 tick 前移。这是 canvas 连续动画在真窗口的首个实证:
      **连续动画需真窗, 静态截图取首帧**(数据初值写死, 首帧确定):
        dist/hnapp-macos-arm64 examples/canvas-demo.html            # 真窗: 折线自己滚
        dist/hnapp-macos-arm64 examples/canvas-demo.html --shot ../screenshots/canvas-demo.png 640 480
@@ -15,7 +19,7 @@
      说明: 引擎没有 DOM 桥, document.getElementById 是 glue 提供的 canvas
      替代入口(也可直接 hnGet2D('dash'))。hnapp 装载文档时自动执行内联
      <script>(与浏览器"解析即执行"对齐), setInterval 由 hn_rt_frame 帧驱动。
--->
+     资产路径相对文档目录(hnapp 打开时 chdir 到文档目录)。 -->
 <html>
 <head>
 <meta name="hn-surface" content="popup">
@@ -134,13 +138,45 @@ function draw() {
   ctx.arc(568, 84, 6, 0, Math.PI * 2, false);
   ctx.fill();
 
-  /* ---- 底部状态条(三枚指示块) ---- */
+  /* ---- 底部状态条: 新能力三件套 ---- */
+  ctx.fillStyle = '#11151f';
+  ctx.fillRect(24, 372, 592, 84);
+
+  /* 数据热力块(putImageData: RGBA 块逐列色温, 每 tick 相位前移) */
+  var HW = 128, HH = 16, hd = [];
+  for (var col = 0; col < HW; col++) {
+    var t = 0.5 + 0.5 * Math.sin(col * 0.22 + tick * 0.7);
+    var hr = Math.round(40 + 215 * t);
+    var hg = Math.round(60 + 80 * Math.sin(Math.PI * t));
+    var hb = Math.round(255 - 215 * t);
+    for (var row = 0; row < HH; row++) { hd.push(hr, hg, hb, 255); }
+  }
+  ctx.putImageData({ width: HW, height: HH, data: hd }, 40, 412);
+
+  /* AI 视野(drawImage **9 参源矩形**: 源图 (96,96,64,64) 裁区 1:1 贴出) */
+  ctx.drawImage('assets/avatar-a.png', 96, 96, 64, 64, 188, 392, 64, 64);
+
+  /* 纹理样例(createPattern repeat: 图案锚定画布原点, 盒内平铺) */
+  ctx.fillStyle = ctx.createPattern('assets/avatar-a.png', 'repeat');
+  ctx.fillRect(272, 392, 64, 64);
+
+  /* 小标签 + 状态三行(点 + 文本) */
+  ctx.fillStyle = '#5b6478';
+  ctx.font = '10px sans-serif';
+  ctx.fillText('热力 · putImageData', 40, 408);
+  ctx.fillText('视野 · 源矩形', 188, 388);
+  ctx.fillText('纹理 · pattern', 272, 388);
   ctx.fillStyle = '#2ecc71';
-  ctx.fillRect(40, 400, 12, 12);
+  ctx.fillRect(356, 392, 10, 10);
   ctx.fillStyle = '#f1c40f';
-  ctx.fillRect(230, 400, 12, 12);
+  ctx.fillRect(356, 414, 10, 10);
   ctx.fillStyle = '#e74c3c';
-  ctx.fillRect(420, 400, 12, 12);
+  ctx.fillRect(356, 436, 10, 10);
+  ctx.fillStyle = '#9aa3b5';
+  ctx.font = '12px sans-serif';
+  ctx.fillText('正常 · 节点 A/B/C', 376, 402);
+  ctx.fillText('降级 · 队列重试', 376, 424);
+  ctx.fillText('拥堵 · 区域 3', 376, 446);
 
   /* ---- 文字标签(y = 基线; 吞吐读数随折线末端实时更新;
           72% 用 textAlign=center 锚点修正 —— measureText 原生桥供宽) ---- */
@@ -163,11 +199,6 @@ function draw() {
   ctx.fillText('负载率', 496, 296);
   ctx.fillStyle = '#e8eaf0';
   ctx.fillText('53%', 496, 320);
-  ctx.font = '12px sans-serif';
-  ctx.fillStyle = '#9aa3b5';
-  ctx.fillText('正常 · 节点 A/B/C', 60, 411);
-  ctx.fillText('降级 · 队列重试', 250, 411);
-  ctx.fillText('拥堵 · 区域 3', 440, 411);
   ctx.fillStyle = '#5b6478';
   ctx.fillText('html-native · canvas 2D(账本重放 · 定时器驱动)', 24, 470);
 }

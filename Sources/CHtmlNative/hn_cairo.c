@@ -49,6 +49,19 @@ static fcolor unpack(hn_color c) {
     return r;
 }
 
+/* ---------------- 混合模式(canvas globalCompositeOperation 子集) ----------------
+ * multiply/screen 是 cairo 的原生运算符(逐像素公式与规范一致);
+ * lighter 映射 CAIRO_OPERATOR_ADD(预乘加法, 与 hnsoft 的 plus-lighter
+ * 同语义)。主循环逐指令 set_operator(指令自带 blend 字段)。 */
+static cairo_operator_t blend_op(int mode) {
+    switch (mode) {
+    case HN_BLEND_LIGHTER:  return CAIRO_OPERATOR_ADD;
+    case HN_BLEND_MULTIPLY: return CAIRO_OPERATOR_MULTIPLY;
+    case HN_BLEND_SCREEN:   return CAIRO_OPERATOR_SCREEN;
+    default:                return CAIRO_OPERATOR_OVER;
+    }
+}
+
 /* ---------------- 圆角矩形路径 ---------------- */
 
 /* 追加一个圆角矩形的子路径(不 fill/clip, 交给调用方决定)。
@@ -400,27 +413,50 @@ static void paint_image(cairo_t *cr, const hn_cmd *c) {
     double iw = cairo_image_surface_get_width(img);
     double ih = cairo_image_surface_get_height(img);
     if (iw <= 0 || ih <= 0) { cairo_surface_destroy(img); return; }
+    /* 源子矩形(9 参 drawImage): 目标 rect 展示源 (isx,isy) 起的
+       (isw×ish) 子区 —— 平移/缩放让源像素 (isx,isy) 落在目标原点。
+       缺省 = 整图(旧口径逐位一致)。 */
+    double sx0 = 0, sy0 = 0, sw = iw, sh = ih;
+    if (c->has_isrc) {
+        sx0 = c->isx; sy0 = c->isy; sw = c->isw; sh = c->ish;
+        if (sx0 < 0) { sw += sx0; sx0 = 0; }
+        if (sy0 < 0) { sh += sy0; sy0 = 0; }
+        if (sx0 + sw > iw) sw = iw - sx0;
+        if (sy0 + sh > ih) sh = ih - sy0;
+        if (sw <= 0 || sh <= 0) { cairo_surface_destroy(img); return; }
+    }
     cairo_save(cr);
     cairo_rectangle(cr, c->x, c->y, c->w, c->h);
     cairo_clip(cr);
     /* 先 translate 再 scale: 面的原点落在 (x,y), 范围正好铺满 rect。
-       反过来先 scale 再 set_source_surface(x,y) 会让原点被缩放到别处。 */
+       反过来先 scale 再 set_source_surface(x,y) 会让原点被缩放到别处。
+       源子矩形: 源面原点再平移 (-sx0,-sy0)。 */
     cairo_translate(cr, c->x, c->y);
-    cairo_scale(cr, c->w / iw, c->h / ih);
-    cairo_set_source_surface(cr, img, 0, 0);
+    cairo_scale(cr, c->w / sw, c->h / sh);
+    cairo_set_source_surface(cr, img, -sx0, -sy0);
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
     cairo_paint(cr);
     cairo_restore(cr);
     cairo_surface_destroy(img);
 }
 
-/* BITMAP: 媒体当前帧(引擎持有的 RGBA8 非预乘缓冲, 生命周期 = 显示列表)。
-   cairo 的 ARGB32 是**预乘 BGRA** 内存布局 —— 先转换一份临时缓冲再包
-   image surface, 走与 IMAGE 同一条 translate→scale→paint 路径; 需要圆角
-   时先按指令圆角裁剪。缓冲为空直接忽略(引擎只在有帧时发 BITMAP)。 */
+/* BITMAP / PDATA: 内存 RGBA8 非预乘缓冲(媒体当前帧 / putImageData 块,
+   引擎持有, 生命周期 = 显示列表)。cairo 的 ARGB32 是**预乘 BGRA** 内存
+   布局 —— 先转换一份临时缓冲再包 image surface, 走与 IMAGE 同一条
+   translate→scale→paint 路径; 需要圆角时先按指令圆角裁剪。
+   PDATA 的源子矩形(脏矩形裁剪)与 9 参 drawImage 同一条 isrc 通道。 */
 static void paint_bitmap(cairo_t *cr, const hn_cmd *c) {
     if (!c->bitmap || c->bitmap_w <= 0 || c->bitmap_h <= 0 || c->bitmap_stride <= 0) return;
     int iw = c->bitmap_w, ih = c->bitmap_h;
+    double sx0 = 0, sy0 = 0, sw = iw, sh = ih;
+    if (c->has_isrc) {
+        sx0 = c->isx; sy0 = c->isy; sw = c->isw; sh = c->ish;
+        if (sx0 < 0) { sw += sx0; sx0 = 0; }
+        if (sy0 < 0) { sh += sy0; sy0 = 0; }
+        if (sx0 + sw > (double)iw) sw = iw - sx0;
+        if (sy0 + sh > (double)ih) sh = ih - sy0;
+        if (sw <= 0 || sh <= 0) return;
+    }
     unsigned char *bgra = (unsigned char *)malloc((size_t)iw * ih * 4);
     if (!bgra) return;
     for (int y = 0; y < ih; y++) {
@@ -457,15 +493,68 @@ static void paint_bitmap(cairo_t *cr, const hn_cmd *c) {
     }
     cairo_rectangle(cr, c->x, c->y, c->w, c->h);
     cairo_clip(cr);
-    /* 先 translate 再 scale: 面的原点落在 (x,y), 范围正好铺满 rect(见 paint_image) */
     cairo_translate(cr, c->x, c->y);
-    cairo_scale(cr, c->w / iw, c->h / ih);
-    cairo_set_source_surface(cr, img, 0, 0);
+    cairo_scale(cr, c->w / sw, c->h / sh);
+    cairo_set_source_surface(cr, img, -sx0, -sy0);
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
     cairo_paint(cr);
     cairo_restore(cr);
     cairo_surface_destroy(img);
     free(bgra);
+}
+
+/* ---------------- pattern 平铺填充(createPattern) ----------------
+ * surface pattern + extend 语义映射: repeat → EXTEND_REPEAT;
+ * repeat-x/repeat-y 用 REPEAT + 轴向带裁剪表达(cairo 无单轴 extend);
+ * no-repeat → EXTEND_NONE(瓦片外透明)。图案锚点 = 画布原点
+ * (cmd 的 pat_ox/pat_oy, 与 hnsoft 同口径)—— pattern matrix 平移。 */
+static void paint_pattern(cairo_t *cr, const hn_cmd *c) {
+    cairo_surface_t *img = load_image(c->text);
+    if (!img) return;
+    double iw = cairo_image_surface_get_width(img);
+    double ih = cairo_image_surface_get_height(img);
+    cairo_pattern_t *p = cairo_pattern_create_for_surface(img);
+    /* 锚点: pattern space 平移 -画布原点(cairo 的 pattern matrix 是
+       user→pattern, 平移量取负把表面原点搬到画布原点) */
+    cairo_matrix_t m;
+    cairo_matrix_init_translate(&m, -c->pat_ox, -c->pat_oy);
+    cairo_pattern_set_matrix(p, &m);
+    cairo_save(cr);
+    /* 目标区域(矩形或闭合多边形)先裁剪 */
+    if (c->poly && c->poly_n >= 3) {
+        cairo_new_path(cr);
+        cairo_move_to(cr, c->poly[0], c->poly[1]);
+        for (int k = 1; k < c->poly_n; k++)
+            cairo_line_to(cr, c->poly[k * 2], c->poly[k * 2 + 1]);
+        cairo_close_path(cr);
+    } else {
+        cairo_new_path(cr);
+        cairo_rectangle(cr, c->x, c->y, c->w, c->h);
+    }
+    cairo_clip(cr);
+    switch (c->pattern_rep) {
+    case HN_PAT_REPEAT_X:
+        cairo_pattern_set_extend(p, CAIRO_EXTEND_REPEAT);
+        cairo_rectangle(cr, -1e6, c->pat_oy, 2e6, ih);   /* 单行瓦片的横带 */
+        break;
+    case HN_PAT_REPEAT_Y:
+        cairo_pattern_set_extend(p, CAIRO_EXTEND_REPEAT);
+        cairo_rectangle(cr, c->pat_ox, -1e6, iw, 2e6);   /* 单列瓦片的竖带 */
+        break;
+    case HN_PAT_NONE:
+        cairo_pattern_set_extend(p, CAIRO_EXTEND_NONE);
+        cairo_rectangle(cr, -1e6, -1e6, 2e6, 2e6);       /* 已被目标裁剪兜住 */
+        break;
+    default:                                             /* HN_PAT_REPEAT */
+        cairo_pattern_set_extend(p, CAIRO_EXTEND_REPEAT);
+        cairo_rectangle(cr, -1e6, -1e6, 2e6, 2e6);
+        break;
+    }
+    cairo_set_source(cr, p);
+    cairo_paint(cr);
+    cairo_pattern_destroy(p);
+    cairo_restore(cr);
+    cairo_surface_destroy(img);
 }
 
 /* ---------------- 网格贴图(Live2D 类) ---------------- */
@@ -644,6 +733,7 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
 
     for (int i = 0; i < dl->count; i++) {
         const hn_cmd *c = &dl->cmds[i];
+        cairo_set_operator(cr, blend_op(c->blend));   /* 每指令混合模式 */
         switch (c->kind) {
         case HN_CMD_RECT: {
             if (c->shadow) paint_shadow(cr, c);
@@ -678,7 +768,11 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             paint_image(cr, c);
             break;
         case HN_CMD_BITMAP:
+        case HN_CMD_PDATA:          /* putImageData: 同一条位图路径(isrc=脏矩形) */
             paint_bitmap(cr, c);
+            break;
+        case HN_CMD_PATTERN:
+            paint_pattern(cr, c);
             break;
         case HN_CMD_CLIP_PUSH:
             cairo_save(cr);
@@ -686,6 +780,31 @@ unsigned char *hncairo_render(const hn_display_list *dl, int width, int height,
             rounded_rect(cr, c->x, c->y, c->w, c->h, c->radius);
             cairo_clip(cr);
             break;
+        case HN_CMD_CLIP_PATH_PUSH: {
+            /* 精确路径裁剪: 折线多边形逐条子路径闭合(非零环绕, 与
+               hnsoft 的 pip_poly 同规则), cairo 路径 clip 原生精确。 */
+            cairo_save(cr);
+            cairo_new_path(cr);
+            if (c->poly && c->poly_n >= 3) {
+                int start = 0;
+                for (int s = 0; s <= (c->clip_segs ? c->clip_nsegs - 1 : 0); s++) {
+                    int cnt = c->clip_segs ? c->clip_segs[s] : c->poly_n;
+                    if (cnt < 0) cnt = 0;
+                    if (start + cnt > c->poly_n) cnt = c->poly_n - start;
+                    if (cnt >= 3) {
+                        cairo_move_to(cr, c->poly[start * 2], c->poly[start * 2 + 1]);
+                        for (int k = 1; k < cnt; k++)
+                            cairo_line_to(cr, c->poly[(start + k) * 2],
+                                          c->poly[(start + k) * 2 + 1]);
+                        cairo_close_path(cr);
+                    }
+                    start += c->clip_segs ? c->clip_segs[s] : c->poly_n;
+                    if (start >= c->poly_n) break;
+                }
+            }
+            cairo_clip(cr);
+            break;
+        }
         case HN_CMD_CLIP_POP:
             cairo_restore(cr);
             break;

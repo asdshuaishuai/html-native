@@ -880,6 +880,10 @@ static hn_context *doc_ctx_find(hn_doc *doc) {
 
 hn_rt *hn_rt_open(const hn_rt_desc *d) {
     if (!d || !d->html) return NULL;
+    /* canvas getImageData 的栅格化缝: rt 链了 hnsoft, 在此把渲染后端注入
+       引擎核心(核心专属构建不链 rt/hnsoft → 不注入, 像素出口如实不可用)。
+       幂等: 多次 open 覆盖同一值。 */
+    hn_paint_set_ledger_raster(hnsoft_render);
     hn_rt *rt = (hn_rt *)calloc(1, sizeof(*rt));
     if (!rt) return NULL;
     snprintf(rt->id, sizeof(rt->id), "%s", d->id ? d->id : "default");
@@ -1166,15 +1170,42 @@ static JSValue js_hn_measure_text(JSContext *ctx, JSValueConst, int argc, JSValu
     return JS_NewFloat64(ctx, w);
 }
 
+/* __hnCanvasPixels(cvId, x, y, w, h) → ArrayBuffer(RGBA 非预乘) | null
+ * canvas getImageData 的原生数据出口: 引擎把该画布账本离屏栅格化后裁出
+ * 子区(标准 ImageData 口径: 越界补透明黑, 非预乘)。glue 侧包成
+ * {width, height, data:Uint8Array}; 失败返回 null(不抛异常, 桥纪律)。 */
+static JSValue js_hn_canvas_pixels(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_context *c = b ? (b->ctx ? b->ctx : doc_ctx_find(b->doc)) : NULL;
+    if (!c || argc < 5) return JS_NULL;
+    const char *id = JS_ToCString(ctx, argv[0]);
+    if (!id) return JS_NULL;
+    int32_t x = 0, y = 0, w = 0, h = 0;
+    JS_ToInt32(ctx, &x, argv[1]);
+    JS_ToInt32(ctx, &y, argv[2]);
+    JS_ToInt32(ctx, &w, argv[3]);
+    JS_ToInt32(ctx, &h, argv[4]);
+    unsigned char *px = NULL;
+    int ow = 0, oh = 0;
+    int ok = hn_canvas_get_image_data(c, id, x, y, w, h, &px, &ow, &oh);
+    JS_FreeCString(ctx, id);
+    if (!ok || !px) return JS_NULL;
+    JSValue ab = JS_NewArrayBufferCopy(ctx, px, (size_t)ow * oh * 4);
+    free(px);
+    return ab;
+}
+
 /* ---------------- <canvas> 2D glue(JS 层状态机) ----------------
  * 标准 2D context 的方法面全部在此实现, 汇到 hnCanvas2D:
  *   fillRect/strokeRect/beginPath/moveTo/lineTo/arc/ellipse/quadraticCurveTo/
  *   bezierCurveTo/arcTo/closePath/fill/stroke/clip/save/restore/translate/
  *   scale/rotate/setTransform/transform/resetTransform/fillText/strokeText/
  *   measureText/createLinearGradient/createRadialGradient/clearRect/
- *   drawImage/setLineDash/getLineDash
+ *   drawImage(3/5/9 参)/setLineDash/getLineDash/createPattern/
+ *   getImageData/putImageData
  *   + fillStyle/strokeStyle/lineWidth/lineCap/font/lineDashOffset/textAlign/
- *     textBaseline/shadowColor/shadowBlur/shadowOffsetX/shadowOffsetY 属性。
+ *     textBaseline/shadowColor/shadowBlur/shadowOffsetX/shadowOffsetY/
+ *     globalCompositeOperation 属性。
  * 简化口径(注释即契约):
  *   - arc/ellipse 以 Math.cos/sin 折线化, 15° 一段(与账本 op 的折线模型
  *     一致); 二次曲线固定 16 段、三次曲线固定 24 段(恒定段数, 段内直线
@@ -1183,10 +1214,22 @@ static JSValue js_hn_measure_text(JSContext *ctx, JSValueConst, int argc, JSValu
  *     lineTo 到拐点 —— 不崩溃是第一契约;
  *   - clearRect 记录 clear_rect op(绘制期矩形内回填渲染底色); 覆盖整块
  *     画布的清空由引擎识别为清账("清账重录"动画循环保持 op 有界);
- *   - clip() 取当前路径包围盒(矩形裁剪);
+ *   - clip() 下送精确路径 op(cpath, 折线多边形 + 子路径点数表) —— 引擎
+ *     光栅期按多边形内外判定(非零环绕); 旧的矩形包围盒口径(clip op)
+ *     保留在引擎侧, 但 glue 不再产生它;
  *   - 渐变: createLinearGradient/createRadialGradient 全部 stop 按扁平数组
  *     下送(引擎分段线性插值); radial 为 CSS createRadialGradient 双圆口径;
  *     fill()/stroke() 遇渐变下送 gpath/带渐变 spath(不再回落纯色);
+ *   - pattern: createPattern(图片路径, repetition)返回 JS 侧标记对象
+ *     (与渐变对象同构); fillRect/fill 遇 pattern 下送 prect/ppath(平铺
+ *     填充); **stroke 遇 pattern 暂回落纯色黑**(描边是逐段 QUAD 展开,
+ *     平铺描边带不在本轮范围 —— 见 hn_canvas.c 的注释契约);
+ *   - getImageData 返回 {width,height,data:Uint8Array}(非预乘 RGBA,
+ *     账本离屏栅格化, 越界补透明黑); putImageData 接收同构对象(或
+ *     {width,height,data} 形状的普通数组), 脏矩形 4 参齐备才启用;
+ *   - globalCompositeOperation 支持 source-over(缺省)/lighter/multiply/
+ *     screen, 随每条 op 下送 blend 字段; 其余模式照常存储, 由引擎侧
+ *     回落 source-over 并提示一次;
  *   - setLineDash 在 stroke 落账前按折线累计弧长切段(每段一个 spath;
  *     单次 stroke 上限 512 段, 到顶截断防失控路径灌爆账本);
  *   - textAlign(left/center/right)按 measureText 宽度修正锚点; textBaseline
@@ -1260,7 +1303,11 @@ static const char *CANVAS_GLUE_JS =
 "    }};"
 "  }"
 "  function make2D(cvId){"
-"    function send(o){o.cv=cvId;try{hnCanvas2D(JSON.stringify(o));}catch(e){}}"
+"    function send(o){"
+"      o.cv=cvId;"
+"      if (st.gco && st.gco!=='source-over') o.blend=st.gco;   /* gco 随 op 下送(pdata 由引擎侧忽略, 标准) */"
+"      try{hnCanvas2D(JSON.stringify(o));}catch(e){}"
+"    }"
 "    function stopsOf(gd){return gd.stops.slice().sort(function(p,q){return p.t-q.t;});}"
 "    function solidOf(style){"
 "      if (style && style.__hngrad){"
@@ -1269,11 +1316,12 @@ static const char *CANVAS_GLUE_JS =
 "        var b=s.length?s[s.length-1].c:a;"
 "        return [(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2,(a[3]+b[3])/2];"
 "      }"
+"      /* pattern 作描边色: 回落纯色黑(描边平铺带不在本轮范围, 见头注) */"
 "      return parseColor(style);"
 "    }"
 "    var st={fill:[0,0,0,255],stroke:[0,0,0,255],fillSrc:'#000000',strokeSrc:'#000000',"
 "            lw:1,cap:'butt',fontPx:10,fontSrc:'10px sans-serif',m:[1,0,0,1,0,0],clips:0,"
-"            dash:[],dashOff:0,align:'left',base:'alphabetic',"
+"            dash:[],dashOff:0,align:'left',base:'alphabetic',gco:'source-over',"
 "            shSrc:'rgba(0,0,0,0)',shC:[0,0,0,0],shX:0,shY:0,shB:0};"
 "    var stack=[],subs=[],cur=null;"
 "    function xf(x,y){var m=st.m;return [m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];}"
@@ -1286,7 +1334,8 @@ static const char *CANVAS_GLUE_JS =
 "    function cloneState(s){return {fill:s.fill.slice(),stroke:s.stroke.slice(),"
 "      fillSrc:s.fillSrc,strokeSrc:s.strokeSrc,lw:s.lw,cap:s.cap,fontPx:s.fontPx,"
 "      fontSrc:s.fontSrc,m:s.m.slice(),clips:s.clips,dash:s.dash.slice(),dashOff:s.dashOff,"
-"      align:s.align,base:s.base,shSrc:s.shSrc,shC:s.shC.slice(),shX:s.shX,shY:s.shY,shB:s.shB};}"
+"      align:s.align,base:s.base,gco:s.gco,"
+"      shSrc:s.shSrc,shC:s.shC.slice(),shX:s.shX,shY:s.shY,shB:s.shB};}"
 "    /* 渐变 op 公共字段: 轴/圆坐标经 CTM 变换(渐变坐标属 user space),"
 "       全部 stop 按 [t,rgba,...] 扁平数组下送(引擎分段线性插值)。 */"
 "    function gradOp(gd){"
@@ -1326,8 +1375,26 @@ static const char *CANVAS_GLUE_JS =
 "      if (st.shC[3]>0&&st.shB>0){o.shc=rgba(st.shC);o.shx=st.shX;o.shy=st.shY;o.shb=st.shB;}"
 "      return o;"
 "    }"
+"    function isPat(v){return v && v.__hnpat;}"
+"    function isGrad(v){return v && v.__hngrad;}"
+"    function patOp(op,src,x,y,w,h,pts){"
+"      var o={op:op,src:src.src,rep:src.rep};"
+"      if (pts) o.pts=pts; else {o.x=x;o.y=y;o.w=w;o.h=h;}"
+"      return o;"
+"    }"
 "    function fillRectImpl(x,y,w,h){"
-"      var m=st.m,grad=(st.fill===null),rotated=(m[1]!==0||m[2]!==0),o,gg;"
+"      var m=st.m,fs=st.fillSrc,grad=isGrad(fs),pat=isPat(fs),rotated=(m[1]!==0||m[2]!==0),o,gg;"
+"      if (pat){"
+"        var p=rectPts(x,y,w,h),t=[];"
+"        for (var i0=0;i0<8;i0+=2){var q3=xf(p[i0],p[i0+1]);t.push(q3[0],q3[1]);}"
+"        if (!rotated){"
+"          var r0=xf(x,y),rw=m[0]*w,rh=m[3]*h;"
+"          if (rw<0){r0[0]+=rw;rw=-rw;}"
+"          if (rh<0){r0[1]+=rh;rh=-rh;}"
+"          send(patOp('prect',fs,r0[0],r0[1],rw,rh));   /* 矩形快路 */"
+"        } else send(patOp('ppath',fs,0,0,0,0,t));      /* 旋转: 多边形路径 */"
+"        return;"
+"      }"
 "      if (rotated){"
 "        var p=rectPts(x,y,w,h),t=[];"
 "        for (var i=0;i<8;i+=2){var q=xf(p[i],p[i+1]);t.push(q[0],q[1]);}"
@@ -1348,10 +1415,12 @@ static const char *CANVAS_GLUE_JS =
 "    var api={};"
 "    Object.defineProperty(api,'fillStyle',{"
 "      get:function(){return st.fillSrc;},"
-"      set:function(v){st.fillSrc=v;st.fill=(v&&v.__hngrad)?null:parseColor(v);}});"
+"      set:function(v){st.fillSrc=v;st.fill=(typeof v==='object'&&v)?null:parseColor(v);}});"
 "    Object.defineProperty(api,'strokeStyle',{"
 "      get:function(){return st.strokeSrc;},"
-"      set:function(v){st.strokeSrc=v;st.stroke=(v&&v.__hngrad)?null:parseColor(v);}});"
+"      set:function(v){st.strokeSrc=v;st.stroke=(typeof v==='object'&&v)?null:parseColor(v);}});"
+"    Object.defineProperty(api,'globalCompositeOperation',{"
+"      get:function(){return st.gco;},set:function(v){st.gco=String(v||'source-over');}});"
 "    Object.defineProperty(api,'lineWidth',{"
 "      get:function(){return st.lw;},set:function(v){st.lw=(+v)>0?+v:1;}});"
 "    Object.defineProperty(api,'lineCap',{"
@@ -1384,7 +1453,7 @@ static const char *CANVAS_GLUE_JS =
 "      while (st.clips>s.clips){send({op:'cpop'});st.clips--;}"
 "      st.fill=s.fill;st.stroke=s.stroke;st.fillSrc=s.fillSrc;st.strokeSrc=s.strokeSrc;"
 "      st.lw=s.lw;st.cap=s.cap;st.fontPx=s.fontPx;st.fontSrc=s.fontSrc;st.m=s.m;"
-"      st.dash=s.dash;st.dashOff=s.dashOff;st.align=s.align;st.base=s.base;"
+"      st.dash=s.dash;st.dashOff=s.dashOff;st.align=s.align;st.base=s.base;st.gco=s.gco;"
 "      st.shSrc=s.shSrc;st.shC=s.shC;st.shX=s.shX;st.shY=s.shY;st.shB=s.shB;"
 "    };"
 "    api.translate=function(x,y){mul([1,0,0,1,x,y]);};"
@@ -1453,11 +1522,12 @@ static const char *CANVAS_GLUE_JS =
 "      arcPts(cx,cy,r,r,0,a0,a1,(v1x*v2y-v1y*v2x)<0);"
 "    };"
 "    api.fill=function(){"
-"      var grad=(st.fill===null);"
+"      var fs=st.fillSrc,grad=isGrad(fs),pat=isPat(fs);"
 "      for (var i=0;i<subs.length;i++){"
 "        var p=subs[i].p;"
 "        if (p.length<6) continue;"
-"        if (!grad) send({op:'fpath',pts:p.slice(),col:rgba(st.fill)});"
+"        if (pat) send(patOp('ppath',fs,0,0,0,0,p.slice()));"
+"        else if (!grad) send({op:'fpath',pts:p.slice(),col:rgba(st.fill)});"
 "        else{var o={op:'gpath',pts:p.slice()};"
 "          var gg=gradOp(st.fillSrc);for (var k in gg)o[k]=gg[k];send(o);}"
 "      }"
@@ -1496,7 +1566,7 @@ static const char *CANVAS_GLUE_JS =
 "      return out;"
 "    }"
 "    api.stroke=function(){"
-"      var grad=(st.stroke===null);"
+"      var grad=isGrad(st.strokeSrc);"
 "      var col=grad?0:rgba(solidOf(st.strokeSrc));"
 "      var w=st.lw*detScale(),cap=(st.cap==='round');"
 "      for (var i=0;i<subs.length;i++){"
@@ -1511,17 +1581,22 @@ static const char *CANVAS_GLUE_JS =
 "        }"
 "      }"
 "    };"
+"    /* clip(): 精确路径裁剪 —— 当前路径的每条子路径(≥3 点)按 CTM 变换后"
+"       作为折线多边形下送 cpath(含 segs 点数表), 引擎光栅期按非零环绕"
+"       内外判定; <3 点的子路径为零面积, 跳过(与 fill 的点数门禁同档)。 */"
 "    api.clip=function(){"
-"      var minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9,any=false;"
-"      for (var i=0;i<subs.length;i++)"
-"        for (var j=0;j+1<subs[i].p.length;j+=2){"
-"          var q=xf(subs[i].p[j],subs[i].p[j+1]);"
-"          if (q[0]<minx)minx=q[0];if(q[0]>maxx)maxx=q[0];"
-"          if (q[1]<miny)miny=q[1];if(q[1]>maxy)maxy=q[1];"
-"          any=true;"
+"      var pts=[],segs=[],any=false;"
+"      for (var i=0;i<subs.length;i++){"
+"        var p=subs[i].p;"
+"        if (p.length<6) continue;"
+"        var cnt=0;"
+"        for (var j=0;j+1<p.length;j+=2){"
+"          var q=xf(p[j],p[j+1]);pts.push(q[0],q[1]);cnt++;"
 "        }"
+"        segs.push(cnt);any=true;"
+"      }"
 "      if (!any) return;"
-"      send({op:'clip',x:minx,y:miny,w:maxx-minx,h:maxy-miny});"
+"      send({op:'cpath',pts:pts,segs:segs});"
 "      st.clips++;"
 "    };"
 "    api.fillRect=function(x,y,w,h){fillRectImpl(x,y,w,h);};"
@@ -1557,12 +1632,56 @@ static const char *CANVAS_GLUE_JS =
 "      if (th<0){q[1]+=th;th=-th;}"
 "      send({op:'clear_rect',x:q[0],y:q[1],w:tw,h:th});"
 "    };"
-"    api.drawImage=function(img,x,y,w,h){"
+"    /* drawImage: 3 参(img,x,y)→ 100x100 缺省(旧口径), 5 参(img,x,y,w,h)"
+"       拉伸, 9 参(img, sx,sy,sw,sh, dx,dy,dw,dh)源子矩形裁贴 —— 协议"
+"       image op 带 sx/sy/sw/sh(源图像素坐标), 引擎绘制期直接裁拷。 */"
+"    api.drawImage=function(img,a2,a3,a4,a5,a6,a7,a8,a9){"
 "      var src=(typeof img==='string')?img:(img&&img.src?img.src:'');"
 "      if (!src) return;"
-"      var q=xf(x,y),m=st.m;"
-"      var dw=(w===undefined)?100:w,dh=(h===undefined)?100:h;"
-"      send({op:'image',src:src,x:q[0],y:q[1],w:dw*m[0],h:dh*m[3]});"
+"      var m=st.m;"
+"      if (arguments.length>=9){"
+"        var q=xf(a6,a7);"
+"        send({op:'image',src:src,x:q[0],y:q[1],w:a8*m[0],h:a9*m[3],"
+"              sx:a2,sy:a3,sw:a4,sh:a5});"
+"        return;"
+"      }"
+"      var q2=xf(a2,a3);"
+"      var dw=(a4===undefined)?100:a4,dh=(a5===undefined)?100:a5;"
+"      send({op:'image',src:src,x:q2[0],y:q2[1],w:dw*m[0],h:dh*m[3]});"
+"    };"
+"    /* createPattern(image, repetition): JS 侧标记对象(与渐变对象同构)。"
+"       image = 图片路径字符串(引擎绘制期经解码缓存取像素)。 */"
+"    api.createPattern=function(img,rep){"
+"      var src=(typeof img==='string')?img:(img&&img.src?img.src:'');"
+"      if (!src) return null;"
+"      var r=String(rep||'repeat');"
+"      if (r!=='repeat'&&r!=='repeat-x'&&r!=='repeat-y'&&r!=='no-repeat') r='repeat';"
+"      return {__hnpat:true,src:src,rep:r};"
+"    };"
+"    /* getImageData(x,y,w,h) → {width,height,data:Uint8Array}(非预乘 RGBA;"
+"       账本离屏栅格化, 越界补透明黑)。w/h<=0 返回 null(标准是抛"
+"       IndexSizeError, glue 纪律是不抛)。 */"
+"    api.getImageData=function(x,y,w,h){"
+"      x=Math.round(+x||0);y=Math.round(+y||0);w=Math.round(+w||0);h=Math.round(+h||0);"
+"      if (w<=0||h<=0) return null;"
+"      var d=__hnCanvasPixels(cvId,x,y,w,h);"
+"      if (!d) return null;"
+"      return {width:w,height:h,data:new Uint8Array(d)};"
+"    };"
+"    /* putImageData(im, dx, dy[, dirtyX, dirtyY, dirtyW, dirtyH]): im 为"
+"       getImageData 的返回(或 {width,height,data} 同构对象)。像素按"
+"       RGBA 数组下送 pdata op(引擎侧 4MB 单块上限); 脏矩形 4 参齐备才启用。 */"
+"    api.putImageData=function(im,x,y,dx,dy,dw2,dh2){"
+"      if (!im||!im.data||!(im.width>0)||!(im.height>0)) return;"
+"      var n=im.width*im.height*4,px=new Array(n);"
+"      for (var i=0;i<n;i++) px[i]=im.data[i]|0;"
+"      var o={op:'pdata',x:+x||0,y:+y||0,w:im.width,h:im.height,px:px};"
+"      if (dx!==undefined&&dy!==undefined){"
+"        o.dx=+dx||0;o.dy=+dy||0;"
+"        o.dw=(dw2===undefined)?im.width:+dw2;"
+"        o.dh=(dh2===undefined)?im.height:+dh2;"
+"      }"
+"      send(o);"
 "    };"
 "    return api;"
 "  }"
@@ -1896,6 +2015,8 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_canvas_2d, "hnCanvas2D", 1));
     JS_SetPropertyStr(ctx, global, "hnMeasureText",
         JS_NewCFunction(ctx, js_hn_measure_text, "hnMeasureText", 2));
+    JS_SetPropertyStr(ctx, global, "__hnCanvasPixels",
+        JS_NewCFunction(ctx, js_hn_canvas_pixels, "__hnCanvasPixels", 5));
     /* 定时器/RAF 内部桥(__hn*; 标准签名由 TIMER_GLUE_JS 转接) */
     JS_SetPropertyStr(ctx, global, "__hnTimer",
         JS_NewCFunction(ctx, js_hn_timer, "__hnTimer", 4));

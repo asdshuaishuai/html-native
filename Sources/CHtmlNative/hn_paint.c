@@ -943,13 +943,14 @@ static void canvas_stroke_polyline(hn_context *c, const hn_canvas_op *o,
         q.qx[2] = x2 - nx; q.qy[2] = y2 - ny;
         q.qx[3] = x1 - nx; q.qy[3] = y1 - ny;
         q.fill = fc;
+        q.blend = o->blend;
         push_cmd(c, &q);
     }
 }
 
 /* 圆头端点/圆滑交点: 顶点处补一枚 16 边形圆片(廉价矢量渲染器的标准做法) */
 static void canvas_cap_dot(hn_context *c, float cx, float cy, float r,
-                           hn_color col, float alpha) {
+                           hn_color col, float alpha, unsigned char blend) {
     if (r <= 0.05f) return;
     const int SEG = 16;
     float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * SEG * 2);
@@ -965,7 +966,272 @@ static void canvas_cap_dot(hn_context *c, float cx, float cy, float r,
     p.poly = poly;
     p.poly_n = SEG;
     p.fill = mul_alpha(col, alpha);
+    p.blend = blend;
     push_cmd(c, &p);
+}
+
+/* 账本重放的核心(逐 op 翻译成显示列表指令)。paint_canvas(元素盒映射)与
+   hn_paint_raster_ledger(getImageData 的离屏栅格化, 1:1 映射)共用。
+   ox/oy = 画布原点的设备坐标, kx/ky = 属性坐标→盒的缩放, ks = 长度均档,
+   alpha = 组透明度; st 只供 TEXT 的字体族/字重/斜体取值(raster 路径传
+   引擎缺省样式)。 */
+static void canvas_emit_ledger(hn_context *c, const hn_canvas_ledger *l,
+                               const hn_style *st,
+                               float ox, float oy, float kx, float ky,
+                               float ks, float alpha) {
+    for (int i = 0; i < l->n_ops; i++) {
+        const hn_canvas_op *o = &l->ops[i];
+        hn_cmd cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        switch (o->kind) {
+        case HN_CV_FILL_RECT: {
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            cmd.fill = mul_alpha(o->color, alpha);
+            cmd.blend = o->blend;
+            /* canvas 阴影(fillRect 专用; alpha=0 的 shadowColor 自然关闸):
+               偏移/模糊随盒缩放各轴均档 —— 与引擎 RECT shadow 同一口径 */
+            if (o->shadow) {
+                cmd.shadow = 1;
+                cmd.shadow_color = mul_alpha(o->sh_color, alpha);
+                cmd.shadow_ox = o->sh_ox * ks;
+                cmd.shadow_oy = o->sh_oy * ks;
+                cmd.shadow_blur = o->sh_blur * ks;
+            }
+            if ((cmd.fill & 0xFFu) == 0 && !cmd.shadow) continue;
+            if (cmd.w <= 0 || cmd.h <= 0) continue;
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_STROKE_PATH: {
+            float hw = o->stroke_w * ks * 0.5f;
+            canvas_stroke_polyline(c, o, hw, ox, oy, kx, ky, alpha);
+            if (o->cap_round) {
+                for (int p2 = 0; p2 < o->n_pts; p2++) {
+                    /* 圆头颜色取该顶点处的渐变色(描边渐变的分段近似同款) */
+                    hn_color dc = ledger_grad_color(o, ledger_grad_t(o, o->pts[p2 * 2],
+                                                                     o->pts[p2 * 2 + 1]));
+                    canvas_cap_dot(c, ox + o->pts[p2 * 2] * kx,
+                                   oy + o->pts[p2 * 2 + 1] * ky, hw, dc, alpha,
+                                   o->blend);
+                }
+            }
+            break;
+        }
+        case HN_CV_FILL_PATH: {
+            if (o->n_pts < 3 || (o->color & 0xFFu) == 0) break;
+            float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
+            if (!poly) break;
+            for (int p2 = 0; p2 < o->n_pts; p2++) {
+                poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
+                poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
+            }
+            cmd.kind = HN_CMD_POLYGON;
+            cmd.poly = poly;
+            cmd.poly_n = o->n_pts;
+            cmd.fill = mul_alpha(o->color, alpha);
+            cmd.blend = o->blend;
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_GRAD_RECT: {
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            cmd.blend = o->blend;
+            /* 显式渐变(canvas createLinearGradient/createRadialGradient 口径):
+               轴/圆参数为绝对坐标, 不走 CSS 盒+角度模型 —— 双 stop 起即为
+               逐像素精确口径, 多 stop 由 stops 数组分段线性。 */
+            canvas_emit_grad(c, &cmd, o, ox, oy, kx, ky, ks, alpha);
+            if ((cmd.fill & 0xFFu) == 0 && !cmd.shadow) continue;
+            if (cmd.w <= 0 || cmd.h <= 0) continue;
+            if (o->shadow) {
+                cmd.shadow = 1;
+                cmd.shadow_color = mul_alpha(o->sh_color, alpha);
+                cmd.shadow_ox = o->sh_ox * ks;
+                cmd.shadow_oy = o->sh_oy * ks;
+                cmd.shadow_blur = o->sh_blur * ks;
+            }
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_GRAD_PATH: {
+            /* fill() 遇渐变: 闭合多边形带显式渐变填充(不再回落纯色)。
+               POLYGON 逐像素求渐变(hnsoft)或 pattern 填充(cairo)。 */
+            if (o->n_pts < 3) break;
+            float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
+            if (!poly) break;
+            for (int p2 = 0; p2 < o->n_pts; p2++) {
+                poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
+                poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
+            }
+            cmd.kind = HN_CMD_POLYGON;
+            cmd.poly = poly;
+            cmd.poly_n = o->n_pts;
+            cmd.blend = o->blend;
+            canvas_emit_grad(c, &cmd, o, ox, oy, kx, ky, ks, alpha);
+            if ((cmd.fill & 0xFFu) == 0) break;   /* alpha 门禁看首 stop */
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_CLEAR_RECT:
+            cmd.kind = HN_CMD_CLEAR_RECT;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            push_cmd(c, &cmd);
+            break;
+        case HN_CV_CLIP_PUSH:
+            cmd.kind = HN_CMD_CLIP_PUSH;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            push_cmd(c, &cmd);
+            break;
+        case HN_CV_CLIP_POP:
+            cmd.kind = HN_CMD_CLIP_POP;
+            push_cmd(c, &cmd);
+            break;
+        case HN_CV_CLIP_PATH: {
+            /* 精确路径裁剪: 折线多边形(hnsoft 帧缓冲按多边形内外判定,
+               cairo 直接路径 clip)。退化(<3 点)按"不裁"处理 —— 与 fill
+               的点数门禁同档(canvas 空路径 fill 也是无操作)。 */
+            if (o->n_pts < 3) break;
+            float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
+            if (!poly) break;
+            for (int p2 = 0; p2 < o->n_pts; p2++) {
+                poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
+                poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
+            }
+            cmd.kind = HN_CMD_CLIP_PATH_PUSH;
+            cmd.poly = poly;
+            cmd.poly_n = o->n_pts;
+            cmd.clip_segs = o->segs;       /* 账本数组, 生命周期 ≥ 显示列表 */
+            cmd.clip_nsegs = o->n_segs;
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_TEXT: {
+            if ((o->color & 0xFFu) == 0 || !o->str) break;
+            /* 文本串复制进 tmp 区(生命周期 = 显示列表) */
+            size_t sl = strlen(o->str);
+            char *ts = (char *)hn_arena_alloc(c->tmp, sl + 1);
+            if (!ts) break;
+            memcpy(ts, o->str, sl + 1);
+            cmd.kind = HN_CMD_TEXT;
+            cmd.text = ts;
+            cmd.text_len = sl;
+            cmd.tx = ox + o->x * kx;
+            cmd.baseline = oy + o->y * ky;
+            cmd.font.size_px = o->font_px * ky;
+            cmd.font.weight = st->font_weight;
+            cmd.font.italic = st->font_italic;
+            cmd.font.letter_spacing = st->letter_spacing;
+            cmd.font.family = st->font_family;
+            cmd.fill = mul_alpha(o->color, alpha);
+            cmd.blend = o->blend;
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_IMAGE: {
+            if (!o->str || !o->str[0]) break;
+            size_t sl = strlen(o->str);
+            char *ts = (char *)hn_arena_alloc(c->tmp, sl + 1);
+            if (!ts) break;
+            memcpy(ts, o->str, sl + 1);
+            cmd.kind = HN_CMD_IMAGE;
+            cmd.text = ts;
+            cmd.text_len = sl;
+            cmd.x = ox + o->x * kx;
+            cmd.y = oy + o->y * ky;
+            cmd.w = o->w * kx;
+            cmd.h = o->h * ky;
+            cmd.blend = o->blend;
+            /* 9 参 drawImage 的源子矩形(源图像素坐标, 绘制期直接裁拷) */
+            if (o->has_src) {
+                cmd.isx = o->sx; cmd.isy = o->sy;
+                cmd.isw = o->sw; cmd.ish = o->sh;
+                cmd.has_isrc = 1;
+            }
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_PDATA: {
+            /* putImageData: RGBA 块经既有位图路径贴入(源子矩形 = 脏矩形
+               在块内的投影)。标准口径 putImageData 不受 gco/变换影响 ——
+               blend 恒 source-over(缺省 0), 走 1:1 贴入。 */
+            if (!o->pdata || o->pw <= 0 || o->ph <= 0) break;
+            float sx0 = 0, sy0 = 0, sw = (float)o->pw, sh = (float)o->ph;
+            if (o->has_dirty) {
+                sx0 = o->dtx; sy0 = o->dty;
+                sw = o->dtw;  sh = o->dth;
+                if (sx0 < 0) { sw += sx0; sx0 = 0; }
+                if (sy0 < 0) { sh += sy0; sy0 = 0; }
+                if (sx0 + sw > (float)o->pw) sw = (float)o->pw - sx0;
+                if (sy0 + sh > (float)o->ph) sh = (float)o->ph - sy0;
+                if (sw <= 0 || sh <= 0) break;          /* 空脏矩形 */
+            }
+            cmd.kind = HN_CMD_PDATA;
+            cmd.bitmap = o->pdata;             /* 账本块, 生命周期 ≥ 显示列表 */
+            cmd.bitmap_stride = o->pw * 4;
+            cmd.bitmap_w = o->pw;
+            cmd.bitmap_h = o->ph;
+            cmd.x = ox + (o->x + sx0) * kx;
+            cmd.y = oy + (o->y + sy0) * ky;
+            cmd.w = sw * kx;
+            cmd.h = sh * ky;
+            cmd.isx = sx0; cmd.isy = sy0;
+            cmd.isw = sw;  cmd.ish = sh;
+            cmd.has_isrc = 1;
+            push_cmd(c, &cmd);
+            break;
+        }
+        case HN_CV_PATTERN_RECT:
+        case HN_CV_PATTERN_PATH: {
+            /* createPattern 平铺填充: 绘制期按图片解码缓存取像素平铺。
+               源路径复制进 tmp 区(生命周期 = 显示列表)。 */
+            if (!o->str || !o->str[0]) break;
+            if (o->kind == HN_CV_PATTERN_PATH && o->n_pts < 3) break;
+            size_t sl = strlen(o->str);
+            char *ts = (char *)hn_arena_alloc(c->tmp, sl + 1);
+            if (!ts) break;
+            memcpy(ts, o->str, sl + 1);
+            cmd.kind = HN_CMD_PATTERN;
+            cmd.text = ts;
+            cmd.text_len = sl;
+            cmd.pattern_rep = o->prep;
+            cmd.pat_ox = ox;               /* 图案锚点 = 画布原点(页面设备坐标) */
+            cmd.pat_oy = oy;
+            cmd.blend = o->blend;
+            if (o->kind == HN_CV_PATTERN_RECT) {
+                cmd.x = ox + o->x * kx;
+                cmd.y = oy + o->y * ky;
+                cmd.w = o->w * kx;
+                cmd.h = o->h * ky;
+                if (cmd.w <= 0 || cmd.h <= 0) break;
+            } else {
+                float *poly = (float *)hn_arena_alloc(
+                    c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
+                if (!poly) break;
+                for (int p2 = 0; p2 < o->n_pts; p2++) {
+                    poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
+                    poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
+                }
+                cmd.poly = poly;
+                cmd.poly_n = o->n_pts;
+            }
+            push_cmd(c, &cmd);
+            break;
+        }
+        }
+    }
 }
 
 static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
@@ -1023,165 +1289,54 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
     cp.radius = eff_radius(st, box_w, box_h);
     push_cmd(c, &cp);
 
-    for (int i = 0; i < l->n_ops; i++) {
-        const hn_canvas_op *o = &l->ops[i];
-        hn_cmd cmd;
-        memset(&cmd, 0, sizeof(cmd));
-        switch (o->kind) {
-        case HN_CV_FILL_RECT: {
-            cmd.kind = HN_CMD_RECT;
-            cmd.x = ox + o->x * kx;
-            cmd.y = oy + o->y * ky;
-            cmd.w = o->w * kx;
-            cmd.h = o->h * ky;
-            cmd.fill = mul_alpha(o->color, alpha);
-            /* canvas 阴影(fillRect 专用; alpha=0 的 shadowColor 自然关闸):
-               偏移/模糊随盒缩放各轴均档 —— 与引擎 RECT shadow 同一口径 */
-            if (o->shadow) {
-                cmd.shadow = 1;
-                cmd.shadow_color = mul_alpha(o->sh_color, alpha);
-                cmd.shadow_ox = o->sh_ox * ks;
-                cmd.shadow_oy = o->sh_oy * ks;
-                cmd.shadow_blur = o->sh_blur * ks;
-            }
-            if ((cmd.fill & 0xFFu) == 0 && !cmd.shadow) continue;
-            if (cmd.w <= 0 || cmd.h <= 0) continue;
-            push_cmd(c, &cmd);
-            break;
-        }
-        case HN_CV_STROKE_PATH: {
-            float hw = o->stroke_w * ks * 0.5f;
-            canvas_stroke_polyline(c, o, hw, ox, oy, kx, ky, alpha);
-            if (o->cap_round) {
-                for (int p2 = 0; p2 < o->n_pts; p2++) {
-                    /* 圆头颜色取该顶点处的渐变色(描边渐变的分段近似同款) */
-                    hn_color dc = ledger_grad_color(o, ledger_grad_t(o, o->pts[p2 * 2],
-                                                                     o->pts[p2 * 2 + 1]));
-                    canvas_cap_dot(c, ox + o->pts[p2 * 2] * kx,
-                                   oy + o->pts[p2 * 2 + 1] * ky, hw, dc, alpha);
-                }
-            }
-            break;
-        }
-        case HN_CV_FILL_PATH: {
-            if (o->n_pts < 3 || (o->color & 0xFFu) == 0) break;
-            float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
-            if (!poly) break;
-            for (int p2 = 0; p2 < o->n_pts; p2++) {
-                poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
-                poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
-            }
-            cmd.kind = HN_CMD_POLYGON;
-            cmd.poly = poly;
-            cmd.poly_n = o->n_pts;
-            cmd.fill = mul_alpha(o->color, alpha);
-            push_cmd(c, &cmd);
-            break;
-        }
-        case HN_CV_GRAD_RECT: {
-            cmd.kind = HN_CMD_RECT;
-            cmd.x = ox + o->x * kx;
-            cmd.y = oy + o->y * ky;
-            cmd.w = o->w * kx;
-            cmd.h = o->h * ky;
-            /* 显式渐变(canvas createLinearGradient/createRadialGradient 口径):
-               轴/圆参数为绝对坐标, 不走 CSS 盒+角度模型 —— 双 stop 起即为
-               逐像素精确口径, 多 stop 由 stops 数组分段线性。 */
-            canvas_emit_grad(c, &cmd, o, ox, oy, kx, ky, ks, alpha);
-            if ((cmd.fill & 0xFFu) == 0 && !cmd.shadow) continue;
-            if (cmd.w <= 0 || cmd.h <= 0) continue;
-            if (o->shadow) {
-                cmd.shadow = 1;
-                cmd.shadow_color = mul_alpha(o->sh_color, alpha);
-                cmd.shadow_ox = o->sh_ox * ks;
-                cmd.shadow_oy = o->sh_oy * ks;
-                cmd.shadow_blur = o->sh_blur * ks;
-            }
-            push_cmd(c, &cmd);
-            break;
-        }
-        case HN_CV_GRAD_PATH: {
-            /* fill() 遇渐变: 闭合多边形带显式渐变填充(不再回落纯色)。
-               POLYGON 逐像素求渐变(hnsoft)或 pattern 填充(cairo)。 */
-            if (o->n_pts < 3) break;
-            float *poly = (float *)hn_arena_alloc(c->tmp, sizeof(float) * (size_t)o->n_pts * 2);
-            if (!poly) break;
-            for (int p2 = 0; p2 < o->n_pts; p2++) {
-                poly[p2 * 2] = ox + o->pts[p2 * 2] * kx;
-                poly[p2 * 2 + 1] = oy + o->pts[p2 * 2 + 1] * ky;
-            }
-            cmd.kind = HN_CMD_POLYGON;
-            cmd.poly = poly;
-            cmd.poly_n = o->n_pts;
-            canvas_emit_grad(c, &cmd, o, ox, oy, kx, ky, ks, alpha);
-            if ((cmd.fill & 0xFFu) == 0) break;   /* alpha 门禁看首 stop */
-            push_cmd(c, &cmd);
-            break;
-        }
-        case HN_CV_CLEAR_RECT:
-            cmd.kind = HN_CMD_CLEAR_RECT;
-            cmd.x = ox + o->x * kx;
-            cmd.y = oy + o->y * ky;
-            cmd.w = o->w * kx;
-            cmd.h = o->h * ky;
-            push_cmd(c, &cmd);
-            break;
-        case HN_CV_CLIP_PUSH:
-            cmd.kind = HN_CMD_CLIP_PUSH;
-            cmd.x = ox + o->x * kx;
-            cmd.y = oy + o->y * ky;
-            cmd.w = o->w * kx;
-            cmd.h = o->h * ky;
-            push_cmd(c, &cmd);
-            break;
-        case HN_CV_CLIP_POP:
-            cmd.kind = HN_CMD_CLIP_POP;
-            push_cmd(c, &cmd);
-            break;
-        case HN_CV_TEXT: {
-            if ((o->color & 0xFFu) == 0 || !o->str) break;
-            /* 文本串复制进 tmp 区(生命周期 = 显示列表) */
-            size_t sl = strlen(o->str);
-            char *ts = (char *)hn_arena_alloc(c->tmp, sl + 1);
-            if (!ts) break;
-            memcpy(ts, o->str, sl + 1);
-            cmd.kind = HN_CMD_TEXT;
-            cmd.text = ts;
-            cmd.text_len = sl;
-            cmd.tx = ox + o->x * kx;
-            cmd.baseline = oy + o->y * ky;
-            cmd.font.size_px = o->font_px * ky;
-            cmd.font.weight = st->font_weight;
-            cmd.font.italic = st->font_italic;
-            cmd.font.letter_spacing = st->letter_spacing;
-            cmd.font.family = st->font_family;
-            cmd.fill = mul_alpha(o->color, alpha);
-            push_cmd(c, &cmd);
-            break;
-        }
-        case HN_CV_IMAGE: {
-            if (!o->str || !o->str[0]) break;
-            size_t sl = strlen(o->str);
-            char *ts = (char *)hn_arena_alloc(c->tmp, sl + 1);
-            if (!ts) break;
-            memcpy(ts, o->str, sl + 1);
-            cmd.kind = HN_CMD_IMAGE;
-            cmd.text = ts;
-            cmd.text_len = sl;
-            cmd.x = ox + o->x * kx;
-            cmd.y = oy + o->y * ky;
-            cmd.w = o->w * kx;
-            cmd.h = o->h * ky;
-            push_cmd(c, &cmd);
-            break;
-        }
-        }
-    }
+    canvas_emit_ledger(c, l, st, ox, oy, kx, ky, ks, alpha);
+
 
     hn_cmd cpo;
     memset(&cpo, 0, sizeof(cpo));
     cpo.kind = HN_CMD_CLIP_POP;
     push_cmd(c, &cpo);
+}
+
+/* ---------------- getImageData: 账本离屏栅格化 ----------------
+ * 账本是 op 流而非位图 —— "读像素"实现为把当前账本按 canvas 属性坐标
+ * 1:1 重放成一张**临时显示列表**, 交渲染后端出 RGBA8 非预乘(与画布在
+ * 页面上的呈现同一重放路径, 含 pattern/pdata/混合模式)。
+ *
+ * 依赖缝: 核心构建目标(如 include_probe)不链 hnsoft —— 引擎核心不得
+ * 硬依赖渲染后端, 渲染函数由**运行时侧注入**(hn_paint_set_ledger_raster,
+ * rt 层 open 时注入 hnsoft_render); 未注入 = 像素出口如实不可用
+ * (hn_canvas_get_image_data 返回 0)。实现: 换入临时 cmds 数组 →
+ * canvas_emit_ledger(恒等映射) → 注入的渲染器 → 恢复原列表。单线程
+ * 渲染管线, 期间不重入; 临时列表用完即 free, c->dl 视图原样归还。 */
+static hn_paint_render_fn g_ledger_render = NULL;
+
+void hn_paint_set_ledger_raster(hn_paint_render_fn fn) {
+    g_ledger_render = fn;
+}
+
+unsigned char *hn_paint_raster_ledger(hn_context *c, hn_canvas_ledger *l,
+                                      float cw, float ch) {
+    if (!c || !l || l->n_ops <= 0 || !g_ledger_render) return NULL;
+    if (!(cw >= 1.0f) || !(ch >= 1.0f)) return NULL;     /* NaN/0/负: 拒绝 */
+    int w = (int)cw, h = (int)ch;
+    if ((float)w < cw) w++;
+    if ((float)h < ch) h++;
+    if (w > 8192 || h > 8192) return NULL;               /* 属性尺寸上限防呆 */
+    hn_cmd *sv = c->cmds;
+    int sn = c->n_cmds, sc = c->cap_cmds;
+    hn_display_list sv_dl = c->dl;
+    hn_style def;
+    hn_style_default(&def);
+    c->cmds = NULL; c->n_cmds = 0; c->cap_cmds = 0;
+    canvas_emit_ledger(c, l, &def, 0, 0, 1.0f, 1.0f, 1.0f, 1.0f);
+    hn_display_list dl;
+    dl.cmds = c->cmds;
+    dl.count = c->n_cmds;
+    unsigned char *px = g_ledger_render(&dl, w, h, 0x00000000u);   /* 透明底 */
+    free(c->cmds);
+    c->cmds = sv; c->n_cmds = sn; c->cap_cmds = sc; c->dl = sv_dl;
+    return px;
 }
 
 /* 防御性保护: DOM 结构异常(纵向超深嵌套 / 横向兄弟链成环)时只截断绘制,

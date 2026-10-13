@@ -64,11 +64,36 @@ typedef enum hn_cmd_kind {
     HN_CMD_POLYGON = 7,   /* 任意多边形(矢量路径/Lottie 形状层); 顶点数可变 */
     HN_CMD_MESH = 8,      /* 网格变形贴图(Live2D 类: 顶点网格 + UV 采样源图) */
     HN_CMD_BITMAP = 9,    /* 内存位图(媒体当前帧), 覆盖 rect */
-    HN_CMD_CLEAR_RECT = 10/* 局部清空: rect 内整体填渲染底色(canvas clearRect
+    HN_CMD_CLEAR_RECT = 10,/* 局部清空: rect 内整体填渲染底色(canvas clearRect
                              的局部口径; 全画布 clearRect 在账本侧已退化为
                              清账, 不产生本指令) */
+    HN_CMD_PDATA = 11,    /* putImageData: 内存 RGBA 块按源子矩形(脏矩形裁剪
+                             后)1:1 贴入。独立于 BITMAP 的 kind —— GPU 后端的
+                             可用性检查对未知 kind 如实回退(hn_gpu.c 未消费
+                             isrc 字段, 不许静默画错) */
+    HN_CMD_PATTERN = 12,  /* createPattern 平铺填充: rect(poly==NULL)或闭合
+                             多边形(poly!=NULL)目标 + 平铺模式 pattern_rep */
+    HN_CMD_CLIP_PATH_PUSH = 13 /* 精确路径裁剪入栈: 折线多边形(poly/poly_n,
+                             子路径点数表 clip_segs; 缺省单多边形)。与
+                             CLIP_POP 配对(cairo 侧 = save+clip) */
 
 } hn_cmd_kind;
+
+/* 全局混合模式(canvas globalCompositeOperation 子集; hn_cmd.blend 用)。
+   source-over 缺省; 其余三档的像素公式(hnsoft 逐式实现, cairo 用原生
+   算子映射): multiply = s·d, screen = s+d-s·d, lighter = 预乘加法钳制。
+   未列出的模式引擎侧回落 source-over 并置一次性 stderr 提示。
+   注意: GPU 后端(hn_gpu.c)暂不消费 blend 字段 —— 含混合模式的帧在 GPU
+   宿主上按 source-over 呈现, 软件路径(hnsoft)为权威实现(见 openIssues)。 */
+enum {
+    HN_BLEND_SRC_OVER = 0,
+    HN_BLEND_LIGHTER  = 1,
+    HN_BLEND_MULTIPLY = 2,
+    HN_BLEND_SCREEN   = 3
+};
+
+/* pattern 平铺模式(createPattern 的 repetition; hn_cmd.pattern_rep 用) */
+enum { HN_PAT_REPEAT = 0, HN_PAT_REPEAT_X = 1, HN_PAT_REPEAT_Y = 2, HN_PAT_NONE = 3 };
 
 /* 渐变色标(canvas 2D createLinearGradient/createRadialGradient 的 addColorStop;
    CSS linear-gradient 的多 stop 同用)。数组由引擎临时区分配,
@@ -131,6 +156,24 @@ typedef struct hn_cmd {
     const unsigned char *bitmap;
     int    bitmap_stride, bitmap_w, bitmap_h;
     double bitmap_pts;
+    /* ---- 源子矩形(IMAGE/PDATA 消费; has_isrc=0 时为整图, 行为不变) ----
+       源图像素坐标(sx,sy 起的 sw×sh 子区)贴到目标 rect(9 参 drawImage /
+       putImageData 脏矩形都在记录侧裁好装进这里)。 */
+    float isx, isy, isw, ish;
+    unsigned char has_isrc;
+    /* ---- 每指令混合模式(HN_BLEND_*; 缺省 0 = source-over) ----
+       软件光栅器逐像素消费; cairo 按 hn_blend_cairo 映射原生算子。 */
+    unsigned char blend;
+    /* PATTERN: 平铺模式 0=repeat 1=repeat-x 2=repeat-y 3=no-repeat;
+       (pat_ox,pat_oy) = 图案锚点 = 画布原点在页面设备坐标的位置
+       (canvas pattern space 锚定画布原点, 不随 fillRect 位置平移;
+       paint 端按 (像素-锚点)/scale 取样)。 */
+    unsigned char pattern_rep;
+    float pat_ox, pat_oy;
+    /* CLIP_PATH_PUSH: 子路径点数表(每条子路径的顶点数; NULL = 单多边形,
+       即 poly_n 全部顶点)。数组指向账本 op(segs), 生命周期同显示列表。 */
+    const int *clip_segs;
+    int        clip_nsegs;
 } hn_cmd;
 
 typedef struct hn_display_list {
@@ -716,6 +759,14 @@ int  hn_canvas_overflow(hn_context *c, const char *canvas_id);
    同一字体/同一字形 advance 口径); 无后端构建回退 字节数×字号×0.55
    (与引擎无后端的排版估算同口径)。 */
 float hn_canvas_measure(hn_context *c, float size_px, const char *utf8, size_t len);
+
+/* getImageData 的数据出口: 把该画布当前账本**离屏栅格化**(canvas 属性
+   坐标系, 透明底)并裁出 (x,y,w,h) 子区, 返回 malloc 的 RGBA8 **非预乘**
+   缓冲(标准 Canvas ImageData 口径; 调用方 free)。越界部分补透明黑
+   (浏览器同口径); 账本不存在 / 尺寸非法返回 0 且 *out = NULL。 */
+int hn_canvas_get_image_data(hn_context *c, const char *canvas_id,
+                             int x, int y, int w, int h,
+                             unsigned char **out, int *out_w, int *out_h);
 
 #ifdef __cplusplus
 }

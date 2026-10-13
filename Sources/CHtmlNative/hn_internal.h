@@ -492,9 +492,27 @@ typedef enum {
     HN_CV_CLIP_PUSH,       /* clip: 矩形裁剪入栈(x,y,w,h) */
     HN_CV_CLIP_POP,        /* cpop: 裁剪出栈(JS save/restore 栈配平) */
     HN_CV_TEXT,            /* text: str 在 (x, y) 基线处, 字号 font_px + color */
-    HN_CV_IMAGE,           /* image: src 图片画到 (x,y,w,h) */
-    HN_CV_CLEAR_RECT       /* clear_rect: 局部清空(x,y,w,h; 绘制期填渲染底色) */
+    HN_CV_IMAGE,           /* image: src 图片画到 (x,y,w,h); has_src 时按
+                              源子矩形 (sx,sy,sw,sh) 贴出(9 参 drawImage) */
+    HN_CV_CLEAR_RECT,      /* clear_rect: 局部清空(x,y,w,h; 绘制期填渲染底色) */
+    HN_CV_PDATA,           /* pdata: putImageData —— RGBA 块(pdata/pw/ph,
+                              malloc)贴到 (x,y); has_dirty 时只贴脏矩形
+                              (dtx..dth, 记录侧裁进源子矩形)。块字节上限
+                              HN_CV_PDATA_MAX_BYTES, 超限拒录并置溢出提示 */
+    HN_CV_PATTERN_RECT,    /* prect: createPattern 平铺填充矩形
+                              (str=源图路径, prep=平铺模式, x,y,w=h 目标) */
+    HN_CV_PATTERN_PATH,    /* ppath: createPattern 平铺填充闭合多边形(pts) */
+    HN_CV_CLIP_PATH        /* cpath: 精确路径裁剪入栈(pts 折线多边形;
+                              segs/n_segs = 子路径点数表, 缺省单多边形) */
 } hn_canvas_op_kind;
+
+/* 每块 putImageData 的像素字节上限(单 op 有界化; 超限拒录)。JSON 协议
+   携带像素是十进制数数组, 4MB 块对应 ~16MB 文本 + 解析期 arena —— 语义
+   上限压在这里, 页作者应分块贴(热力图/瓦片本来就是分块的)。 */
+#define HN_CV_PDATA_MAX_BYTES (4u << 20)
+
+/* 平铺模式枚举 HN_PAT_* 在 hn.h(hn_cmd.pattern_rep 是公共字段,
+   光栅后端也要认)。 */
 
 typedef struct hn_canvas_op {
     hn_canvas_op_kind kind;
@@ -515,8 +533,26 @@ typedef struct hn_canvas_op {
     unsigned char shadow;
     hn_color sh_color;
     float sh_ox, sh_oy, sh_blur;
-    char  *str;            /* text 文本 / image 路径(malloc 副本) */
+    /* 每指令混合模式(HN_BLEND_*; globalCompositeOperation 子集)。
+       所有落账 op 共带: 未列出的模式解析期回落 source-over 并提示一次。 */
+    unsigned char blend;
+    /* image 的源子矩形(9 参 drawImage); has_src=0 = 整图(3/5 参不变) */
+    float sx, sy, sw, sh;
+    unsigned char has_src;
+    /* pdata 的 RGBA 块(非预乘, pw*4 紧排; malloc, op_free 释放) */
+    unsigned char *pdata;
+    int pw, ph;
+    /* pdata 的脏矩形(canvas 原语: 只贴块内 (dtx,dty,dw,dh) 子区) */
+    float dtx, dty, dtw, dth;
+    unsigned char has_dirty;
+    /* cpath 的子路径点数表(每条子路径顶点数; NULL = pts 是单多边形)。
+       malloc 数组, op_free 释放; 生命周期同 op(显示列表重放读它)。 */
+    int *segs;
+    int n_segs;
+    char  *str;            /* text 文本 / image·pattern 源路径(malloc 副本) */
     float font_px;
+    /* pattern 的平铺模式(HN_PAT_*; prect/ppath 消费) */
+    unsigned char prep;
 } hn_canvas_op;
 
 typedef struct hn_canvas_ledger {
@@ -534,6 +570,18 @@ hn_canvas_ledger *hn_canvas_ledger_find(hn_context *c, const char *id);
 hn_canvas_ledger *hn_canvas_ledger_get(hn_context *c, const char *id);
 /* 释放全部账本(文档替换 = 元素销毁 / context 销毁时调) */
 void hn_canvas_dispose(hn_context *c);
+
+/* getImageData 的栅格化核心(hn_paint.c 实现 —— 账本重放是它的地盘):
+   把账本按 canvas 属性坐标 1:1 重放到一张临时显示列表, 交注入的渲染
+   后端渲成 w×h 的 RGBA8 非预乘位图(malloc, 调用方 free)。失败返回 NULL。 */
+unsigned char *hn_paint_raster_ledger(hn_context *c, hn_canvas_ledger *l,
+                                      float cw, float ch);
+/* 依赖缝: 核心不硬链渲染后端 —— 运行时侧(rt, 已链 hnsoft)open 时注入
+   渲染函数(hnsoft_render); 核心专属构建(include_probe 等, 无 hnsoft)
+   不注入 = getImageData 的像素出口如实不可用。 */
+typedef unsigned char *(*hn_paint_render_fn)(const hn_display_list *, int, int,
+                                             hn_color);
+void hn_paint_set_ledger_raster(hn_paint_render_fn fn);
 
 /* ---------- context ---------- */
 struct hn_context {
