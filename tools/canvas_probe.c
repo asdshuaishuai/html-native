@@ -9,6 +9,9 @@
  *   4. 像素采样: hnsoft 位图中心像素 = 所填颜色(BGRA 预乘)
  *   5. 补全特性: radial/多 stop 渐变、fill() 带渐变、clearRect 局部、
  *      曲线折线化、measureText、lineDash、textAlign/Baseline
+ *   6. 账本有界化: 满幅不透明 fillRect 视同清账(新帧语义) —— op 数稳态
+ *      有界、半透明/渐变/裁剪中不满幅不清、clearRect 后再满幅正常、
+ *      半像素容差边界(详见 hn_canvas.c 的 frect_frame_reset)。
  *
  * 用法(py 薄封装编好即跑; 手工编译见 tools/canvas_probe.py):
  *   bash tools/tools/canvas_probe.sh
@@ -48,6 +51,12 @@ static void check_near(float got, float want, float tol, const char *label) {
     if (ok) g_pass++; else g_fail++;
 }
 
+/* C 直录薄封装(hn_canvas_record 的 strlen 口径; 与 JS 桥 hnCanvas2D
+   同一条生产落账路径 —— 有界化探针全部走这里) */
+static int rec_op(hn_context *c, const char *json) {
+    return hn_canvas_record(c, json, strlen(json));
+}
+
 /* ---- 探针文档: 十二块 200x120 画布纵向排开(body margin 0, display:block)
  *  各画布盒子(绝对坐标, 由布局保证):
  *   cv  (0,0)     CTM + fillRect          cv2  (0,120)  折线路径 fill
@@ -55,7 +64,12 @@ static void check_near(float got, float want, float tol, const char *label) {
  *   cv5 (0,480)   fillText                cv6  (0,600)  留空(C 直录路径用)
  *   cv7 (0,720)   bezier/quadratic 曲线   cv8  (0,840)  radial 渐变
  *   cv9 (0,960)   多 stop 线性渐变        cv10 (0,1080) fill() 带渐变(gpath)
- *   cv11(0,1200)  clearRect 局部清空      cv12 (0,1320) lineDash + textAlign */
+ *   cv11(0,1200)  clearRect 局部清空      cv12 (0,1320) lineDash + textAlign
+ *  追加五块**无脚本**画布(有界化探针用, 全经 hn_canvas_record 直录,
+ *  与 JS 桥同一条落账路径; 无脚本 → 首帧渲染时无账本, 不扰动前 95 断言):
+ *   cvf (0,1440)  满幅不透明 frect ×N 新帧语义   cvh (0,1560) 半透明满幅不清
+ *   cvg (0,1680)  渐变满幅不清                   cvc (0,1800) clip 中满幅不清
+ *   cvf2(0,1920)  clearRect 后再满幅 + 容差边界 */
 static const char *DOC_HTML =
 "<html><head><style>body{margin:0}canvas{display:block}</style></head>"
 "<body>"
@@ -71,6 +85,12 @@ static const char *DOC_HTML =
 "<canvas id=\"cv10\" width=\"200\" height=\"120\"></canvas>"
 "<canvas id=\"cv11\" width=\"200\" height=\"120\"></canvas>"
 "<canvas id=\"cv12\" width=\"200\" height=\"120\"></canvas>"
+/* 有界化探针画布: 无脚本(C 直录驱动), 排在 cv12 之下 */
+"<canvas id=\"cvf\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvh\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvg\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvc\" width=\"200\" height=\"120\"></canvas>"
+"<canvas id=\"cvf2\" width=\"200\" height=\"120\"></canvas>"
 "<script>\n"
 "var ctx = hnGet2D('cv');\n"
 "ctx.translate(10, 5);\n"
@@ -203,7 +223,9 @@ static int pix_b(int x, int y) { return g_px[((long)y * g_w + x) * 4]; }
 int main(void) {
     printf("canvas_probe — <canvas> 2D 账本全链路(脚本自动执行→落账→重放→位图)\n\n");
 
-    hn_rt_desc d = { "canvas-probe", DOC_HTML, strlen(DOC_HTML), NULL, 0, 640, 1440 };
+    /* 窗口 640x2040: 原十二块画布(0..1440)像素锚逐值不动, 其下再排五块
+       200x120 无脚本画布(cvf..cvf2, 1440..2040)给有界化探针用 */
+    hn_rt_desc d = { "canvas-probe", DOC_HTML, strlen(DOC_HTML), NULL, 0, 640, 2040 };
     hn_rt *rt = hn_rt_open(&d);
     check(rt != NULL, "hn_rt_open 成功(文档 + 内联 <script> 自动执行)");
     if (!rt) return 1;
@@ -547,6 +569,122 @@ int main(void) {
     check(mmx > 40 && mmx < 100, "textAlign=center 锚点左移(100 - 宽/2)");
     check_near(tbx, 150, 0.01f, "textAlign=left 锚点不平移");
     check_near(tbl, 1436, 3.0f, "textBaseline=top 基线 = 100+0.8×20 + 盒 1320");
+
+    /* == 15. 账本有界化: 满幅不透明 fillRect 视同清账(新帧语义) ==
+       画布盒: cvf(0,1440) cvh(0,1560) cvg(0,1680) cvc(0,1800) cvf2(0,1920),
+       属性 200x120 与盒 1:1 → 账本坐标 + (0,盒y) = 位图坐标。全部经
+       hn_canvas_record 直录(与 JS 桥 hnCanvas2D 同一条生产落账路径)。 */
+    printf("== 账本有界化(满幅不透明 fillRect = 新的一帧) ==\n");
+    {
+        char b[192];
+        /* -- cvf: 200 帧"满幅不透明盖底 + 小方块"(canvas 动画惯用法) --
+           末帧底色 #102030、方块 (150,60) 10x10 #ff00ff 固定 → 末态像素可锚;
+           前 199 帧底色 #224466、方块 8x8 游走(确定性, 无随机数)。 */
+        for (int i = 0; i < 200; i++) {
+            int last = (i == 199);
+            int n = snprintf(b, sizeof(b),
+                "{\"cv\":\"cvf\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+                "\"col\":%u}", last ? 0x102030FFu : 0x224466FFu);
+            hn_canvas_record(c, b, (size_t)n);
+            n = snprintf(b, sizeof(b),
+                "{\"cv\":\"cvf\",\"op\":\"frect\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
+                "\"col\":%u}",
+                last ? 150 : (i * 13) % 170 + 10,
+                last ? 60 : (i * 7) % 90 + 15,
+                last ? 10 : 8, last ? 10 : 8,
+                last ? 0xFF00FFFFu : 0xFF8800FFu);
+            hn_canvas_record(c, b, (size_t)n);
+        }
+        check_int(hn_canvas_count(c, "cvf"), 2,
+                  "200 帧满幅盖底: 账本稳态 2 op(底色 + 小方块), 非 400");
+        check_int(hn_canvas_overflow(c, "cvf"), 0, "cvf 未溢出(有界化生效)");
+        check(hn_rt_reflow(rt) == 1, "重排版+重光栅(cvf 落账后)");
+        dl = hn_context_display_list(c);
+        g_px = hn_rt_pixels(rt);
+        check(g_px != NULL, "重光栅位图就绪");
+        if (g_px) {
+            g_w = hn_rt_width(rt);
+            check(pix_r(155, 1505) == 0xFF && pix_g(155, 1505) == 0x00 &&
+                  pix_b(155, 1505) == 0xFF, "末态像素: 末帧小方块(150,60)=#ff00ff 在");
+            check(pix_r(10, 1450) == 0x10 && pix_g(10, 1450) == 0x20 &&
+                  pix_b(10, 1450) == 0x30, "末态像素: 底色 = 最后一次填充 #102030");
+            check(pix_r(14, 1459) == 0x10 && pix_g(14, 1459) == 0x20 &&
+                  pix_b(14, 1459) == 0x30,
+                  "末态像素: 第 0 帧小方块(10,15)已被替换(历史不残留)");
+        }
+        /* -- cvf 再 2000 帧: op 数仍 2 —— 账本内存/重放成本不随帧数线性涨 -- */
+        for (int i = 0; i < 2000; i++) {
+            int n = snprintf(b, sizeof(b),
+                "{\"cv\":\"cvf\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+                "\"col\":%u}", 0x224466FFu);
+            hn_canvas_record(c, b, (size_t)n);
+            n = snprintf(b, sizeof(b),
+                "{\"cv\":\"cvf\",\"op\":\"frect\",\"x\":%d,\"y\":8,\"w\":8,\"h\":8,"
+                "\"col\":%u}", (i * 13) % 170 + 10, 0xFF8800FFu);
+            hn_canvas_record(c, b, (size_t)n);
+        }
+        check_int(hn_canvas_count(c, "cvf"), 2, "再 2000 帧: 账本仍 2 op(内存占用有界)");
+
+        /* -- cvh: 半透明满幅(alpha 128)×120: 不清账(视觉上混合历史而非替换) -- */
+        for (int i = 0; i < 120; i++) {
+            int n = snprintf(b, sizeof(b),
+                "{\"cv\":\"cvh\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+                "\"col\":%u}", 0x22446680u);
+            hn_canvas_record(c, b, (size_t)n);
+        }
+        rec_op(c, "{\"cv\":\"cvh\",\"op\":\"frect\",\"x\":10,\"y\":10,\"w\":8,\"h\":8,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvh"), 121, "半透明满幅 ×120: 不清账(退回逐条落账)");
+        check_int(hn_canvas_overflow(c, "cvh"), 0, "cvh 未溢出(121 < 4096 上限)");
+
+        /* -- cvg: 渐变满幅(grect 盖全画布)×120: 不清账(渐变可带透明 stop) -- */
+        for (int i = 0; i < 120; i++) {
+            int n = snprintf(b, sizeof(b),
+                "{\"cv\":\"cvg\",\"op\":\"grect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+                "\"x0\":0,\"y0\":0,\"x1\":200,\"y1\":120,\"c0\":%u,\"c1\":%u}",
+                0xFF0000FFu, 0x0000FFFFu);
+            hn_canvas_record(c, b, (size_t)n);
+        }
+        rec_op(c, "{\"cv\":\"cvg\",\"op\":\"frect\",\"x\":10,\"y\":10,\"w\":8,\"h\":8,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvg"), 121, "渐变满幅 ×120: 不清账(退回逐条落账)");
+
+        /* -- cvc: clip 激活下满幅不清账; cpop 配平后恢复"新帧"语义 -- */
+        rec_op(c, "{\"cv\":\"cvc\",\"op\":\"clip\",\"x\":10,\"y\":10,\"w\":50,\"h\":50}");
+        rec_op(c, "{\"cv\":\"cvc\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvc"), 2, "clip 激活下的满幅 frect 不清账(第 1 条)");
+        rec_op(c, "{\"cv\":\"cvc\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvc"), 3, "clip 激活下的满幅 frect 不清账(第 2 条)");
+        rec_op(c, "{\"cv\":\"cvc\",\"op\":\"cpop\"}");
+        rec_op(c, "{\"cv\":\"cvc\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvc"), 1, "cpop 配平后满幅 frect = 新帧(清账, 仅余底色)");
+        rec_op(c, "{\"cv\":\"cvc\",\"op\":\"frect\",\"x\":10,\"y\":10,\"w\":8,\"h\":8,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvc"), 2, "新帧之上正常追加增量 op");
+
+        /* -- cvf2: 全幅 clearRect 后再满幅(衔接既有清账口径) + 半像素容差 -- */
+        rec_op(c, "{\"cv\":\"cvf2\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+               "\"col\":4278255615}");
+        rec_op(c, "{\"cv\":\"cvf2\",\"op\":\"frect\",\"x\":10,\"y\":10,\"w\":8,\"h\":8,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvf2"), 2, "cvf2: 底色 + 增量(新帧语义下的普通两笔)");
+        rec_op(c, "{\"cv\":\"cvf2\",\"op\":\"clear_rect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120}");
+        check_int(hn_canvas_count(c, "cvf2"), 0, "全幅 clearRect 清账(既有口径不变)");
+        rec_op(c, "{\"cv\":\"cvf2\",\"op\":\"frect\",\"x\":0,\"y\":0,\"w\":200,\"h\":120,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvf2"), 1, "clearRect 后再满幅: 正常落账为新底");
+        rec_op(c, "{\"cv\":\"cvf2\",\"op\":\"frect\",\"x\":0.6,\"y\":0,\"w\":200,\"h\":120,"
+               "\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvf2"), 2,
+                  "x=0.6 欠覆盖 > 半像素容差: 不清账(逐条落账)");
+        rec_op(c, "{\"cv\":\"cvf2\",\"op\":\"frect\",\"x\":-0.4,\"y\":-0.4,\"w\":200.5,"
+               "\"h\":120.5,\"col\":4278255615}");
+        check_int(hn_canvas_count(c, "cvf2"), 1,
+                  "欠覆盖 ≤ 半像素容差(-0.4/出血 0.5): 视为满幅, 清账");
+    }
 
     hn_rt_close(rt);
 

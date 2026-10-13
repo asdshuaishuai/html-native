@@ -20,7 +20,12 @@
 #      治理后 4Hz 醒来, 应近 0; 阈值放宽到 5% 容采样抖动);
 #   ④⑤ media-demo / canvas-demo 6s: 交互 16ms 全路径 + 图层合成两页的
 #      同口径 CPU/RSS(信息值);
-#   ⑥ 打印四页对照表(写明采样窗口); 收口纪律同 media_window_probe
+#   ⑥ 分配 churn 实证(pet 12s, HN_ALLOC_TRACE=1): rt 渲染管线曾每帧
+#      malloc+free 两张全页位图(hnsoft RGBA + 预乘 BGRA); 治理后两缓冲
+#      只增不减持久复用, rt_raster 每 300 帧打一行 [alloc-trace] new=N。
+#      硬断言: Σnew ≤ 200/窗(治理前 ~2.0/帧)+ RSS 三点采样无增长趋势
+#      (<10MB);
+#   ⑦ 打印四页对照表(写明采样窗口); 收口纪律同 media_window_probe
 #      (exec 让 $! 即 hnapp 本体 + trap 按"探针特有参数"扫尾)。
 #
 # 用法: bash tools/perf_probe.sh [dist_dir]
@@ -77,7 +82,7 @@ sample_cpu() {
 # 后台 exec 起真窗; 起步 1s(启动+首帧)后取**累计 CPU 时间**差(ps -o time,
 # 本进程的精确记账, 不受整机负载/调度噪声污染 —— %cpu 衰减均值在共享
 # 开发机上会把空闲页都吹到两位数, 不能做断言依据), 途中顺带采 3 次
-# %CPU 作花絮。
+# %CPU 作花絮; RSS 采**三点**(1s/中段/收尾)供"无增长趋势"断言(⑥)。
 run_window() {
     local html="$1" secs="$2"
     local log="$SBX/win-$$.log"
@@ -92,20 +97,23 @@ run_window() {
     sleep 2; s2=$(sample_cpu "$pid")
     local remain=$((secs - 3))
     [ "$remain" -lt 2 ] && remain=2
-    sleep "$remain"; s3=$(sample_cpu "$pid")
+    local half=$((remain / 2))
+    sleep "$half"
+    local rm=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
+    sleep $((remain - half)); s3=$(sample_cpu "$pid")
     local t1=$(ps -o time= -p "$pid" 2>/dev/null | tr -d ' ')
     local r1=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     PIDS="${PIDS%% $pid}"   # 已收口, 免 trap 重复 kill
     PIDS="${PIDS# }"
-    # CPU% = CPU 时间差 / 墙钟 ×100(bash 无浮点, 交给 awk); RSS 取暖机后/收尾两点
-    CPU_OUT=$(awk -v a="$t0" -v b="$t1" -v r0="$r0" -v r1="$r1" -v s1="$s1" -v s2="$s2" -v s3="$s3" -v w="$secs" '
+    # CPU% = CPU 时间差 / 墙钟 ×100(bash 无浮点, 交给 awk); RSS 取三点趋势
+    CPU_OUT=$(awk -v a="$t0" -v b="$t1" -v r0="$r0" -v rm="$rm" -v r1="$r1" -v s1="$s1" -v s2="$s2" -v s3="$s3" -v w="$secs" '
       function secs(t) { if (t == "" || index(t, ":") == 0) return -1
         n = split(t, p, ":"); return p[n-1] * 60 + p[n] }
       BEGIN { c0 = secs(a); c1 = secs(b)
         if (c0 < 0 || c1 < 0) printf "avg=-1.0 samples=%s/%s/%s rss=?MB", s1, s2, s3
         else { d = c1 - c0; if (d < 0) d = 0
-          printf "avg=%.1f cpu=%.2fs samples=%s/%s/%s rss=%d->%dMB", d * 100 / w, d, s1, s2, s3, r0 / 1024, r1 / 1024 } }')
+          printf "avg=%.1f cpu=%.2fs samples=%s/%s/%s rss=%d->%d->%dMB", d * 100 / w, d, s1, s2, s3, r0 / 1024, rm / 1024, r1 / 1024 } }')
     echo "$CPU_OUT"
 }
 
@@ -170,7 +178,41 @@ CNV_R=$(run_window "$ROOT/examples/canvas-demo.html" 6)
 CNV_AVG=$(printf '%s' "$CNV_R" | sed -n 's/.*avg=\([0-9.]*\).*/\1/p')
 echo "| $CNV_R"
 
-# ---------- ⑥ 对照(信息值; 采样窗口 6s 墙钟, CPU=进程 rusage 差分) ----------
+# ---------- ⑥ 分配 churn 实证(pet.html 12s 真窗, HN_ALLOC_TRACE=1) ----------
+# 此前 rt 渲染管线每帧 malloc+free **两张**全页位图(hnsoft RGBA + 预乘
+# BGRA; 360x360 各 ~0.5MB, 920x520 各 ~2MB —— 30fps 即几十~上百 MB/s 的
+# 分配器 churn, 推高 CPU 与内存碎片)。治理后两缓冲均"只增不减"持久复用,
+# rt_raster 在 HN_ALLOC_TRACE=1 时每 300 帧打一行 [alloc-trace] new=N
+# (计数 = fb 位图扩容 + 多边形/字形暖机, 口径见 hnsoft_heap_allocs)。
+# 断言(窗口取 12s: pet 走 ambient 33ms 轻路径 ≈30fps, 10s 只有 ~300 帧
+# 刚好一个打印周期, 12s 保证至少一行落在窗口内):
+#   A(计数差分有界): trace 行 ≥1 且 Σnew ≤ 200(治理前 ~2×帧数, 同窗
+#     ≥700; 治理后只有暖机扩容+新字形, 实测 ~54);
+#   B(RSS 无增长趋势): 三点采样的尾点-首点 < 10MB。
+printf '  ⑥ pet.html 12s 分配 churn(HN_ALLOC_TRACE=1) ... '
+export HN_ALLOC_TRACE=1
+CHURN_R=$(run_window "$PET" 12)
+unset HN_ALLOC_TRACE
+echo "| $CHURN_R"
+cp "$SBX/win-$$.log" "$SBX/churn.log" 2>/dev/null
+TRACE_LINES=$(grep -c 'alloc-trace' "$SBX/churn.log" 2>/dev/null)
+TRACE_NEWS=$(grep 'alloc-trace' "$SBX/churn.log" 2>/dev/null | sed -n 's/.*new=\([0-9]*\).*/\1/p')
+NEW_SUM=$(printf '%s\n' "$TRACE_NEWS" | awk '{s+=$1} END {print s+0}')
+LAST_NEW=$(printf '%s\n' "$TRACE_NEWS" | tail -1)
+RSS1=$(printf '%s' "$CHURN_R" | sed -n 's/.*rss=\([0-9]*\)->.*/\1/p')
+RSS3=$(printf '%s' "$CHURN_R" | sed -n 's/.*->\([0-9]*\)MB$/\1/p')
+CHURN_A=0
+if [ "${TRACE_LINES:-0}" -ge 1 ] && [ "${NEW_SUM:-0}" -le 200 ]; then CHURN_A=1; fi
+ck "⑥ alloc-trace 差分有界(${TRACE_LINES:-0} 行, Σnew=$NEW_SUM/窗 ≤200; 治理前 ~2.0/帧)" "$CHURN_A"
+CHURN_B=0
+RSS_DIFF="?"
+if [ -n "$RSS1" ] && [ -n "$RSS3" ]; then
+    RSS_DIFF=$((RSS3 - RSS1))
+    [ "$RSS_DIFF" -lt 10240 ] && CHURN_B=1
+fi
+ck "⑥ 12s RSS 无增长趋势(${RSS1:-?}->${RSS3:-?}MB, 差 ${RSS_DIFF}KB < 10MB)" "$CHURN_B"
+
+# ---------- ⑦ 对照(信息值; 采样窗口见各行; CPU=进程 rusage 差分) ----------
 echo "  ----------------------------------------"
 echo "  | 页面                            | %CPU 均值(6s 窗口) |"
 echo "  | pet.html(ambient 33ms 轻路径)   | ${PET_AVG:-?}% |"
@@ -178,6 +220,7 @@ echo "  | media-demo.html(媒体+图层合成)  | ${MED_AVG:-?}% |"
 echo "  | canvas-demo.html(JS+RAF 16ms)   | ${CNV_AVG:-?}% |"
 echo "  | timer-only(250ms 上限节拍)      | ${TMR_AVG:-?}% |"
 echo "  | img cache: hit=${C_HIT:-?} miss=${C_MISS:-?} evict=${C_EVICT:-?} bytes=${C_BYTES:-?} |"
+echo "  | alloc churn(12s 窗): Σnew=${NEW_SUM:-?} trace_lines=${TRACE_LINES:-?} RSS=${RSS1:-?}->${RSS3:-?}MB |"
 echo "  | 环境钮: HN_ANIM_FPS=${HN_ANIM_FPS:-30}(16/30/60) |"
 echo "  | 硬节拍口径见 timer_probe.c §6/§8(bash tools/timer_probe.sh) |"
 

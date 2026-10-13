@@ -42,6 +42,11 @@ struct hn_rt {
                                    时离屏/shot 路径与旧版逐位一致) */
     int transparent;
     unsigned char *bgra;        /* 预乘 BGRA(平台 blit 的直接输入) */
+    size_t bgra_cap;            /* bgra 容量(字节; **只增不减**复用 —— 每帧
+                                   换算写满全图, 免掉稳态帧的 malloc/free churn) */
+    unsigned char *soft_buf;    /* hnsoft RGBA 复用缓冲(hnsoft_render_reuse_
+                                   scaled 的 slot; 归 rt 持有, 只增不减) */
+    int soft_cap;               /* soft_buf 容量(字节; 0 = 未分配) */
     hn_node *hover;
     hn_node *focus;
     char id[128];              /* store 隔离键 */
@@ -743,6 +748,26 @@ void hn_rt_set_gpu_host(const void *host) { hn_gpu_set_host(host); }
    产出**预乘 BGRA**(与下方 CPU 路径 "RGBA 非预乘 → 预乘 BGRA" 的换算产物
    同口径, blit 语义一致); 表缺席/init 失败/指令不支持/任一步失败 → 静默
    落回 hnsoft —— 回退是**逐帧**的(同一会话里 GPU 帧与 CPU 帧可自由穿插)。 */
+/* HN_ALLOC_TRACE=1: 分配 churn 实证(每 300 帧 ~2MB 级全页缓冲的堆分配
+   差分)。计数口径 = hnsoft 热路径(fb 位图/多边形/字形)+ 本文件 bgra
+   缓冲的分配/扩容; 治理前稳态 ≈2.0/帧(fb 一次 + bgra 一次), 治理后
+   ≈0/帧(只剩暖机扩容)—— perf_probe 断言"差分有界"。getenv 只读一次。 */
+static long g_rt_allocs = 0;
+
+static void alloc_trace_tick(void) {
+    static int frames = 0, on = -1;
+    static long last = 0;
+    if (on < 0) on = getenv("HN_ALLOC_TRACE") ? 1 : 0;
+    if (!on) return;
+    frames++;
+    if (frames % 300) return;
+    long cur = hnsoft_heap_allocs() + g_rt_allocs;
+    fprintf(stderr, "[alloc-trace] frames=%d new=%ld (%.3f/帧)\n",
+            frames, cur - last, (double)(cur - last) / 300.0);
+    fflush(stderr);
+    last = cur;
+}
+
 static int rt_raster(hn_rt *rt) {
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
@@ -752,22 +777,37 @@ static int rt_raster(hn_rt *rt) {
     unsigned char *bgra = NULL;
     if (hn_gpu_available(dl))
         hn_gpu_render_scaled(dl, bw, bh, bg, scale, &bgra);
-    if (!bgra) {
-        unsigned char *rgba = hnsoft_render_scaled(dl, bw, bh, bg, scale);
+    if (bgra) {
+        /* GPU 产出直接接管(旧口径; GPU 是显式选配路径, 不在本 churn 治理
+           面 —— CPU 稳态不走此支)。 */
+        free(rt->bgra);
+        rt->bgra = bgra;
+        rt->bgra_cap = (size_t)bw * (size_t)bh * 4;
+    } else {
+        /* CPU 路径(稳态): RGBA 走**复用缓冲**(hnsoft_render_reuse_scaled,
+           slot 由 rt 持有、只增不减), BGRA 走 rt 的持久缓冲(同样只增不减)
+           —— 治理前这里每帧 malloc+free 两张全页位图(920x520 下 ~2MB ×
+           帧率的分配器 churn), 现在只有窗口首次出图/放大时扩容一次。 */
+        unsigned char *rgba = hnsoft_render_reuse_scaled(dl, bw, bh, bg, scale,
+                                                         &rt->soft_buf, &rt->soft_cap);
         if (!rgba) return 0;
+        size_t need = (size_t)bw * (size_t)bh * 4;
+        if (!rt->bgra || need > rt->bgra_cap) {
+            unsigned char *nb = (unsigned char *)realloc(rt->bgra, need);
+            if (!nb) return 0;   /* 旧 bgra 原地保留(与旧 OOM 口径一致: 上一帧像素仍可 blit) */
+            rt->bgra = nb;
+            rt->bgra_cap = need;
+            g_rt_allocs++;
+        }
         int n = bw * bh;
-        bgra = (unsigned char *)malloc((size_t)n * 4);
-        if (!bgra) { free(rgba); return 0; }
         /* RGBA 非预乘 → BGRA 预乘(三平台 blit 的统一约定) */
         for (int i = 0; i < n; i++) {
             unsigned char r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
             if (a != 255) { r = (unsigned char)((r * a) / 255); g = (unsigned char)((g * a) / 255); b = (unsigned char)((b * a) / 255); }
-            bgra[i * 4] = b; bgra[i * 4 + 1] = g; bgra[i * 4 + 2] = r; bgra[i * 4 + 3] = a;
+            rt->bgra[i * 4] = b; rt->bgra[i * 4 + 1] = g; rt->bgra[i * 4 + 2] = r; rt->bgra[i * 4 + 3] = a;
         }
-        free(rgba);
     }
-    free(rt->bgra);
-    rt->bgra = bgra;
+    alloc_trace_tick();
     render_trace(bw, bh, scale);
     return 1;
 }
@@ -1994,6 +2034,7 @@ void hn_rt_close(hn_rt *rt) {
         hn_context_destroy(rt->ctx);
     }
     free(rt->bgra);
+    free(rt->soft_buf);   /* hnsoft 复用缓冲归 rt 持有, 一并归还 */
     free(rt);
 }
 

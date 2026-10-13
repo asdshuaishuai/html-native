@@ -80,6 +80,14 @@ static void blend(unsigned char *px, fcolor c) {
     px[3] = (unsigned char)(oa * 255.0f + 0.5f);
 }
 
+/* ---------------- 分配计数(HN_ALLOC_TRACE churn 实证口径) ----------------
+ * 渲染热路径的堆分配累计: fb 位图缓冲(一次性变体每帧新分配 / 复用变体
+ * 仅扩容)、超长多边形堆缓冲、新字形位图。动画宿主接复用缓冲后稳态增量
+ * 应 ≈0/帧 —— rt 层每 300 帧差分打印(perf_probe 断言), 数字直接量化
+ * "消除每帧全页位图分配 churn"这件事本身。 */
+static long g_soft_allocs = 0;
+long hnsoft_heap_allocs(void) { return g_soft_allocs; }
+
 /* ---------------- 帧缓冲 ---------------- */
 
 typedef struct {
@@ -97,10 +105,10 @@ typedef struct {
 /* 圆角矩形 SDF(定义在下方"圆角矩形 SDF"一节; 裁剪判定先用) */
 static float sd_rounded(float px, float py, float x, float y, float w, float h, float r);
 
-static void fb_init(fb *f, int w, int h, hn_color bg) {
-    f->w = w; f->h = h; f->clip_n = 0;
-    f->bg = bg;
-    f->px = (unsigned char *)malloc((size_t)w * h * 4);
+/* 底色填充(**全像素覆盖** —— 复用缓冲的安全性由"每像素都被写"保证):
+   上一帧的任何残留都被这一步抹掉, 之后才跑指令循环。两个公开变体
+   (一次性 malloc / 复用缓冲)都先走这里, 拿到的位图逐位一致。 */
+static void fb_fill_bg(fb *f, hn_color bg) {
     fcolor b = unpack(bg);
     unsigned char r = (unsigned char)(b.r * 255 + 0.5f);
     unsigned char g = (unsigned char)(b.g * 255 + 0.5f);
@@ -110,7 +118,7 @@ static void fb_init(fb *f, int w, int h, hn_color bg) {
        不透明黑 —— 透明背板直接失效, 而且症状是"声明了透明却是一块黑",
        完全不会怀疑到光栅器。 */
     unsigned char ba = (unsigned char)(b.a * 255 + 0.5f);
-    for (int i = 0; i < w * h; i++) {
+    for (int i = 0; i < f->w * f->h; i++) {
         f->px[i * 4] = r; f->px[i * 4 + 1] = g; f->px[i * 4 + 2] = bl; f->px[i * 4 + 3] = ba;
     }
 }
@@ -519,6 +527,36 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha, float scale) {
 
 typedef struct { float x; int wind; } xhit;
 
+/* 超长多边形(>256 顶点)的堆 scratch: 三段(px/py/hits)同水位、**只增不
+   减**的有界缓存(上限 = 进程见过的最大顶点数)。此前每次进入 paint_polygon
+   都 malloc/free 一套(账本动画页每帧重画同一条长路径 —— 稳态帧也逃不掉);
+   缓存化后只有首次见到更大路径时扩容一次。渲染是单线程主循环, 免锁。
+   返回 0 = 扩容失败(OOM; 与旧 malloc 失败口径一致 —— 跳过本 path 不画)。 */
+static float *g_poly_xs = NULL, *g_poly_ys = NULL;
+static xhit *g_poly_hits = NULL;
+static int g_poly_cap = 0;
+
+static int poly_scratch_ensure(int n, float **px, float **py, xhit **hits) {
+    if (n > g_poly_cap) {
+        int nc = n + n / 4 + 16;   /* 1.25x 头部: 尺寸渐增的路径免逐帧小步扩容 */
+        float *xs = (float *)realloc(g_poly_xs, sizeof(float) * (size_t)nc);
+        if (!xs) return 0;
+        g_poly_xs = xs;
+        float *ys = (float *)realloc(g_poly_ys, sizeof(float) * (size_t)nc);
+        if (!ys) return 0;
+        g_poly_ys = ys;
+        xhit *hs = (xhit *)realloc(g_poly_hits, sizeof(xhit) * (size_t)(nc + 2));
+        if (!hs) return 0;
+        g_poly_hits = hs;
+        g_poly_cap = nc;
+        g_soft_allocs += 3;        /* 只在扩容时计数(稳态 0) */
+    }
+    *px = g_poly_xs;
+    *py = g_poly_ys;
+    *hits = g_poly_hits;
+    return 1;
+}
+
 static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     if (!c->poly || c->poly_n < 3) return;
     int n = c->poly_n;
@@ -533,19 +571,15 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
     int do_stroke = c->stroke_w > 0.05f && strokec.a > 0.004f;
     if (!do_fill && !do_stroke) return;
 
-    /* 顶点/交点缓冲: 常规多边形(≤256 顶点)走栈上定长, 免掉稳态帧循环里
-       每帧 3 次 malloc/free(账本动画页每帧重画同一条路径); 超长路径
-       (canvas 大型 path)仍走堆, 行为不变。 */
+    /* 顶点/交点缓冲: 常规多边形(≤256 顶点)走栈上定长; 超长路径(canvas
+       大型 path)走模块级 scratch(poly_scratch_ensure —— 只增不减的有界
+       缓存, 稳态帧零分配)。 */
     enum { POLY_STACK_N = 256 };
     float px_stack[POLY_STACK_N], py_stack[POLY_STACK_N];
     xhit hits_stack[POLY_STACK_N + 2];
-    float *px = n <= POLY_STACK_N ? px_stack : (float *)malloc(sizeof(float) * (size_t)n);
-    float *py = n <= POLY_STACK_N ? py_stack : (float *)malloc(sizeof(float) * (size_t)n);
-    if (!px || !py) {
-        if (px != px_stack) free(px);
-        if (py != py_stack) free(py);
-        return;
-    }
+    float *px = px_stack, *py = py_stack;
+    xhit *hits = hits_stack;
+    if (n > POLY_STACK_N && !poly_scratch_ensure(n, &px, &py, &hits)) return;
     float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
     for (int i = 0; i < n; i++) {
         float x = (c->poly[i * 2]     - ox) * scale + ox;
@@ -558,13 +592,6 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
 
     if (do_fill) {
         int y0 = (int)floorf(miny) - 1, y1 = (int)ceilf(maxy) + 1;
-        xhit *hits = n <= POLY_STACK_N ? hits_stack
-                                       : (xhit *)malloc(sizeof(xhit) * (size_t)(n + 2));
-        if (!hits) {
-            if (px != px_stack) free(px);
-            if (py != py_stack) free(py);
-            return;
-        }
         for (int s = y0; s <= y1; s++) {
             float fy = (float)s + 0.5f;
             int nh = 0;
@@ -609,7 +636,6 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
                 }
             }
         }
-        if (hits != hits_stack) free(hits);
     }
 
     /* 描边: 每条边按宽度展开成四边形带(闭合路径) */
@@ -660,8 +686,6 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
             }
         }
     }
-    if (px != px_stack) free(px);
-    if (py != py_stack) free(py);
 }
 
 /* ---------------- 网格变形贴图(重心坐标反查 UV) ---------------- */
@@ -803,6 +827,7 @@ static const glyph *glyph_get(int cp, int size_px) {
     int n = e->w * e->h;
     if (n > 0) {
         e->bm = (unsigned char *)malloc((size_t)n);
+        g_soft_allocs++;
         memcpy(e->bm, g->bitmap.buffer, (size_t)n);
     } else e->bm = NULL;
     return e;
@@ -1221,60 +1246,107 @@ static void paint_clear_rect(fb *f, const hn_cmd *c, float scale) {
 
 /* ---------------- 主渲染 ---------------- */
 
-unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int height,
-                                    hn_color bg, float scale) {
+/* 指令循环(渲染核心): fb 已就绪(尺寸/底色全像素覆盖/裁剪栈清零), 逐条
+ * 消费显示列表。两个公开变体(hnsoft_render_scaled 一次性缓冲 /
+ * hnsoft_render_reuse[_scaled] 复用缓冲)都落到这里 —— 同一条渲染代码
+ * 路径, 像素输出逐位一致, 差别只在缓冲归谁分配。 */
+static void render_cmds(fb *f, const hn_display_list *dl, float rs) {
     /* cmds == NULL 且 count == 0 是**合法的空显示列表**(文档没有任何可见
        指令, 如只有空白 canvas 的页面): 仍要产出底色位图 —— 否则"首帧为空"
        的文档会被运行时判成渲染失败, <script> 驱动的页面(canvas 2D 账本)
        根本活不到脚本执行。 */
-    if (!dl || width <= 0 || height <= 0) return NULL;
-    /* scale 缺省/非法按 1.0(hnsoft_render 的既有口径, 逐位一致) */
-    float rs = (scale >= 0.5f) ? scale : 1.0f;
-    fb f;
-    fb_init(&f, width, height, bg);
-
     for (int i = 0; i < dl->count; i++) {
         const hn_cmd *c = &dl->cmds[i];
         switch (c->kind) {
         case HN_CMD_RECT:
             if (c->shadow) {
                 /* 有阴影先画阴影(在填充之下) */
-                paint_shadow(&f, c, rs, 0, 0, 1.0f);
+                paint_shadow(f, c, rs, 0, 0, 1.0f);
             }
-            paint_rect(&f, c, rs, 0, 0, 1.0f);
+            paint_rect(f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_TEXT:
             /* 文本: 字号 ×rs 后走 FreeType —— 真 2x 字形光栅, 不是拉伸 */
-            paint_text(&f, c, rs, 0, 0, 1.0f);
+            paint_text(f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_IMAGE:
-            paint_image(&f, c, rs, 0, 0, 1.0f);
+            paint_image(f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_BITMAP:
-            paint_bitmap(&f, c, rs, 0, 0, 1.0f);
+            paint_bitmap(f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_CLEAR_RECT:
-            paint_clear_rect(&f, c, rs);
+            paint_clear_rect(f, c, rs);
             break;
         case HN_CMD_CLIP_PUSH:
-            fb_push_clip(&f, c->x * rs, c->y * rs,
+            fb_push_clip(f, c->x * rs, c->y * rs,
                          (c->x + c->w) * rs, (c->y + c->h) * rs, c->radius * rs);
             break;
         case HN_CMD_QUAD:
-            paint_quad(&f, c, 1.0f, rs);
+            paint_quad(f, c, 1.0f, rs);
             break;
         case HN_CMD_POLYGON:
-            paint_polygon(&f, c, rs, 0, 0, 1.0f);
+            paint_polygon(f, c, rs, 0, 0, 1.0f);
             break;
         case HN_CMD_MESH:
-            paint_mesh(&f, c, 1.0f, rs);
+            paint_mesh(f, c, 1.0f, rs);
             break;
         case HN_CMD_CLIP_POP:
-            fb_pop_clip(&f);
+            fb_pop_clip(f);
             break;
         }
     }
+}
+
+/* 公开变体①: 每次调用 malloc 一张新位图(一次性口径; shot/CLI/探针用)。
+ * 帧循环宿主请用 hnsoft_render_reuse —— 否则动画/媒体页每帧一对
+ * malloc/free 全页位图(920x520 下 ~2MB × 帧率的分配器 churn)。 */
+unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int height,
+                                    hn_color bg, float scale) {
+    if (!dl || width <= 0 || height <= 0) return NULL;
+    /* scale 缺省/非法按 1.0(hnsoft_render 的既有口径, 逐位一致) */
+    float rs = (scale >= 0.5f) ? scale : 1.0f;
+    fb f;
+    f.w = width; f.h = height; f.clip_n = 0; f.bg = bg;
+    f.px = (unsigned char *)malloc((size_t)width * height * 4);
+    g_soft_allocs++;
+    if (!f.px) return NULL;
+    fb_fill_bg(&f, bg);
+    render_cmds(&f, dl, rs);
     return f.px;
+}
+
+/* 公开变体②(主实现, 带 scale): 渲染进**调用方持有的复用缓冲**。
+ * 需求字节(w*h*4) > *slot_cap 时 realloc 扩容(只增不减), 然后与变体①
+ * 同一条 fb_fill_bg + render_cmds 路径 —— 像素逐位一致。失败返回 NULL
+ * 且 *slot/*slot_cap 保持原值(旧缓冲原地保留, 上一帧位图仍可 blit)。 */
+unsigned char *hnsoft_render_reuse_scaled(const hn_display_list *dl, int width, int height,
+                                          hn_color bg, float scale,
+                                          unsigned char **slot, int *slot_cap) {
+    if (!dl || width <= 0 || height <= 0 || !slot || !slot_cap) return NULL;
+    size_t need = (size_t)width * (size_t)height * 4;
+    if (need > 0x7FFFFFFFu) return NULL;        /* *slot_cap 是 int 口径的防呆上限 */
+    if (!*slot || (int)need > *slot_cap) {
+        /* 只增不减: 窗口缩小不缩容(Resize 抖动不反复 realloc)。 */
+        unsigned char *np = (unsigned char *)realloc(*slot, need);
+        if (!np) return NULL;
+        *slot = np;
+        *slot_cap = (int)need;
+        g_soft_allocs++;                        /* 只在扩容时计数(稳态 0) */
+    }
+    fb f;
+    f.w = width; f.h = height; f.clip_n = 0; f.bg = bg; f.px = *slot;
+    fb_fill_bg(&f, bg);
+    float rs = (scale >= 0.5f) ? scale : 1.0f;
+    render_cmds(&f, dl, rs);
+    return *slot;
+}
+
+/* 公开变体②的 1x 薄封装(hnsoft_render 的复用对应物; scale 缺省/非法
+ * 按 1.0 的口径与变体①一致)。 */
+unsigned char *hnsoft_render_reuse(const hn_display_list *dl, int width, int height,
+                                   hn_color bg, unsigned char **slot, int *slot_cap) {
+    return hnsoft_render_reuse_scaled(dl, width, height, bg, 1.0f, slot, slot_cap);
 }
 
 unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height, hn_color bg) {

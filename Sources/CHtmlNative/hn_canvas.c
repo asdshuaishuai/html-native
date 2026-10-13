@@ -6,8 +6,17 @@
  *     解析成"已解析的原语 op"(坐标已 CTM 变换、颜色已 RGBA), 序列化为
  *     JSON 调 hnCanvas2D 桥。
  *   本文件 —— 桥的落账侧: 解析 op JSON, 按元素 id 记入账本(定长数组,
- *     上限 4096, 满则丢弃并置溢出标志); 提供清空/内省与销毁纪律。
+ *     上限 4096, 满则丢弃新 op 并置溢出标志 + 打一行 stderr 提示);
+ *     提供清空/内省与销毁纪律。
  *   hn_paint.c —— 绘制 <canvas> 时把账本重放成显示列表指令。
+ *
+ * **账本有界化: 满幅不透明 fillRect 视同清账**(详见 frect_frame_reset):
+ *   canvas 动画的惯用法是"每帧 fillRect 盖底"(不调 clearRect)—— 若账本
+ *   只在显式 clear/全幅 clearRect 时重置, 账本会以整帧 op 数/帧 无界增长
+ *   (canvas-demo 实测 56 op/tick 线性涨, 80 tick 撞 4096 上限后新帧全被
+ *   丢弃, 画面冻结)。因此落账前判定: 不透明 + 满幅覆盖 + 无激活裁剪的
+ *   frect = "新的一帧", 清空账本后仅记录该 op(它就是新底色)。账本从此
+ *   稳态有界 = 底色 op + 增量 op, 与浏览器 canvas 的视觉语义一致。
  *
  * hnCanvas2D op 协议(JSON 对象, 每次一条):
  *   {"cv":"<canvas id>","op":"frect","x","y","w","h","col",
@@ -25,11 +34,14 @@
  *   {"cv":..,"op":"clear"}                                             清空账本
  *   {"cv":..,"op":"clear_rect","x","y","w","h"}                        局部清空(见下)
  * 颜色一律 0xRRGGBBAA 的十进制数(JS 侧 `>>>0`), 坐标已含 CTM。
+ * 特例: frect 满足"不透明 + 覆盖画布全幅 + 无激活裁剪"时落账前先清账本
+ * (视同新帧, 见 frect_frame_reset) —— 账本稳态有界的关键。
  * 渐变字段口径: linear 时 x0,y0→x1,y1 为轴两端; "radial":1 时为双圆
  * (x0,y0,r0)内圆 → (x1,y1,r1)外圆(CSS createRadialGradient 全口径);
  * "stops" 是扁平数组 [t0,c0,t1,c1,...](升序给定; t∈[0,1]) —— 给了 stops
  * 就走多 stop 分段线性, 否则退回首末两端色(向后兼容)。
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "hn_internal.h"
@@ -84,7 +96,7 @@ static void op_free(hn_canvas_op *o) {
     memset(o, 0, sizeof(*o));
 }
 
-/* 清空账本(保留槽位本身; clearRect 与销毁共用) */
+/* 清空账本(保留槽位本身; clearRect / 销毁 / 满幅不透明 frect 新帧共用) */
 static void ledger_reset(hn_canvas_ledger *l) {
     for (int i = 0; i < l->n_ops; i++) op_free(&l->ops[i]);
     l->n_ops = 0;
@@ -181,6 +193,62 @@ static void parse_shadow_fields(const hn_json *root, hn_canvas_op *o) {
     o->shadow = ((o->sh_color & 0xFFu) != 0);
 }
 
+/* ---------------- 满幅不透明 fillRect 视同清账(账本有界化) ---------------- */
+
+/* 全幅判定容差(px): 设备空间坐标是浮点落账, 允许半像素的出血/欠覆盖
+   (如 x=-0.4 或 x+w=W-0.4 仍算盖满); 超过半像素的欠覆盖(如 x=0.6)不算。 */
+#define HN_CV_FULLCOVER_EPS 0.5f
+
+/* 账本内处于激活状态的裁剪深度(未配对 clip 数)。
+   按账本序扫描 push/pop 计数; 空栈上的多余 cpop 按"无操作"建模(与浏览器
+   restore 空栈口径一致), 不产生负深度。>0 = 有裁剪未配平。 */
+static int ledger_clip_depth(const hn_canvas_ledger *l) {
+    int depth = 0;
+    for (int i = 0; i < l->n_ops; i++) {
+        if (l->ops[i].kind == HN_CV_CLIP_PUSH) depth++;
+        else if (l->ops[i].kind == HN_CV_CLIP_POP && depth > 0) depth--;
+    }
+    return depth;
+}
+
+/* frect 落账前的"新帧判定"。返回 1 = 账本已清空(调用方随即落这条 op,
+ * 它就是新底色)。三个条件缺一不可, 有争议的场景一律不清(保守侧):
+ *   ② 填充色不透明(alpha==255) —— 半透明满幅在视觉上**混合**历史而非
+ *      替换, 清账会丢层;
+ *   ① 矩形覆盖画布全幅 —— 画布属性尺寸从元素 width/height 取(缺省
+ *      300x150, 与 clearRect 全清 / paint_canvas 重放同一口径); 坐标已是
+ *      JS glue CTM 变换后的设备空间坐标。元素不在文档里(直录探针/孤立
+ *      账本)拿不到属性尺寸, 退回普通落账。NaN 参与比较恒假 → 不清。
+ *   ③ 无未配对的 clip —— 裁剪中的"满幅"矩形盖不到被裁掉的区域, 历史
+ *      在裁剪区外仍然可见。
+ * 刻意不清账的边界(写明即契约):
+ *   - 渐变满幅(grect)不清: 渐变可带透明 stop, 视觉上不替换全部历史;
+ *   - 旋转/斜切 CTM 的 fillRect 走 JS glue 的 fpath 分支, 天然不进这里;
+ *   - 带阴影的满幅 frect **仍算**清账: 阴影画在本 op 之下/之外, 不透明
+ *     填充自身已覆盖全部画布, 历史不可见;
+ *   - fpath/spath/gpath/text/image 一律不清(非矩形或非纯色填充)。
+ * 页作者注意: 渐变/半透明盖底的动画想保持账本有界, 应每帧先全幅
+ * clearRect 再画(那是显式清账口径)。 */
+static int frect_frame_reset(hn_context *c, hn_canvas_ledger *l,
+                             const char *cv_id, const hn_canvas_op *o) {
+    if ((o->color & 0xFFu) != 0xFFu) return 0;           /* ② 不透明 */
+    hn_node *n = c->doc ? hn_doc_find_by_id(c->doc, cv_id) : NULL;
+    if (!n) return 0;                                    /* 无元素 = 无尺寸口径 */
+    const char *aw = hn_node_attr(n, "width");
+    const char *ah = hn_node_attr(n, "height");
+    float cw = aw && *aw ? (float)atof(aw) : 300.0f;
+    float ch = ah && *ah ? (float)atof(ah) : 150.0f;
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+    /* ① 全幅覆盖(含半像素容差) */
+    if (!(o->x <= HN_CV_FULLCOVER_EPS && o->y <= HN_CV_FULLCOVER_EPS &&
+          o->x + o->w >= cw - HN_CV_FULLCOVER_EPS &&
+          o->y + o->h >= ch - HN_CV_FULLCOVER_EPS)) return 0;
+    if (ledger_clip_depth(l) > 0) return 0;              /* ③ 裁剪激活中 */
+    ledger_reset(l);                                     /* 新的一帧 */
+    return 1;
+}
+
 /* 记录一条 op。返回记录后的账本 op 数(clear 返回清掉的条数); 坏输入 -1。
    "cv" 字段 = canvas 元素 id(JS 桥的寻址键)。 */
 int hn_canvas_record(hn_context *c, const char *op_json, size_t len) {
@@ -251,6 +319,9 @@ int hn_canvas_record(hn_context *c, const char *op_json, size_t len) {
         o.h = (float)hn_json_num(hn_json_obj_get(root, "h"), 0);
         o.color = json_color(root, "col");
         parse_shadow_fields(root, &o);
+        /* 满幅不透明 fillRect 视同清账: 命中则账本已清空, 下面公共落账段
+           把这条 op 记为账本唯一内容(它就是新底色) —— 稳态 = 底色 + 增量。 */
+        frect_frame_reset(c, l, cv_id, &o);
         ok = 1;
     } else if (!strcmp(kind, "spath")) {
         o.kind = HN_CV_STROKE_PATH;
@@ -309,6 +380,15 @@ int hn_canvas_record(hn_context *c, const char *op_json, size_t len) {
     int result = -1;
     if (ok) {
         if (l->n_ops >= HN_CANVAS_MAX_OPS) {
+            /* 保险丝(保持"丢弃新 op"现状, 不回滚最旧 —— 半截历史比缺帧更
+               难排查): 只在首次溢出时打一行 stderr 提示页作者按帧清账
+               (清账后标志复位, 再溢出会再提示一次)。 */
+            if (!l->overflow)
+                fprintf(stderr,
+                        "[hn_canvas] 账本溢出: canvas '%s' 达 %d op 上限, 之后的新 op "
+                        "被丢弃(画面停在溢出前的样子)。请每帧清账: 全幅 "
+                        "clearRect(0,0,w,h), 或以不透明满幅 fillRect 盖底。\n",
+                        l->id, l->n_ops);
             l->overflow = 1;         /* 满则丢弃: 不崩溃, 标志可内省 */
         } else {
             if (l->n_ops == l->cap_ops) {

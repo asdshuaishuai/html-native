@@ -14,7 +14,10 @@
 
 /* 渲染显示列表到 RGBA8 缓冲(预乘前直通, stride = width*4, 自上而下)。
  * bg 为画布底色(#RRGGBBAA 打包, 与 hn_color 一致)。
- * 返回 malloc 的缓冲(调用方 free), 失败返回 NULL。 */
+ * 返回 malloc 的缓冲(调用方 free), 失败返回 NULL。
+ * 【两变体并存】本函数是**一次性**口径: 每次调用新分配一张全页位图,
+ * 适合 shot/CLI/探针等单发渲染; 帧循环宿主(动画/媒体页)请用下面的
+ * hnsoft_render_reuse —— 两变体走同一条渲染核心, 像素输出逐位一致。 */
 unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height,
                              hn_color bg);
 
@@ -29,6 +32,34 @@ unsigned char *hnsoft_render(const hn_display_list *dl, int width, int height,
  * hnsoft_render 即本函数 scale=1.0 的薄封装。 */
 unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int height,
                                     hn_color bg, float scale);
+
+/* 【复用变体】渲染进**调用方持有的缓冲**(slot/cap 由调用方持有, 旧签名
+ * 全部不动 —— 向后兼容靠并存, 不靠改约):
+ *   - *slot == NULL / *slot_cap == 0 起步; 需求字节(w*h*4)超过 *slot_cap
+ *     时 realloc 扩容(**只增不减** —— 窗口缩小不缩容, Resize 抖动不反复
+ *     分配), 渲染进该缓冲并返回它;
+ *   - 每帧先全像素覆盖底色再跑同一条指令循环(与 hnsoft_render 同一条
+ *     渲染核心), 像素输出**逐位一致** —— 差别只在缓冲归谁分配;
+ *   - 失败返回 NULL 且 *slot/*slot_cap 保持原值(旧缓冲原地保留, 上一帧
+ *     位图仍可 blit)。
+ * 契约: 缓冲生命周期归调用方(用完 free(*slot)); hnsoft 不缓存不释放。
+ * 动画/媒体宿主每帧调用即可消除"每帧 malloc+free 一张全页位图"的
+ * 分配器 churn(920x520 下 ~2MB × 帧率)。 */
+unsigned char *hnsoft_render_reuse(const hn_display_list *dl, int width, int height,
+                                   hn_color bg, unsigned char **slot, int *slot_cap);
+
+/* hnsoft_render_reuse 的带 scale 版(HiDPI 2x 主实现; rt 运行时帧循环走
+ * 这里) —— 缓冲复用语义与上完全一致, 像素与 hnsoft_render_scaled 逐位
+ * 一致(scale=1.0 时两变体互换逐位相等)。 */
+unsigned char *hnsoft_render_reuse_scaled(const hn_display_list *dl, int width, int height,
+                                          hn_color bg, float scale,
+                                          unsigned char **slot, int *slot_cap);
+
+/* 渲染热路径的堆分配累计计数(HN_ALLOC_TRACE churn 实证口径): 计 fb 位图
+ * 缓冲(一次性变体每帧新分配 / 复用变体仅扩容)、超长多边形堆缓冲、新字形
+ * 位图三类事件。帧循环走复用缓冲后稳态增量应 ≈0/帧 —— rt 层每 300 帧差分
+ * 打印一行, perf_probe 据此断言"分配差分有界"。 */
+long hnsoft_heap_allocs(void);
 
 /* 把 RGBA 缓冲编码为 PNG(存储型 deflate, 无压缩但格式合法)。
  * 返回 malloc 的 PNG 数据, *out_len 写出长度; 失败返回 NULL。 */
