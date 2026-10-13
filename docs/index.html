@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <title>html-native — HTML 描述原生界面</title>
-<meta name="description" content="与 RN / Flutter 同级的原生 UI 框架，UI 描述语言是 HTML。C99 引擎零平台依赖，双渲染器，人类与 AI 都能直接开发。">
+<meta name="description" content="为 AI agent 定制的 HTML 原生渲染引擎。C99 引擎零平台依赖 (Neb = NO-WEB)，自研光栅 + 可选 cairo + GPU 原语契约，人类与 AI 都能直接开发。">
 <style>
 :root {
   --bg: #0b0e13; --bg2: #11151d; --card: #151a24; --line: #232b39;
@@ -198,21 +198,22 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
 <div class="wrap">
 
   <div class="hero">
-    <div class="badge"><span class="dot"></span> v0.1.0 · 三平台二进制已发布</div>
+    <div class="badge"><span class="dot"></span> C99 全自研引擎 Neb (NO-WEB) · 三平台二进制</div>
     <h1>用 HTML 写界面<br><span class="grad">渲染成原生窗口</span></h1>
     <p class="lede">
-      与 RN / Flutter 同级的原生 UI 框架 —— 但 UI 描述语言是 HTML。
-      没有浏览器、没有 WebView 内核、没有 JavaScript 运行时、没有构建步骤。
-      一个 C99 引擎负责把标记算成绘制指令，平台运行时把它画到屏幕上。
+      为 AI agent 定制的 HTML 原生渲染引擎。
+      没有浏览器、没有 WebView 内核、没有构建步骤。
+      一个 C99 引擎 (Neb = NO-WEB) 把标记算成绘制指令，平台层把它画到屏幕上。
     </p>
     <div class="cta">
       <a class="btn primary" href="#start">快速上手 →</a>
       <a class="btn ghost" href="https://github.com/asdshuaishuai/html-native">查看源码</a>
-      <a class="btn ghost" href="https://github.com/asdshuaishuai/html-native/releases">下载 v0.1.0</a>
+      <a class="btn ghost" href="https://github.com/asdshuaishuai/html-native/releases">下载发布版</a>
     </div>
     <div class="install mono">
-      <span class="cmt"># 一个文件就是一个应用，保存即热更新</span><br>
-      <span class="cmd">$</span> hn new myapp &amp;&amp; cd myapp &amp;&amp; hn dev app.html
+      <span class="cmt"># 构建后：常驻宿主 + 一条命令开原生窗</span><br>
+      <span class="cmd">$</span> bash tools/build-multiplatform.sh &amp;&amp; bash tools/build-daemon-cli.sh<br>
+      <span class="cmd">$</span> dist/hn-daemon &amp; dist/hn open myapp app.html --window
     </div>
   </div>
 
@@ -228,38 +229,40 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
       <div class="card">
         <div class="ico">◆</div>
         <h3>零 WebView 依赖</h3>
-        <p>守护进程二进制经 <code>otool -L</code> 验证不链接 WebKit/WebCore。
-           只有 AppKit + CoreGraphics + CoreText —— 后者是注入的画布与字体后端。</p>
+        <p>渲染只有自研 C99 一条路。产物经 <code>otool -L</code> 验证只链接
+           FreeType 与系统 libc —— 不链接 WebKit/WebCore/CoreText；
+           平台差异收敛于运行期 dlopen 的薄胶水层（每平台一个 <code>hnp_*.c</code>）。</p>
       </div>
       <div class="card">
         <div class="ico">◇</div>
         <h3>引擎平台无关</h3>
         <p>核心只依赖 ISO C 标准库，显示列表是纯数据。
-           同一份源码交叉编译出 5 个目标产物，跨架构输出逐字节一致。</p>
+           同一份源码交叉编译出 5 个目标产物，跨架构布局输出逐字节一致（构建门禁守着，实测 5 文档一致）。</p>
       </div>
       <div class="card">
         <div class="ico">○</div>
         <h3>可逐层取证</h3>
-        <p><code>hn dom</code> 看 DOM 树、<code>hn dump</code> 看绘制指令。
-           出问题能定位到“哪一层算错了”，而不是只能看到“显示不对”。</p>
+        <p><code>hncore parse|layout|boxes|paint|verify</code> 逐层看 DOM/盒模型/绘制指令，
+           加 <code>hn dump/text</code> 与 24 个探针（约 1145 项断言）钉住每一层。</p>
       </div>
       <div class="card">
         <div class="ico">▣</div>
         <h3>人类与 AI 双入口</h3>
-        <p>人类走 <code>hn new → hn dev</code> 热重载循环；
-           agent 现场生成标记推给宿主即刻成窗。两条等价路径，同一引擎。</p>
+        <p>人类写 <code>app.html</code> 开窗、保存热重载（壳内 mtime watch）；
+           agent 现场生成标记推给常驻宿主即刻成窗。两条等价路径，同一引擎。</p>
       </div>
       <div class="card">
         <div class="ico">▤</div>
         <h3>应用是易变对象</h3>
         <p>像小程序一样可随时随地生成、销毁、持久化：
-           <code>--ttl</code> 到期热销毁、<code>hn persist</code> 离线打包、同 id 热更新。</p>
+           <code>hn persist</code> 打成 <code>.hnapp</code> 胶囊（含 agent 指令）、
+           同 id 热更新、<code>resident</code> op 注册常驻（宿主重启自动重开）。</p>
       </div>
       <div class="card">
         <div class="ico">▥</div>
         <h3>系统能力内建</h3>
-        <p><code>sys://</code> 零网络桥直接读系统信息、本地 KV、剪贴板、通知，
-           片段自带样式，换入即用。</p>
+        <p><code>sys://</code> 零网络桥直接读 CPU/内存/磁盘/运行时长/主机名、本地 KV、
+           剪贴板、通知、打开 URL，片段自带样式，换入即用。</p>
       </div>
     </div>
   </section>
@@ -276,34 +279,35 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
       <div class="layer">
         <span class="tag">你写的</span>
         <span class="what">app.html + app.css</span>
-        <span class="how">界面的一切。131 行的仪表盘就是这么来的</span>
+        <span class="how">界面的一切。85 行的仪表盘就是这么来的（examples/dashboard.html）</span>
       </div>
       <div class="arrow">↓ 装载（自动注入主题令牌 / 展开 include / 内联 link）</div>
       <div class="layer engine">
         <span class="tag">C99 引擎</span>
         <span class="what">解析 → 级联 → 布局 → 绘制指令</span>
-        <span class="how">3932 行，零平台依赖，产出 hn_cmd 数组（仅 5 种指令）</span>
+        <span class="how">~20.6k 行（含 include/hn.h），零平台依赖，产出 hn_cmd 数组</span>
       </div>
-      <div class="arrow">↓ 注入文本/图片后端（引擎不认识字体，只调用回调）</div>
+      <div class="arrow">↓ 注入文本/图片/媒体后端（引擎不认识字体，只调用回调）</div>
       <div class="layer">
-        <span class="tag">平台运行时</span>
-        <span class="what">CoreGraphics 落屏 · 窗口/弹窗物化</span>
-        <span class="how">薄层：遍历指令数组，翻译成系统绘图调用</span>
+        <span class="tag">平台层</span>
+        <span class="what">hnsoft 软光栅落屏 · 窗口物化（可选 cairo / GPU 原语）</span>
+        <span class="how">薄层：遍历指令数组，翻译成绘制调用；契约单头 hn_platform.h</span>
       </div>
       <div class="arrow">↓</div>
       <div class="layer">
         <span class="tag">宿主</span>
         <span class="what">应用生命周期 + Unix socket 协议</span>
-        <span class="how">open / update / close / list / persist / dev 热重载</span>
+        <span class="how">open / update / close / list / persist / resident / 壳 mtime 热重载</span>
       </div>
     </div>
 
     <div style="margin-top: 26px" class="grid2">
       <div class="card">
-        <h3>绘制指令只有 5 种</h3>
+        <h3>绘制指令共 10 种</h3>
         <pre><span class="c">// 引擎产出的是纯数据，不是绘图调用</span>
 <span class="k">typedef struct</span> hn_cmd {
-  hn_cmd_kind kind;   <span class="c">// RECT / TEXT / IMAGE / CLIP±</span>
+  hn_cmd_kind kind;   <span class="c">// RECT / TEXT / IMAGE / CLIP± / QUAD /</span>
+                      <span class="c">// POLYGON / MESH / BITMAP / CLEAR_RECT</span>
   <span class="k">float</span> x, y, w, h, radius;
   hn_color fill, stroke;     <span class="c">// 含渐变/阴影</span>
   <span class="k">const char</span> *text;          <span class="c">// 文本或图片路径</span>
@@ -319,7 +323,8 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
   <span class="k">void</span>  (*metrics)(ctx, font, &amp;asc, &amp;desc);
 } hn_text_backend;
 
-<span class="c">// 运行时注入 CoreText 实现；换平台只换这一层</span></pre>
+<span class="c">// 同款契约还有：图片后端 / hn_media_host / hnp_gpu_host（GPU 原语）</span>
+<span class="c">// 运行时注入 FreeType 实现；换平台只换这一层</span></pre>
       </div>
     </div>
   </section>
@@ -347,16 +352,18 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
           <code>&gt;</code> 子代、<code>+</code> 相邻、<code>~</code> 通用兄弟、
           <code>:hover</code> <code>:active</code> <code>:focus</code>
           <code>:nth-child(odd|even|N|2n)</code> <code>:first-child</code> <code>:last-child</code>；
-          级联特异性 + 继承 + 行内 style。
+          属性选择器 <code>[a=v]</code>、<code>:not()</code>、<code>:nth-of-type</code>、
+          <code>calc()</code>；级联特异性 + 继承 + 行内 style。
         </p>
       </div>
       <div class="card">
         <h3>视觉</h3>
         <p>
           盒模型、圆角（含 <code>50%</code> 画圆）、
-          <code>linear-gradient</code>、<code>box-shadow</code>、opacity、
-          <code>transition</code> 过渡动画、cursor、
-          <code>text-decoration</code>、<code>list-style</code>。
+          <code>linear-gradient</code>/径向渐变、<code>box-shadow</code>、<code>text-shadow</code>、
+          <code>filter: brightness/contrast/saturate</code>、<code>clip-path: circle/inset</code>、
+          opacity、<code>transition</code>/<code>@keyframes</code>（含 spring/bounce 缓动族）、
+          <code>transform</code> 2D/3D、cursor、<code>text-decoration</code>、<code>list-style</code>。
         </p>
       </div>
       <div class="card">
@@ -372,15 +379,25 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         <p>
           <code>hx-get/post</code>、<code>hx-target</code>、<code>hx-swap</code>、
           <code>hx-trigger="click | load | every Ns"</code>、
-          表单参数自动携带、input 回车提交（自动定位载体）。
+          表单参数自动携带、input 回车提交（自动定位载体）；
+          事件统一管道（点击/键盘/滚轮/hover → 冒泡 → hx 消费）。
         </p>
       </div>
       <div class="card">
         <h3>系统集成</h3>
         <p>
-          <code>sys://info|cpu|memory|disk|battery|uptime|host</code> 系统数据、
+          <code>sys://cpu|memory|disk|uptime|host</code> 系统数据、
           <code>sys://store</code> 本地 KV 持久化、剪贴板、系统通知、
           打开 URL —— 全部本地应答，零网络。
+        </p>
+      </div>
+      <div class="card">
+        <h3>富媒体与直染（agent 母语）</h3>
+        <p>
+          <code>&lt;div hn-md&gt;</code>/<code>hn-json</code>/<code>hn-csv</code> 源文本装载即变 DOM；
+          GIF 动图、Lottie/<code>.lottie</code> 矢量动画、Live2D motion 驱动 rig、
+          <code>&lt;video&gt;/&lt;audio&gt;</code>（真窗 AVFoundation；video 可走 AVPlayerLayer 图层直通）、
+          <code>&lt;canvas&gt;</code> 2D（QuickJS）、WASM 计算（wasm3）。
         </p>
       </div>
       <div class="card">
@@ -389,14 +406,18 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
           <code>&lt;include src&gt;</code> 文件级组件（嵌套/循环检测）；
           <code>&lt;meta name="hn-theme" content="dark"&gt;</code> 一行注入设计令牌基座
           —— agent 不写 CSS 也能出精致界面。
+          另有 <code>hn-stream</code> 自动跟随/环形缓冲、<code>hn-mesh</code> 网格形变、
+          <code>hn-presence</code> 弱存在感。
         </p>
       </div>
       <div class="card">
-        <h3>单一渲染路径</h3>
+        <h3>单一渲染路径 + GPU 契约</h3>
         <p>
-          只有自研 C99 引擎这一条渲染路径 —— 没有 WebKit 兜底、没有 Swift。
-          <code>grid</code>/<code>canvas</code> 等能力边界如实写在 README,
-          音频/视频与 WASM 运行时缝正在落地（见 <code>docs/media-design.md</code>）。
+          渲染只有自研 C99 引擎这一条路径 —— 没有 WebKit 兜底、没有 Swift。
+          后端接缝上是 hnsoft 软件光栅（默认）+ 可选 cairo（同签名换链接）+
+          <strong>GPU 原语契约 <code>hnp_gpu_host</code></strong>（平台出原语、引擎出画法；
+          Metal v1 已落地，<code>HN_GPU=metal</code> 显式开启，覆盖不了的指令整帧回退 hnsoft）。
+          <code>grid</code>/<code>svg</code> 等边界如实写在 README。
         </p>
       </div>
     </div>
@@ -421,18 +442,18 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
       </div>
       <div class="shot">
         <div class="frame"><img src="screenshots/message-card.png" alt="消息卡片" loading="lazy"></div>
-        <div class="cap"><strong>TTL 消息卡片</strong><span>秒开弹窗 · 到期热销毁 · 拖拽 · 点外关闭</span></div>
+        <div class="cap"><strong>消息卡片</strong><span>秒开 popup · 同 id 热更新 · daemon 生命周期</span></div>
       </div>
       <div class="shot">
-        <div class="frame"><img src="screenshots/dev-app.png" alt="脚手架应用" loading="lazy"></div>
-        <div class="cap"><strong>脚手架生成的应用</strong><span><code>hn new</code> 产物 · include 组件 · 保存即热更新</span></div>
+        <div class="frame"><img src="screenshots/dev-app.png" alt="网页式应用" loading="lazy"></div>
+        <div class="cap"><strong>网页式应用</strong><span>include 组件 · 主题令牌 · 保存即热更新</span></div>
       </div>
       <div class="shot">
         <div class="frame"><img src="screenshots/inputs-focus.png" alt="输入控件" loading="lazy"></div>
         <div class="cap"><strong>输入控件</strong><span>值状态 · 闪烁 caret · Tab 聚焦 · 原生键盘编辑</span></div>
       </div>
     </div>
-    <div class="note">截图由 <code>hn-shot</code> 用真实视图 <code>cacheDisplay</code> 自绘生成 —— 所见即窗口所得。</div>
+    <div class="note">截图由 <code>hnapp-*</code>/<code>hncore render</code> 离屏渲染生成（@2x 真窗 backing）—— 所见即窗口所得；更多效果见仓库 <code>screenshots/</code>（桌宠/媒体/Live2D/3D 大屏）。</div>
   </section>
 
   <!-- ================= 上手 ================= -->
@@ -447,17 +468,17 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
 <span class="g">$</span> ZIG=zig bash tools/build-multiplatform.sh
 <span class="g">$</span> bash tools/build-daemon-cli.sh  <span class="c"># 产出 dist/hn-daemon + dist/hn</span>
 
-<span class="c"># 打开你的第一个原生窗口</span>
+<span class="c"># 打开你的第一个原生窗口（--window = 真桌面窗）</span>
 <span class="g">$</span> dist/hn-daemon &amp;
-<span class="g">$</span> dist/hn open myapp app.html --css app.css</pre>
+<span class="g">$</span> dist/hn open myapp app.html --css app.css --window</pre>
       </div>
       <div class="card">
         <h3>2 · 改文件，窗口就变了</h3>
         <pre><span class="c"># app.html 里改标题，保存</span>
 <span class="k">&lt;h1&gt;</span>myapp<span class="k">&lt;/h1&gt;</span>   <span class="c">→</span>   <span class="k">&lt;h1&gt;</span>我的应用<span class="k">&lt;/h1&gt;</span>
 
-<span class="c"># 半秒内窗口同步更新，进程与状态不动</span>
-<span class="c"># 引擎 watch 文件 mtime，同 id 热推送新编码</span></pre>
+<span class="c"># 真窗壳每 ~300ms watch 文件 mtime，同 id 整文档重载：</span>
+<span class="c"># 窗口与进程不动，界面即刻更新（hn update 走同一通道）</span></pre>
       </div>
     </div>
 
@@ -481,14 +502,16 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         <h3>命令行速查</h3>
         <table>
           <tr><th>命令</th><th>作用</th></tr>
-          <tr><td><code>hn open &lt;id&gt; app.html --css app.css</code></td><td>打开应用（表面由 meta 决定：window / popup / layer）</td></tr>
-          <tr><td><code>hn dev app.html --css app.css</code></td><td>开发模式，保存即热更新</td></tr>
-          <tr><td><code>hn update &lt;id&gt; app.html</code></td><td>热更新（窗口与状态保持）</td></tr>
+          <tr><td><code>hn open &lt;id&gt; app.html [--css app.css]</code></td><td>打开应用（无头槽位；表面由 meta 决定）</td></tr>
+          <tr><td><code>hn open &lt;id&gt; app.html --window</code></td><td>真桌面窗（daemon spawn 平台壳，每窗一进程）</td></tr>
+          <tr><td><code>hn update &lt;id&gt; app.html</code></td><td>热更新（无头保持文档；窗口应用原子写回源文件）</td></tr>
           <tr><td><code>hn list</code> / <code>hn close &lt;id&gt;</code></td><td>列出运行中应用 / 销毁</td></tr>
-          <tr><td><code>hn persist</code> / <code>hn restore &lt;id&gt;</code></td><td>离线打包 <code>.hnapp</code> / 从包恢复</td></tr>
-          <tr><td><code>hn open app.html --ttl 8</code></td><td>消息卡：8 秒后自动热销毁</td></tr>
-          <tr><td><code>hn dom &lt;id&gt;</code> / <code>hn dump &lt;id&gt;</code></td><td>内省：DOM 树 / 绘制指令（排查用）</td></tr>
-          <tr><td><code>hn-shot app.html out.png 480 700 --live</code></td><td>真实视图自绘截图</td></tr>
+          <tr><td><code>hn dump &lt;id&gt;</code> / <code>hn text &lt;id&gt; --element x</code></td><td>内省：指令数 / 元素文本</td></tr>
+          <tr><td><code>hn event &lt;id&gt; --kind click --target btn</code></td><td>注入事件驱动 hx（agent 感知+驱动闭环）</td></tr>
+          <tr><td><code>hn shot &lt;id&gt; out.png</code></td><td>无头渲染 PNG</td></tr>
+          <tr><td><code>hncore render|renderc app.html out.png W H</code></td><td>引擎 CLI：hnsoft / cairo 后端同一显示列表</td></tr>
+          <tr><td><code>hnapp-macos-arm64 app.html --shot out.png W H</code></td><td>平台壳离屏渲染（同生产光栅器）</td></tr>
+          <tr><td>socket op <code>persist</code>/<code>restore</code>/<code>resident</code></td><td>胶囊打包/恢复/常驻登记（CLI 未包，任意 socket 客户端可调）</td></tr>
         </table>
       </div>
     </div>
@@ -505,12 +528,16 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
     <div class="card">
       <table>
         <tr><th>目标</th><th>格式</th><th>产物</th></tr>
-        <tr><td>macOS arm64</td><td>Mach-O</td><td><code>hncore-macos-arm64</code></td></tr>
+        <tr><td>macOS arm64</td><td>Mach-O</td><td><code>hncore-macos-arm64</code>（+可选 cairo: <code>hncore-cairo-macos-arm64</code>）</td></tr>
         <tr><td>macOS x86_64</td><td>Mach-O</td><td><code>hncore-macos-x86_64</code></td></tr>
         <tr><td>Linux x86_64</td><td>ELF（musl 静态）</td><td><code>hncore-linux-x86_64</code></td></tr>
         <tr><td>Linux aarch64</td><td>ELF（musl 静态）</td><td><code>hncore-linux-aarch64</code></td></tr>
         <tr><td>Windows x86_64</td><td>PE32+</td><td><code>hncore-windows-x86_64.exe</code></td></tr>
       </table>
+      <div class="note" style="margin-top: 10px">
+        同一条构建还产出：运行时 <code>hnapp-macos-arm64 / hnapp-macos-headless / hnapp-linux-x86_64</code>
+        （新分层架构，GPU 原语仅 macOS 入列）与旧窗口壳 <code>hnweb-*</code>/<code>hnwin-*</code>。
+      </div>
       <pre style="margin-top: 16px"><span class="c"># 一条命令构建全部（需要 zig 提供三平台 libc）</span>
 <span class="g">$</span> ZIG=zig ./tools/build-multiplatform.sh
 
@@ -533,16 +560,16 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
     </p>
     <div class="grid3">
       <div class="card">
-        <div class="metric">86</div>
-        <p>离屏回归断言，覆盖解析 / 级联 / 布局 / 绘制 / 交互 / 编码 / 双渲染器</p>
+        <div class="metric">~1145</div>
+        <p>探针断言/检查（24 个 <code>tools/*_probe.sh</code>，2026-10-13 实测合计；覆盖解析/级联/布局/绘制/交互/直染/媒体/3D/双后端）</p>
       </div>
       <div class="card">
         <div class="metric">5</div>
-        <p>语义一致性检查：跨架构绘制指令与盒几何逐字节比对</p>
+        <p>文档跨架构逐字节一致（构建门禁：同 HN_NO_TEXT 口径比对布局输出）</p>
       </div>
       <div class="card">
-        <div class="metric">6</div>
-        <p><code>hncore verify</code> 布局不变量：负尺寸 / 负坐标 / 重叠检测</p>
+        <div class="metric">10</div>
+        <p>显示列表指令类（RECT/TEXT/IMAGE/CLIP±/QUAD/POLYGON/MESH/BITMAP/CLEAR_RECT），每类有探针锚</p>
       </div>
     </div>
     <div class="card" style="margin-top: 16px">
@@ -552,9 +579,12 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         完整 margin 简写的分支判断把 6 字母写成 7 → 外边距只作用于左边；
         纯色 background 无法覆盖先声明的渐变 → 主题令牌换色失效；
         POSIX 函数依赖 → Windows/严格 C99 下无法编译；
-        FMA 融合 → 跨架构布局差 0.1px。
+        FMA 融合 → 跨架构布局差 0.1px；
+        mesh 竖向 anchor 权重写反 → 立绘摆动方向颠倒；
+        透明背板三个静默失效（底色 alpha 硬编码 255 / blend 只写 RGB / SDF 内部距离塌陷）。
         <br><br>
-        每一个都补了对应的回归断言，防止复发。
+        每一个都补了对应的回归断言，防止复发（20 项 CPU 治理与媒体降级线也在
+        <code>perf_probe</code>/<code>media_window_probe</code> 里守着）。
       </p>
     </div>
   </section>

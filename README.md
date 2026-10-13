@@ -4,9 +4,10 @@
 [![site](https://img.shields.io/badge/site-asdshuaishuai.github.io%2Fhtml--native-4f7cff)](https://asdshuaishuai.github.io/html-native/)
 [![license](https://img.shields.io/badge/license-MIT-3ecf6f)](LICENSE)
 
-> 与 RN / Flutter 同级的原生 UI 框架——UI 描述语言是 HTML。
+> **为 AI agent 定制的 HTML 原生渲染引擎**。
 > **渲染引擎:C99 全自研, 官方名称 Neb(NO-WEB)** —— 名字即承诺: 不含 WebView/浏览器内核。
-> 形态是一个**系统级 PWA / 小程序引擎**：随时生成、销毁、持久化一个应用。
+> agent 生成 HTML/CSS/JS, Neb 直接渲染成桌面级原生窗(桌宠/数字人/数据大屏/
+> 流式会话), 无浏览器、无构建、无运行时依赖。
 >
 > 渲染全部走自研 C99 引擎(原生、无 WebView、无 Swift): 平台差异收敛在
 > `platform/hn_platform.h` 的薄胶水层 —— 每平台一个 `hnp_*.c`, 运行期
@@ -136,7 +137,7 @@ macOS/Linux/Windows 产物 —— 除五个 `hncore` 引擎 CLI（验证与集�
 ## 架构与代码地图
 
 ```
-Sources/CHtmlNative/  **Neb 引擎核心**(C99, ~10900 行, 零依赖, 不含平台/UI/网络)
+Sources/CHtmlNative/  **Neb 引擎核心**(C99, ~20600 行含 include/hn.h, 零依赖, 不含平台/UI/网络)
   hn_html.c    hn 编码解析 → DOM(arena)
   hn_css.c     样式表解析 → 规则(选择器展开/特异性)
   hn_style.c   级联 + 继承 + UA 样式表
@@ -149,15 +150,21 @@ Sources/CHtmlNative/  **Neb 引擎核心**(C99, ~10900 行, 零依赖, 不含平
   hn_lottie.c  Lottie 求值 → 矢量指令(多边形/图片/矩形/渐变/裁剪)
   hn_mesh.c    网格变形贴图 → MESH 指令(Live2D 类效果的原语)
   hn_context.c 会话: 布局编排/命中/hot-update/清单解析
+  hn_gpu.c     **GPU 后端引擎侧**(显示列表 → hnp_gpu_host 原语批; 不支持指令整帧回退 hnsoft)
   hn_cairo.c   **可选**绘制后端: 显示列表 → cairo(一份实现喂所有平台)
   include/hn.h 引擎公共 API(单头)
 rt/hn_rt.c             公共运行时: 文档生命周期/htmx 执行/sys:// 桥/本地 KV
                        + QuickJS 求值(HN_HAVE_QUICKJS, 静态链接可选)
-platform/hn_platform.h 平台抽象 API(~15 个函数: init/开窗/blit/事件/时钟/光标)
+                       + 定时器/RAF/媒体宿主/GPU 宿主槽/HiDPI scale
+platform/hn_platform.h 平台契约(窗口/媒体/视频图层/~15 函数 + GPU 原语表 hnp_gpu_host)
   hnp_headless.c       无头平台(CI/服务器/agent 无显示环境)
-  hnp_macos.c          macOS: 运行期 dlopen AppKit + objc_msgSend(零 .m/.swift)
-  hnp_linux.c          Linux: 运行期 dlopen X11
+  hnp_macos.c          macOS: 运行期 dlopen AppKit/CoreGraphics/QuartzCore(零 .m/.swift)
+  hnp_media_macos.c    macOS 媒体宿主(AVFoundation, 运行期 dlopen)
+  hnp_gpu_metal.c      macOS GPU 原语(Metal v1; 运行期 dlopen + MSL 运行期编译)
+  hnp_linux.c          Linux: 运行期 dlopen X11/Xext/Xv
 app/hn_app.c           唯一主循环(~120 行): 链接不同 hnp_*.c 即该平台的应用
+  hn_media_platform.c  平台媒体宿主装配(hnp_media_* → hn_media_host)
+  hn_media_synth.c     合成媒体宿主单一来源(hncore/hnapp 共用)
 tools/hncore.c         引擎 CLI(render/renderc: hnsoft 与 cairo 同一显示列表)
 tools/hnweb_macos.c    macOS 窗口壳(M1+M2: dlopen AppKit/CoreGraphics)
 tools/hnweb_linux.c    Linux 窗口壳(M1+M2: X11 dlopen + hnsoft, 事件管道+帧循环)
@@ -166,9 +173,18 @@ tools/hn_daemon.c      C99 常驻宿主(Unix socket JSON-lines, agent 入口)
 tools/hn_cli.c         C99 命令行客户端(与 daemon 配对)
 tools/build-multiplatform.sh  交叉构建(zig cc, 三平台产物 + 跨架构确定性门禁)
 tools/build-daemon-cli.sh     daemon/CLI 本机构建
-tools/*_probe.c/.sh    探针(render/alpha/cairo/mesh/sysbridge/rt + 布局/CSS/HTML/Lottie/GIF)
+tools/*_probe.c/.sh    探针(render/alpha/cairo/gpu/mesh/sysbridge + 布局/CSS/HTML/Lottie/GIF/
+                       canvas/timer/fmt/md/stream/anim/quad3d/live2d/media/pet/hidpi/resident/window)
+docs/                  校准文档: getting-started(上手) · platforms(平台能力矩阵)
+                       · media-design(媒体契约) · threejs-support(3D 支持度)
+                       · adr-001-renderer(绘制引擎决策) · roadmap(路线图)
 screenshots/           引擎效果截图
 ```
+
+> 代码地图的行数是历史口径(引擎核心约 10.9k 行的旧快照); 当前实测:
+> `Sources/CHtmlNative/*.c *.h`(含 include/hn.h)共 **20,637 行**,
+> `platform/` 3,469 · `rt/` 2,581 · `app/` 1,351 · `tools/` 20,145
+> (`wc -l`, 2026-10-13)。
 
 ## 使用
 
@@ -289,6 +305,13 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 
 ## 支持的子集(v1)
 
+> **能力索引**(想找什么去哪): **GPU 后端契约**(平台原语 + Metal v1)见本文
+> "绘制后端"段与 [docs/platforms.md](docs/platforms.md) 的「GPU 契约的定位」;
+> **媒体元素/视频图层**见"媒体元素"条与 [docs/media-design.md](docs/media-design.md);
+> **Markdown/JSON/CSV 直染**见"直染"三节; 平台逐格能力矩阵见
+> [docs/platforms.md](docs/platforms.md); 3D/QUAD 支持度见
+> [docs/threejs-support.md](docs/threejs-support.md)。
+>
 > **实现语言盘点(语言纯度口径)**: **引擎与全部工具 = C99**(Sources/ + rt/ +
 > tools/ 全部 `.c`; 无 Python/Node/Swift); **构建与验证链 = bash**
 > (`tools/build-multiplatform.sh`、`tools/*_probe.sh`, 探针共享

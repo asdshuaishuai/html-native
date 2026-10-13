@@ -4,6 +4,11 @@
 > 检验页: `examples/threejs-ui.html`(920x880 深色数据大屏,四个典型 three.js UI 场景)。
 > 截图: `screenshots/threejs-ui.png`(HN_CLOCK=1500)、`screenshots/threejs-ui-t0.png`(HN_CLOCK=0,立方体转 90°,证明动画在走)。
 > 口径: 本引擎**不是 WebGL**。3D = CSS 3D 变换 + 元素盒四角过 4x4 矩阵 + 透视除法(k = d/(d−z))成投影四边形(QUAD),渐变/边框/文字逐像素随面片采样。
+> 校准: 2026-10-13 按当日代码复核(深度排序/关键帧字段两处已更新, 见下)。
+>
+> 注(与 README 的索引关系): 本页是 3D/QUAD 专项; 深度排序的引擎实现见
+> `Sources/CHtmlNative/hn_paint.c` 的 `paint_children_depth_sorted`(画家算法),
+> 口径由 `tools/quad3d_probe.sh`(33 断言)钉死。
 
 ## 支持度矩阵
 
@@ -16,9 +21,9 @@
 | 环形/圆周排布(对象摆上圆环) | 环容器 preserve-3d + 各卡 `rotateY(60°·i) + translateZ(半径)` | ✅(静态排布) | 04 环形仪表 |
 | 渐变材质(map / vertexColors) | `linear-gradient` 逐像素画在元素平面、随 QUAD 投影(等效"先画后变换") | ✅ | 01–04 全部面片 |
 | 文字贴片(PlaneGeometry + 纹理字) | 文字直接绘制在 3D 面片上,锚点与字号缩放正确,面片内近大远小 | 近似(字形本身不透视畸变) | 02 面板、03 面上字母、04 卡标 |
-| 动画循环 requestAnimationFrame + 物体旋转 | `@keyframes`(仅采样 opacity / translate-x / translate-y / scale / rotate 单数值)+ `infinite`;离屏用 `HN_CLOCK=<ms>` 确定性取帧 | ✅(字段受限;transform 简写/两值 translate 不进时间轴) | 03 立方体 rotate 0→360°/6s(两截图即 t=0 与 t=1500 的对比) |
+| 动画循环 requestAnimationFrame + 物体旋转 | `@keyframes` 采样字段(2026-10-13 实测确认): opacity / translate-x / translate-y / scale / rotate(rotate-z) / **rotate-x / rotate-y** / background(-color) / color(单数值与颜色); `infinite`;离屏用 `HN_CLOCK=<ms>` 确定性取帧 | ✅(面片旋转与底色/文字色都能逐帧插值; `transform` 简写/两值 translate 不进时间轴) | 03 立方体 rotate 0→360°/6s(两截图即 t=0 与 t=1500 的对比) |
 | translateZ 近大远小(景深) | 自身 `perspective` + `translateZ(±)`,k = d/(d−z) | ✅ | 01 顶部数据条(Z −80/+10/+90) |
-| 深度缓冲 / 正确遮挡 | preserve-3d 内自动深度排序(2D 仍文档序)—— 面片按中心视空间 z 从远到近发射(画家算法,稳定排序:同深保持文档序);非 3D 内容与 z-index/2D 语义不受影响;跨 preserve-3d 边界不排序 | ✅(子树内自动;无逐像素深度缓冲) | 03 六面遮挡、04 卡片环(已转出交错深度,不再手工排序) |
+| 深度缓冲 / 正确遮挡 | preserve-3d 内自动深度排序(2D 仍文档序)—— 面片按中心视空间 z 从远到近发射(画家算法,稳定排序:同深保持文档序);非 3D 内容与 z-index/2D 语义不受影响;跨 preserve-3d 边界不排序 | ✅ 已落地(`hn_paint.c` `paint_children_depth_sorted`;quad3d_probe 33 断言含"交叠区像素 = 近面片遮挡远面片"与"非 3D 交错对仍按文档序"两条对照) | 03 六面遮挡、04 卡片环(已转出交错深度,不再手工排序) |
 | OrbitControls 相机控制器 | ❌ 无运行时相机;视点固定,换角度 = 改 CSS 角度重新布局/绘制 | ❌ | — |
 | 光照 / 阴影 / PBR 材质(MeshStandardMaterial、阴影贴图) | ❌ 无光照模型、无法线、无阴影计算;仅 2D 装饰性 box-shadow/text-shadow(不随 3D 变换参与光照) | ❌ | —(demo 用渐变+亮边框冒充发光材质) |
 | 3D 模型加载(glTF/OBJ + 纹理) | ❌ 无模型管线;几何只能用 CSS 盒/面片拼 | ❌ | — |
@@ -29,9 +34,10 @@
 1. **同一元素勿混用 2D scale 与 3D 变换** —— 自身面片不含自身 scale;要缩放用外层壳包一层。
 2. **preserve-3d 旋转面片上的 absolute 子级必须自带 transform**(哪怕 `translateZ(0.02px)`)才走"自身 3D 矩阵"路径;无自身 transform 的子级按父内坐标套父矩阵,会整体脱出面片(demo 02 地板格线因此各带 translateZ)。
 3. **带 translateZ 投影的面片里,子级反过来不能再带自身 transform**(会脱锚);demo 04 表盘 tick 因此不带 rotate,只用 margin-top 排弧。
-4. `@keyframes` 只采样五个单数值字段;`transform` 简写与两值 translate 不进时间轴。
+4. `@keyframes` 采样 9 个字段:opacity / translate-x / translate-y / scale / rotate(rotate-z) / rotate-x / rotate-y / background(-color) / color;`transform` 简写与两值 translate 不进时间轴(2026-10-13 复核 `hn_context.c` `kf_collect`)。
 5. 面内偏移不要用 `transform: translate(x,y)` 叠 3D —— QUAD 平移一次、文字锚点平移两次会脱出面片(见 `examples/threejs-lab.html` 页首注)。
+6. **深度排序是面片级的**(画家算法, 按面片中心视空间 z): 互相穿插的两个面片(非前后关系)不保证逐像素正确 —— 需要逐像素深度缓冲(WebGL 语义)的场景做不到;这是"QUAD 透视投影"与真 GPU 管线的本质差别。
 
 ## 诚实结论
 
-本引擎是 **CSS 3D 变换 + QUAD 透视投影**,不是 WebGL,没有 GPU 渲染管线。它能覆盖的是 three.js 观感里"**数据大屏 / 卡片 UI 类**"的那一半:透视舞台、网格地板、盒子标识、圆环卡片排布、渐变材质、面片文字、无限旋转动画 —— 这些用纯 CSS 口径即可逼近,且离屏渲染对 `HN_CLOCK` 完全确定(两张截图逐字节可比对)。它覆盖不了另一半:没有相机控制器、没有光照/阴影/材质系统、没有模型加载与粒子系统,遮挡是 preserve-3d 子树内的画家算法(面片级排序,非逐像素深度缓冲,跨子树边界不排序),字形不做透视畸变。因此评估结论是:**把本引擎当"CSS 3D 大屏渲染器"看,three.js 类 UI 的静态观感与简单动画可以达到以假乱真;当"three.js 替代品"看,3D 能力上限是装饰级的,不是场景级的。**
+本引擎是 **CSS 3D 变换 + QUAD 透视投影**,不是 WebGL,没有 GPU 3D 渲染管线(有 GPU **光栅**后端: `hnp_gpu_host` 原语表 + Metal v1 把 QUAD 当四边形贴图绘制, 但几何/排序/透视仍是引擎算的 CPU 路径, 见 ADR 001 与 docs/platforms.md)。它能覆盖的是 three.js 观感里"**数据大屏 / 卡片 UI 类**"的那一半:透视舞台、网格地板、盒子标识、圆环卡片排布、渐变材质、面片文字、无限旋转动画 —— 这些用纯 CSS 口径即可逼近,且离屏渲染对 `HN_CLOCK` 完全确定(两张截图逐字节可比对)。它覆盖不了另一半:没有相机控制器、没有光照/阴影/材质系统、没有模型加载与粒子系统,遮挡是 preserve-3d 子树内的画家算法(面片级排序,非逐像素深度缓冲,跨子树边界不排序),字形不做透视畸变。因此评估结论是:**把本引擎当"CSS 3D 大屏渲染器"看,three.js 类 UI 的静态观感与简单动画可以达到以假乱真;当"three.js 替代品"看,3D 能力上限是装饰级的,不是场景级的。**

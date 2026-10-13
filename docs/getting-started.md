@@ -13,8 +13,9 @@ html-native 是一个系统级小程序引擎(定位同 RN / Flutter,但 UI 语�
 - **应用即文件**。一个小应用就是目录里的 `app.html`(+ 可选 `app.css`),
   双击不存在的概念——`hn` 命令秒开、秒销毁。
 - **秒级反馈**。开发模式下保存文件,窗口立刻热更新,不用重启任何东西。
-- **系统能力开箱即用**。读 CPU/内存/电池、本地持久化、剪贴板、系统通知,
-  全部是一行 `sys://` 地址,零网络、零依赖。
+- **系统能力开箱即用**。读 CPU/内存/磁盘/运行时长/主机名、本地持久化、剪贴板、
+  系统通知、打开 URL,全部是一行 `sys://` 地址,零网络、零依赖
+  (电池与全量系统卡见下文校准注)。
 
 AI agent 可以生成这些 HTML 直接推给引擎成窗;人类也可以直接手写——
 这份指南就是写给你(人类)的。
@@ -31,17 +32,33 @@ mkdir myapp && cd myapp                     # 应用即文件: 手写两个文�
 dist/hn open myapp app.html --css app.css
 ```
 
-窗口已经出现了。现在做三件事,感受开发循环:
+内容已渲染(无头槽位)。现在做三件事,感受开发循环
+(要让窗口真出现在桌面上, 见下一条):
 
 1. **改文字**:把 `app.html` 里 `<h1>myapp</h1>` 改成任意标题,⌘S 保存——
-   半秒内窗口标题和界面同步变化。
+   `hn update` 后界面同步变化(窗口应用则由壳的 mtime watch 自动重载)。
 2. **改样式**:把 `app.css` 里 `--accent: #4f7cff` 换成 `#ff6b6b`,保存——
    保存按钮连同主题色一起换(CSS 变量贯穿整个界面)。
 3. **用存储**:在"你的名字"输入框打字,点保存,关掉窗口重新 `hn open`——
    值还在(本地 JSON 持久化,存在 `~/.html-native/store/`)。
 
-`hn dev` 的本质:引擎 watch 源文件 mtime(0.5s 轮询),变了就以同 id
-热推送新编码,窗口对象与进程不动,只有内容重排。
+上面是 **daemon + 无头槽位**的开法。要让窗口真的出现在桌面(原生窗, 每窗一进程),
+给 `open` 加 `--window`:
+
+```bash
+dist/hn open myapp app.html --window        # daemon spawn 平台壳, 回 {"pid":N,"window":true}
+dist/hn update myapp app.html               # 热推送新内容到子进程(spawn 的源文件原子写回)
+dist/hn close myapp                         # SIGTERM 回收, 关窗即退
+```
+
+窗口应用上 `eval`/`shot`/`dump` 不可用(文档在子进程里, daemon 无句柄)——
+**headless 是 agent 的渲染/截图管线, window 是给人看的桌面窗**。真窗口下的
+热重载由壳自带的 mtime watch 完成(源文件保存 ~300ms 内界面更新, 进程与窗口不动)。
+
+`hn dev` 的本质:引擎 watch 源文件 mtime(`hn_app.c` `HN_WATCH_INTERVAL_MS=300`,
+即 ~300ms 轮询),变了就以同 id 热推送新编码,窗口对象与进程不动,只有内容重排。
+注: `hn dev`/`hn new` 两个 CLI 子命令**尚未包装**(路线图; 现用 `hn update`
+或 `--window` 开窗即等价热开发循环, 详见 README「已知简化与路线图」)。
 
 ## 应用解剖
 
@@ -67,13 +84,19 @@ myapp/
 </body></html>
 ```
 
-三种表面:
+三种表面(`hn-surface` 由引擎解析, 物化取决于壳; 桌宠另有一组 meta, 见下):
 
 | surface | 物化成 | 适合 |
 |---|---|---|
-| `window` | 常规 NSWindow | 正式小应用 |
-| `popup` | 浮层面板(不抢焦点、悬浮) | 消息卡、agent 输出 |
-| `layer` | 状态栏层级 | 常驻小组件 |
+| `window` | 常规原生窗(NSWindow / X11 / Win32) | 正式小应用 |
+| `popup` | 低存在感窗口(不抢焦点语义; `hn-presence=ghost` 缺省) | 消息卡、agent 输出 |
+| `layer` | 弱存在感小组件(`hn-level="floating"` 悬浮于普通窗口上) | 常驻小组件 |
+
+注: 当前 C99 平台层(`hn_app` + `hnp_*.c`)的开窗能力聚焦"桌宠一组 meta":
+`hn-transparent`(逐像素透明)/`hn-frameless`(无框)/`hn-level=floating|desktop`/
+`hn-spaces=all`/`hn-shadow=0`/`hn-click-through` —— macOS 已物化, Linux 逐字段
+对齐(`tools/linux_parity_check.sh` 编译级对账, 行为级需真机), Windows/headless
+优雅忽略。`popup`/`layer` 的精细物化(不抢焦点浮层等)在壳层路线图上。
 
 ## 交互(htmx 风格)
 
@@ -97,17 +120,21 @@ myapp/
 
 ## 系统能力速查(sys://)
 
-全部本地、零网络,响应自带样式片段,换入即用:
+全部本地、零网络,响应自带样式片段,换入即用
+(下表为 C99 运行时 `rt/hn_rt.c` 的 `hn_rt_sys_fragment` 实测路由; 2026-10-13 逐条实跑验证):
 
 | 地址 | 作用 |
 |---|---|
-| `sys://info` | 全量系统卡(主机/CPU/内存/磁盘/电池/运行时间) |
-| `sys://cpu` / `sys://memory` / `sys://disk` / `sys://battery` / `sys://uptime` / `sys://host` | 单项数据 |
+| `sys://cpu` / `sys://memory` / `sys://disk` / `sys://uptime` / `sys://host` | 系统单项数据(CPU 采样占用 / 内存 / 磁盘 / 运行时长 / 主机名) |
 | `sys://store/get?key=k` | 读本地 KV(该应用持久化值) |
 | `hx-post="sys://store/set?key=k"` | 写本地 KV(表单 `value` 字段) |
 | `sys://clipboard/get` / `hx-post="sys://clipboard/set"` | 剪贴板读写 |
-| `hx-post="sys://notify"` | 系统通知(title/body 表单字段) |
+| `hx-post="sys://notify"` | 系统通知(`text` 字段) |
 | `sys://open?url=…` | 用系统默认方式打开 URL/文件 |
+
+> 校准注: `sys://info`(全量卡)与 `sys://battery` **不在** C99 运行时路由表里
+> (只在 Windows 的 `tools/sysbridge.c` 桥里; Linux 壳的 `sys_fragment` 是待移植
+> 占位)。全量卡可由页面自己拼 `cpu`/`memory`/… 片段得到; 电池是路线图。
 
 ## 样式能力(CSS 子集)
 
@@ -161,11 +188,15 @@ head 里声明主题, 引擎注入一整套设计令牌基底(暗/亮):色彩系
 ## 能力边界(无 WebKit 兜底)
 
 引擎不走系统 WebKit —— 渲染只有自研 C99 这一条路。CSS 是实用子集:
-`grid`、`canvas`/`svg` 还未实现(3D 变换/网格变形 MESH 指令已覆盖一部分
-立体与形变需求)。**正在进行中**: 音频/视频(`<video>`/`<audio>`, 解码委托
-平台媒体框架, 非 FFmpeg 路线)与 WASM 运行时缝(wasm3),
-契约见 [docs/media-design.md](media-design.md)。
-完整能力清单见 [README](../README.md)「支持的子集」。
+`grid`、`svg`、`::before/::after`、`@font-face`、`word-break` 还未实现
+(3D 变换/网格变形 MESH 指令已覆盖一部分立体与形变需求)。
+**已落地**(不再是"进行中"): `<canvas>` 2D API(QuickJS 驱动, 状态机在 JS 层)、
+音频/视频(`<video>`/`<audio>`, 解码委托平台媒体框架 —— macOS AVFoundation,
+非 FFmpeg 路线; 真窗可走 AVPlayerLayer 图层直通)、WASM 运行时缝(wasm3)、
+JS 定时器与 RAF、Markdown/JSON/CSV 直染、GIF/dotLottie/Live2D motion 驱动、
+桌宠窗口形态、HiDPI。
+契约见 [docs/media-design.md](media-design.md)、平台矩阵见
+[docs/platforms.md](platforms.md)。完整能力清单见 [README](../README.md)「支持的子集」。
 
 ## 组件复用(include)
 
@@ -182,36 +213,53 @@ head 里声明主题, 引擎注入一整套设计令牌基底(暗/亮):色彩系
 ## 应用生命周期
 
 ```bash
-hn open myapp app.html --css app.css    # 生成(表面由 meta 决定)
-hn list                                 # 在运行的应用
-hn update myapp app.html                # 热更新(文档生命周期保持)
-hn shot myapp out.png                   # 渲染 PNG
-hn close myapp                          # 销毁
+hn open myapp app.html --css app.css    # 生成(无头槽位; 表面由 meta 决定)
+hn open myapp app.html --window         # 真桌面窗(daemon spawn 平台壳, 每窗一进程)
+hn list                                 # 在运行的应用(窗口应用带 kind:window/pid)
+hn update myapp app.html                # 热更新(无头保持文档生命周期; 窗口应用原子写回源文件)
+hn shot myapp out.png                   # 渲染 PNG(无头应用)
+hn close myapp                          # 销毁(窗口应用 = SIGTERM 回收子进程)
 ```
 
 持久化与轻应用槽位走宿主 socket op(`{"op":"persist",…}` /
-`{"op":"restore",…}` / `{"op":"applets"}`), CLI 尚未包这一层 ——
-任何 socket 客户端都能直接调。
+`{"op":"restore",…}` / `{"op":"applets"}` / `{"op":"resident",…}` 常驻回归),
+CLI 尚未包这一层 —— 任何 socket 客户端都能直接调。
+(CLI 现有 9 个子命令: ping/open/update/close/list/dump/text/event/shot。)
 
 所有命令走常驻宿主(`~/.html-native/hn-daemon.sock`, JSON-lines 协议):
-先 `dist/hn-daemon &` 起宿主, 之后每个应用都是宿主里的轻量对象。
+先 `dist/hn-daemon &` 起宿主, 之后每个应用都是宿主里的轻量对象
+(窗口应用是宿主 spawn 的独立子进程)。
 
 ## 输入控件
 
 `<input>` / `<textarea>` 开箱可用:点击聚焦(`:focus` 生效)、
 Tab 在控件间轮换、原生键盘编辑(含中文输入与光标移动)、闪烁 caret。
+`type=text/password/checkbox/radio` 语义齐备(password 掩码、
+checkbox/radio 绘制方框对勾/圆点、`:disabled`/`:checked` 伪类)。
 表单值经 `hx-post` 自动编码发送。两个顺手的表单语义:
 
 - input 里按**回车** = 提交:自动定位最近的提交载体
   (自身 → 祖先 → 最近容器内第一个 `hx-post`/`hx-get` 元素)再触发;
-- textarea 支持多行:值按 `
-` 逐行布局,光标跟随所在行。
+- textarea 支持多行:值按换行逐行布局,光标跟随所在行。
+
+## 新能力速览(校准补记, 全部已落地)
+
+| 能力 | 一条命令/声明 |
+|---|---|
+| **桌宠形态**(透明/无框/悬浮/穿透) | `examples/pet.html`: `hn-transparent`+`hn-frameless`+`hn-level`+`hn-click-through`; 真窗 `dist/hnapp-macos-arm64 examples/pet.html` |
+| **媒体元素**(`<video>`/`<audio>`) | `examples/media-demo.html`; 真窗 AVFoundation 解码出声, `video` 可走 AVPlayerLayer 图层直通(`HN_MEDIA_LAYER=0` 退回 CPU) |
+| **直染**(agent 输出零脚本渲染) | `<div hn-md>…markdown…</div>` / `hn-json` / `hn-csv`; 见 `examples/md-demo.html`、`fmt-demo.html` |
+| **HiDPI**(Retina 2x 真窗) | 缺省按平台 backing scale; `HN_RENDER_SCALE=1\|2` 可覆盖(离屏恒 1x) |
+| **GPU 契约 + Metal v1** | `HN_GPU=metal dist/hnapp-macos-arm64 examples/dashboard.html`(缺省关, 全 CPU/hnsoft) |
+| **常驻/几何记忆** | socket op `{"op":"resident",...}` 登记后 daemon 重启自动重开; 开窗位置自动记忆 |
+| **持久化胶囊** | `hn persist <id> x.hnapp` / `restore`(socket op; 胶囊内嵌 agent 指令与能力图) |
 
 ## 调试与验收
 
 ```bash
 dist/hnapp-macos-arm64 app.html --shot out.png 480 620   # 壳渲染落盘
 dist/hncore-macos-arm64 render app.html out.png 460 560  # 引擎 CLI(hnsoft 后端)
+dist/hncore-cairo-macos-arm64 renderc app.html out.png 460 560  # cairo 后端(同一显示列表)
 dist/hn shot myapp out.png                               # daemon 无头渲染
 
 # C99 离屏验收(61 断言; 位图即窗口所见, 光栅器就是生产用的 hnsoft)
@@ -219,20 +267,31 @@ cc -O2 -I Sources/CHtmlNative/include -I Sources/CHtmlNative \
    -I /opt/homebrew/include/freetype2 tools/render_probe.c \
    Sources/CHtmlNative/hn_{arena,html,css,style,layout,paint,context,theme}.c \
    Sources/CHtmlNative/hn_{json,lottie,mesh,png,media}.c \
+   Sources/CHtmlNative/hn_{md,fmt,canvas,gif}.c \
    Sources/CHtmlNative/hnsoft.c -L/opt/homebrew/lib -lfreetype -lm \
    -o /tmp/render_probe && /tmp/render_probe
+
+# 探针任选(全绿 = 该链路健康, 数字为 2026-10-13 实测断言数):
+bash tools/canvas_probe.sh   # 95    bash tools/md_probe.sh      # 107
+bash tools/fmt_probe.sh      # 118   bash tools/gif_probe.sh     # 61
+bash tools/live2d_probe.sh   # 44    bash tools/lottie_probe.sh  # 37
+bash tools/quad3d_probe.sh   # 33    bash tools/pet_probe.sh     # 27
+bash tools/gpu_probe.sh      # 7     bash tools/timer_probe.sh   # 59
 ```
 
 ## 边界(诚实清单)
 
-- JavaScript 走内嵌 QuickJS(可选): `<script>` 求值 + `hnSetText`/`hnSetValue`
-  桥; 交互主体仍是声明式 hx-*。
-- CSS 是实用子集,不是全量(无 grid 等;`nth-child` 已支持,其余在路线图上)。
-- 图片支持 `<img>`;字体走 FreeType + 系统字体栈。
+- JavaScript 走内嵌 QuickJS(可选): `<script>` 求值 + 桥函数
+  `hnSetText`/`hnSetValue`/`hnGet2D`/`hnCanvas2D`/`hnMeshParam`/`hnMedia*`/
+  `hnWasm*`; 定时器与 RAF 已落地。**没有** `addEventListener`/DOM 全量 API/
+  `fetch`(Swift 时代的 `hn.fetch` 已随全量 C99 删除) —— 交互主体仍是声明式 hx-*。
+- CSS 是实用子集,不是全量(无 grid/svg/伪元素/`@font-face`/`word-break`;
+  `nth-child` 已支持,其余在路线图上)。
+- 图片支持 `<img>`(含 GIF 动图、`object-fit`);字体走 FreeType + 系统字体栈。
 - 平台壳全部纯 C99: macOS `hnp_macos.c`/`hnweb_macos.c`(运行期 dlopen
-  AppKit), Linux `hnp_linux.c`/`hnweb_linux.c`(dlopen X11),
-  Windows `tools/hnwin.c`(Win32); 无头走 `hnp_headless.c`/daemon。
-  没有 Swift、没有 WebKit、没有 .m 文件。
+  AppKit/CoreGraphics/QuartzCore/Metal), Linux `hnp_linux.c`/`hnweb_linux.c`
+  (dlopen X11/libXext/libXv), Windows `tools/hnwin.c`(Win32);
+  无头走 `hnp_headless.c`/daemon。没有 Swift、没有 WebKit、没有 .m 文件。
 
 遇到问题先跑 `render_probe`(全绿说明引擎层健康),
 再单独渲染你的文件定位是内容还是引擎的问题。
