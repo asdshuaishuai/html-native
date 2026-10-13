@@ -412,14 +412,60 @@ extern int sysctlbyname(const char *, void *, size_t *, const void *, size_t);
 static unsigned long g_boot_hint;   /* uptime 用(进程启动时的 monotonic) */
 
 /* 剪贴板/openURL 的 ObjC 调用: 每次经 dlsym(不依赖链接了哪个 hnp_*.c)。
-   Apple 平台 AppKit 已由 hnp_init 装载; 非 Apple 直接返回 0。 */
+   Apple 平台 AppKit 已由 hnp_init 装载; 非 Apple 直接返回 0。
+
+   ⚠️ 2026-10 修复(本轮): 这里原写 `dlsym((void *)0, "objc_msgSend")` ——
+   **RTLD_DEFAULT 在 macOS 是 (void *)-2 而非 NULL**(dlfcn.h), 传 0 得到
+   的是"找不到符号"的 NULL, 于是三个函数全部走 `if (!gc || !sl || !send)`
+   提前返回: ⌘C/⌘V 与 sys://clipboard 在 macOS 上**从来没工作过**, 只是
+   静默失败(界面显示 "clip unavailable")。同一 bug 在 sys_open_url 上
+   (链接点击/notify 外链同样没打开过)。已全部改为 RTLD_DEFAULT。
+
+   有界 autorelease 池: 本文件在池外调用 stringWithUTF8String: 等
+   convenient 构造器会泄漏(与 hnp_macos.c 事故②同一根因)。这里按
+   hnp_macos.c 的 pool_push/pool_pop 同款手法套一层 —— 对象只在调用
+   期间存活, drain 后立即回收。 */
 #ifdef __APPLE__
 #include <dlfcn.h>
-static void *hn_objc_msgSend;   /* lazy: 首次调用时 dlsym */
-static void *hn_objc_sel(const char *name) {
-    return dlsym((void *)0, name);
+/* -std=c99 + _POSIX_C_SOURCE 下 Darwin 的 dlfcn.h 不暴露 RTLD_DEFAULT
+   (__DARWIN_C_LEVEL 停在 POSIX 档, RTLD_DEFAULT 在 FULL 档里) ——
+   这正是原作者写 (void *)0 的原因, 而 macOS 上 dlsym(0, ...) **不搜全局
+   (拿到 NULL)**, 于是整块静默失效。这里按 Darwin 真值补定义
+   (dyld 源码/机器码实测 = (void *)-2); 其余平台的 RTLD_DEFAULT 由
+   dlfcn.h 正常给出(glibc = (void *)0, 语义是全局符号表)。 */
+#ifndef RTLD_DEFAULT
+#if defined(__APPLE__)
+#define RTLD_DEFAULT ((void *)-2)
+#else
+#define RTLD_DEFAULT ((void *)0)
+#endif
+#endif
+typedef void *(*hn_dlsym_msgSend_t)(void *, void *, ...);
+typedef struct { void *send, *gc, *sl; } hn_objc_rt;
+static int hn_objc_bind(hn_objc_rt *rt) {
+    rt->gc = dlsym(RTLD_DEFAULT, "objc_getClass");
+    rt->sl = dlsym(RTLD_DEFAULT, "sel_registerName");
+    rt->send = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    return rt->gc && rt->sl && rt->send;
 }
-static const char *hn_cls(const char *name) { return name; }  /* 占位: objc_getClass 由 dlsym */
+/* 有界 autorelease 池(与 hnp_macos.c 的 pool_push/pool_pop 同款):
+   NSObject 的 alloc/init 与 drain 都经 objc_msgSend 调用。 */
+static void *hn_pool_enter(const hn_objc_rt *rt) {
+    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt->send;
+    void *(*gc)(const char *) = (void *(*)(const char *))rt->gc;
+    void *(*sel)(const char *) = (void *(*)(const char *))rt->sl;
+    void *cls = gc("NSAutoreleasePool");
+    if (!cls) return NULL;
+    void *o = ((void *(*)(void *, void *))send)(cls, sel("alloc"));
+    if (!o) return NULL;
+    return ((void *(*)(void *, void *))send)(o, sel("init"));
+}
+static void hn_pool_exit(const hn_objc_rt *rt, void *pool) {
+    if (!pool) return;
+    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt->send;
+    void *(*sel)(const char *) = (void *(*)(const char *))rt->sl;
+    ((void (*)(void *, void *))send)(pool, sel("drain"));
+}
 #endif
 
 static double sys_uptime_s(void) {
@@ -514,44 +560,69 @@ static void sys_host(char *out, size_t cap) {
 #ifdef __APPLE__
 #include <dlfcn.h>
 static int clip_set(const char *text) {
-    void *(*gc)(const char *) = (void *(*)(const char *))dlsym((void *)0, "objc_getClass");
-    void *(*sl)(const char *) = (void *(*)(const char *))dlsym((void *)0, "sel_registerName");
-    void *(*send)(void*, void*, ...) = (void *(*)(void*, void*, ...))dlsym((void *)0, "objc_msgSend");
-    if (!gc || !sl || !send) return 0;
-    void *pb = send(gc("NSPasteboard"), sl("generalPasteboard"));
-    if (!pb) return 0;
-    ((void (*)(void*,void*))send)(pb, sl("clearContents"));
-    void *nscls = gc("NSString");
-    void *str = ((void*(*)(void*,void*,const char*))send)(nscls, sl("stringWithUTF8String:"), text);
-    void *type_str = ((void*(*)(void*,void*,const char*))send)(nscls, sl("stringWithUTF8String:"), "public.utf8-plain-text");
-    ((void*(*)(void*,void*,void*,void*))send)(pb, sl("setString:forType:"), str, type_str);
-    return 1;
+    hn_objc_rt rt;
+    if (!hn_objc_bind(&rt)) return 0;
+    void *pool = hn_pool_enter(&rt);
+    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt.send;
+    void *(*gc)(const char *) = (void *(*)(const char *))rt.gc;
+    void *(*sl)(const char *) = (void *(*)(const char *))rt.sl;
+    int ok = 0;
+    void *pb = ((void *(*)(void *, void *))send)(gc("NSPasteboard"), sl("generalPasteboard"));
+    if (pb) {
+        ((void (*)(void *, void *))send)(pb, sl("clearContents"));
+        void *nscls = gc("NSString");
+        void *str = ((void *(*)(void *, void *, const char *))send)(
+            nscls, sl("stringWithUTF8String:"), text);
+        void *type = ((void *(*)(void *, void *, const char *))send)(
+            nscls, sl("stringWithUTF8String:"), "public.utf8-plain-text");
+        if (str && type)
+            ok = ((void *(*)(void *, void *, void *, void *))send)(
+                pb, sl("setString:forType:"), str, type) ? 1 : 0;
+    }
+    hn_pool_exit(&rt, pool);
+    return ok;
 }
 static int clip_get(char *out, size_t cap) {
-    void *(*gc)(const char *) = (void *(*)(const char *))dlsym((void *)0, "objc_getClass");
-    void *(*sl)(const char *) = (void *(*)(const char *))dlsym((void *)0, "sel_registerName");
-    void *(*send)(void*, void*, ...) = (void *(*)(void*, void*, ...))dlsym((void *)0, "objc_msgSend");
-    if (!gc || !sl || !send) return 0;
-    void *pb = send(gc("NSPasteboard"), sl("generalPasteboard"));
-    if (!pb) return 0;
-    void *type = ((void*(*)(void*,void*,const char*))send)(gc("NSString"), sl("stringWithUTF8String:"), "public.utf8-plain-text");
-    void *str = ((void*(*)(void*,void*,void*))send)(pb, sl("stringForType:"), type);
-    if (!str) return 0;
-    const char *c = ((const char *(*)(void*,void*))send)(str, sl("UTF8String"));
-    if (!c) return 0;
-    snprintf(out, cap, "%s", c);
-    return 1;
+    hn_objc_rt rt;
+    if (!hn_objc_bind(&rt) || !out || cap == 0) return 0;
+    out[0] = 0;
+    void *pool = hn_pool_enter(&rt);
+    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt.send;
+    void *(*gc)(const char *) = (void *(*)(const char *))rt.gc;
+    void *(*sl)(const char *) = (void *(*)(const char *))rt.sl;
+    int ok = 0;
+    void *pb = ((void *(*)(void *, void *))send)(gc("NSPasteboard"), sl("generalPasteboard"));
+    if (pb) {
+        void *type = ((void *(*)(void *, void *, const char *))send)(
+            gc("NSString"), sl("stringWithUTF8String:"), "public.utf8-plain-text");
+        void *str = type ? ((void *(*)(void *, void *, void *))send)(
+            pb, sl("stringForType:"), type) : NULL;
+        const char *c = str ? ((const char *(*)(void *, void *))send)(
+            str, sl("UTF8String")) : NULL;
+        if (c) { snprintf(out, cap, "%s", c); ok = 1; }
+    }
+    hn_pool_exit(&rt, pool);
+    return ok;
 }
 static int sys_open_url(const char *url) {
-    void *(*gc)(const char *) = (void *(*)(const char *))dlsym((void *)0, "objc_getClass");
-    void *(*sl)(const char *) = (void *(*)(const char *))dlsym((void *)0, "sel_registerName");
-    void *(*send)(void*, void*, ...) = (void *(*)(void*, void*, ...))dlsym((void *)0, "objc_msgSend");
-    if (!gc || !sl || !send) return 0;
-    void *ws = send(gc("NSWorkspace"), sl("sharedWorkspace"));
-    if (!ws) return 0;
-    void *str = ((void*(*)(void*,void*,const char*))send)(gc("NSString"), sl("stringWithUTF8String:"), url);
-    ((void (*)(void*,void*,void*))send)(ws, sl("openURL:"), str);
-    return 1;
+    hn_objc_rt rt;
+    if (!hn_objc_bind(&rt)) return 0;
+    void *pool = hn_pool_enter(&rt);
+    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt.send;
+    void *(*gc)(const char *) = (void *(*)(const char *))rt.gc;
+    void *(*sl)(const char *) = (void *(*)(const char *))rt.sl;
+    int ok = 0;
+    void *ws = ((void *(*)(void *, void *))send)(gc("NSWorkspace"), sl("sharedWorkspace"));
+    if (ws) {
+        void *str = ((void *(*)(void *, void *, const char *))send)(
+            gc("NSString"), sl("stringWithUTF8String:"), url);
+        if (str) {
+            ((void (*)(void *, void *, void *))send)(ws, sl("openURL:"), str);
+            ok = 1;
+        }
+    }
+    hn_pool_exit(&rt, pool);
+    return ok;
 }
 #else
 static int clip_set(const char *text) { (void)text; return 0; }
@@ -2142,47 +2213,268 @@ int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {
     return 0;
 }
 
+/* ---------------- 输入编辑(caret 感知的文本编辑模型) ----------------
+ *
+ * 旧实现的三个缺陷(本轮修): ① 追加写的是 `hn_node_attr(n,"value")`(属性),
+ * 而 hn_node_set_value 写的是内部 value 缓冲 + 移动 caret —— 但 attr 读回
+ * 优先看内部缓冲(hn_node_value), 于是每次"追加"都从**属性原值**重算,
+ * 连打两个字符只剩最后一个(实测: h,i,! → "!"); ② 无 caret 概念, 只能
+ * 在末尾增删; ③ 删除分支比对 key==3, 而 HNP_KEY_BACKSPACE 实际是 4
+ * (3 是 TAB) —— 对照 hnp_key 枚举即可看出。
+ * 本段按"基础值 + caret"模型重写, 由 hn_rt_key / hn_rt_ime_* / hn_rt_edit
+ * 共用。全部走 hn_node_value/hn_node_set_value/hn_node_caret/
+ * hn_node_set_caret(引擎公开 API)。 */
+
+/* UTF-8 边界辅助 */
+static int u8_prev(const char *s, int i) {           /* i 之前一个字符的起点 */
+    if (i <= 0) return 0;
+    int j = i - 1;
+    while (j > 0 && ((unsigned char)s[j] & 0xC0) == 0x80) j--;
+    return j;
+}
+static int u8_next(const char *s, int len, int i) {  /* i 之后一个字符的起点 */
+    if (i >= len) return len;
+    int j = i + 1;
+    while (j < len && ((unsigned char)s[j] & 0xC0) == 0x80) j++;
+    return j;
+}
+
+/* caret 位置读当前值(字符串 + 长度; 指向节点内部缓冲, 生命周期 = 本次调用) */
+static const char *rt_focus_text(hn_rt *rt, int *len) {
+    *len = 0;
+    if (!rt || !rt->focus) return "";
+    size_t vl = 0;
+    const char *v = hn_node_value(rt->focus, &vl);
+    if (!v) { v = ""; vl = 0; }
+    if (vl > 0x7FFFFFFF) vl = 0x7FFFFFFF;
+    *len = (int)vl;
+    return v;
+}
+
+/* 在 caret 处插入串, 同时删除 caret 前 del_before 字节与 caret 后 del_after
+   字节(Backspace = del_before; Delete = del_after; 普通插入 = 0/0)。
+   caret 落在插入串之后。 */
+static int rt_edit_insert2(hn_rt *rt, const char *ins, int del_before, int del_after) {
+    int vl = 0;
+    const char *v = rt_focus_text(rt, &vl);
+    int caret = hn_node_caret(rt->focus);
+    if (caret < 0) caret = 0;
+    if (caret > vl) caret = vl;
+    int db = del_before < 0 ? 0 : del_before;
+    int da = del_after < 0 ? 0 : del_after;
+    if (db > caret) db = caret;
+    if (da > vl - caret) da = vl - caret;
+    size_t in = ins ? strlen(ins) : 0;
+    if ((size_t)vl + in + 1 > 65536) return 0;   /* 防呆上限 */
+    static char buf[65536];                      /* 单线程主循环; 静态免堆分配 */
+    int head = caret - db;                       /* 保留的前段(= 插入点) */
+    memcpy(buf, v, (size_t)head);
+    if (in) memcpy(buf + head, ins, in);
+    size_t tail_off = (size_t)caret + (size_t)da;
+    memcpy(buf + head + in, v + tail_off, (size_t)(vl - (int)tail_off));
+    size_t nl = (size_t)head + in + (size_t)(vl - (int)tail_off);
+    buf[nl] = 0;
+    hn_node_set_value(rt->focus, buf, nl);   /* set_value 把 caret 移到末尾 */
+    hn_node_set_caret(rt->focus, head + (int)in);
+    return 1;
+}
+static int rt_edit_insert(hn_rt *rt, const char *ins, int del_bytes) {
+    return rt_edit_insert2(rt, ins, 0, del_bytes);   /* 兼容旧调用: caret 后删 */
+}
+
+/* IME 基础值: 组字开始时的已上屏值。组字期间 value = base + preedit。 */
+static char g_ime_base[65536];
+static int g_ime_base_len;
+static int g_ime_active;
+
+int hn_rt_ime_preedit(hn_rt *rt, const char *preedit, int cursor) {
+    (void)cursor;
+    if (!rt || !rt->focus) return 0;
+    if (hn_node_input_kind(rt->focus) == HN_IN_CHECKBOX ||
+        hn_node_input_kind(rt->focus) == HN_IN_RADIO) return 0;
+    if (!g_ime_active) {
+        /* 组字开始: 记基础值(此后 preedit 变化都从它重算, 不叠加) */
+        int vl = 0;
+        const char *v = rt_focus_text(rt, &vl);
+        if ((size_t)vl >= sizeof(g_ime_base)) vl = (int)sizeof(g_ime_base) - 1;
+        memcpy(g_ime_base, v, (size_t)vl);
+        g_ime_base[vl] = 0;
+        g_ime_base_len = vl;
+        g_ime_active = 1;
+    }
+    if (!preedit || !*preedit) {
+        /* 组字结束/取消: 恢复基础值 */
+        hn_node_set_value(rt->focus, g_ime_base, (size_t)g_ime_base_len);
+        g_ime_active = 0;
+        return rt_render(rt);
+    }
+    /* 预编辑串直插: value = base + preedit(caret 落其末尾) */
+    static char buf[65536];
+    size_t pl = strlen(preedit);
+    if ((size_t)g_ime_base_len + pl + 1 > sizeof(buf)) pl = sizeof(buf) - 1 - (size_t)g_ime_base_len;
+    memcpy(buf, g_ime_base, (size_t)g_ime_base_len);
+    memcpy(buf + g_ime_base_len, preedit, pl);
+    buf[g_ime_base_len + pl] = 0;
+    hn_node_set_value(rt->focus, buf, (size_t)g_ime_base_len + pl);
+    return rt_render(rt);
+}
+
+int hn_rt_ime_commit(hn_rt *rt, const char *text) {
+    if (!rt || !rt->focus) return 0;
+    if (!g_ime_active) {
+        /* 无组字态的提交(直接字符输入经 IME 通道): 当普通插入 */
+        return text && *text ? (rt_edit_insert(rt, text, 0) ? rt_render(rt) : 0) : 0;
+    }
+    if (!text) text = "";
+    static char buf[65536];
+    size_t tl = strlen(text);
+    if ((size_t)g_ime_base_len + tl + 1 > sizeof(buf)) tl = sizeof(buf) - 1 - (size_t)g_ime_base_len;
+    memcpy(buf, g_ime_base, (size_t)g_ime_base_len);
+    memcpy(buf + g_ime_base_len, text, tl);
+    buf[g_ime_base_len + tl] = 0;
+    hn_node_set_value(rt->focus, buf, (size_t)g_ime_base_len + tl);
+    /* caret 落上屏串末尾(set_value 已是末尾), 清基础态 */
+    g_ime_active = 0;
+    g_ime_base_len = 0;
+    g_ime_base[0] = 0;
+    return rt_render(rt);
+}
+
+int hn_rt_focus_box(hn_rt *rt, int *x, int *y, int *w, int *h) {
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (!rt || !rt->focus) return 0;
+    float bx = 0, by = 0, bw = 0, bh = 0;
+    hn_node_box(rt->focus, &bx, &by, &bw, &bh);
+    if (bw <= 0 || bh <= 0) return 0;
+    if (x) *x = (int)bx;
+    if (y) *y = (int)by;
+    if (w) *w = (int)bw;
+    if (h) *h = (int)bh;
+    return 1;
+}
+
+/* 编辑命令(⌘C/⌘V/⌘X/⌘A)。剪贴板读写复用 sys:// 同源后端 clip_get/clip_set。
+   选区模型: 本引擎 v1 无字符级选区 —— COPY/CUT 操作"整个当前值"(文档
+   语义的最小正确近似), SELECT_ALL 同口径(整值 = 全选); PASTE 在 caret
+   处插入(替换语义留给后续选区模型)。 */
+int hn_rt_edit(hn_rt *rt, int op, const char *text) {
+    if (!rt || !rt->focus) return 0;
+    int kind = hn_node_input_kind(rt->focus);
+    if (kind == HN_IN_CHECKBOX || kind == HN_IN_RADIO) return 0;
+    if (op == HN_EDIT_COPY) {
+        int vl = 0;
+        const char *v = rt_focus_text(rt, &vl);
+        return (vl > 0 && clip_set(v)) ? 0 : 0;   /* 复制不改文档: 不重渲染 */
+    }
+    if (op == HN_EDIT_CUT) {
+        int vl = 0;
+        const char *v = rt_focus_text(rt, &vl);
+        if (vl > 0) clip_set(v);
+        hn_node_set_value(rt->focus, "", 0);
+        hn_node_set_caret(rt->focus, 0);
+        return rt_render(rt);
+    }
+    if (op == HN_EDIT_PASTE) {
+        char tmp[8192];
+        const char *src = text;
+        if (!src) {
+            tmp[0] = 0;
+            if (!clip_get(tmp, sizeof(tmp))) return 0;
+            src = tmp;
+        }
+        return (src && *src) ? (rt_edit_insert(rt, src, 0) ? rt_render(rt) : 0) : 0;
+    }
+    if (op == HN_EDIT_SELECT_ALL) {
+        /* v1 无字符选区: 全选 = caret 归零的整值语义(复制/剪切即整值) */
+        hn_node_set_caret(rt->focus, 0);
+        return rt_render(rt);
+    }
+    return 0;
+}
+
+/* Tab 焦点轮换(文档序环形): 当前焦点在 inputs 里找下一个可聚焦控件。 */
+static hn_node *rt_focus_next(hn_rt *rt, int back) {
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    int n = 0;
+    while (hn_doc_input_at(doc, n)) n++;
+    if (n <= 0) return NULL;
+    int cur = -1;
+    for (int i = 0; i < n; i++)
+        if (hn_doc_input_at(doc, i) == rt->focus) { cur = i; break; }
+    for (int step = 1; step <= n; step++) {
+        int i = cur < 0
+            ? (back ? n - step : step - 1)
+            : ((cur + (back ? -step : step)) % n + n) % n;
+        hn_node *cand = hn_doc_input_at(doc, i);
+        if (cand && !hn_node_is_disabled(cand)) return cand;
+    }
+    return NULL;
+}
+
 int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8) {
     if (!rt || !down) return 0;
     hn_node *target = rt->focus ? rt->focus : hn_doc_root(hn_context_doc(rt->ctx));
-    if (key == 2 /*RETURN*/) {
+    if (key == HN_KT_RETURN) {
+        /* textarea: 回车插入换行(浏览器语义); input: hx 提交 */
+        if (rt->focus && hn_node_input_kind(rt->focus) == HN_IN_TEXTAREA)
+            return rt_edit_insert(rt, "\n", 0) ? rt_render(rt) : 0;
         hn_node *carrier = hx_carrier(target);
         if (carrier && hx_perform(rt, carrier)) return rt_render(rt);
         return 0;
     }
-    if (key == 3 /*BACKSPACE*/ && rt->focus) {
-        /* 删除末字符 */
-        char val[4096];
-        size_t vl = 0;
-        hn_node_set_value(rt->focus, "", 0);
-        /* 读当前值 → 截末字符 → 写回 */
-        const char *old = NULL;
-        hn_node *n = rt->focus;
-        if (hn_node_attr(n, "value")) old = hn_node_attr(n, "value");
-        if (old) {
-            size_t ol = strlen(old);
-            if (ol > 0) {
-                /* UTF-8: 回退到字符边界(跳过 continuation byte 10xxxxxx) */
-                size_t cut = ol - 1;
-                while (cut > 0 && (old[cut] & 0xC0) == 0x80) cut--;
-                hn_node_set_value(n, old, cut);
-            }
+    if (key == HN_KT_TAB) {
+        hn_node *nx = rt_focus_next(rt, 0);
+        if (nx) {
+            rt->focus = nx;
+            hn_context_set_focus(rt->ctx, nx);
+            return rt_render(rt);
         }
-        return rt_render(rt);
+        return 0;
     }
-    /* 可打印字符 → 追加到焦点 input 的 value */
-    if (utf8 && *utf8 && rt->focus) {
-        char old_val[4096] = { 0 };
-        const char *old = hn_node_attr(rt->focus, "value");
-        if (old) snprintf(old_val, sizeof(old_val), "%s", old);
-        size_t ol = strlen(old_val);
-        size_t al = strlen(utf8);
-        if (ol + al < sizeof(old_val)) {
-            memcpy(old_val + ol, utf8, al);
-            old_val[ol + al] = 0;
-            hn_node_set_value(rt->focus, old_val, ol + al);
+    if (key == HN_KT_BACKSPACE && rt->focus) {
+        int vl = 0;
+        const char *v = rt_focus_text(rt, &vl);
+        int caret = hn_node_caret(rt->focus);
+        if (caret > 0) {
+            int prev = u8_prev(v, caret);
+            return rt_edit_insert2(rt, NULL, caret - prev, 0) ? rt_render(rt) : 0;
         }
-        return rt_render(rt);
+        return 0;
+    }
+    if (key == HN_KT_DELETE && rt->focus) {
+        int vl = 0;
+        const char *v = rt_focus_text(rt, &vl);
+        int caret = hn_node_caret(rt->focus);
+        if (caret < vl) {
+            int nx = u8_next(v, vl, caret);
+            return rt_edit_insert2(rt, NULL, 0, nx - caret) ? rt_render(rt) : 0;
+        }
+        return 0;
+    }
+    if ((key == HN_KT_LEFT || key == HN_KT_RIGHT ||
+         key == HN_KT_HOME || key == HN_KT_END) && rt->focus) {
+        int vl = 0;
+        const char *v = rt_focus_text(rt, &vl);
+        int caret = hn_node_caret(rt->focus);
+        int nc = caret;
+        if (key == HN_KT_LEFT) nc = u8_prev(v, caret);
+        else if (key == HN_KT_RIGHT) nc = u8_next(v, vl, caret);
+        else if (key == HN_KT_HOME) nc = 0;
+        else nc = vl;
+        if (nc != caret) {
+            hn_node_set_caret(rt->focus, nc);
+            return rt_render(rt);
+        }
+        return 0;
+    }
+    /* 可打印字符/IME 文本 → 在 caret 处插入(组字中由 IME 事件独占: 平台
+       在组字期间不发本路径, 见 hnp_macos.c 的 IME 路由) */
+    if (utf8 && *utf8) {
+        if (!rt->focus) return 0;
+        return rt_edit_insert(rt, utf8, 0) ? rt_render(rt) : 0;
     }
     return 0;
 }

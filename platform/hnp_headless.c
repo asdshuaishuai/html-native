@@ -75,11 +75,45 @@ int hnp_window_origin(hnp_window *w, int *x, int *y) {
     return 0;
 }
 
+/* 窗口移动: 无头平台没有窗口表面, 空实现(与 origin 的"拿不到"同一口径:
+   夹取链在 origin 返回 0 时整体跳过, 到不了这里)。 */
+void hnp_window_move(hnp_window *w, int x, int y) { (void)w; (void)x; (void)y; }
+
+/* 可见区查询: 无头平台无屏, 返回 0 —— 调用方跳过几何夹取(声明照常通过;
+   与 hnp_window_scale 恒 1.0 同一"无屏"口径)。 */
+int hnp_screen_workarea(hnp_window *w, int px, int py,
+                        int *vx, int *vy, int *vw, int *vh) {
+    (void)w; (void)px; (void)py; (void)vx; (void)vy; (void)vw; (void)vh;
+    return 0;
+}
+
 /* 设备像素比: 无头平台没有屏, 恒 1.0(离屏/shot 的 1x 确定性口径不破;
    HiDPI 只在真窗平台物化, 见 hn_platform.h 的 hnp_window_scale 注释)。 */
 float hnp_window_scale(hnp_window *w) {
     (void)w;
     return 1.0f;
+}
+
+/* IME/剪贴板: 无头平台无输入法与剪贴板服务 —— 空实现(声明照常通过)。
+   **无 IME 事件产出**: hnp_pump 恒不返回 HNP_EV_IME_* / SCALE_CHANGED /
+   FOCUS_* / SCREEN_CHANGED(契约见 hn_platform.h 的枚举注释), 引擎侧
+   永不进入预编辑态, 行为与无 IME 的旧版逐位一致。 */
+void hnp_ime_focus(hnp_window *w, int x, int y, int iw, int ih) {
+    (void)w; (void)x; (void)y; (void)iw; (void)ih;
+}
+int hnp_clipboard_get(hnp_window *w, char *out, size_t cap) {
+    (void)w; (void)out; (void)cap;
+    return 0;
+}
+int hnp_clipboard_set(hnp_window *w, const char *utf8) {
+    (void)w; (void)utf8;
+    return 0;
+}
+
+/* 键码映射: 无头平台无原生键码, 恒 NONE(契约见 hn_platform.h)。 */
+hnp_key hnp_key_from_native(unsigned long native_code) {
+    (void)native_code;
+    return HNP_KEY_NONE;
 }
 
 int hnp_pump(hnp_event *ev, int timeout_ms) {

@@ -110,6 +110,12 @@ void hnp_window_close(hnp_window *w);
    这里只是把新尺寸同步进平台视图)。 */
 void hnp_window_resize(hnp_window *w, int new_w, int new_h);
 
+/* 移动窗口(外框左上角, 屏幕坐标, 左上原点 y 向下 —— 与 hnp_window_origin
+   同口径)。屏幕参数变化后几何记忆越界夹取用: hn_app 读 origin + workarea,
+   越界就 move 回可见区。macOS: setFrameOrigin(按主屏高翻 y); Linux:
+   XMoveWindow; headless: 无表面, 空实现(注释写明)。NULL 安全。 */
+void hnp_window_move(hnp_window *w, int x, int y);
+
 /* ---------------- 像素上屏 ---------------- */
 
 /* 把一张 BGRA 预乘位图送进窗口内容区。
@@ -139,6 +145,15 @@ void hnp_window_set_click_through(hnp_window *w, int on);
    让调用方整体跳过记忆。NULL 安全。 */
 int hnp_window_origin(hnp_window *w, int *x, int *y);
 
+/* 可见区查询(屏幕参数变化后的几何记忆夹取): 写"包含点 (px,py) 的屏的
+   可见工作区", 点不在任何屏上时写主屏可见区 —— vx/vy/vw/vh 全部为
+   引擎口径(左上原点, y 向下, 虚拟桌面坐标)。hn_app 在收到
+   HNP_EV_SCREEN_CHANGED / 开窗处用它把记忆坐标钳回可见区。
+   返回 1 = 已写出; 0 = 平台拿不到(headless 无屏; Linux v1 未接 Xinerama/
+   RandR, 按契约跳过夹取 —— 声明照常通过, 物化看平台)。NULL 安全。 */
+int hnp_screen_workarea(hnp_window *w, int px, int py,
+                        int *vx, int *vy, int *vw, int *vh);
+
 /* 读窗口所在屏的设备像素比(backing scale; Retina = 2.0)。
    HiDPI 渲染的查询口: 真窗壳用它把 hn_rt 的渲染缩放设成平台倍率
    (hn_rt_set_scale), 位图按 (逻辑尺寸 × scale) 出图、文字按 ×scale 走
@@ -147,6 +162,37 @@ int hnp_window_origin(hnp_window *w, int *x, int *y);
    headless/Linux)返回 1.0 —— 全链路行为与 1x 完全一致。NULL 安全。
    上限(caps)由调用方管(hn_app cap 2.0; 环境钮 HN_RENDER_SCALE 可覆盖)。 */
 float hnp_window_scale(hnp_window *w);
+
+/* ---------------- IME(输入法)抽象 ----------------
+ * 契约(平台能力矩阵): 平台把"输入法相关能力"经 hnp_pump 的
+ * HNP_EV_IME_PREEDIT / HNP_EV_IME_COMMIT 事件上报; 平台侧若需要知道
+ * "当前是否有可编辑焦点/焦点盒在哪"(macOS 的 NSTextInputClient 需要
+ * firstRectForCharacterRange 把候选窗摆在光标处), 经 hnp_ime_focus 喂入。
+ *
+ *   macOS: 内容视图实现 NSTextInputClient 关键方法(运行期 class_addMethod,
+ *          不 dlopen 协议 —— 协议方法只需"实现了 + respondsToSelector"
+ *          即被系统识别, 见 hnp_macos.c 的 IME 段), NSTextInputContext
+ *          interpretKeyEvents 转键事件, 系统回调 insertText/setMarkedText
+ *          → 本层转发为 IME 事件。
+ *   Linux/headless: 空实现 —— 无 IME 事件产出; 引擎侧无预编辑状态,
+ *          行为与无 IME 的旧版逐位一致(真 Linux IME 需 XIM/GTK immodule,
+ *          属路线图, 声明照常通过)。
+ * 所有函数 NULL 安全、幂等。 */
+
+/* 通知平台: 当前可编辑焦点盒(引擎盒坐标, 逻辑 px, 左上原点 —— 与
+   hnp_event.x/y 同口径; w/h 为 0 表示无焦点/不可编辑)。
+   macOS: 缓存起来供 firstRectForCharacterRange 把候选窗定位到光标处
+   (并激活/停用输入上下文); 其余平台空实现(注释写明)。 */
+void hnp_ime_focus(hnp_window *w, int x, int y, int iw, int ih);
+
+/* 平台读剪贴板文本到 out(UTF-8, 0 结尾; 容量不足截断)。返回 1 = 有文本。
+   macOS: NSPasteboard generalPasteboard(public.utf8-plain-text);
+   其余平台返回 0(无剪贴板桥; sys://clipboard 的既有实现见 hn_rt.c,
+   本 API 供编辑路径 ⌘C/⌘V/⌘X 直接调用, 与 hx 通道同源)。NULL 安全。 */
+int hnp_clipboard_get(hnp_window *w, char *out, size_t cap);
+
+/* 写文本进系统剪贴板。返回 1 = 已写入。其余平台返回 0(空实现)。 */
+int hnp_clipboard_set(hnp_window *w, const char *utf8);
 
 /* ---------------- 事件 ---------------- */
 
@@ -162,9 +208,38 @@ typedef enum {
     HNP_EV_KEY_DOWN,        /* 按键: key(枚举)/utf8(可打印字符) */
     HNP_EV_KEY_UP,
     HNP_EV_TEXT,            /* 输入法文本: utf8(编辑路径, 平台可不给) */
+    HNP_EV_SCALE_CHANGED,   /* 窗口所在屏 backing scale 变化: scale 有效。
+                               macOS: 视图 viewDidChangeBackingProperties / 窗口
+                               NSWindowDidChangeBackingPropertiesNotification →
+                               hnp_window_scale 重读后发本事件(跨屏拖动、
+                               系统缩放切换)。hn_app 收到 → hn_rt_set_scale +
+                               重 blit(HNP_EV_SCALE_CHANGED 段)。
+                               Linux: X11 无统一 backing scale 概念(hnp_window_scale
+                               恒 1.0), 不发本事件 —— 空实现/永不产出, 注释写明;
+                               headless: 无屏, 恒 1.0, 永不产出。 */
+    HNP_EV_FOCUS_IN,        /* 窗口获得键盘焦点(光标闪烁/输入法激活时机)。macOS:
+                               becomeKeyWindow 路径; Linux: FocusIn; 不支持的
+                               平台永不产出(调用方按"无此事件"降级)。 */
+    HNP_EV_FOCUS_OUT,       /* 窗口失去键盘焦点。 */
+    HNP_EV_SCREEN_CHANGED,  /* 屏幕参数变化(分辨率/排列/数量)。hn_app 收到 →
+                               几何记忆越界夹取(可见区钳制)。macOS: NSScreen
+                               参数通知; Linux/headless: 永不产出。 */
+    HNP_EV_IME_PREEDIT,     /* 输入法预编辑串变化(组字中): utf8 = 当前预编辑串
+                               (空串 = 预编辑结束), cursor = 预编辑串内光标
+                               (字节偏移, 仅诊断)。平台在 IME 组字期间**每个
+                               中间态**发一次; hn_app 转 hn_rt_ime_preedit 做
+                               "预编辑串直插"呈现(最小实现), commit 时由
+                               HNP_EV_IME_COMMIT 替换。不支持 IME 的平台永不
+                               产出(引擎侧无此状态, 零影响)。 */
+    HNP_EV_IME_COMMIT,      /* 输入法提交串(选字上屏): utf8 = 最终文本。 */
 } hnp_event_kind;
 
-/* 语义键(平台实现把本机键码映射到这一套) */
+/* 语义键(平台实现把本机键码映射到这一套)。
+   ⚠️ 兼容纪律: 数值是 ABI(hn_rt_key 的 key 参数按此值断言, rt_probe.c
+   曾按"RETURN=2/BACKSPACE=3"的旧假设书写) —— 历史枚举在
+   HNP_KEY_BACKSPACE 与 HNP_KEY_DELETE 的顺序上与 hn_rt.c 的注释错位,
+   本次**只增不改**: 已在最后追加, 旧值一律不动。hn_rt.c 现按
+   HNP_KEY_* 常量名取用, 不再写裸数字。 */
 typedef enum {
     HNP_KEY_NONE = 0,
     HNP_KEY_ESCAPE, HNP_KEY_RETURN, HNP_KEY_TAB, HNP_KEY_BACKSPACE, HNP_KEY_DELETE,
@@ -173,6 +248,15 @@ typedef enum {
     HNP_KEY_F1, HNP_KEY_F2, HNP_KEY_F3, HNP_KEY_F4, HNP_KEY_F5, HNP_KEY_F6,
     HNP_KEY_F7, HNP_KEY_F8, HNP_KEY_F9, HNP_KEY_F10, HNP_KEY_F11, HNP_KEY_F12,
     HNP_KEY_PRINTABLE,      /* utf8 里带字符 */
+    /* ---- 追加键(本轮新增; 追加不改旧值) ---- */
+    HNP_KEY_INSERT,         /* mac: Help/Insert 键(VR=0x72) */
+    HNP_KEY_MENU,           /* 上下文菜单键(Windows; mac 无对应, 不发) */
+    HNP_KEY_CAPS_LOCK,
+    HNP_KEY_NUM_LOCK,
+    HNP_KEY_SCROLL_LOCK,
+    HNP_KEY_PAUSE,
+    HNP_KEY_SPACE,          /* 空格: UTF-8 " " 同时进 utf8 */
+    HNP_KEY_ENTER_NUMPAD,
 } hnp_key;
 
 typedef struct {
@@ -181,8 +265,12 @@ typedef struct {
     int button;             /* 0=左 1=中 2=右 */
     float dx, dy;           /* 滚轮增量(像素) */
     hnp_key key;            /* 语义键 */
-    const char *utf8;       /* 可打印字符(指向平台内部缓冲, pump 内有效) */
+    const char *utf8;       /* 可打印字符/IME 文本(指向平台内部缓冲, pump 内有效) */
     unsigned mods;          /* 位: 1=shift 2=ctrl 4=alt 8=cmd/meta */
+    float scale;            /* HNP_EV_SCALE_CHANGED: 新的 backing scale
+                               (hnp_window_scale 同口径; 其余事件无意义) */
+    int cursor;             /* HNP_EV_IME_PREEDIT: 预编辑串内光标(字节偏移,
+                               诊断用; 其余事件无意义) */
 } hnp_event;
 
 /* 泵一个事件。timeout_ms:
@@ -193,6 +281,15 @@ typedef struct {
    **必须**在收到 EXPOSE 时把缓存位图再 blit(窗口最小化恢复后内容丢失),
    收到 RESIZE 时通知 hn_rt 重排。 */
 int  hnp_pump(hnp_event *ev, int timeout_ms);
+
+/* ---------------- 原生键码 → 语义键(单测/诊断口) ----------------
+ * 把平台原生键码映射成 hnp_key。native_code 的口径**因平台而异**:
+ *   macOS:   NSEvent.keyCode(虚拟键码, 取自 SDK Events.h 的 kVK_*)
+ *   Linux:   X11 keysym(XLookupString 的 keysym)
+ *   headless: 无原生键码, 恒返回 HNP_KEY_NONE
+ * 平台内部的事件路径与本函数共用同一张表(单源: 探针断言的就是运行期
+ * 实际使用的映射, 不存在"测试一份、运行另一份"的漂移)。 */
+hnp_key hnp_key_from_native(unsigned long native_code);
 
 /* ---------------- 时钟 ---------------- */
 

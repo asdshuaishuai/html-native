@@ -151,9 +151,38 @@ struct hnp_window {
     obj_t win, iv, img;
     int w, h, transparent;
     int layered;   /* contentView 已 setWantsLayer:YES(视频图层挂载时置位) */
+
+    /* ---- 呈现直通(深度 1): 视图自持位图 ---- */
+    obj_t cg;              /* 当前内容的 CGImage(blit 建; 视图据此重画) */
+    unsigned char *frame;  /* 平台自持帧缓冲(CGImage 的稳定数据源) */
+    size_t fcap;           /* frame 容量(字节) */
+    int cg_bw, cg_bh;      /* 位图像素尺寸(物理) */
+    int cg_lw, cg_lh;      /* 逻辑点尺寸(= 内容区 CSS px) */
+
+    /* ---- 显示生命周期(深度 3) ---- */
+    float scale;           /* 最近一次读到的 backing scale */
+    int   scale_dirty;     /* 视图报 backing 变化 → pump 发 HNP_EV_SCALE_CHANGED */
+    int   screen_dirty;    /* NSScreen 参数通知 → pump 发 HNP_EV_SCREEN_CHANGED */
+    int   focus_dirty;     /* 键窗口变化 → pump 发 FOCUS_IN/OUT */
+    int   focus_now;       /* 当前是否键窗口 */
+
+    /* ---- IME(深度 2) ---- */
+    char  marked[512];     /* 预编辑串(组字中); 空 = 无组字 */
+    int   marked_len;
+    int   marked_cursor;   /* 预编辑串内光标(字节偏移) */
+    int   fx, fy, fw, fh;  /* 可编辑焦点盒(逻辑 px, 引擎坐标; fw/fh=0 无焦点) */
+    int   ime_active;      /* 输入上下文激活态(焦点盒非空时置位) */
+    obj_t ictx;            /* NSTextInputContext(*自己 alloc 的*; 见
+                              hn_view_input_context 的实测注释 —— NSImageView
+                              的父类实现恒 nil, 必须自建) */
 };
 
-/* ---- 原生视频图层: 与媒体后端的对接口 + (win, id) → 子图层 表 ----
+/* 前向声明: 视图类注册/窗口映射(在 window_open 之前定义, 但 hnp_window
+   结构体引用不透明句柄, 声明放这里)。 */
+static void hn_ensure_notifications(void);
+static void hn_ime_queue_push(hnp_window *w, const char *s, int cursor, int commit);
+
+/* ---------------- 原生视频图层: 与媒体后端的对接口 + (win, id) → 子图层 表 ----
  * (实现与坐标/提交细节见文件尾"原生视频图层"段; 表声明在此 ——
  * hnp_window_close 的摘层清理要用。) */
 
@@ -212,10 +241,336 @@ static char g_utf8[8];
    —— 桌宠整窗都是内容, 没有可拖的空白。运行期用 objc_allocateClassPair +
    class_addMethod 建一个覆写该方法的子类(实测返回 1)。延迟注册一次,
    供所有窗口复用; 运行时无这些符号(理论不可能, 同进程必有 libobjc)时返回
-   NULL, 调用方回退到原始 NSImageView(退化为"不可拖")。 */
+   NULL, 调用方回退到原始 NSImageView(退化为"不可拖")。
+
+   ---- 本轮扩展(呈现直通 + IME; 同一运行期子类追加覆写) ----
+   呈现直通(深度 1): drawRect: 用 CGContext 直画窗口持有的 CGImage ——
+   位图数据来自 hnp_window_blit 的 BGRA 缓冲, blit 时 CGImageCreate 一次
+   (视图持引用), 之后每帧 setNeedsDisplay: 触发系统重画, 不再每帧造
+   NSImage/CGBitmapContext。drawRect 里 ctx 的 CTM 做 (0,h) 平移 + y 翻转,
+   把"原点左上、y 向下"的位图口径摆正到 AppKit 左下原点坐标系。
+   IME(深度 2): NSTextInputClient 关键方法经 class_addMethod 挂在同一类上
+   —— **协议方法只需实现即可被系统识别**(AppKit 不看 class_addProtocol,
+   只看 respondsToSelector:; NSView.inputContext 非 nil 的前提正是视图
+   响应 NSTextInputClient 必需选择器), 因此不 dlopen 协议、不链 .m。
+   生命周期(深度 3): viewDidChangeBackingProperties 覆写, 读新 backingScale
+   写进窗口侧待决标志, hnp_pump 下一拍发 HNP_EV_SCALE_CHANGED。
+
+   状态归属: 视图方法经 [self window] 拿 NSWindow, 再从 g_win_map 反查
+   hnp_window —— 全部状态(位图 CGImage/预编辑串/焦点盒)挂在 hnp_window
+   上, 不往运行期类加 ivar(objc_allocateClassPair 的 ivar 偏移管理在
+   class_addIvar 路径上繁琐且易错; 本文件既有 g_vl 表的同款"静态映射"手法
+   已被验证)。 */
+
+/* NSWindow 指针 → hnp_window 映射(进程一窗, 定长表足够)。
+   **注意**: 事件里的窗口经指针比对在多数场景可用, 但 NSEvent 从队列取出
+   时 [e window] 返回的 NSWindow 对象与 postEvent: 时构造用的可能不是同一
+   实例(实测: 合成事件的路由指针比对落空) —— 因此映射同时记 windowNumber
+   (long, NSWindow 稳定编号), 查找优先 windowNumber。视图侧的 [self window]
+   走指针(同进程同对象), 两条路径共用同一张表。 */
+#define HN_WIN_MAP_CAP 8
+static struct { obj_t win; long wnum; hnp_window *hw; } g_win_map[HN_WIN_MAP_CAP];
+static int g_win_map_n;
+
+static hnp_window *hn_hw_from_self(obj_t self) {
+    if (!self) return NULL;
+    obj_t win = MSG0(obj_t, self, "window");
+    if (!win) return NULL;
+    long num = ((long (*)(obj_t, sel_t))o_msgSend)(win, o_sel("windowNumber"));
+    for (int i = 0; i < g_win_map_n; i++)
+        if (g_win_map[i].wnum == num) return g_win_map[i].hw;
+    return NULL;
+}
+
+/* 事件窗口 → hnp_window(优先 windowNumber, 指针兜底) */
+static hnp_window *hn_hw_from_event(obj_t e) {
+    if (!e) return NULL;
+    obj_t win = MSG0(obj_t, e, "window");
+    if (!win) return NULL;
+    long num = ((long (*)(obj_t, sel_t))o_msgSend)(win, o_sel("windowNumber"));
+    for (int i = 0; i < g_win_map_n; i++)
+        if (g_win_map[i].wnum == num) return g_win_map[i].hw;
+    for (int i = 0; i < g_win_map_n; i++)
+        if (g_win_map[i].win == win) return g_win_map[i].hw;
+    return NULL;
+}
+
 static signed char hn_view_can_move_window(obj_t self, sel_t cmd) {
     (void)self; (void)cmd;
     return 1;   /* 任意位置按下都可拖动窗口 */
+}
+
+/* ================= 深度 1: drawRect: 直呈 ================= */
+
+/* drawRect: — 把窗口持有的 CGImage 直接画进当前 CGContext。
+   AppKit 视图坐标系原点在左下(y 向上), 位图口径是原点左上(y 向下):
+   先把 CTM 平移到 (0, h) 再对 y 取负(scale 1,-1), 此后 ctx 内 y 向下,
+   CGContextDrawImage 的目标矩形 (0,0,w,h) 即"左上原点铺满视图"。
+   w/h 用窗口的**逻辑点尺寸**(内容区 CSS px)—— 位图可是 2x 物理像素,
+   CGImage 自身尺寸与绘制矩形不同时 CG 自动做图像缩放(Retina 上
+   1 物理像素落 1 屏像素: 位图 720px 画进 360pt 的 2x 背衬)。 */
+static void hn_view_draw_rect(obj_t self, sel_t cmd, CGRect dirty) {
+    hnp_window *w = hn_hw_from_self(self);
+    /* 无自持位图(回退路径 HN_BLIT_FALLBACK=1 / 尚未首次 blit): 转交
+       NSImageView 的默认绘制实现(它负责 setImage: 的来源画)—— 不这么做
+       回退路径整窗空白(实测: 覆写 drawRect: 而父类实现不调用, 旧 NSImage
+       路径的 image 没有任何人画)。父类 IMP 经 class_getMethodImplementation
+       取(避免 objc_msgSendSuper 的 super 结构体)。 */
+    if (!w || !w->cg) {
+        void *(*get_imp)(obj_t, sel_t) =
+            (void *(*)(obj_t, sel_t))dlsym(RTLD_DEFAULT, "class_getMethodImplementation");
+        void *imp = get_imp ? get_imp(o_getClass("NSImageView"), o_sel("drawRect:")) : NULL;
+        if (imp && imp != (void *)hn_view_draw_rect)
+            ((void (*)(obj_t, sel_t, CGRect))imp)(self, o_sel("drawRect:"), dirty);
+        return;
+    }
+    (void)cmd;
+    obj_t ctx = MSG0(obj_t, o_getClass("NSGraphicsContext"), "currentContext");
+    if (!ctx) return;
+    void *cgctx = ((void *(*)(obj_t, sel_t))o_msgSend)(ctx, o_sel("CGContext"));
+    if (!cgctx) return;
+    double lw = w->cg_lw > 0 ? (double)w->cg_lw : (double)w->cg_bw;
+    double lh = w->cg_lh > 0 ? (double)w->cg_lh : (double)w->cg_bh;
+    if (lw <= 0 || lh <= 0) return;
+    void (*di)(void *, obj_t, CGRect) = (void (*)(void *, obj_t, CGRect))dlsym(RTLD_DEFAULT, "CGContextDrawImage");
+    if (!di) return;
+    /* **不要翻转**(实测, 2026-10): 视图 drawRect: 的 CGContext 里
+       CGContextDrawImage 已按"位图数据行 0 = 显示顶部"落位 —— 按其文档
+       口径 CGImage 的 (0,0) 是左上、而 CG 目标矩形也按左上锚, 二者同向。
+       加 translate(0,h)+scale(1,-1) 翻转 → 画面整体上下颠倒(本机实测:
+       静态页红块从 y≈20 跑到 y≈300, 与旧 NSImage 路径逐像素对照暴露)。
+       教训: 别再凭"AppKit 左下原点"直觉加翻转 —— drawRect 的上下文已经
+       把坐标系摆成位图口径。 */
+    CGRect r = { { 0, 0 }, { lw, lh } };
+    di(cgctx, w->cg, r);
+}
+
+/* 抗锯齿插值: 位图与视图点尺寸不一致时(2x 位图 → 1x 屏)由 IAD 决定。
+   缺省 CG 在放大/缩小时会插值, 观感与旧 NSImage 路径一致(旧路径由
+   AppKit 走同一 CG 缩放), 不动它。 */
+
+/* ================= 深度 3: backing scale 变化 ================= */
+
+/* viewDidChangeBackingProperties — 窗口从 Retina 拖到非 Retina 屏(或
+   反向)时 AppKit 调它。这里只置脏标志, 不直接回调引擎(引擎在主循环
+   里, 视图回调线程 = 主线程; 但保持"事件只从 hnp_pump 出"的单口纪律),
+   hnp_pump 下一拍读到脏就发 HNP_EV_SCALE_CHANGED 并附新 scale。 */
+static void hn_view_backing_changed(obj_t self, sel_t cmd) {
+    (void)cmd;
+    hnp_window *w = hn_hw_from_self(self);
+    if (!w) return;
+    w->scale_dirty = 1;
+}
+
+/* ================= 深度 2: NSTextInputClient ================= */
+
+/* 说明(协议识别机制): AppKit 判断一个视图能否作为输入客户端, 走
+   -[NSView inputContext] → 内部查 respondsToSelector: 的
+   NSTextInputClient 必需方法集(insertText:replacementRange: /
+   doCommandBySelector: / setMarkedText:... / unmarkText / selectedRange /
+   markedRange / hasMarkedText / attributedSubstringForProposedRange: /
+   validAttributesForMarkedText / firstRectForCharacterRange: /
+   characterIndexForPoint:)。**不需要** class_addProtocol / 不 dlopen
+   Protocol —— 方法实现了就"是"客户端。因此本段全部 class_addMethod。
+
+   类型编码(逐字节抄 objc 规范; BOOL=char 'c', NSRange 是结构体):
+     insertText:replacementRange:  v@:@@ 之后的 NSRange 以 {_NSRange=QQ} 拼
+     setMarkedText:selectedRange:replacementRange:  v@:@@{_NSRange=QQ}{_NSRange=QQ}
+     unmarkText / doCommandBySelector:  v@:@ / v@::
+     hasMarkedText  c@: ; markedRange/selectedRange  {_NSRange=QQ}@:
+     firstRectForCharacterRange:actualRange:  {CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^v
+   NSRange 是两个 NSUInteger(arm64 = 两个 unsigned long = {Q,Q})。 */
+
+typedef struct { unsigned long loc, len; } hn_nsrange;
+typedef struct { double x, y; } hn_cgpoint2;
+typedef struct { double w, h; } hn_cgsize2;
+typedef struct { hn_cgpoint2 origin; hn_cgsize2 size; } hn_cgrect2;
+
+/* 从任意对象取 UTF-8 串(String/NSAttributedString)。
+   ⚠️ 实测教训: NSString **没有** -string 选择器(那是 NSAttributedString 的),
+   对 NSString 直接发 -string 会抛 NSInvalidArgumentException 崩在输入法
+   回调里(本机实测: "unrecognized selector sent to instance")。必须先
+   respondsToSelector: 探。 */
+static const char *hn_nsstr_utf8(obj_t o) {
+    if (!o) return NULL;
+    obj_t s = o;
+    if (((signed char (*)(obj_t, sel_t, sel_t))o_msgSend)(o, o_sel("respondsToSelector:"),
+                                                         o_sel("string")))
+        s = MSG0(obj_t, o, "string");
+    const char *c = ((const char *(*)(obj_t, sel_t))o_msgSend)(s, o_sel("UTF8String"));
+    return c;
+}
+
+/* 挂起队列: insertText/setMarkedText 是**系统在 interpretKeyEvents 内同步
+   回调**我们的, 而本文件的 pump 才有事件出口 —— 回调只把串推进窗口级
+   挂起队列, 下一次 hnp_pump 按序取出为 HNP_EV_IME_PREEDIT/COMMIT。
+   每窗口 8 槽; IME 事件低频, 同窗同型(preedit/preedit 或 commit/commit)
+   合并为"只留最新", 槽满丢最旧。 */
+#define HN_IME_Q_CAP 8
+typedef struct {
+    hnp_window *win; unsigned char used; unsigned char commit;
+    int cursor; char utf8[512];
+} hn_ime_ent;
+static hn_ime_ent g_ime_q[HN_IME_Q_CAP];
+
+static void hn_ime_queue_push(hnp_window *w, const char *s, int cursor, int commit) {
+    /* 同窗同型合并(预编辑高频刷新只保留最新; commit 不合并 —— 两次
+       提交是两次编辑, 但本引擎同帧内连续 commit 极罕见, 合并也安全) */
+    for (int i = 0; i < HN_IME_Q_CAP; i++)
+        if (!g_ime_q[i].used) {
+            g_ime_q[i].win = w;
+            g_ime_q[i].used = 1;
+            g_ime_q[i].commit = (unsigned char)(commit ? 1 : 0);
+            g_ime_q[i].cursor = cursor;
+            snprintf(g_ime_q[i].utf8, sizeof(g_ime_q[i].utf8), "%s", s ? s : "");
+            return;
+        }
+    /* 满: 整体前移一格, 丢最旧 */
+    for (int i = 0; i < HN_IME_Q_CAP - 1; i++) g_ime_q[i] = g_ime_q[i + 1];
+    g_ime_q[HN_IME_Q_CAP - 1].win = w;
+    g_ime_q[HN_IME_Q_CAP - 1].used = 1;
+    g_ime_q[HN_IME_Q_CAP - 1].commit = (unsigned char)(commit ? 1 : 0);
+    g_ime_q[HN_IME_Q_CAP - 1].cursor = cursor;
+    snprintf(g_ime_q[HN_IME_Q_CAP - 1].utf8, sizeof(g_ime_q[HN_IME_Q_CAP - 1].utf8),
+             "%s", s ? s : "");
+}
+
+/* insertText:replacementRange: — 系统提交最终文本(选字上屏/直接输入)。
+   markedText 上屏的语义: 先清预编辑态, 再记挂起提交串。 */
+static void hn_view_insert_text(obj_t self, sel_t cmd, obj_t string, hn_nsrange rep) {
+    (void)cmd; (void)rep;
+    hnp_window *w = hn_hw_from_self(self);
+    if (!w) return;
+    const char *s = hn_nsstr_utf8(string);
+    if (!s) return;
+    hn_ime_queue_push(w, "", 0, 0);   /* PREEDIT "" = 组字结束 */
+    hn_ime_queue_push(w, s, 0, 1);    /* 1 = commit */
+    w->marked[0] = 0;
+    w->marked_len = 0;
+}
+
+/* setMarkedText:selectedRange:replacementRange: — 组字中间态(拼音串/候选)。
+   string 为 nil/空 = 取消组字。 */
+static void hn_view_set_marked(obj_t self, sel_t cmd, obj_t string, hn_nsrange sel, hn_nsrange rep) {
+    (void)cmd; (void)rep;
+    hnp_window *w = hn_hw_from_self(self);
+    if (!w) return;
+    const char *s = hn_nsstr_utf8(string);
+    if (!s) s = "";
+    hn_ime_queue_push(w, s, (int)sel.loc, 0);
+    size_t n = strlen(s);
+    if (n >= sizeof(w->marked)) n = sizeof(w->marked) - 1;
+    memcpy(w->marked, s, n);
+    w->marked[n] = 0;
+    w->marked_len = (int)n;
+    w->marked_cursor = (int)sel.loc;
+}
+
+/* unmarkText — 系统要求彻底清预编辑(不改 value) */
+static void hn_view_unmark(obj_t self, sel_t cmd) {
+    (void)cmd;
+    hnp_window *w = hn_hw_from_self(self);
+    if (!w) return;
+    if (w->marked_len) hn_ime_queue_push(w, "", 0, 0);
+    w->marked[0] = 0;
+    w->marked_len = 0;
+}
+
+/* doCommandBySelector: — 命令键(方向/回车/退格等)经键绑定机制回灌。
+   这些键**同时**已作为 HNP_EV_KEY_* 事件进引擎(hnp_pump keydown 分支),
+   这里不重复上屏(避免双份) —— 只留桩: 组字期间系统会先送命令键,
+   引擎侧预编辑由 PREEDIT ""/commit 事件自然收敛。 */
+static void hn_view_do_command(obj_t self, sel_t cmd, sel_t action) {
+    (void)self; (void)cmd; (void)action;
+}
+
+/* hasMarkedText → BOOL */
+static signed char hn_view_has_marked(obj_t self, sel_t cmd) {
+    (void)cmd;
+    hnp_window *w = hn_hw_from_self(self);
+    return (w && w->marked_len > 0) ? 1 : 0;
+}
+
+/* NSNotFound = NSIntegerMax(64 位)= 0x7FFFFFFFFFFFFFFF */
+#define HN_NSNOTFOUND 0x7FFFFFFFFFFFFFFFL
+static hn_nsrange hn_view_marked_range(obj_t self, sel_t cmd) {
+    (void)cmd;
+    hnp_window *w = hn_hw_from_self(self);
+    hn_nsrange r;
+    if (w && w->marked_len > 0) { r.loc = 0; r.len = (unsigned long)w->marked_len; }
+    else { r.loc = HN_NSNOTFOUND; r.len = 0; }
+    return r;
+}
+
+/* selectedRange → {0,0}(本引擎不向系统暴露文档内容, 见下) */
+static hn_nsrange hn_view_selected_range(obj_t self, sel_t cmd) {
+    (void)self; (void)cmd;
+    hn_nsrange r; r.loc = 0; r.len = 0;
+    return r;
+}
+
+/* firstRectForCharacterRange:actualRange: — 候选窗/输入法图标的位置。
+   返回**屏幕坐标**(AppKit 左下原点全局坐标): 焦点盒(引擎左上原点,
+   内容区坐标)→ 视图坐标(未翻转, 原点左下: y = 内容高 − y − h)→
+   NSWindow convertRectToScreen:。无焦点盒时返回零矩形(系统把候选窗
+   摆在窗口附近; 不是错误)。 */
+static hn_cgrect2 hn_view_first_rect(obj_t self, sel_t cmd, hn_nsrange range, void *actual) {
+    (void)cmd; (void)range; (void)actual;
+    hn_cgrect2 z; z.origin.x = z.origin.y = z.size.w = z.size.h = 0;
+    hnp_window *w = hn_hw_from_self(self);
+    if (!w || !w->win || w->fw <= 0 || w->fh <= 0) return z;
+    double ch = (double)w->h;
+    double vx = (double)w->fx;
+    double vy = ch - (double)w->fy - (double)w->fh;
+    CGRect r = { { vx, vy }, { (double)w->fw, (double)w->fh } };
+    CGRect sr = ((CGRect (*)(obj_t, sel_t, CGRect))o_msgSend)(
+        w->win, o_sel("convertRectToScreen:"), r);
+    hn_cgrect2 out;
+    out.origin.x = sr.origin.x; out.origin.y = sr.origin.y;
+    out.size.w = sr.size.w; out.size.h = sr.size.h;
+    return out;
+}
+
+/* characterIndexForPoint: — 鼠标点选组字候选(引擎不映射指针到字符, 返回 0) */
+static unsigned long hn_view_char_index(obj_t self, sel_t cmd, hn_cgpoint2 p) {
+    (void)self; (void)cmd; (void)p;
+    return 0;
+}
+
+/* attributedSubstringForProposedRange:actualRange: — 返回 nil:
+   引擎不把编辑文本暴露给输入法(拼音输入不需要读回文本; 候选/联想词
+   服务会因此退化, 属已知取舍, 注释写明) */
+static obj_t hn_view_attr_substring(obj_t self, sel_t cmd, hn_nsrange range, void *actual) {
+    (void)self; (void)cmd; (void)range; (void)actual;
+    return NULL;
+}
+
+/* validAttributesForMarkedText → 空数组(AppKit 期望非 nil) */
+static obj_t hn_view_valid_attrs(obj_t self, sel_t cmd) {
+    (void)self; (void)cmd;
+    return MSG0(obj_t, o_getClass("NSArray"), "array");
+}
+
+/* inputContext — **必须自己覆写**。实测(本机 macOS 26, 2026-10):
+   NSImageView 覆写了 -inputContext 并恒返回 nil(plain NSImageView 与
+   "子类+class_addProtocol"都拿到 nil; 只有父类换成 NSView 时才由 AppKit
+   自动建上下文)。所以本类显式实现: 惰性 alloc/initWithClient:(self) 一个
+   NSTextInputContext 并缓存(每视图一份; 进程窗口少, 一窗一份足够)。
+   缓存槽挂在 hnp_window(经 hn_hw_from_self 反查, 同其他状态的口径)。 */
+static obj_t hn_view_input_context(obj_t self, sel_t cmd) {
+    (void)cmd;
+    hnp_window *w = hn_hw_from_self(self);
+    if (!w) return NULL;
+    if (!w->ictx) {
+        obj_t cls = o_getClass("NSTextInputContext");
+        obj_t o = cls ? MSG0(obj_t, cls, "alloc") : NULL;
+        if (!o) return NULL;
+        obj_t ctx = ((obj_t (*)(obj_t, sel_t, obj_t))o_msgSend)(
+            o, o_sel("initWithClient:"), self);
+        if (!ctx) { MSG0(void, o, "release"); return NULL; }
+        w->ictx = ctx;
+    }
+    return w->ictx;
 }
 
 static obj_t hn_pet_view_class(void) {
@@ -235,6 +590,48 @@ static obj_t hn_pet_view_class(void) {
         cls = NULL;
         return NULL;
     }
+    /* ---- 深度 1: 直呈 ---- */
+    add_method(cls, o_sel("drawRect:"), (void (*)(void))hn_view_draw_rect,
+               "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
+    /* ---- 深度 3: backing 变化 ---- */
+    add_method(cls, o_sel("viewDidChangeBackingProperties"),
+               (void (*)(void))hn_view_backing_changed, "v@:");
+    /* ---- 深度 2: NSTextInputClient ----
+       ① class_addProtocol: **实测必需** —— 只 add_method 时
+       [view inputContext] 返回 nil(本轮实测), class_addProtocol 后
+       inputContext 非 nil 且 conformsToProtocol: 为真。这与"协议方法只需
+       respondsToSelector"的常见说法不同: NSView.inputContext 的判定走
+       class_conformsToProtocol(在 macOS 14/15 上实测如此), 因此协议本身
+       也要挂。objc_getProtocol("NSTextInputClient") 在 AppKit 装载后可用。
+       ② 方法编码见上方注释块。 */
+    {
+        void *(*getproto)(const char *) = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "objc_getProtocol");
+        signed char (*addproto)(obj_t, void *) = (signed char (*)(obj_t, void *))dlsym(RTLD_DEFAULT, "class_addProtocol");
+        void *proto = getproto ? getproto("NSTextInputClient") : NULL;
+        if (proto && addproto) addproto(cls, proto);
+    }
+    add_method(cls, o_sel("insertText:replacementRange:"),
+               (void (*)(void))hn_view_insert_text, "v@:@{_NSRange=QQ}");
+    add_method(cls, o_sel("setMarkedText:selectedRange:replacementRange:"),
+               (void (*)(void))hn_view_set_marked, "v@:@{_NSRange=QQ}{_NSRange=QQ}");
+    add_method(cls, o_sel("unmarkText"), (void (*)(void))hn_view_unmark, "v@:");
+    add_method(cls, o_sel("doCommandBySelector:"), (void (*)(void))hn_view_do_command, "v@::");
+    add_method(cls, o_sel("hasMarkedText"), (void (*)(void))hn_view_has_marked, "c@:");
+    add_method(cls, o_sel("markedRange"), (void (*)(void))hn_view_marked_range, "{_NSRange=QQ}@:");
+    add_method(cls, o_sel("selectedRange"), (void (*)(void))hn_view_selected_range, "{_NSRange=QQ}@:");
+    add_method(cls, o_sel("firstRectForCharacterRange:actualRange:"),
+               (void (*)(void))hn_view_first_rect,
+               "{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^v");
+    add_method(cls, o_sel("characterIndexForPoint:"), (void (*)(void))hn_view_char_index,
+               "Q@:{CGPoint=dd}");
+    add_method(cls, o_sel("attributedSubstringForProposedRange:actualRange:"),
+               (void (*)(void))hn_view_attr_substring, "@@:{_NSRange=QQ}^v");
+    add_method(cls, o_sel("validAttributesForMarkedText"),
+               (void (*)(void))hn_view_valid_attrs, "@@:");
+    /* inputContext: 必须自建(NSImageView 的父类实现恒 nil; 见
+       hn_view_input_context 的实测注释) */
+    add_method(cls, o_sel("inputContext"),
+               (void (*)(void))hn_view_input_context, "@@:");
     reg_pair(cls);
     return cls;
 }
@@ -311,6 +708,21 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
     MSG1(void, MSG0(obj_t, o_getClass("NSApplication"), "sharedApplication"),
          "activateIgnoringOtherApps:", (obj_t)1);
     w->win = win; w->iv = iv;
+    /* 深度 3: 初始 scale 记账(hnp_pump 只在变化时发 SCALE_CHANGED) */
+    {
+        double s = ((double (*)(obj_t, sel_t))o_msgSend)(win, o_sel("backingScaleFactor"));
+        if (!(s >= 1.0)) s = 1.0;
+        w->scale = (float)s;
+    }
+    /* 窗口→hnp_window 映射(视图回调经 [self window] 反查; 满表丢弃 ——
+       表满时视图方法退化为 no-op, 窗口本身照常工作) */
+    if (g_win_map_n < HN_WIN_MAP_CAP) {
+        g_win_map[g_win_map_n].win = win;
+        g_win_map[g_win_map_n].wnum = ((long (*)(obj_t, sel_t))o_msgSend)(win, o_sel("windowNumber"));
+        g_win_map[g_win_map_n].hw = w;
+        g_win_map_n++;
+    }
+    hn_ensure_notifications();
     return w;
 }
 
@@ -327,6 +739,21 @@ void hnp_window_close(hnp_window *w) {
             i--;
         }
     }
+    /* 窗口映射表摘除(视图回调随后查不到 → no-op) */
+    for (int i = 0; i < g_win_map_n; i++) {
+        if (g_win_map[i].hw == w) {
+            g_win_map[i] = g_win_map[g_win_map_n - 1];
+            g_win_map_n--;
+            i--;
+        }
+    }
+    /* IME 挂起队列里属于本窗的槽清掉(悬垂指针防线) */
+    for (int i = 0; i < HN_IME_Q_CAP; i++)
+        if (g_ime_q[i].used && g_ime_q[i].win == w) g_ime_q[i].used = 0;
+    /* 呈现直通资源: 先释放 CGImage(数据源指向 frame), 再 free frame */
+    if (w->cg) ((void (*)(CGImageRef))dlsym(RTLD_DEFAULT, "CGImageRelease"))(w->cg);
+    free(w->frame);
+    if (w->ictx) { MSG0(void, w->ictx, "deactivate"); MSG0(void, w->ictx, "release"); }
     if (w->img) MSG0(void, w->img, "release");
     if (w->win) { MSG0(void, w->win, "close"); MSG0(void, w->win, "release"); }
     free(w);
@@ -335,45 +762,130 @@ void hnp_window_close(hnp_window *w) {
 void hnp_window_resize(hnp_window *w, int nw, int nh) {
     if (!w || !w->iv) return;
     w->w = nw; w->h = nh;
+    /* 逻辑点尺寸跟动(呈现矩形 = drawRect 的绘制矩形) */
+    if (w->cg) { w->cg_lw = nw; w->cg_lh = nh; }
     CGRect cr = { { 0, 0 }, { (double)nw, (double)nh } };
     ((void (*)(obj_t, sel_t, CGRect))o_msgSend)(w->iv, o_sel("setFrame:"), cr);
+    MSG1(void, w->iv, "setNeedsDisplay:", (obj_t)1);
 }
 
-void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int bh, size_t stride) {
-    if (!w || !w->win || !bgra_pre) return;
-    /* 事故②修复挂点: blit 全程套有界池(setImage:/display 触发的 AppKit/
-       CA 内部 autorelease 对象由此回收), 见 pool_push 注释。 */
-    obj_t pool = pool_push();
-    /* DeviceRGB 是不可变全局对象: 复用一份, 不再每次 blit 泄一个
-       CGColorSpaceRef(旧代码 Create 后无人 Release)。 */
+/* 移动窗口(引擎口径左上原点 → AppKit 左下原点, 主屏高翻转)。 */
+void hnp_window_move(hnp_window *w, int x, int y) {
+    if (!w || !w->win) return;
+    CGRect f = MSG0(CGRect, w->win, "frame");
+    CGPoint o = { (double)x, hn_primary_screen_height() - (double)y - f.size.h };
+    ((void (*)(obj_t, sel_t, CGPoint))o_msgSend)(w->win, o_sel("setFrameOrigin:"), o);
+}
+
+/* ================= 呈现: 位图缓冲 → CGImage(一次) =================
+   旧路径(现回退路径): 每帧 CGImageCreate + NSImage initWithCGImage:size: +
+   setImage: —— 每帧两次对象分配 + NSImage 内部表示/缓存拷贝。
+   新路径(缺省): **窗口自持帧缓冲**(cap 增长一次, 之后每帧只 memcpy),
+   CGImage 的数据提供者直接引用该稳定缓冲(无释放回调 —— 缓冲与窗口同
+   生命周期, close 时先释放 CGImage 再 free 缓冲), 视图持 CGImage 引用,
+   drawRect 直画。每帧成本 = 一次 memcpy(必付: 引擎下帧会重写自己的
+   缓冲, 平台不拷就会画到半新半旧的数据) + 零分配 + 零 AppKit 图像机制。
+   安全性: 缓冲/视图/display 全在主线程同一拍内, 无竞态; EXPOSE 重画时
+   读的是平台自持缓冲(不是引擎已释放的旧位图) —— 旧 NSImage 路径靠
+   AppKit 内部拷贝达到同样效果, 新路径靠自持缓冲, 等价且更省。 */
+static CGImageRef hn_make_cgimage(const unsigned char *buf, int bw, int bh, size_t stride) {
+    /* stride 此处要求 == w*4(hn_rt 保证); kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little */
     static CGColorSpaceRef g_cs;
     if (!g_cs)
         g_cs = ((CGColorSpaceRef (*)(void))dlsym(RTLD_DEFAULT, "CGColorSpaceCreateDeviceRGB"))();
     CGDataProviderRef prov = ((CGDataProviderRef (*)(void *, const void *, size_t, void (*)(void *, const void *, size_t)))
-        dlsym(RTLD_DEFAULT, "CGDataProviderCreateWithData"))(NULL, bgra_pre, (size_t)bw * bh * 4, NULL);
-    /* stride 此处要求 == w*4(hn_rt 保证); kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little */
+        dlsym(RTLD_DEFAULT, "CGDataProviderCreateWithData"))(NULL, buf, (size_t)bw * bh * 4, NULL);
+    if (!prov) return NULL;
     CGImageRef cg = ((CGImageRef (*)(size_t, size_t, size_t, size_t, size_t, CGColorSpaceRef,
                                      uint32_t, CGDataProviderRef, const double *, int, int))
         dlsym(RTLD_DEFAULT, "CGImageCreate"))(
         (size_t)bw, (size_t)bh, 8, 32, stride, g_cs, 2u | 8192u, prov, NULL, 0, 0);
-    if (cg) {
+    ((void (*)(CGDataProviderRef))dlsym(RTLD_DEFAULT, "CGDataProviderRelease"))(prov);
+    return cg;
+}
+
+/* 回退开关(HN_BLIT_FALLBACK=1 强制旧 NSImage 路径; 诊断/对照用) */
+static int blit_fallback(void) {
+    static int f = -1;
+    if (f < 0) {
+        const char *e = getenv("HN_BLIT_FALLBACK");
+        f = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return f;
+}
+
+void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int bh, size_t stride) {
+    if (!w || !w->win || !bgra_pre || bw <= 0 || bh <= 0) return;
+    /* 事故②修复挂点: blit 全程套有界池(setNeedsDisplay:/display 触发的
+       AppKit/CA 内部 autorelease 对象由此回收), 见 pool_push 注释。 */
+    obj_t pool = pool_push();
+    /* HiDPI 口径: 位图物理尺寸照实(bw×bh 可为逻辑的 2 倍), 视图按**逻辑点**
+       呈现(drawRect 的绘制矩形取内容区 CSS px) —— Retina 上 2x 位图
+       1:1 物理像素落进 2x 背衬, 不经系统放大。拿不到逻辑尺寸时回退位图尺寸。 */
+    int lw = w->w > 0 ? w->w : bw;
+    int lh = w->h > 0 ? w->h : bh;
+
+    if (blit_fallback()) {
+        /* ---- 旧路径(NSImage; 保留为回归对照臂: HN_BLIT_FALLBACK=1 启用) ----
+           直接把引擎缓冲交给 CGImage(引用不拷), 走 AppKit 图像机制 ——
+           与改动前逐字节同码, 供"新老两路径产物一致"的对照实验。 */
+        CGImageRef cg = hn_make_cgimage(bgra_pre, bw, bh, stride);
+        if (cg) {
+            obj_t nsimg = MSG0(obj_t, o_getClass("NSImage"), "alloc");
+            CGSize sz = { (double)lw, (double)lh };
+            nsimg = ((obj_t (*)(obj_t, sel_t, CGImageRef, CGSize))o_msgSend)(
+                nsimg, o_sel("initWithCGImage:size:"), cg, sz);
+            MSG1(void, w->iv, "setImage:", nsimg);
+            if (w->img) MSG0(void, w->img, "release");
+            w->img = nsimg;
+            ((void (*)(CGImageRef))dlsym(RTLD_DEFAULT, "CGImageRelease"))(cg);
+        }
+        MSG0(void, w->win, "display");
+        pool_pop(pool);
+        return;
+    }
+
+    /* ---- 新路径(直呈): 自持帧缓冲 → CGImage(视图持引用) + setNeedsDisplay: ----
+       兼容面对账: contentView 是 NSImageView 子类, pet_probe/hidpi_probe 读
+       `contentView.image`(非空断言)与 CGImageForProposedRect(像素尺寸)——
+       首次/尺寸变化时 setImage: **一次**(NSImage 保留同一 CGImage, CGImage
+       的数据提供者指向帧缓冲; 此后每帧 memcpy 即"内容更新", NSImage 无需重建)。 */
+    size_t need = (size_t)bw * bh * 4;
+    int rebuild = (w->frame == NULL || w->cg_bw != bw || w->cg_bh != bh);
+    if (w->fcap < need) {
+        unsigned char *nb = (unsigned char *)realloc(w->frame, need);
+        if (!nb) { pool_pop(pool); return; }   /* 分配失败: 保留上一帧, 不崩 */
+        w->frame = nb;
+        w->fcap = need;
+        rebuild = 1;
+    }
+    if (stride == (size_t)bw * 4)
+        memcpy(w->frame, bgra_pre, need);
+    else
+        for (int y = 0; y < bh; y++)
+            memcpy(w->frame + (size_t)y * bw * 4, bgra_pre + (size_t)y * stride, (size_t)bw * 4);
+    if (rebuild) {
+        CGImageRef cg = hn_make_cgimage(w->frame, bw, bh, (size_t)bw * 4);
+        if (!cg) { pool_pop(pool); return; }
+        if (w->cg) ((void (*)(CGImageRef))dlsym(RTLD_DEFAULT, "CGImageRelease"))(w->cg);
+        w->cg = cg;
+        w->cg_bw = bw; w->cg_bh = bh;
+        w->cg_lw = lw; w->cg_lh = lh;
+        /* 兼容面: NSImage(探针读回/AppKit 兜底; CGImage 被它保留) */
         obj_t nsimg = MSG0(obj_t, o_getClass("NSImage"), "alloc");
-        /* HiDPI 口径(真窗 2x 渲染的关键一环): NSImage 的**点尺寸**取窗口内容区
-           逻辑尺寸, 位图像素照实(bw×bh 可为逻辑的 2 倍) —— AppKit 在 Retina 上
-           把 720x720 物理像素画进 360x360 点的视图 = 1:1 物理像素, 不经系统
-           放大(1x 屏 bw==w->w, 与旧版行为逐位一致)。拿不到逻辑尺寸时回退
-           位图尺寸(探针喂任意位图的防御)。 */
-        int lw = w->w > 0 ? w->w : bw;
-        int lh = w->h > 0 ? w->h : bh;
         CGSize sz = { (double)lw, (double)lh };
         nsimg = ((obj_t (*)(obj_t, sel_t, CGImageRef, CGSize))o_msgSend)(
             nsimg, o_sel("initWithCGImage:size:"), cg, sz);
-        MSG1(void, w->iv, "setImage:", nsimg);
-        if (w->img) MSG0(void, w->img, "release");
-        w->img = nsimg;
-        ((void (*)(CGImageRef))dlsym(RTLD_DEFAULT, "CGImageRelease"))(cg);
+        if (nsimg) {
+            MSG1(void, w->iv, "setImage:", nsimg);
+            if (w->img) MSG0(void, w->img, "release");
+            w->img = nsimg;
+        }
     }
-    MSG0(void, (obj_t)prov, "release");
+    /* setNeedsDisplay: 标脏; display 立即同步重绘(本壳自管 runloop,
+       事件循环不保证跑到 CA 提交时机 —— 与旧 setImage:+display 同拍,
+       EXPOSE/缩放的即时性不依赖 runloop 行为) */
+    MSG1(void, w->iv, "setNeedsDisplay:", (obj_t)1);
     MSG0(void, w->win, "display");
     pool_pop(pool);
 }
@@ -547,10 +1059,19 @@ void hnp_video_layer_detach(hnp_window *w, const char *player_id) {
     pool_pop(pool);
 }
 
+/* 本机键码 → 语义键(macOS 虚拟键码逐值抄自 SDK 的 Events.h:
+   kVK_Escape=53 kVK_Return=36 kVK_ANSI_KeypadEnter=76 kVK_Tab=48
+   kVK_Delete=51(实为 Backspace!) kVK_ForwardDelete=117 kVK_LeftArrow=123
+   kVK_RightArrow=124 kVK_DownArrow=125 kVK_UpArrow=126 kVK_Home=115
+   kVK_End=119 kVK_PageUp=116 kVK_PageDown=121 kVK_Help=114(Insert)
+   F 区 122/120/99/118/96/97/98/100/101/109/103/111。
+   注: mac 的 kVK_Delete 是**向后删除**(Backspace), 前进删除是
+   kVK_ForwardDelete —— 与 PC 键盘的 Delete 键语义对齐到 HNP_KEY_DELETE。 */
 static hnp_key mac_keycode_to_hnp(unsigned short kc) {
     switch (kc) {
     case 53: return HNP_KEY_ESCAPE;
-    case 36: case 76: return HNP_KEY_RETURN;
+    case 36: return HNP_KEY_RETURN;
+    case 76: return HNP_KEY_ENTER_NUMPAD;
     case 48: return HNP_KEY_TAB;
     case 51: return HNP_KEY_BACKSPACE;
     case 117: return HNP_KEY_DELETE;
@@ -562,21 +1083,127 @@ static hnp_key mac_keycode_to_hnp(unsigned short kc) {
     case 119: return HNP_KEY_END;
     case 116: return HNP_KEY_PAGE_UP;
     case 121: return HNP_KEY_PAGE_DOWN;
+    case 114: return HNP_KEY_INSERT;      /* Help/Insert 键 */
+    case 71: return HNP_KEY_SCROLL_LOCK;  /* Clear 键(近似) */
+    case 57: return HNP_KEY_CAPS_LOCK;
     case 122: return HNP_KEY_F1;  case 120: return HNP_KEY_F2;  case 99: return HNP_KEY_F3;
     case 118: return HNP_KEY_F4;  case 96: return HNP_KEY_F5;   case 97: return HNP_KEY_F6;
     case 98: return HNP_KEY_F7;   case 100: return HNP_KEY_F8;  case 101: return HNP_KEY_F9;
     case 109: return HNP_KEY_F10; case 103: return HNP_KEY_F11; case 111: return HNP_KEY_F12;
+    case 49: return HNP_KEY_SPACE;
     default: return HNP_KEY_PRINTABLE;
     }
+}
+
+/* 契约导出(hn_platform.h): 探针的键码映射断言走这里 —— 与事件路径同一
+   张表(单源), 断言的就是运行期行为。 */
+hnp_key hnp_key_from_native(unsigned long native_code) {
+    return mac_keycode_to_hnp((unsigned short)native_code);
+}
+
+/* ================= 深度 2: IME 路由 =================
+
+   键事件的三个去向(按优先级):
+     ① 组字中(marked_len > 0): 一切 keyDown 交输入上下文
+        (interpretKeyEvents) —— IME 内部消费(改候选/退格/翻页), 回调
+        setMarkedText/insertText 落成 PREEDIT/COMMIT 事件; 引擎本拍
+        收不到任何键(避免与组字串双份)。Esc/Return 在组字中由 IME
+        自己收敛(取消/提交) —— 不触发窗口关闭/hx 提交。
+     ② 非组字 + 无 cmd/ctrl + 可打印键(含空格): 同样交输入上下文 ——
+        这是"中文能打出来"的入口(拼音/n 键起串); insertText 回调
+        产 COMMIT 事件作为该键的文本结果(US 布局下 'a' → COMMIT "a",
+        与旧 utf8 直送引擎等效; shift 大小写/option 特殊字符随 IME 正确)。
+     ③ 其余(方向/Home/End/PageUp/Down/退格/删除/Tab/Return/F 区/cmd 组合):
+        不进 IME, 直接作 HNP_EV_KEY_* 给引擎 —— 语义键与快捷键的既有
+        行为零漂移。 */
+
+/* 把 NSEvent 交给输入上下文; 返回 1 = 已路由(调用方不再 sendEvent:/
+   不再发引擎键事件)。 */
+static int ime_route_event(hnp_window *w, obj_t e) {
+    if (!w || !w->iv || !w->win) return 0;
+    obj_t ctx = MSG0(obj_t, w->iv, "inputContext");
+    if (!ctx) return 0;   /* 无输入上下文(类注册失败): 走引擎路径 */
+    obj_t arr = MSG0(obj_t, o_getClass("NSArray"), "array");
+    if (!arr) return 0;
+    arr = ((obj_t (*)(obj_t, sel_t, obj_t))o_msgSend)(arr, o_sel("arrayByAddingObject:"), e);
+    /* interpretKeyEvents:(NSResponder) → 内部按当前输入源解析:
+       组字/查表/键绑定; 回调进 insertText:/setMarkedText: */
+    ((void (*)(obj_t, sel_t, obj_t))o_msgSend)(w->iv, o_sel("interpretKeyEvents:"), arr);
+    return 1;
+}
+
+/* IME trace(HN_IME_TRACE=1): 组字/提交链路逐行落日志(真窗手动验收的
+   观测点; 与 HN_MEDIA_TRACE 同款环境钮纪律, 记忆化)。 */
+static int ime_trace(void) {
+    static int t = -1;
+    if (t < 0) {
+        const char *e = getenv("HN_IME_TRACE");
+        t = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return t;
 }
 
 int hnp_pump(hnp_event *ev, int timeout_ms) {
     if (!ev) return 0;
     ev->kind = HNP_EV_NONE;
     ev->utf8 = NULL;
+    ev->scale = 1.0f;
+    ev->cursor = 0;
     /* 事故②同款修复: 每次泵的 NSDate/NSEvent 及 AppKit 事件分派内部
        autorelease 对象, 落进本次有界池统一回收(无池时逐事件泄漏)。 */
     obj_t pool = pool_push();
+
+    /* ---- 深度 2/3 的挂起事件优先出队(不占 AppKit 事件泵) ----
+       顺序: IME 事件(组字/上屏) → backing scale → 屏幕参数。
+       (挂起事件在下次 pump 前对调用方有效; utf8 指向 g_ime_q 的内部缓冲。) */
+    for (int i = 0; i < HN_IME_Q_CAP; i++) {
+        if (!g_ime_q[i].used) continue;
+        hnp_window *hw = g_ime_q[i].win;
+        g_ime_q[i].used = 0;
+        if (!hw) continue;
+        ev->kind = g_ime_q[i].commit ? HNP_EV_IME_COMMIT : HNP_EV_IME_PREEDIT;
+        ev->utf8 = g_ime_q[i].utf8;
+        ev->cursor = g_ime_q[i].cursor;
+        if (ime_trace())
+            fprintf(stderr, "[ime] %s utf8=\"%s\" cursor=%d\n",
+                    g_ime_q[i].commit ? "commit" : "preedit",
+                    g_ime_q[i].utf8, g_ime_q[i].cursor);
+        pool_pop(pool);
+        return 1;
+    }
+    if (g_win_map_n > 0) {
+        hnp_window *hw = g_win_map[0].hw;
+        if (hw->scale_dirty) {
+            /* AppKit 只在 backing 属性**真变化**时调 viewDidChangeBackingProperties
+               (跨屏拖动/系统缩放切换/屏色彩空间变化), 所以这里不额外去重 ——
+               事件语义 = "平台报告 backing 变了", 值随事件带上; 调用方
+               (hn_app)的 hn_rt_set_scale 对新值幂等(同值早退), 无重复成本。
+               去重反而会漏: 若视图报变化而我们缓存的旧值恰好相同(例如上一次
+               事件被超时丢弃), 静默丢弃会让重渲染停在旧 scale 上。 */
+            hw->scale_dirty = 0;
+            float ns = hnp_window_scale(hw);
+            hw->scale = ns;
+            ev->kind = HNP_EV_SCALE_CHANGED;
+            ev->scale = ns;
+            if (getenv("HN_SCALE_TRACE") || ime_trace())
+                fprintf(stderr, "[scale] backing=%.1f\n", (double)ns);
+            pool_pop(pool);
+            return 1;
+        }
+        if (hw->screen_dirty) {
+            hw->screen_dirty = 0;
+            ev->kind = HNP_EV_SCREEN_CHANGED;
+            pool_pop(pool);
+            return 1;
+        }
+        if (hw->focus_dirty) {
+            hw->focus_dirty = 0;
+            ev->kind = hw->focus_now ? HNP_EV_FOCUS_IN : HNP_EV_FOCUS_OUT;
+            pool_pop(pool);
+            return 1;
+        }
+    }
+
     obj_t app = MSG0(obj_t, o_getClass("NSApplication"), "sharedApplication");
     obj_t NSDate = o_getClass("NSDate");
     obj_t lim;
@@ -617,12 +1244,33 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
         break;
     }
     case EV_KEYDOWN: case EV_KEYUP: {
-        ev->kind = (ty == EV_KEYDOWN) ? HNP_EV_KEY_DOWN : HNP_EV_KEY_UP;
         unsigned short kc = MSG0(unsigned short, e, "keyCode");
-        ev->key = mac_keycode_to_hnp(kc);
+        hnp_key k = mac_keycode_to_hnp(kc);
+        /* ---- IME 路由(见上方"IME 路由"注释块) ---- */
+        hnp_window *hw = hn_hw_from_event(e);
+        if (ty == EV_KEYDOWN && hw && hw->ime_active) {
+            int cmd_ctrl = (mods & (2 | 8)) != 0;   /* ctrl 或 cmd */
+            int composing = hw->marked_len > 0;
+            int printable = (k == HNP_KEY_PRINTABLE || k == HNP_KEY_SPACE);
+            /* 组字中: 全交输入上下文(Esc 取消组字/Return 提交都由 IME 收口,
+               不触发窗口关闭与 hx)。非组字: 无修饰可打印键交输入上下文
+               (中文起串/大小写/option 字符), 其余语义键直达引擎。 */
+            if (composing || (!cmd_ctrl && printable)) {
+                ime_route_event(hw, e);
+                /* 组字中键已被 IME 消化(引擎这拍不见它); 非组字可打印键的
+                   文本结果将经 insertText → HNP_EV_IME_COMMIT 上行。
+                   无论回调是否产出事件, 本键都不再走引擎键路径(避免双份)。 */
+                MSG1(void, app, "sendEvent:", e);
+                pool_pop(pool);
+                return 1;
+            }
+        }
+        ev->kind = (ty == EV_KEYDOWN) ? HNP_EV_KEY_DOWN : HNP_EV_KEY_UP;
+        ev->key = k;
         ev->mods = mods;
-        /* 可打印字符: charactersIgnoringModifiers */
-        if (ev->key == HNP_KEY_PRINTABLE) {
+        /* 可打印字符: charactersIgnoringModifiers(旧路径; 有 IME 时
+           上方的输入上下文路线已消费, 这里只在 IME 未激活/非可打印时兜底) */
+        if (k == HNP_KEY_PRINTABLE) {
             obj_t ch = MSG0(obj_t, e, "charactersIgnoringModifiers");
             if (ch) {
                 const char *s = ((const char *(*)(obj_t, sel_t))o_msgSend)(ch, o_sel("UTF8String"));
@@ -633,6 +1281,9 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
                     ev->utf8 = g_utf8;
                 }
             }
+        } else if (k == HNP_KEY_SPACE) {
+            g_utf8[0] = ' '; g_utf8[1] = 0;
+            ev->utf8 = g_utf8;
         }
         break;
     }
@@ -661,4 +1312,199 @@ void hnp_set_cursor(hnp_window *w, hnp_cursor c) {
                     : c == HNP_CURSOR_TEXT ? "IBeamCursor" : "arrowCursor";
     obj_t cur = MSG0(obj_t, o_getClass("NSCursor"), sel);
     if (cur) MSG0(void, cur, "set");
+}
+
+/* ================= 深度 2: IME 焦点 + 剪贴板桥 =================
+
+   hnp_ime_focus: hn_app 在焦点/布局变化时喂当前可编辑盒(引擎口径)。
+   - fw/fh > 0 → 输入上下文激活(interpretKeyEvents 路线才生效)并记住
+     盒子(firstRectForCharacterRange 把候选窗摆到这里);
+   - fw/fh <= 0 → 停用(所有键回引擎直路, 无 IME)。
+   实现: 经 NSTextInputContext activate/deactivate(macOS 10.6+);
+   activate 之后该窗口的键入才进输入法(中文候选窗/拼音串)。
+   hn_app 侧调用点: 点击命中 input/textarea 后、布局重排后、失去焦点时。 */
+void hnp_ime_focus(hnp_window *w, int x, int y, int iw, int ih) {
+    if (!w) return;
+    w->fx = x; w->fy = y; w->fw = iw; w->fh = ih;
+    int want = (iw > 0 && ih > 0);
+    if (want == w->ime_active) return;
+    w->ime_active = want;
+    if (!w->iv) return;
+    obj_t ctx = MSG0(obj_t, w->iv, "inputContext");
+    if (!ctx) return;
+    if (want) MSG0(void, ctx, "activate");
+    else MSG0(void, ctx, "deactivate");
+    /* 焦点切换后系统缓存的字符坐标要失效(invalidateCharacterCoordinates,
+       10.6+; 缺了它候选窗会停在上一控件的屏幕位置) */
+    MSG0(void, ctx, "invalidateCharacterCoordinates");
+}
+
+/* 剪贴板: NSPasteboard generalPasteboard(与 hn_rt.c 的 sys://clipboard
+   同源同对象 —— 那里是 hx 数据通道, 这里是 ⌘C/⌘V/⌘X 编辑通道;
+   两处都走系统剪贴板, 天然一致)。 */
+int hnp_clipboard_get(hnp_window *w, char *out, size_t cap) {
+    (void)w;
+    if (!out || cap == 0) return 0;
+    out[0] = 0;
+    obj_t pb = MSG0(obj_t, o_getClass("NSPasteboard"), "generalPasteboard");
+    if (!pb) return 0;
+    /* clearContents 不调 —— 只读不写, 不清剪贴板(读路径的副作用面
+       为零; setString:forType: 才需要 clear) */
+    obj_t type = nsstr("public.utf8-plain-text");
+    obj_t str = ((obj_t (*)(obj_t, sel_t, obj_t))o_msgSend)(pb, o_sel("stringForType:"), type);
+    if (!str) return 0;
+    const char *c = ((const char *(*)(obj_t, sel_t))o_msgSend)(str, o_sel("UTF8String"));
+    if (!c) return 0;
+    snprintf(out, cap, "%s", c);
+    return out[0] ? 1 : 0;
+}
+
+int hnp_clipboard_set(hnp_window *w, const char *utf8) {
+    (void)w;
+    if (!utf8) return 0;
+    obj_t pb = MSG0(obj_t, o_getClass("NSPasteboard"), "generalPasteboard");
+    if (!pb) return 0;
+    MSG0(int, pb, "clearContents");
+    obj_t str = nsstr(utf8);
+    obj_t type = nsstr("public.utf8-plain-text");
+    signed char ok = ((signed char (*)(obj_t, sel_t, obj_t, obj_t))o_msgSend)(
+        pb, o_sel("setString:forType:"), str, type);
+    return ok ? 1 : 0;
+}
+
+/* ================= 深度 3: 屏幕参数 + 可见区 ================= */
+
+/* hnp_screen_workarea: 找包含点 (px,py) 的屏(引擎口径左上原点;
+   AppKit 原点左下 → pt_y = 主屏高 − py, 全屏坐标), 命中屏取 visibleFrame
+   (菜单栏/Dock 已排除), 翻回引擎口径; 点不在任何屏上(屏摘除后的记忆坐标)
+   回退主屏可见区 —— 这正是"屏没了, 窗口摆回主屏"的语义。 */
+int hnp_screen_workarea(hnp_window *w, int px, int py,
+                        int *vx, int *vy, int *vw, int *vh) {
+    (void)w;
+    if (!vx || !vy || !vw || !vh) return 0;
+    double ph = hn_primary_screen_height();
+    if (ph <= 0) return 0;
+    obj_t arr = MSG0(obj_t, o_getClass("NSScreen"), "screens");
+    unsigned long n = arr ? MSG0(unsigned long, arr, "count") : 0;
+    CGRect best = { { 0, 0 }, { 0, 0 } };
+    CGRect primary_vis = { { 0, 0 }, { 0, 0 } };
+    for (unsigned long i = 0; i < n; i++) {
+        obj_t s = ((obj_t (*)(obj_t, sel_t, unsigned long))o_msgSend)(arr, o_sel("objectAtIndex:"), i);
+        CGRect f = MSG0(CGRect, s, "frame");
+        CGRect vf = MSG0(CGRect, s, "visibleFrame");
+        if (i == 0) primary_vis = vf;
+        double ax = (double)px, ay = ph - (double)py;   /* 点 → AppKit 全局坐标 */
+        if (ax >= f.origin.x && ax < f.origin.x + f.size.w &&
+            ay >= f.origin.y && ay < f.origin.y + f.size.h) {
+            best = vf;
+            break;
+        }
+    }
+    if (best.size.w <= 0) best = primary_vis;
+    if (best.size.w <= 0) {
+        obj_t ms = MSG0(obj_t, o_getClass("NSScreen"), "mainScreen");
+        if (!ms) return 0;
+        best = MSG0(CGRect, ms, "visibleFrame");
+    }
+    if (best.size.w <= 0 || best.size.h <= 0) return 0;
+    *vx = hn_round_d(best.origin.x);
+    *vy = hn_round_d(ph - best.origin.y - best.size.h);
+    *vw = hn_round_d(best.size.w);
+    *vh = hn_round_d(best.size.h);
+    return 1;
+}
+
+/* 屏幕参数变化(分辨率/排列/数量)与键窗口变化的通知注册(进程一次)。
+   NSNotificationCenter 回调经 class_addMethod 挂在运行期监听类上 ——
+   与视图覆写同一手法; 回调只置脏, hnp_pump 出事件。 */
+static void hn_on_screen_change(obj_t self, sel_t cmd, obj_t note) {
+    (void)cmd; (void)note;
+    (void)self;
+    for (int i = 0; i < g_win_map_n; i++)
+        if (g_win_map[i].hw) g_win_map[i].hw->screen_dirty = 1;
+}
+
+/* NSWindowDidChangeBackingPropertiesNotification 的处理: 置 scale 脏
+   (与视图覆写 viewDidChangeBackingProperties 同一出口; 双保险 ——
+   多数场景视图覆写先到, 本通知在窗口层再报一次, 语义相同)。
+   ⚠️ 修复(本轮实测): 此前这个选择器被指向 hn_on_screen_change(错置
+   screen_dirty), 且在 objc_registerClassPair **之后**才 add_method ——
+   注册后加方法静默失败(class_addMethod 对已注册类返回 NO), 于是
+   NSNotificationCenter 分发到 responder 时找不到实现 → 消息转发 →
+   崩溃/静默丢事件。现改为注册前一次性挂全。 */
+static void hn_on_backing_change(obj_t self, sel_t cmd, obj_t note) {
+    (void)cmd;
+    (void)self;
+    obj_t win = note ? MSG0(obj_t, note, "object") : NULL;
+    long num = win ? ((long (*)(obj_t, sel_t))o_msgSend)(win, o_sel("windowNumber")) : -1;
+    for (int i = 0; i < g_win_map_n; i++) {
+        if (num >= 0 && g_win_map[i].wnum != num) continue;
+        if (g_win_map[i].hw) g_win_map[i].hw->scale_dirty = 1;
+    }
+}
+/* 键窗口变化(NSWindowDidBecomeKey/ResignKeyNotification): 置 FOCUS_IN/OUT
+   事件位; 失焦时额外停用 IME 上下文(中文候选窗不该残留在非键窗口)。
+   查表按 windowNumber(与事件路由同一口径; 通知里的 NSWindow 对象指针
+   与事件里的一致, 但全库统一窗口号更稳)。 */
+static void hn_on_key_window(obj_t self, sel_t cmd, obj_t note) {
+    (void)cmd; (void)self;
+    obj_t win = note ? MSG0(obj_t, note, "object") : NULL;
+    if (!win) return;
+    long num = ((long (*)(obj_t, sel_t))o_msgSend)(win, o_sel("windowNumber"));
+    int key = (int)(((signed char (*)(obj_t, sel_t))o_msgSend)(win, o_sel("isKeyWindow")));
+    for (int i = 0; i < g_win_map_n; i++) {
+        if (!g_win_map[i].hw) continue;
+        if (g_win_map[i].wnum != num && g_win_map[i].win != win) continue;
+        g_win_map[i].hw->focus_dirty = 1;
+        g_win_map[i].hw->focus_now = key;
+        if (!key && g_win_map[i].hw->ime_active) {
+            obj_t ctx = MSG0(obj_t, g_win_map[i].hw->iv, "inputContext");
+            if (ctx) MSG0(void, ctx, "deactivate");
+        }
+    }
+}
+
+static void hn_setup_notifications(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    obj_t (*alloc_pair)(obj_t, const char *, size_t) =
+        (obj_t (*)(obj_t, const char *, size_t))dlsym(RTLD_DEFAULT, "objc_allocateClassPair");
+    signed char (*add_method)(obj_t, sel_t, void (*)(void), const char *) =
+        (signed char (*)(obj_t, sel_t, void (*)(void), const char *))dlsym(RTLD_DEFAULT, "class_addMethod");
+    void (*reg_pair)(obj_t) = (void (*)(obj_t))dlsym(RTLD_DEFAULT, "objc_registerClassPair");
+    if (!alloc_pair || !add_method || !reg_pair) return;
+    obj_t cls = alloc_pair(o_getClass("NSObject"), "HNPNoteObserver", 0);
+    if (!cls) return;
+    add_method(cls, o_sel("onScreenChange:"), (void (*)(void))hn_on_screen_change, "v@:@");
+    add_method(cls, o_sel("onKeyWindow:"), (void (*)(void))hn_on_key_window, "v@:@");
+    /* ⚠️ 必须在 objc_registerClassPair **之前**挂(注册后 add_method 返回 NO) */
+    add_method(cls, o_sel("onBackingChange:"), (void (*)(void))hn_on_backing_change, "v@:@");
+    reg_pair(cls);
+    obj_t obs = MSG0(obj_t, cls, "alloc");
+    obs = MSG0(obj_t, obs, "init");
+    if (!obs) return;
+    obj_t nc = MSG0(obj_t, o_getClass("NSNotificationCenter"), "defaultCenter");
+    if (!nc) return;
+    /* 屏幕参数变化(显示分辨率/排列/数量): AppKit 对这三类只有
+       didChangeScreenParameters(没有 willChange)。 */
+    obj_t name = nsstr("NSApplicationDidChangeScreenParametersNotification");
+    ((void (*)(obj_t, sel_t, obj_t, sel_t, obj_t, obj_t))o_msgSend)(
+        nc, o_sel("addObserver:selector:name:object:"), obs, o_sel("onScreenChange:"), name, NULL);
+    /* 键窗口变化(FOCUS_IN/OUT) */
+    obj_t kname = nsstr("NSWindowDidBecomeKeyNotification");
+    obj_t kname2 = nsstr("NSWindowDidResignKeyNotification");
+    ((void (*)(obj_t, sel_t, obj_t, sel_t, obj_t, obj_t))o_msgSend)(
+        nc, o_sel("addObserver:selector:name:object:"), obs, o_sel("onKeyWindow:"), kname, NULL);
+    ((void (*)(obj_t, sel_t, obj_t, sel_t, obj_t, obj_t))o_msgSend)(
+        nc, o_sel("addObserver:selector:name:object:"), obs, o_sel("onKeyWindow:"), kname2, NULL);
+    /* backingScaleFactor 变化(与视图覆写互为双保险; 视图覆写是主页) */
+    obj_t bname = nsstr("NSWindowDidChangeBackingPropertiesNotification");
+    ((void (*)(obj_t, sel_t, obj_t, sel_t, obj_t, obj_t))o_msgSend)(
+        nc, o_sel("addObserver:selector:name:object:"), obs, o_sel("onBackingChange:"), bname, NULL);
+}
+
+/* hnp_init 之后回调一次(hnp_window_open 里调) */
+static void hn_ensure_notifications(void) {
+    hn_setup_notifications();
 }

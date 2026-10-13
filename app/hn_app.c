@@ -79,6 +79,17 @@ static void blit_now(hn_rt *rt, hnp_window *w) {
         hnp_window_blit(w, px, bw, bh, (size_t)bw * 4);
 }
 
+/* IME 焦点盒同步: 把引擎当前焦点控件盒(无焦点则 0 尺寸)喂平台 ——
+   平台据此激活/停用输入上下文并把候选窗/输入法图标摆到控件处。
+   平台不支持时空实现(签名同源, 零分平台代码)。点点击/布局/Tab 后调用。 */
+static void sync_ime_focus(hn_rt *rt, hnp_window *w) {
+    int x = 0, y = 0, bw = 0, bh = 0;
+    if (hn_rt_focus_box(rt, &x, &y, &bw, &bh))
+        hnp_ime_focus(w, x, y, bw, bh);
+    else
+        hnp_ime_focus(w, 0, 0, 0, 0);
+}
+
 /* ---------------- 媒体: 落盘前的确定性推进(--shot --advance MS) ---------------- */
 
 /* 全部 video 会话里最大的当前时刻(秒; 无媒体/无会话 = 0)。
@@ -450,6 +461,10 @@ int main(int argc, char **argv) {
         hn_rt_set_scale(rt, rs);
     }
     blit_now(rt, w);
+    /* 真实键盘焦点在窗口上: 插入符可见(闪烁时机由引擎动画时钟推进;
+       失焦由 HNP_EV_FOCUS_OUT 熄灭 —— 桌宠常驻窗口不闪无谓的 caret)。 */
+    hn_context_set_caret_visible(hn_rt_context(rt), 1);
+    sync_ime_focus(rt, w);   /* 初始 IME 焦点盒(通常无焦点 → 停用态) */
 
     /* ---- 收尾信号(SIGTERM = daemon win_kill 的优雅关闭路径) ---- */
     {
@@ -521,6 +536,7 @@ int main(int argc, char **argv) {
                 }
                 hn_rt_reflow(rt);
                 blit_now(rt, w);
+                sync_ime_focus(rt, w);   /* 重排后焦点盒可能变 */
                 break;
             case HNP_EV_EXPOSE: blit_now(rt, w); break;
             case HNP_EV_POINTER_MOVE:
@@ -528,12 +544,39 @@ int main(int argc, char **argv) {
                 break;
             case HNP_EV_BUTTON_DOWN:
                 if (hn_rt_button(rt, 1, (float)ev.x, (float)ev.y, ev.button)) blit_now(rt, w);
+                /* IME 焦点盒同步: 点击后焦点可能落到/离开可编辑控件 ——
+                   把新焦点盒喂平台(候选窗摆位/输入上下文激活态)。 */
+                sync_ime_focus(rt, w);
                 break;
             case HNP_EV_SCROLL:
                 if (hn_rt_scroll(rt, ev.dx, ev.dy, (float)ev.x, (float)ev.y)) blit_now(rt, w);
                 break;
             case HNP_EV_KEY_DOWN:
+                /* Esc: 组字中由 IME 消费(平台在组字期间不发本事件); 到这里
+                   就是真 Esc → 关窗(既有语义)。 */
                 if (ev.key == HNP_KEY_ESCAPE) { quit = 1; break; }
+                /* ⌘/Ctrl 编辑快捷键(复制/粘贴/剪切/全选): 平台剪贴板优先
+                   (hnp_clipboard_get 拿系统剪贴板), 无平台桥时落回引擎的
+                   同源后端(sys://clipboard)。Ctrl+C 等是终端习惯; mac 用 ⌘。 */
+                if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'c' || ev.utf8[0] == 'C')) {
+                    if (hn_rt_edit(rt, HN_EDIT_COPY, NULL)) blit_now(rt, w);
+                    break;
+                }
+                if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'v' || ev.utf8[0] == 'V')) {
+                    char cb[8192] = { 0 };
+                    const char *txt = NULL;
+                    if (hnp_clipboard_get(w, cb, sizeof(cb)) && cb[0]) txt = cb;
+                    if (hn_rt_edit(rt, HN_EDIT_PASTE, txt)) blit_now(rt, w);
+                    break;
+                }
+                if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'x' || ev.utf8[0] == 'X')) {
+                    if (hn_rt_edit(rt, HN_EDIT_CUT, NULL)) blit_now(rt, w);
+                    break;
+                }
+                if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'a' || ev.utf8[0] == 'A')) {
+                    if (hn_rt_edit(rt, HN_EDIT_SELECT_ALL, NULL)) blit_now(rt, w);
+                    break;
+                }
                 /* m = 媒体静音开关(手工验收 walkthrough: 试听/肃静两态);
                    带 cmd/ctrl 修饰的 m 不拦(留给系统/编辑器快捷键),
                    无媒体元素时也不消费, 照旧交引擎。 */
@@ -541,7 +584,62 @@ int main(int argc, char **argv) {
                     !(ev.mods & 10) && hn_media_platform_toggle_mute(rt))
                     break;
                 if (hn_rt_key(rt, 1, (int)ev.key, ev.utf8)) blit_now(rt, w);
+                /* Tab 轮换/点击换焦点后 IME 盒跟动 */
+                if (ev.key == HNP_KEY_TAB) sync_ime_focus(rt, w);
                 break;
+            case HNP_EV_IME_PREEDIT:
+                /* 输入法组字中间态: 预编辑串直插(最小实现见 hn_rt_ime_preedit) */
+                if (hn_rt_ime_preedit(rt, ev.utf8 ? ev.utf8 : "", ev.cursor)) blit_now(rt, w);
+                sync_ime_focus(rt, w);   /* 组字中焦点盒可能随行变化 */
+                break;
+            case HNP_EV_IME_COMMIT:
+                if (hn_rt_ime_commit(rt, ev.utf8 ? ev.utf8 : "")) blit_now(rt, w);
+                sync_ime_focus(rt, w);
+                break;
+            case HNP_EV_SCALE_CHANGED: {
+                /* ---- 深度 3: 跨屏/系统缩放变化 → 重设渲染缩放 + 重 blit ----
+                   HN_RENDER_SCALE 显式覆盖时不跟动(探针/强制 1x 语义)。 */
+                float rs = ev.scale;
+                if (rs > 2.0f) rs = 2.0f;
+                if (rs < 1.0f) rs = 1.0f;
+                const char *e2 = getenv("HN_RENDER_SCALE");
+                if (!(e2 && *e2)) {
+                    g_render_scale = rs;
+                    hn_rt_set_scale(rt, rs);
+                    blit_now(rt, w);
+                    printf("[scale] 事件驱动重设: scale=%.0f bmp=%dx%d\n",
+                           (double)rs, hn_rt_bitmap_width(rt), hn_rt_bitmap_height(rt));
+                    fflush(stdout);
+                }
+                break;
+            }
+            case HNP_EV_SCREEN_CHANGED:
+                /* ---- 深度 3: 屏幕参数变化 → 几何记忆越界夹取 ----
+                   显示器摘除/重排后记忆坐标可能落进不存在区域: 读当前
+                   origin + 可见区, 越界就 move 回可见区内。 */
+                if (geo_have) {
+                    int gx, gy, vx, vy, vw, vh;
+                    if (hnp_window_origin(w, &gx, &gy) &&
+                        hnp_screen_workarea(w, gx + geo.w / 2, gy + geo.h / 2,
+                                            &vx, &vy, &vw, &vh)) {
+                        int nx = gx, ny = gy, moved = 0;
+                        if (nx + 40 < vx) { nx = vx; moved = 1; }
+                        if (nx > vx + vw - 40) { nx = vx + vw - 40; moved = 1; }
+                        if (ny < vy) { ny = vy; moved = 1; }
+                        if (ny > vy + vh - 40) { ny = vy + vh - 40; moved = 1; }
+                        if (moved) {
+                            hnp_window_move(w, nx, ny);
+                            geo.x = nx; geo.y = ny;
+                            geo_store(gpath, &geo);
+                            printf("[screen] 参数变化: 几何夹取 (%d,%d)→(%d,%d)\n",
+                                   gx, gy, nx, ny);
+                            fflush(stdout);
+                        }
+                    }
+                }
+                break;
+            case HNP_EV_FOCUS_IN:  hn_context_set_caret_visible(hn_rt_context(rt), 1); break;
+            case HNP_EV_FOCUS_OUT: hn_context_set_caret_visible(hn_rt_context(rt), 0); break;
             default: break;
             }
         }

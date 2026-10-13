@@ -495,10 +495,47 @@ int hnp_window_origin(hnp_window *w, int *x, int *y) {
 }
 
 /* 设备像素比: X11 没有统一的 backing scale 概念(HiDPI 靠 Xft.dpi/缩放
-   由 WM/工具包各自为政), 恒 1.0 —— 位图与窗口像素 1:1, 语义不变。 */
+   由 WM/工具包各自为政), 恒 1.0 —— 位图与窗口像素 1:1, 语义不变。
+   **无 HNP_EV_SCALE_CHANGED 产出**(永不变化, 契约见 hn_platform.h)。 */
 float hnp_window_scale(hnp_window *w) {
     (void)w;
     return 1.0f;
+}
+
+/* 窗口移动: XMoveWindow(内容区左上角; 引擎左上原点 y 向下与 X 根窗口
+   同系, 无需翻转 —— 与 hnp_window_origin 的 XTranslateCoordinates 同口径)。
+   Xlib 缺席/窗口未建 → 静默(声明照常通过)。 */
+void hnp_window_move(hnp_window *w, int x, int y) {
+    if (!w || !x11.dpy || !w->xw) return;
+    if (x11.XMoveWindow) x11.XMoveWindow(x11.dpy, w->xw, x, y);
+    if (x11.XFlush) x11.XFlush(x11.dpy);
+}
+
+/* 可见区查询: Linux v1 未接 Xinerama/RandR(多屏布局各 WM 口径不一),
+   返回 0 —— 调用方跳过几何夹取(声明照常通过, 物化看平台; X11 全屏
+   坐标本身没有"工作区"概念, EWMH 的 _NET_WORKAREA 是 WM 私有实现差异区)。
+   与 hnp_window_scale 恒 1.0 同一"Linux 能力矩阵留位"口径。 */
+int hnp_screen_workarea(hnp_window *w, int px, int py,
+                        int *vx, int *vy, int *vw, int *vh) {
+    (void)w; (void)px; (void)py; (void)vx; (void)vy; (void)vw; (void)vh;
+    return 0;
+}
+
+/* IME/剪贴板: Linux v1 空实现(声明照常通过, 物化看平台)。
+   真 IME 需 XIM/GTK immodule 运行期装载(路线图); 剪贴板可经 X11 selection
+   协议接(同样路线图)—— 都留待输入后端落地时一并接。**无 IME 事件
+   产出**(HNP_EV_IME_* / FOCUS_* / SCREEN_CHANGED 在 Linux 侧永不产生,
+   引擎侧无预编辑状态, 行为与旧版逐位一致)。 */
+void hnp_ime_focus(hnp_window *w, int x, int y, int iw, int ih) {
+    (void)w; (void)x; (void)y; (void)iw; (void)ih;
+}
+int hnp_clipboard_get(hnp_window *w, char *out, size_t cap) {
+    (void)w; (void)out; (void)cap;
+    return 0;
+}
+int hnp_clipboard_set(hnp_window *w, const char *utf8) {
+    (void)w; (void)utf8;
+    return 0;
 }
 
 static hnp_key keysym_to_hnp(unsigned long ks) {
@@ -516,8 +553,20 @@ static hnp_key keysym_to_hnp(unsigned long ks) {
     case 0xFF57: return HNP_KEY_END;
     case 0xFF55: return HNP_KEY_PAGE_UP;
     case 0xFF56: return HNP_KEY_PAGE_DOWN;
+    case 0xFF63: return HNP_KEY_INSERT;      /* XK_Insert */
+    case 0xFFE5: return HNP_KEY_CAPS_LOCK;   /* XK_Caps_Lock */
+    case 0xFF7F: return HNP_KEY_NUM_LOCK;    /* XK_Num_Lock */
+    case 0xFF14: return HNP_KEY_SCROLL_LOCK; /* XK_Scroll_Lock */
+    case 0xFF13: return HNP_KEY_PAUSE;       /* XK_Pause */
+    case 0x0020: return HNP_KEY_SPACE;       /* XK_space */
+    case 0xFF8D: return HNP_KEY_ENTER_NUMPAD;/* XK_KP_Enter */
     default: return HNP_KEY_PRINTABLE;
     }
+}
+
+/* 契约导出(hn_platform.h): 与事件路径同一张表(单源)。 */
+hnp_key hnp_key_from_native(unsigned long native_code) {
+    return keysym_to_hnp(native_code);
 }
 
 int hnp_pump(hnp_event *ev, int timeout_ms) {

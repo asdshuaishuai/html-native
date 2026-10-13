@@ -89,8 +89,53 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button);
 /* 滚轮(命中元素滚动)。返回 1 表示重渲染过。 */
 int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y);
 
-/* 按键。返回 1 表示重渲染过。Esc 由平台壳自己处理(窗口关闭)。 */
+/* 按键。返回 1 表示重渲染过。Esc 由平台壳自己处理(窗口关闭)。
+   key 取 platform/hn_platform.h 的 hnp_key 值 —— 本层不 include 平台头
+   (平台无关是 hn_rt 的存在理由), 故在此镜像一份 HN_KT_*(Key Type)
+   枚举, **值必须与 hnp_key 逐项一致**; tools/macos_deep_probe.sh 现场
+   编译一个同时包含两个头的对账器做编译期断言(漂移即探针红)。
+   支持: 可打印字符/IME 文本插入(若 utf8 非空)、RETURN(hx 提交; textarea
+   内插入换行)、TAB(焦点轮换)、BACKSPACE/DELETE(按 caret 删除)、
+   LEFT/RIGHT/HOME/END(按字符/caret 移动)、上下/翻页(预留, 当前 no-op)。 */
+enum {
+    HN_KT_NONE = 0,
+    HN_KT_ESCAPE, HN_KT_RETURN, HN_KT_TAB, HN_KT_BACKSPACE, HN_KT_DELETE,
+    HN_KT_LEFT, HN_KT_RIGHT, HN_KT_UP, HN_KT_DOWN,
+    HN_KT_HOME, HN_KT_END, HN_KT_PAGE_UP, HN_KT_PAGE_DOWN,
+    HN_KT_F1, HN_KT_F2, HN_KT_F3, HN_KT_F4, HN_KT_F5, HN_KT_F6,
+    HN_KT_F7, HN_KT_F8, HN_KT_F9, HN_KT_F10, HN_KT_F11, HN_KT_F12,
+    HN_KT_PRINTABLE,
+    HN_KT_INSERT, HN_KT_MENU, HN_KT_CAPS_LOCK, HN_KT_NUM_LOCK,
+    HN_KT_SCROLL_LOCK, HN_KT_PAUSE, HN_KT_SPACE, HN_KT_ENTER_NUMPAD
+};
 int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8);
+
+/* ---------------- IME 上屏(平台 IME 事件转发) ----------------
+ * 最小实现口径("预编辑串直插"): 组字期间把"基础值 + 预编辑串"写进焦点
+ * 控件的 value(caret 落在预编辑串末尾), commit 时用"基础值 + 提交串"
+ * 一次性替换; 取消(preedit 空串)恢复基础值。基础值 = 组字开始那一刻的
+ * 已上屏值, 引擎内部记录。返回 1 表示重渲染过。
+ * 平台不支持 IME 时不调用(0 成本); NULL 安全。 */
+
+/* 预编辑串变化(组字中每个中间态; preedit 空串 = 组字结束/取消)。
+   cursor 为预编辑串内光标(字节偏移; 诊断/未来高亮用, 最小实现忽略)。 */
+int hn_rt_ime_preedit(hn_rt *rt, const char *preedit, int cursor);
+
+/* 提交串(选字上屏): 基础值 + text 落进 value, 清预编辑态。 */
+int hn_rt_ime_commit(hn_rt *rt, const char *text);
+
+/* 焦点控件盒(逻辑 px, 左上原点; 供平台把 IME 候选窗/输入法图标摆到光标处)。
+   焦点非可编辑控件/无焦点时返回 0(调用方按"无焦点盒"降级)。 */
+int hn_rt_focus_box(hn_rt *rt, int *x, int *y, int *w, int *h);
+
+/* ---------------- 编辑命令(快捷键的引擎侧实现) ----------------
+ * 平台壳把 ⌘C/⌘V/⌘X/⌘A 映射到这里; 剪贴板读写复用本文件既有 sys://
+ * 剪贴板后端(macOS NSPasteboard / Linux 留位), 不新增平台依赖。
+ * text 仅 PASTE 需要: NULL = 用本层剪贴板读(clip_get); 非 NULL = 调用方
+ * 已从平台剪贴板拿到文本(hnp_clipboard_get), 优先用它。返回 1 = 文档变过
+ * (调用方 blit)。无焦点控件时静默 0。 */
+enum { HN_EDIT_COPY = 0, HN_EDIT_CUT = 1, HN_EDIT_PASTE = 2, HN_EDIT_SELECT_ALL = 3 };
+int hn_rt_edit(hn_rt *rt, int op, const char *text);
 
 /* ---------------- 内省(agent 感知) ---------------- */
 
