@@ -9,12 +9,19 @@
  * - 文本: FreeType 光栅化 + (字形,字号) 缓存
  * - PNG: 存储型 deflate(合法 PNG, 无压缩) + CRC32
  */
+/* 图片解码缓存要 stat() 取 (mtime,size) 做失效键 —— -std=c99 严格模式下
+   POSIX 声明默认隐藏, 必须在一切 include 之前显式打开(只影响本 TU)。 */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "hnsoft.h"
 #include "hn_png.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/stat.h>
 
 #ifndef HN_NO_TEXT
 #include <ft2build.h>
@@ -27,6 +34,11 @@ typedef struct { float r, g, b, a; } fcolor;
 
 /* 图像像素解码(定义在文件后部): 返回 malloc 的 RGBA8, 调用方 free */
 static unsigned char *load_image_pixels(const char *path, int *w, int *h);
+/* 带 (path, mtime, size) 解码缓存的版本: 返回缓存持有的**借用指针**
+   (调用方不得 free), 失败返回 NULL。渲染每帧的 IMAGE/MESH 指令都走它 ——
+   此前每帧重跑 fopen + inflate + unfilter, profile 显示占静态图片页
+   引擎算力的 ~40%(hn_png inf_data/unfilter 是 Top 叶子)。 */
+static const unsigned char *image_pixels_cached(const char *path, int *w, int *h);
 
 static fcolor unpack(hn_color c) {
     fcolor r;
@@ -285,20 +297,71 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
     base.a *= alpha;
     fcolor sc = unpack(c->stroke);
     sc.a *= alpha;
+    int grad = (c->gradient || c->grad_kind) != 0;
+    int do_stroke = (c->stroke_w > 0 && sc.a > 0.01f);
+
+    /* 行级剪裁外提(与 blend_rgba 同一构造): 接受域用与 fb_clip_ok **同一个**
+       浮点谓词单调走查, 圆角/病态剪裁退回逐像素原路 → 逐位等价。
+       profile: fb_clip_ok 是交互页 Top 叶子之一 —— 全页矩形每像素都重跑
+       4 次浮点比较 + 裁剪栈读。 */
+    int fast = 1, xlo = 0, xhi = f->w - 1;
+    float cy0 = 0, cy1 = 0;
+    if (f->clip_n > 0) {
+        const float cx0 = f->clip[f->clip_n - 1].x0, cy0c = f->clip[f->clip_n - 1].y0;
+        const float cx1 = f->clip[f->clip_n - 1].x1, cy1c = f->clip[f->clip_n - 1].y1;
+        const float cr = f->clip[f->clip_n - 1].r;
+        if (!(cx0 == cx0) || !(cy0c == cy0c) || !(cx1 == cx1) || !(cy1c == cy1c) || cr > 0) {
+            fast = 0;
+        } else {
+            cy0 = cy0c;
+            cy1 = cy1c;
+            while (xlo <= xhi && !((float)xlo + 0.5f >= cx0)) xlo++;
+            while (xhi >= xlo && !((float)xhi + 0.5f < cx1)) xhi--;
+        }
+    }
+    /* 实心快路(r==0 且描边不画): 逐式复算 sd_rounded 的 qx/qy(同一表达式
+       → 同一浮点值), 两方向都 ≤ -0.5 时 ax=ay=0、d = fmaxf(qx,qy) ≤ -0.5
+       → cov = 0.5-d ≥ 1 → 钳位后恒为 1.0f, col.a *= 1.0f 逐位不变 ——
+       免每像素 sqrtf。渐变仍逐像素取色。 */
+    const int solid = (r == 0.0f && !do_stroke);
 
     for (int py = iy0; py <= iy1; py++) {
-        for (int px = ix0; px <= ix1; px++) {
+        if (py < 0 || py >= f->h) continue;   /* fb_clip_ok 的帧界, 快路必须保住 */
+        if (fast && f->clip_n > 0) {
+            const float fy = (float)py + 0.5f;
+            if (!(fy >= cy0) || !(fy < cy1)) continue;
+        }
+        int px_a = ix0, px_b = ix1;
+        if (fast) {
+            if (px_a < xlo) px_a = xlo;
+            if (px_b > xhi) px_b = xhi;
+        }
+        for (int px = px_a; px <= px_b; px++) {
             float fx = px + 0.5f, fy = py + 0.5f;
-            float d = sd_rounded(fx, fy, x, y, w, h, r);
-            float cov = 0.5f - d;
-            if (cov <= 0) continue;
-            if (cov > 1) cov = 1;
             fcolor col;
-            if (c->gradient || c->grad_kind) col = grad_at(c, fx, fy, scale); else col = base;
+            float cov;
+            float d = 0.0f;
+            int solid_pix = 0;
+            if (solid) {
+                /* 与 sd_rounded 同式: 保证分支后果与通用路径逐位一致 */
+                float qx = fabsf(fx - (x + w * 0.5f)) - (w * 0.5f - r);
+                float qy = fabsf(fy - (y + h * 0.5f)) - (h * 0.5f - r);
+                if (qx <= -0.5f && qy <= -0.5f) solid_pix = 1;
+            }
+            if (solid_pix) {
+                cov = 1.0f;
+                if (grad) col = grad_at(c, fx, fy, scale); else col = base;
+            } else {
+                d = sd_rounded(fx, fy, x, y, w, h, r);
+                cov = 0.5f - d;
+                if (cov <= 0) continue;
+                if (cov > 1) cov = 1;
+                if (grad) col = grad_at(c, fx, fy, scale); else col = base;
+            }
             col.a *= cov;
             fb_blend(f, px, py, col);
-            /* 描边: 内外 1px 环 */
-            if (c->stroke_w > 0 && sc.a > 0.01f) {
+            /* 描边: 内外 1px 环(solid 时 do_stroke 恒假, d 即通用路径的 d) */
+            if (do_stroke) {
                 float sd_in = fabsf(d) - c->stroke_w * 0.5f * scale;
                 float scov = 0.5f - sd_in;
                 if (scov > 0) {
@@ -470,9 +533,19 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
     int do_stroke = c->stroke_w > 0.05f && strokec.a > 0.004f;
     if (!do_fill && !do_stroke) return;
 
-    float *px = (float *)malloc(sizeof(float) * (size_t)n);
-    float *py = (float *)malloc(sizeof(float) * (size_t)n);
-    if (!px || !py) { free(px); free(py); return; }
+    /* 顶点/交点缓冲: 常规多边形(≤256 顶点)走栈上定长, 免掉稳态帧循环里
+       每帧 3 次 malloc/free(账本动画页每帧重画同一条路径); 超长路径
+       (canvas 大型 path)仍走堆, 行为不变。 */
+    enum { POLY_STACK_N = 256 };
+    float px_stack[POLY_STACK_N], py_stack[POLY_STACK_N];
+    xhit hits_stack[POLY_STACK_N + 2];
+    float *px = n <= POLY_STACK_N ? px_stack : (float *)malloc(sizeof(float) * (size_t)n);
+    float *py = n <= POLY_STACK_N ? py_stack : (float *)malloc(sizeof(float) * (size_t)n);
+    if (!px || !py) {
+        if (px != px_stack) free(px);
+        if (py != py_stack) free(py);
+        return;
+    }
     float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
     for (int i = 0; i < n; i++) {
         float x = (c->poly[i * 2]     - ox) * scale + ox;
@@ -485,8 +558,13 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
 
     if (do_fill) {
         int y0 = (int)floorf(miny) - 1, y1 = (int)ceilf(maxy) + 1;
-        xhit *hits = (xhit *)malloc(sizeof(xhit) * (size_t)(n + 2));
-        if (!hits) { free(px); free(py); return; }
+        xhit *hits = n <= POLY_STACK_N ? hits_stack
+                                       : (xhit *)malloc(sizeof(xhit) * (size_t)(n + 2));
+        if (!hits) {
+            if (px != px_stack) free(px);
+            if (py != py_stack) free(py);
+            return;
+        }
         for (int s = y0; s <= y1; s++) {
             float fy = (float)s + 0.5f;
             int nh = 0;
@@ -531,7 +609,7 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
                 }
             }
         }
-        free(hits);
+        if (hits != hits_stack) free(hits);
     }
 
     /* 描边: 每条边按宽度展开成四边形带(闭合路径) */
@@ -582,7 +660,8 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
             }
         }
     }
-    free(px); free(py);
+    if (px != px_stack) free(px);
+    if (py != py_stack) free(py);
 }
 
 /* ---------------- 网格变形贴图(重心坐标反查 UV) ---------------- */
@@ -590,9 +669,11 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
 static void paint_mesh(fb *f, const hn_cmd *c, float alpha, float scale) {
     if (!c->mesh_verts || !c->mesh_uv || c->mesh_cols <= 0 || c->mesh_rows <= 0) return;
     int iw = 0, ih = 0;
-    unsigned char *ipx = load_image_pixels(c->text ? c->text : "", &iw, &ih);
+    /* 借用指针(解码缓存持有), 不得 free —— 此前每帧 malloc/解码/free,
+       30fps 下等于每秒把同一张 PNG 解 30 遍 */
+    const unsigned char *ipx = image_pixels_cached(c->text ? c->text : "", &iw, &ih);
     float ga = (float)(c->fill & 0xFFu) / 255.0f * alpha;
-    if (ga <= 0.004f) { if (ipx) free(ipx); return; }
+    if (ga <= 0.004f) return;
     /* scale(HiDPI): 网格顶点是屏幕坐标, paint 时乘 scale 进物理像素域;
        UV 是归一化采样坐标, 与缩放无关 —— 源图照常采样, 只是落点更密。 */
     if (!ipx) {
@@ -668,7 +749,6 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha, float scale) {
             }
         }
     }
-    free(ipx);
 }
 
 /* ---------------- 文本(FreeType) ---------------- */
@@ -894,23 +974,202 @@ static unsigned char *load_image_pixels(const char *path, int *w, int *h) {
     return px;
 }
 
+/* ---------------- 图片解码缓存((path, mtime, size) 键, LRU 字节预算) ------
+ * 动画帧循环里 IMAGE/MESH 指令每帧都来要同一张图 —— 此前每帧
+ * fopen + inflate + unfilter 全量重跑(macOS sample 实测: pet.html 引擎
+ * 叶子样本里 hn_png 解码三件套占 ~40%)。解码是文件的纯函数, 缓存不动像素。
+ *
+ * 失效键: 路径 + st_mtime(秒) + st_size —— 文件被替换后下一帧重新解码。
+ * 有界: 解码字节预算 HN_IMG_CACHE_BUDGET(48MB 软上限, 超了 LRU 逐出;
+ * 单条超预算的大图保留 —— 总占用仍有界 = 预算 + 最大单条) +
+ * 条目上限 HN_IMG_CACHE_MAX_ENT。解码失败也入表(负缓存, 免得缺图页
+ * 每帧重跑 fopen; stat 变化即重试)。 */
+typedef struct {
+    char *path;
+    long long mtime, fsize;   /* 失效键; stat 不可用/文件缺失时为哨兵值 */
+    unsigned char *px;        /* RGBA8 解码结果(缓存持有) */
+    int w, h;
+    size_t bytes;             /* px 字节数(预算口径; 失败条目为 0) */
+    unsigned long long last_use;
+} img_cache_ent;
+
+#define HN_IMG_CACHE_BUDGET  (48u << 20)   /* 48MB 解码像素软上限 */
+#define HN_IMG_CACHE_MAX_ENT 32
+#define HN_IMG_STAT_MISS_MTIME (-1)        /* 文件缺失/stat 失败的哨兵 */
+
+static img_cache_ent g_imgc[HN_IMG_CACHE_MAX_ENT];
+static int g_imgc_n = 0;
+static size_t g_imgc_bytes = 0;
+static unsigned long long g_imgc_clock = 0;
+/* 命中/未命中计数(HN_IMG_CACHE_STATS=1 时逐帧打印, 供 perf_probe 断言) */
+static long g_img_hit = 0, g_img_miss = 0, g_img_evict = 0;
+
+static void img_stat_line(void) {
+    static int stats_on = -1;
+    if (stats_on < 0) stats_on = getenv("HN_IMG_CACHE_STATS") ? 1 : 0;
+    if (!stats_on) return;
+    fprintf(stderr, "hn_img_cache: hit=%ld miss=%ld evict=%ld entries=%d bytes=%zu\n",
+            g_img_hit, g_img_miss, g_img_evict, g_imgc_n, g_imgc_bytes);
+}
+
+static void img_key_of(const char *path, long long *mtime, long long *fsize) {
+    *mtime = HN_IMG_STAT_MISS_MTIME;
+    *fsize = -1;
+#if defined(_WIN32)
+    struct _stat st;
+    if (path && *path && _stat(path, &st) == 0) {
+        *mtime = (long long)st.st_mtime;
+        *fsize = (long long)st.st_size;
+    }
+#else
+    struct stat st;
+    if (path && *path && stat(path, &st) == 0) {
+        *mtime = (long long)st.st_mtime;
+        *fsize = (long long)st.st_size;
+    }
+#endif
+}
+
+/* 超预算/超表时逐出最久未用, 腾到装得下 need 为止(全空则止 —— 软上限) */
+static void img_cache_evict(size_t need) {
+    while (g_imgc_n > 0 &&
+           (g_imgc_bytes + need > HN_IMG_CACHE_BUDGET || g_imgc_n >= HN_IMG_CACHE_MAX_ENT)) {
+        int victim = 0;
+        for (int i = 1; i < g_imgc_n; i++)
+            if (g_imgc[i].last_use < g_imgc[victim].last_use) victim = i;
+        g_imgc_bytes -= g_imgc[victim].bytes;
+        free(g_imgc[victim].px);
+        free(g_imgc[victim].path);
+        g_imgc[victim] = g_imgc[g_imgc_n - 1];
+        g_imgc_n--;
+        g_img_evict++;
+    }
+}
+
+static const unsigned char *image_pixels_cached(const char *path, int *w, int *h) {
+    *w = *h = 0;
+    if (!path || !*path) return NULL;
+    long long mtime, fsize;
+    img_key_of(path, &mtime, &fsize);
+    for (int i = 0; i < g_imgc_n; i++) {
+        if (g_imgc[i].mtime == mtime && g_imgc[i].fsize == fsize &&
+            g_imgc[i].path && !strcmp(g_imgc[i].path, path)) {
+            g_imgc[i].last_use = ++g_imgc_clock;
+            g_img_hit++;
+            img_stat_line();
+            if (!g_imgc[i].px) return NULL;   /* 负缓存: 解码失败的路径 */
+            *w = g_imgc[i].w;
+            *h = g_imgc[i].h;
+            return g_imgc[i].px;
+        }
+    }
+    /* 未命中: 解码(失败也入表, 但 stat 失败的缺失文件用哨兵键可被
+       "文件出现"自动击穿 —— 键不同自然走到这里重新解码) */
+    g_img_miss++;
+    int iw = 0, ih = 0;
+    unsigned char *px = load_image_pixels(path, &iw, &ih);
+    size_t bytes = px ? (size_t)iw * ih * 4 : 0;
+    img_cache_evict(bytes);
+    g_imgc[g_imgc_n].path = (char *)malloc(strlen(path) + 1);
+    if (g_imgc[g_imgc_n].path) strcpy(g_imgc[g_imgc_n].path, path);
+    g_imgc[g_imgc_n].mtime = mtime;
+    g_imgc[g_imgc_n].fsize = fsize;
+    g_imgc[g_imgc_n].px = px;
+    g_imgc[g_imgc_n].w = iw;
+    g_imgc[g_imgc_n].h = ih;
+    g_imgc[g_imgc_n].bytes = bytes;
+    g_imgc[g_imgc_n].last_use = ++g_imgc_clock;
+    g_imgc_n++;
+    g_imgc_bytes += bytes;
+    img_stat_line();
+    if (!px) return NULL;
+    *w = iw;
+    *h = ih;
+    return px;
+}
+
 /* RGBA8(非预乘) → 画布拉伸混合。IMAGE(解码文件)与 BITMAP(媒体当前帧)
    共用同一条像素路径 —— 两者的差别只在"像素从哪来"(stride 分开给:
-   文件 = iw*4 紧排, 媒体帧 = 引擎会话的 stride)。 */
+   文件 = iw*4 紧排, 媒体帧 = 引擎会话的 stride)。
+
+   扫描线快路(profile: fb_blend/fb_clip_ok 是三页共同的 Top 叶子 ——
+   全幅 blit 每像素都重跑一遍浮点剪裁判定): 把 fb_clip_ok 的接受域
+   **一次性**外提成整数 x 区间 + 行级 y 判定, 圆角裁剪与 NaN 坐标退回
+   逐像素原路。等价性靠构造保证: 区间端点用与 fb_clip_ok **同一个**
+   浮点谓词单调走查(x+0.5f >= cx0 / x+0.5f < cx1), 不引入任何新的
+   舍入路径 → 接受集逐位相同。不透明快路(源 alpha=255、组 alpha≥0.999、
+   目底 alpha=255 → blend 走双不透明直写)已对 0..255 全值验证
+   round(v/255*255+0.5)==v 逐位成立, 直拷贝与 blend 输出一致。 */
 static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int ih,
                        int x0, int y0, int w, int h, float alpha) {
-    for (int yy = 0; yy < h; yy++)
-        for (int xx = 0; xx < w; xx++) {
-            int sx = xx * iw / (w > 0 ? w : 1), sy = yy * ih / (h > 0 ? h : 1);
-            const unsigned char *p = px + (size_t)sy * stride + (size_t)sx * 4;
-            fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, p[3] / 255.0f * alpha };
-            fb_blend(f, x0 + xx, y0 + yy, col);
+    if (w <= 0 || h <= 0) return;
+    int fast = 1, xlo = 0, xhi = f->w - 1;
+    float cy0 = 0, cy1 = 0;
+    if (f->clip_n > 0) {
+        const float cx0 = f->clip[f->clip_n - 1].x0, cy0c = f->clip[f->clip_n - 1].y0;
+        const float cx1 = f->clip[f->clip_n - 1].x1, cy1c = f->clip[f->clip_n - 1].y1;
+        const float cr = f->clip[f->clip_n - 1].r;
+        /* NaN/非有限剪裁坐标: fb_clip_ok 的比较全为假反而"放行", 语义病态,
+           不赌快路的区间推导 —— 退回逐像素原路逐位复刻 */
+        if (!(cx0 == cx0) || !(cy0c == cy0c) || !(cx1 == cx1) || !(cy1c == cy1c) || cr > 0) {
+            fast = 0;
+        } else {
+            cy0 = cy0c;
+            cy1 = cy1c;
+            /* 接受列 ⇔ x+0.5f >= cx0 且 x+0.5f < cx1(与 fb_clip_ok 同式);
+               谓词沿 x 单调, 从两端向内走查即得精确接受区间 */
+            while (xlo <= xhi && !((float)xlo + 0.5f >= cx0)) xlo++;
+            while (xhi >= xlo && !((float)xhi + 0.5f < cx1)) xhi--;
         }
+    }
+    const int opaque = (alpha >= 0.999f);
+    const int wdiv = w, hdiv = h;   /* 上面已挡 0; 除法防 0 的旧卫语句等价收敛 */
+    for (int yy = 0; yy < h; yy++) {
+        const int dy = y0 + yy;
+        if (dy < 0 || dy >= f->h) continue;
+        if (fast && f->clip_n > 0) {
+            const float fy = (float)dy + 0.5f;
+            if (!(fy >= cy0) || !(fy < cy1)) continue;
+        }
+        const int sy = yy * ih / hdiv;
+        const unsigned char *srow = px + (size_t)sy * stride;
+        unsigned char *drow = f->px + (size_t)dy * f->w * 4;
+        if (fast) {
+            int a = xlo - x0;
+            int b = xhi - x0;
+            if (a < 0) a = 0;
+            if (b > w - 1) b = w - 1;
+            for (int xx = a; xx <= b; xx++) {
+                const unsigned char *p = srow + (size_t)(xx * iw / wdiv) * 4;
+                unsigned char *d = drow + (size_t)(x0 + xx) * 4;
+                if (opaque && p[3] == 255 && d[3] == 255) {
+                    /* 双不透明直写: blend 快路的输出对 0..255 全值逐位等于源 */
+                    d[0] = p[0];
+                    d[1] = p[1];
+                    d[2] = p[2];
+                } else {
+                    fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f,
+                                   p[3] / 255.0f * alpha };
+                    blend(d, col);
+                }
+            }
+        } else {
+            /* 原路(圆角/病态剪裁): 逐像素 fb_clip_ok + blend, 逐位不变 */
+            for (int xx = 0; xx < w; xx++) {
+                int sx = xx * iw / wdiv;
+                const unsigned char *p = srow + (size_t)sx * 4;
+                fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f,
+                               p[3] / 255.0f * alpha };
+                fb_blend(f, x0 + xx, dy, col);
+            }
+        }
+    }
 }
 
 static void paint_image(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     int iw = 0, ih = 0;
-    unsigned char *px = load_image_pixels(c->text ? c->text : "", &iw, &ih);
+    /* 借用指针(解码缓存持有), 不得 free —— 同 paint_mesh */
+    const unsigned char *px = image_pixels_cached(c->text ? c->text : "", &iw, &ih);
     if (!px) {
         /* 占位: 画虚线框, 表明"图片位"而非静默空白 */
         float x = (c->x - ox) * scale + ox, y = (c->y - oy) * scale + oy;
@@ -927,7 +1186,6 @@ static void paint_image(fb *f, const hn_cmd *c, float scale, float ox, float oy,
     int x0 = (int)((c->x - ox) * scale + ox), y0 = (int)((c->y - oy) * scale + oy);
     int w = (int)(c->w * scale), h = (int)(c->h * scale);
     blend_rgba(f, px, iw * 4, iw, ih, x0, y0, w, h, alpha);
-    free(px);
 }
 
 /* BITMAP: 媒体当前帧(RGBA8 非预乘, 引擎持有缓存)。位图为空时忽略 ——

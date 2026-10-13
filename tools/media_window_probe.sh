@@ -26,6 +26,12 @@
 #      (>50% 采样像素不同 = 图层合成下画面仍在动); 同时 trace 行
 #      带 layer 尾标、无 [media-pb](CPU 帧转换痕迹)—— 双证据钉死"真的走
 #      了 GPU 合成, 不是悄悄退回 CPU"。
+#   ⑫ loop 回绕连续性(根治验收): demo.mp4 4s 真窗跑 19s → 到尾 4 次
+#      (4/8/12/16s, 首圈引擎闩锁, 3 圈通知驱动)。断言 [media-end] ≥3
+#      (到尾通知在投递)、[media-wrap] ≥2(通知驱动回绕在跑)、t 序列回绕处
+#      无 >0.5s 停滞空洞(相邻样本 Δwall-Δt, 高精度墙钟前缀)、无 seek 风暴
+#      (任意 1s 滑窗 [media-seek] ≤4 —— 旧病实测 60 次/秒); CPU 峰值/均值
+#      为信息值不判。
 #   ⑩ 收口自查: 无 hnapp 孤儿残留。
 #
 # 用法: bash tools/media_window_probe.sh [dist_dir]
@@ -525,6 +531,103 @@ CEOF
 else
     echo "  (跳过 ⑪: 无真窗二进制)"
 fi
+# ---------- ⑫ loop 回绕连续性(根治验收): 3 圈通知驱动回绕 ----------
+# 根治后口径: demo.mp4 4s 真窗跑 19s → 到尾 4 次(4/8/12/16s), 首圈引擎
+# 闩锁(平台无从预知 loop 属性), 之后 3 圈由到尾通知直接 seek(0)+play。
+# 断言:
+#   a) [media-end] ≥3      —— 到尾通知真的在投递(观察者链路活);
+#   b) [media-wrap] ≥2     —— 通知驱动回绕真的在跑(启发式已退役为主路径);
+#   c) t 序列回绕处无停滞空洞 —— 相邻 PLAYING 样本 hole=Δwall-Δt(回卷按
+#      dur 调整)全部 ≤0.55s。旧病: 落位窗口 position≈duration → 每 16ms
+#      重触发 seek + 撞尾自动 pause 吃补发 play, 表现即秒级空洞;
+#   d) 无 seek 风暴 —— 任意 1s 滑窗 [media-seek] ≤4 且全程 ≤12(风暴特征
+#      是 60 次/秒连发; 健康态 ~每 4s 一次);
+#   e) 信息值: 全程 CPU 峰值/均值(回绕瞬间尖峰对照, 不判)。
+# 实现注: 每行日志带高精度墙钟(perl Time::HiRes 前缀, fifo 转接保住
+# hnapp 真 PID —— hole 口径的 Δwall 来源); [media] 行 app 侧显式 fflush,
+# [media-end/-wrap/-seek] 走 stderr(无缓冲), 交错序可信。
+if [ -x "$HN_APP" ]; then
+    LOG="$SBX/wrap-win.log"; FIFO="$SBX/wrap.fifo"; CPULOG="$SBX/wrap-cpu.log"
+    mkfifo "$FIFO"
+    (perl -MTime::HiRes=time -ne 'BEGIN{$|=1} printf "%.3f %s", time, $_' \
+        <"$FIFO" >"$LOG") &
+    RPID=$!
+    (cd "$ROOT/examples" && exec env HN_MEDIA_TRACE=1 HN_MEDIA_MUTE=1 \
+        "$HN_APP" media-demo.html 520 820) >"$FIFO" 2>&1 &
+    WPID=$!
+    (while kill -0 "$WPID" 2>/dev/null; do
+        printf '%s %s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" \
+            "$(ps -o %cpu= -p "$WPID" 2>/dev/null | tr -d ' ')"
+        sleep 0.25
+    done) >"$CPULOG" &
+    CPUPID=$!
+    RUNS=19
+    sleep "$RUNS"
+    ALIVE=0; kill -0 "$WPID" 2>/dev/null && ALIVE=1
+    kill "$WPID" 2>/dev/null; sleep 0.3; kill -9 "$WPID" 2>/dev/null
+    wait "$WPID" 2>/dev/null; WPID=""
+    kill "$CPUPID" 2>/dev/null; wait "$CPUPID" 2>/dev/null
+    wait "$RPID" 2>/dev/null   # fifo 读端随写端关闭 EOF 退出
+    ck "⑫ 真窗回绕 ${RUNS} 秒仍存活(未崩)" "$ALIVE"
+
+    # 单遍 awk 统计: 通知/回绕/seek 计数 + t 序列空洞 + 1s 滑窗风暴峰值
+    STATS=$(awk '
+        /\[media-end\]/  { ne++ }
+        /\[media-wrap\]/ { nw++ }
+        /\[media-seek\]/ { ns++; sw[++k]=$1 }
+        /\[media\] / && /tag=video/ && /state=PLAYING/ {
+            wall=$1; t=-1; dur=-1
+            for (i=1; i<=NF; i++) {
+                if ($i ~ /^t=/)   t = substr($i, 3) + 0
+                if ($i ~ /^dur=/) dur = substr($i, 5) + 0
+            }
+            if (t < 0 || dur <= 0) next
+            if (have) {
+                dt = t - pt
+                if (dt < -dur / 2) { dt += dur; wraps++ }   # 回卷: t 序列回绕
+                hole = (wall - pwall) - dt
+                if (hole > maxhole) maxhole = hole
+                drift += hole; twall += wall - pwall; n++
+            }
+            have = 1; pt = t; pwall = wall
+        }
+        END {
+            storm = 0
+            for (i = 1; i <= k; i++) {
+                c = 0
+                for (j = i; j <= k; j++) { if (sw[j] - sw[i] <= 1.0) c++; else break }
+                if (c > storm) storm = c
+            }
+            printf "%d %d %d %d %.3f %.3f %d %d %.1f", \
+                   ne + 0, nw + 0, ns + 0, n + 0, maxhole + 0, drift + 0, \
+                   storm + 0, wraps + 0, twall + 0
+        }' "$LOG")
+    read -r NE NW NS N MAXHOLE DRIFT STORM WRAPS TWALL <<< "$STATS"
+    [ "${NE:-0}" -ge 3 ] \
+        && ck "⑫a 到尾通知在场且 ≥3 次(实测 ${NE}; [media-end])" 1 \
+        || ck "⑫a 到尾通知在场且 ≥3 次(实测 ${NE})" 0
+    [ "${NW:-0}" -ge 2 ] \
+        && ck "⑫b 通知驱动回绕 ≥2 圈(实测 ${NW}; [media-wrap], 首圈闩锁)" 1 \
+        || ck "⑫b 通知驱动回绕 ≥2 圈(实测 ${NW})" 0
+    if [ "${N:-0}" -ge 20 ] && [ "${WRAPS:-0}" -ge 3 ]; then
+        ck "⑫c 回绕无停滞空洞(max hole=${MAXHOLE}s ≤0.55; 样本 ${N}, 回卷 ${WRAPS} 圈)" \
+           "$(awk -v h="$MAXHOLE" 'BEGIN { print (h <= 0.55) ? 1 : 0 }')"
+    else
+        ck "⑫c 回绕无停滞空洞(PLAYING 样本 ${N:-0} <20 或回卷 ${WRAPS:-0} <3 圈, 序列不完整)" 0
+    fi
+    if [ "${NS:-0}" -le 12 ] && [ "${STORM:-99}" -le 4 ]; then
+        ck "⑫d 无 seek 风暴(全程 ${NS} 次, 1s 滑窗峰值 ${STORM} ≤4)" 1
+    else
+        ck "⑫d 无 seek 风暴(全程 ${NS:-?} 次, 1s 滑窗峰值 ${STORM:-?} >4 = 风暴)" 0
+    fi
+    CPUSTAT=$(awk 'NF==2 && $2+0==$2 { if ($2+0>m) m=$2+0; s+=$2; n++ }
+                   END { if (n) printf "%.0f %.0f", m, s / n; else print "- -" }' "$CPULOG")
+    echo "  i ⑫e CPU 信息值(回绕连跑 ${RUNS}s): 峰值/均值 = ${CPUSTAT}% ; 序列墙钟覆盖 ${TWALL:-0}s, 累计 hole(信息) = ${DRIFT:-0}s"
+    grep -q "media-end" "$LOG" || { echo "      --- 日志尾([media] 行) ---"; grep "\[media\]" "$LOG" | tail -6 | sed 's/^/      /'; }
+else
+    echo "  (跳过 ⑫: 无真窗二进制)"
+fi
+
 # ---------- ⑩ 收口自查: 无 hnapp 孤儿残留 ----------
 # 本脚本启动的 hnapp 全部带"探针特有文档名"参数 —— 按同模式 pgrep,
 # 有命中即说明收口漏了(exec 替换 + trap kill 的完整链路失效)。

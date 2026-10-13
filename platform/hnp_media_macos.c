@@ -28,7 +28,11 @@
  *     校验(sane_stride), 不合法回退 GetBytesPerRow/紧排宽度;
  *  5) pause 态直接 seek 视频轨停在 0.000 —— 必须 play→seek→settle→pause;
  *  6) ended 用 position>=duration 推导(rate 播完仍 1.00, 不可靠);
- *  7) CMTime(24B 结构体)按值传/收, 函数指针原型写对即可(arm64 实测正确)。
+ *  7) CMTime(24B 结构体)按值传/收, 函数指针原型写对即可(arm64 实测正确);
+ *  8) loop 回绕根治(2026-10): actionAtItemEnd=None(撞尾不 pause, 补发的
+ *     play 不再被吃) + 到尾通知 AVPlayerItemDidPlayToEndTimeNotification
+ *     的 selector 观察者直接 seek(0)+play —— position≈duration 启发式只兜
+ *     首圈(loop 闩锁后退役), 风暴与秒级停顿都从根上消失, 见"到尾通知"段。
  *
  * 明确不做(media-design.md §9): http(s) 流媒体(open 如实失败)、字幕、DRM、
  * FFmpeg、wasm 解码、播放器 UI、playbackRate。单线程使用(与引擎同一约定)。
@@ -42,6 +46,7 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "hn_platform.h"
 
@@ -91,6 +96,14 @@ static size_t   (*f_CVPixelBufferGetPlaneCount)(const void *);
 static size_t   (*f_CVPixelBufferGetDataSize)(const void *);
 static unsigned int (*f_CVPixelBufferGetPixelFormatType)(const void *);
 
+/* libdispatch 的 _f 变体(dlsym 即得 —— libdispatch 经 libSystem 在每个
+   进程在场): 到尾通知若被 AVFoundation 在非主线程投递, 用它把处理转交
+   主线程。零 block(block 字面量要 ObjC 编译器支持), _f 变体收 C 函数
+   指针 + 上下文指针, 与本文件"纯 C99 + 运行期 dlsym"同口径。 */
+static void (*f_dispatch_async_f)(obj_t, void *, void (*)(void *));
+static obj_t g_main_queue;   /* dlsym "_dispatch_main_q"(导出的队列对象) */
+static obj_t g_media_obs;    /* 到尾通知观察者单例(进程同寿, 永不释放) */
+
 #define CV_LOCK_READONLY 1u       /* kCVPixelBufferLock_ReadOnly(CoreVideo) */
 
 static int g_once;   /* 0=未初始化, 1=OK, -1=失败(如实进 open 的 err) */
@@ -137,6 +150,10 @@ static int media_init_once(void) {
     o_getClass = (obj_t (*)(const char *))dlsym(RTLD_DEFAULT, "objc_getClass");
     o_sel      = (sel_t (*)(const char *))dlsym(RTLD_DEFAULT, "sel_registerName");
     o_msgSend  = (obj_t (*)(obj_t, sel_t, ...))dlsym(RTLD_DEFAULT, "objc_msgSend");
+    /* 到尾通知非主线程投递时的主线程转交(缺了不致命 —— 退化为就地处理) */
+    f_dispatch_async_f = (void (*)(obj_t, void *, void (*)(void *)))
+                         dlsym(RTLD_DEFAULT, "dispatch_async_f");
+    g_main_queue       = dlsym(RTLD_DEFAULT, "_dispatch_main_q");
     f_CMTimeGetSeconds = (double (*)(CMTime))dlsym(RTLD_DEFAULT, "CMTimeGetSeconds");
     f_CFRelease        = (void (*)(const void *))dlsym(RTLD_DEFAULT, "CFRelease");
     f_CVPixelBufferGetWidth      = (size_t (*)(const void *))dlsym(RTLD_DEFAULT, "CVPixelBufferGetWidth");
@@ -181,9 +198,30 @@ struct hnp_media {
     int stall_cnt;                 /* 同值连续采样计数(playing 态专用) */
     int layer_mode;                /* 1 = 原生 AVPlayerLayer 直出(帧不再外送,
                                       hnp_media_frame 早退 —— CPU 拉帧/转换归零) */
+    /* —— loop 回绕根治(到尾通知主路径, 2026-10) ——
+       旧路线: 引擎靠 position≈duration 启发式轮询触发 seek(0), 落位窗口里
+       每 16ms 重触发(seek 风暴), 且播放器撞尾自动 pause 吃掉补发的 play
+       (最坏 ≤2s 停顿)。现: actionAtItemEnd=None 撞尾不 pause; 到尾系统
+       通知(AVPlayerItemDidPlayToEndTimeNotification)经观察者直接回绕;
+       引擎在"到尾后 1s 内"发 seek(0)+play 即闩为 loop 会话 —— 平台无 loop
+       属性 ABI(hn_platform.h 冻结), 以引擎回绕签名推断, 首wrap仍走引擎
+       (启发式只兜第一圈, 之后通知是主路径; 0.5s 停滞自愈继续兜底)。 */
+    int obs_registered;            /* 到尾通知已注册(close 配对摘除, 防悬空) */
+    int loop_latched;              /* 引擎回绕签名已见 → 后续到尾通知直接回绕 */
+    int wrap_pending;              /* 通知回绕 seek 在途: position 对旧尾读数报 0 */
+    int ended_seen;                /* 到尾通知累计次数(诊断/探针观测点) */
+    int wrap_cnt;                  /* 通知驱动回绕累计次数(探针观测点) */
+    int seek_cnt;                  /* seek 累计次数(探针 seek 风暴观测点) */
+    double ended_wall;             /* 最近一次到尾通知的单调时刻(now_mono) */
 };
 
 int hnp_media_supported(void) { return 1; }
+
+/* 到尾通知的进程级装配与会话级注册/摘除(实现在通知段; open 调 setup+
+   watch, close 调 watch(m,0) —— 必须配对摘除, 否则 NSNotificationCenter
+   持 item 引用悬空/解码器资源滞留)。 */
+static void media_note_setup(void);
+static void media_note_watch(hnp_media *m, int on);
 
 /* ---- src → 会话注册表(原生视频图层的查询口) ----
    open 成功登记(url 原串为键 —— 引擎会话传给 open 的 src 与 <video src>
@@ -302,7 +340,15 @@ hnp_media *hnp_media_open(const char *url, char *err, size_t err_cap) {
     }
     MSG0(void, player, "retain");  /* playerWithURL: 便利构造是 autoreleased,
                                       自己 +1(池已 drain), close 时 release 配平 */
+    /* 到尾动作 = None(**枚举值 2**, AVPlayerActionAtItemEndNone): 不 Advance
+       不 Pause —— 播完停在末帧等通知处理器 seek(0)。铲掉风暴根因一: 缺省
+       Pause 在撞尾瞬间把 rate 打到 0, 引擎补发的 play 被吃掉(position 永久
+       停在 0)。⚠️ 不能传 0 —— 那是 Advance(AVQueuePlayer 专属, AVPlayer
+       setActionAtItemEnd:(0) 直接抛 NSInvalidArgumentException 实测崩)。 */
+    MSG1(void, player, "setActionAtItemEnd:", (obj_t)2);
     m->player = player; m->item = item; m->output = out;
+    media_note_setup();            /* 进程一次: 观察者运行期类 + 单例对象 */
+    media_note_watch(m, 1);        /* 会话级注册(close 配对摘除) */
     reg_add(url, m);   /* 图层模式查询口(见 g_reg 注释); 满表时静默不入 */
     return m;
 }
@@ -310,6 +356,8 @@ hnp_media *hnp_media_open(const char *url, char *err, size_t err_cap) {
 void hnp_media_close(hnp_media *m) {
     if (!m) return;   /* 幂等; NULL 安全 */
     reg_del(m);       /* 图层注册表先摘(app 侧下一拍 walk 即 detach 图层) */
+    media_note_watch(m, 0);   /* 到尾通知配对摘除(先于 item 释放, 防通知中心
+                                 持悬空 item / 解码器资源滞留 —— 热重载同路) */
     if (g_once > 0 && m->player) {
         obj_t pool = ns_alloc_init(o_getClass("NSAutoreleasePool"));
         MSG0(void, m->player, "pause");
@@ -323,6 +371,7 @@ void hnp_media_close(hnp_media *m) {
 
 int hnp_media_play(hnp_media *m) {
     if (!m || !m->player || g_once <= 0) return 0;
+    m->wrap_pending = 0;   /* 显式播放意图最高: 作废回绕在途抑制 */
     MSG0(void, m->player, "play");
     m->playing = 1;
     return 1;
@@ -330,6 +379,7 @@ int hnp_media_play(hnp_media *m) {
 
 void hnp_media_pause(hnp_media *m) {
     if (!m || !m->player || g_once <= 0) return;
+    m->wrap_pending = 0;   /* 暂停后回绕 seek 已无意义(显式意图最高) */
     MSG0(void, m->player, "pause");
     m->playing = 0;
 }
@@ -352,6 +402,148 @@ static double cur_position(hnp_media *m) {
     return cm_to_sec(((CMTime (*)(obj_t, sel_t))o_msgSend)(m->player, o_sel("currentTime")));
 }
 
+/* ---- 到尾通知(AVPlayerItemDidPlayToEndTimeNotification)主路径回绕 ----
+ *
+ * 标准 Cocoa 姿态, 零 block: NSNotificationCenter + selector 观察者。
+ * 观察者方法是运行期子类方法(objc_allocateClassPair + class_addMethod,
+ * 与 hnp_macos.c 的 HNPNoteObserver 同手法; ⚠️ 方法必须在 objc_register-
+ * ClassPair **之前**挂, 注册后 add_method 静默返回 NO → 分发即消息转发崩)。
+ *
+ * 处理器流程: 通知.object = 播完的 AVPlayerItem → 按指针查会话注册表 →
+ * 记账(ended_wall/ended_seen) → loop 已闩锁且播放态则 seek(0)+play 一次。
+ * 非主线程投递(AVFoundation 内部队可能)时经 dispatch_async_f 转交主线程
+ * —— 全部会话状态变更保持在引擎同一线程(单线程契约), 零竞态。
+ *
+ * 探针观测点(HN_MEDIA_TRACE=1, stderr): [media-end](到尾通知)/
+ * [media-wrap](通知驱动回绕)/[media-seek](引擎 seek, 风暴计数)。 */
+
+static double now_mono(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+/* HN_MEDIA_TRACE 记忆化读(与 app 壳/hnp_macos.c 的环境钮纪律同款) */
+static int media_trace(void) {
+    static char memo[8] = "\x01";
+    static int on = -1;
+    const char *e = getenv("HN_MEDIA_TRACE");
+    const char *cur = (e && *e) ? e : "";
+    if (strcmp(cur, memo) != 0) {
+        snprintf(memo, sizeof memo, "%s", cur);
+        on = (e && *e) ? 1 : 0;
+    }
+    return on;
+}
+
+/* 回绕本体: seek(0) 零容差(与 hnp_media_seek 播放态同口径 —— coarse 容差
+   会向关键帧窗口妥协, 落位时间不可预期) + play 保险(actionAtItemEnd=None
+   下 rate 本应仍在, 补一发防同类再犯) + wrap_pending(在途窗口 position
+   对旧尾读数报 0, 引擎启发式永不成立 —— 风暴根因二连根拔除)。 */
+static void media_wrap_now(hnp_media *m, const char *via) {
+    CMTime z = sec_to_cm(0.0);
+    ((void (*)(obj_t, sel_t, CMTime, CMTime, CMTime))o_msgSend)(
+        m->player, o_sel("seekToTime:toleranceBefore:toleranceAfter:"), z, z, z);
+    MSG0(void, m->player, "play");
+    m->wrap_pending = 1;
+    m->wrap_cnt++;
+    if (media_trace())
+        fprintf(stderr, "[media-wrap] n=%d via=%s dur=%.3f\n",
+                m->wrap_cnt, via, m->duration);
+}
+
+/* 按通知.object(item 指针)查会话并处理。**只比较指针不解引用 ctx 语义的
+   item**(dispatch 转交路上 item 可能已随 close 释放 —— 悬空指针值做比较
+   安全; 注册表摘除后查不到 = 会话已亡, 安全吞掉)。 */
+static void media_handle_item_end(obj_t item) {
+    if (!item) return;
+    hnp_media *m = NULL;
+    for (int i = 0; i < g_reg_n; i++)
+        if (g_reg[i].m->item == item) { m = g_reg[i].m; break; }
+    if (!m || !m->player) return;
+    m->ended_wall = now_mono();
+    m->ended_seen++;
+    int wrap = 0;
+    if (m->loop_latched && m->playing && m->duration_known) {
+        media_wrap_now(m, "notif");
+        wrap = 1;
+    }
+    if (media_trace())
+        fprintf(stderr, "[media-end] n=%d loop=%d playing=%d wrap=%d\n",
+                m->ended_seen, m->loop_latched, m->playing, wrap);
+}
+
+/* dispatch_async_f 主线程落点(通知非主线程投递时) */
+static void media_end_trampoline(void *ctx) {
+    media_handle_item_end((obj_t)ctx);
+}
+
+/* NSNotificationCenter 分发入口(观察者方法, 签名 v@:@) */
+static void media_on_item_end(obj_t self, sel_t cmd, obj_t note) {
+    (void)self; (void)cmd;
+    obj_t item = note ? MSG0(obj_t, note, "object") : NULL;
+    if (!item) return;
+    if (MSG0(int, o_getClass("NSThread"), "isMainThread") ||
+        !f_dispatch_async_f || !g_main_queue) {
+        media_handle_item_end(item);      /* 主线程: 就地处理 */
+    } else {
+        f_dispatch_async_f(g_main_queue, item, media_end_trampoline);
+    }
+}
+
+/* 进程一次: 运行期观察者类 + 单例对象。单例与进程同寿(永不释放) ——
+   观察者无悬空; 会话级 item 注册在 media_note_watch 里配对增删。 */
+static void media_note_setup(void) {
+    static obj_t (*alloc_pair)(obj_t, const char *, size_t);
+    static signed char (*add_method)(obj_t, sel_t, void (*)(void), const char *);
+    static void (*reg_pair)(obj_t);
+    static int done;
+    if (done) return;
+    done = 1;
+    alloc_pair = (obj_t (*)(obj_t, const char *, size_t))
+                 dlsym(RTLD_DEFAULT, "objc_allocateClassPair");
+    add_method = (signed char (*)(obj_t, sel_t, void (*)(void), const char *))
+                 dlsym(RTLD_DEFAULT, "class_addMethod");
+    reg_pair   = (void (*)(obj_t))dlsym(RTLD_DEFAULT, "objc_registerClassPair");
+    if (!alloc_pair || !add_method || !reg_pair) return;
+    obj_t cls = alloc_pair(o_getClass("NSObject"), "HNPMediaNoteObserver", 0);
+    if (!cls) return;
+    /* ⚠️ 必须 objc_registerClassPair **之前**挂(hnp_macos.c 同一教训) */
+    add_method(cls, o_sel("onItemEnd:"), (void (*)(void))media_on_item_end, "v@:@");
+    reg_pair(cls);
+    obj_t o = MSG0(obj_t, cls, "alloc");
+    g_media_obs = o ? MSG0(obj_t, o, "init") : NULL;
+}
+
+/* 会话级注册/摘除(配对: open 置 1 / close 置 0; obs_registered 防重复)。
+   套一次性 autorelease 池: nsstr 产物是 autoreleased, 而 open 的池在注册
+   前已 drain(无池 autorelease = 泄漏), 与 media_pump 同一纪律。 */
+static void media_note_watch(hnp_media *m, int on) {
+    if (!m || !m->item) return;
+    if (on) {
+        if (!g_media_obs || m->obs_registered) return;
+        obj_t nc = MSG0(obj_t, o_getClass("NSNotificationCenter"), "defaultCenter");
+        if (!nc) return;
+        m->obs_registered = 1;
+        obj_t pool = ns_alloc_init(o_getClass("NSAutoreleasePool"));
+        ((void (*)(obj_t, sel_t, obj_t, sel_t, obj_t, obj_t))o_msgSend)(
+            nc, o_sel("addObserver:selector:name:object:"),
+            g_media_obs, o_sel("onItemEnd:"),
+            nsstr("AVPlayerItemDidPlayToEndTimeNotification"), m->item);
+        if (pool) MSG0(void, pool, "drain");
+    } else {
+        if (!m->obs_registered) return;
+        m->obs_registered = 0;
+        obj_t nc = MSG0(obj_t, o_getClass("NSNotificationCenter"), "defaultCenter");
+        if (!nc) return;
+        obj_t pool = ns_alloc_init(o_getClass("NSAutoreleasePool"));
+        ((void (*)(obj_t, sel_t, obj_t, obj_t, obj_t))o_msgSend)(
+            nc, o_sel("removeObserver:name:object:"), g_media_obs,
+            nsstr("AVPlayerItemDidPlayToEndTimeNotification"), m->item);
+        if (pool) MSG0(void, pool, "drain");
+    }
+}
+
 /* duration 异步解析; 每次元数据被问时顺手刷新(就绪即记账) */
 static void refresh_duration(hnp_media *m) {
     if (m->duration_known || !m->item) return;
@@ -362,6 +554,18 @@ static void refresh_duration(hnp_media *m) {
 
 int hnp_media_seek(hnp_media *m, double sec) {
     if (!m || !m->player || g_once <= 0) return 0;
+    m->seek_cnt++;
+    /* loop 闩锁: 引擎在"到尾通知后 1s 内"发来的 seek(0)(播放态)是 loop
+       回绕签名 —— 闩上后, 后续到尾由通知处理器直接回绕(启发式主路径退役;
+       非 loop 的 ENDED→replay 发生在 pause 态, 不命中)。窗口 1s: 引擎的
+       启发式在到尾后 ≤1 拍(~16ms)必触发, 用户手动回开头远晚于此。 */
+    double since_end = m->ended_seen ? now_mono() - m->ended_wall : -1.0;
+    if (m->playing && sec <= 0.001 && since_end >= 0 && since_end < 1.0)
+        m->loop_latched = 1;
+    if (media_trace())
+        fprintf(stderr, "[media-seek] n=%d sec=%.3f playing=%d loop=%d since_end=%.3f\n",
+                m->seek_cnt, sec, m->playing, m->loop_latched, since_end);
+    m->wrap_pending = 0;   /* 显式 seek 意图最高: 作废回绕在途抑制 */
     media_pump();
     refresh_duration(m);
     /* 钳制到 [0, duration](已知时; 未知只钳下界) */
@@ -418,14 +622,22 @@ int hnp_media_duration(hnp_media *m, double *sec_out) {
 
 int hnp_media_position(hnp_media *m, double *sec_out) {
     if (!m || !m->player || g_once <= 0) return 0;
-    media_pump();
+    media_pump();   /* 泵里可能正是到尾通知的投递点(处理器已就地回绕) */
     double p = cur_position(m);
-    /* 回绕/重启卡死自愈(实证两轮: 结尾→0 的 seek 是异步的, 引擎侧已做
-       "落位窗口抑制"防 seek 风暴; 但 seek 落位前播放器可能先撞到结尾
-       自动 pause(rate→0), 此后引擎补发的 play 被吃掉 —— position 永久
-       停在 0, 引擎却按 PLAYING 驱动 60fps, t 恒 0)。playing 态却在 0
-       附近 ~0.5s 纹丝不动 → 再催一次 play。合法起点 0.5s 内早已前进;
-       paused 态(m->playing==0)不进这段。 */
+    /* 通知驱动回绕的在途窗口: seekToTime 异步, 落位前 currentTime 仍读
+       旧尾值(≈duration)。wrap_pending 期间对"仍在尾部(离尾 <0.5s)"的
+       读数改报 seek 目标 0 —— 引擎 cur_time 直接落 0, position≈duration
+       的启发式触发条件永不成立(风暴根因二: 落位窗口每 16ms 重触发 seek,
+       连根拔除); 读数已离尾 = 落位, 恢复真值并清窗。用户显式 seek/play/
+       pause 已在入口清窗(意图最高)。 */
+    if (m->wrap_pending) {
+        if (m->duration_known && p >= m->duration - 0.5) p = 0.0;
+        else m->wrap_pending = 0;
+    }
+    /* 回绕/重启卡死自愈(兜底保留, 主路径已换到到尾通知): 通知丢失/闩锁
+       未成(如用户手动 seek 到尾)时仍可能撞尾自动停; playing 态在 0 附近
+       ~0.5s 纹丝不动 → 再催一次 play。合法起点 0.5s 内早已前进; paused 态
+       (m->playing==0)不进这段。 */
     if (m->playing) {
         if (p < 0.05 && p == m->stall_pos) {
             if (++m->stall_cnt >= 30) {
