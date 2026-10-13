@@ -7,7 +7,9 @@
  * 同契约: EWMH(_NET_WM_STATE)+ Motif(_MOTIF_WM_HINTS)+ XShape 输入形状,
  * 全部 dlopen 运行期解析; 常量逐值抄录见下方常量块注释(同 hnp_macos.c
  * 的"不凭记忆写常量"纪律)。libXext(XShape)缺席时 click_through 优雅
- * 降级为无穿透(声明照常接受, 物化看平台)。
+ * 降级为无穿透(声明照常接受, 物化看平台)。原生视频图层(文件尾)同款
+ * 手法跑 XVideo 扩展(libXv): 缺席/无可用端口时 attach 如实返回 0,
+ * 调用方回退 CPU 逐帧。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -94,6 +96,10 @@ typedef int (*fn_XGetWindowAttributes_t)(xdisplay *, xwindow, xwinattr_stub *);
 
 /* ---- 窗口形态/桌宠能力所需(与上面同一解析模式, 运行期 dlsym) ---- */
 typedef int (*fn_XMoveWindow_t)(xdisplay *, xwindow, int, int);
+/* 视频图层子窗的"位置+尺寸"一步摆位(XMoveWindow 只能动位置; 图层盒
+   跟随布局/滚动时位置与尺寸常一起变, 单独一发比两发少一次中间态) */
+typedef int (*fn_XMoveResizeWindow_t)(xdisplay *, xwindow, int, int,
+                                      unsigned int, unsigned int);
 typedef int (*fn_XTranslateCoordinates_t)(xdisplay *, xwindow, xwindow, int, int,
                                           int *, int *, xwindow *);
 typedef int (*fn_XSendEvent_t)(xdisplay *, xwindow, int, long, xclient_stub *);
@@ -170,6 +176,7 @@ static struct {
     fn_XConnectionNumber_t XConnectionNumber;
     fn_XGetWindowAttributes_t XGetWindowAttributes;
     fn_XMoveWindow_t XMoveWindow;
+    fn_XMoveResizeWindow_t XMoveResizeWindow;
     fn_XTranslateCoordinates_t XTranslateCoordinates;
     fn_XSendEvent_t XSendEvent;
     fn_XChangeProperty_t XChangeProperty;
@@ -220,6 +227,7 @@ static int x11_load(void) {
     SYM(XConnectionNumber, fn_XConnectionNumber_t);
     SYM(XGetWindowAttributes, fn_XGetWindowAttributes_t);
     SYM(XMoveWindow, fn_XMoveWindow_t);
+    SYM(XMoveResizeWindow, fn_XMoveResizeWindow_t);
     SYM(XTranslateCoordinates, fn_XTranslateCoordinates_t);
     SYM(XSendEvent, fn_XSendEvent_t);
     SYM(XChangeProperty, fn_XChangeProperty_t);
@@ -416,8 +424,13 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
     return w;
 }
 
+/* 视频图层清理(实现见文件尾"原生视频图层"段; 声明提前 —— 窗口关闭
+   要先摘图层子窗: 它依赖父窗与 GC 还活着)。 */
+static void hn_xvl_close_window(hnp_window *w);
+
 void hnp_window_close(hnp_window *w) {
     if (!w) return;
+    hn_xvl_close_window(w);   /* 先摘视频图层(子窗/缓冲/端口引用) */
     if (w->ximage) x11.XDestroyImage(w->ximage);
     if (w->gc) x11.XFreeGC(x11.dpy, w->gc);
     x11.XDestroyWindow(x11.dpy, w->xw);
@@ -585,18 +598,417 @@ void hnp_set_cursor(hnp_window *w, hnp_cursor c) { (void)w; (void)c; /* M1: 未�
    兜底: 那会把真实实现静默遮蔽成 0, 属于坑)。 */
 int hnp_media_supported(void) { return 0; }
 
-/* 原生视频图层: Linux 无媒体实现(也就没有 player 可挂), 且 X11 合成路径
-   本轮不做 —— 空实现, attach 返回 0 = 不支持, app 侧保持 CPU 逐帧路径
-   (与媒体 ABI 的"声明照常通过, 物化看平台"同一口径)。 */
+/* ---------------- GPU 渲染后端(v1 无 GPU 路径) ----------------
+   Linux v1 无 GPU 原语表: 返回 NULL —— 呼出方(引擎经 hn_rt_set_gpu_host
+   注入槽)据此整体回退 hnsoft(docs/platforms.md 实现矩阵: Linux 的
+   GL/mesa 后端是路线图; 与 hnp_media_supported()==0 的 ABI 留位同一口径)。 */
+const hnp_gpu_host *hnp_gpu_backend(void) { return NULL; }
+
+/* ---------------- 原生视频图层(X11 对应物: XVideo 扩展, libXv 运行期 dlopen) ----------------
+ * hn_platform.h 尾部契约(hnp_video_layer_attach/frame/detach)的 Linux 实现。
+ * macOS 侧是 AVPlayerLayer(系统合成器直通); X11 的对应物是 **XVideo 扩展**
+ * —— 服务器侧做硬件缩放/颜色空间转换的视频 blitter, 最接近"图层原语"语义
+ * 的路径。仍按平台铁律运行期 dlopen("libXv.so.6"), 编译期零依赖(交叉产物
+ * strings 里只有 dlsym 名字, 见 linux_parity_check.sh 的视频图层断言组)。
+ *
+ * 三原语的 X11 形态(本轮 = 图层原语, 不是"视频播放器"):
+ *   attach = grab 端口 + 建图层**子窗口** + XvCreateImage(YV12/I420 帧缓冲,
+ *            预填视频黑) + 首次 XvPutImage;
+ *   frame  = 盒变化时 XMoveResizeWindow 子窗(位置+尺寸一发), 尺寸变化时
+ *            重建 XvImage; 每拍 XvPutImage 摆图 —— X11 没有替我们推进画面
+ *            的合成器, 摆图就是"内容推进通道": Linux 解码后端落地后往
+ *            img->data 写 YV12 帧即可, 本拍摆图自然上屏(**原语即插即用**);
+ *            无解码器时重复摆同一黑帧, 开销一次 blit;
+ *   detach = XvStopVideo + 销毁子窗 + 释放缓冲; 末层摘除时 XvUngrabPort。
+ *
+ * 图层层级对齐(与 macOS "sublayer 在位图图层之上"同语义): 图层 = 父窗的
+ * 子窗口 —— X11 子窗恒绘制在父窗自身内容之上, 且父窗 XPutImage 被子窗
+ * 矩形裁剪(服务器语义, 免维护遮挡表)。子窗不选任何输入事件: 指针事件按
+ * X11 规则上浮父窗(坐标已平移), 引擎命中测试口径不变 —— 对应
+ * AVPlayerLayer 不吃事件。父窗 resize/expose 后调用方每拍 frame() 跟随;
+ * 子窗无 ExposureMask, 内容丢失(最小化恢复等)靠下一拍摆图补 —— 与
+ * "EXPOSE 时重 blit"同一节拍。
+ *
+ * 降级链(诚实口径): libXv 缺席 / 扩展不可用 / 无带 XvImageMask 的适配器 /
+ * 端口全被占 / YV12+I420 都不被端口接受 → attach 返回 0, 调用方
+ * (app/hn_media_platform.c)自然回退 CPU 逐帧路径。**不**在本轮自造
+ * MIT-SHM 视频管线 —— SHM 位图路径是 v2 备选(此注释即留位)。
+ *
+ * Linux 侧暂无解码后端(hnp_media_supported()==0, 无 player 注册表): 本原语
+ * 以 player_id 为图层键自洽成表(同 macOS 的 (win,id) 唯一口径), 不经弱
+ * 符号查询口。合成媒体宿主(hnapp-linux)的梯度帧仍走 CPU 位图路径, 被本
+ * 图层子窗盖住 —— 解码后端落地前, X11 真窗的视频盒呈现"视频黑", 如实
+ * 反映"图层在、解码未接"。
+ */
+
+/* Xv 常量(逐值抄录, 不凭记忆 —— 同文件头纪律):
+   Xv.h 能力/方向掩码: XvInputMask=1<<0, XvOutputMask=1<<1(方向位);
+   XvVideoMask=1<<2, XvImageMask=1<<3, XvAudioMask=1<<4(能力位)。
+   本侧只要 image 能力(XvImage blitter), 不碰 XvPutVideo 视频流端口。 */
+#define HN_XV_IMAGE_MASK (1L << 3)
+/* X.h: Success = 0, CurrentTime = 0L(时间戳"现在"哨兵, grab/ungrab 用) */
+#define HN_X_SUCCESS    0
+#define HN_XV_CURRENT_TIME 0L
+/* YUV/RGB 四元码(FourCC): 字节序 = 'a' 在低字节。只认 YV12/I420 ——
+   两者同为"全分辨率 Y + 两个半分辨率 U/V 平面", 仅 U/V 摆放次序不同,
+   本原语对两者统一按 planes/pitches/offsets 填黑, 不关心次序。 */
+#define HN_XV_FOURCC(a, b, c, d) \
+    ((int)(((unsigned)(unsigned char)(a)) | (((unsigned)(unsigned char)(b)) << 8) | \
+           (((unsigned)(unsigned char)(c)) << 16) | (((unsigned)(unsigned char)(d)) << 24)))
+
+/* ---- 最小 Xv ABI(抄录 X11/extensions/Xvlib.h 布局; 同 Xlib stub 的
+   "手工声明最小面"手法)。XvPortID = XID = unsigned long(LP64)。 ---- */
+typedef unsigned long xport_stub;
+
+/* XvImageFormatInfo(88 字节, 全 4 字节对齐无内衬)—— 本侧只声明布局备用,
+   判定走 XvCreateImage 的服务器校验(见 xvl_acquire), 不读此结构字段 */
+typedef struct {
+    int id; int type; int byte_order; char guid[16];
+    int bits_per_pixel; int format; int num_planes; int depth;
+    unsigned int red_mask, green_mask, blue_mask;
+    unsigned int y_sample_bits, u_sample_bits, v_sample_bits;
+    unsigned int horz_y_period, horz_u_period, horz_v_period;
+    unsigned int vert_y_period, vert_u_period, vert_v_period;
+    char component_order[4]; int scanline_order;
+} xvfmt_stub;
+
+/* XvAdaptorInfo(LP64 布局: base_id 0 / num_ports 8 / type 16(+7 内衬) /
+   name 24 / num_encodings 32 / encodings 40 / num_formats 48 / formats 56 /
+   max_width 64 / max_height 68 / put_flags 72 / get_flags 80)。
+   只依赖头部三字段(base_id/num_ports/type)—— 它们无内衬歧义; 尾部能力位
+   与格式表的抄录差异不进判定路径(纪律: 只读最有把握的 ABI 面)。 */
+typedef struct {
+    xport_stub base_id;
+    unsigned long num_ports;
+    char type;                     /* XvInput/Output/Video/Image/AudioMask 位集 */
+    char *name;
+    unsigned long num_encodings;
+    void *encodings;
+    unsigned long num_formats;
+    xvfmt_stub *formats;
+    int max_width, max_height;
+    unsigned long put_flags, get_flags;
+} xvadaptor_stub;
+
+/* XvImage(XvCreateImage 产出; 56 字节: id 0 / width 4 / height 8 /
+   data_size 12 / num_planes 16(+4 内衬) / pitches 24 / offsets 32 /
+   data 40 / obdata 48)。data 缓冲由调用方 malloc(XvCreateImage 只给
+   data_size), 平面几何经 pitches/offsets 取 —— 不假设 YV12 定长行距。 */
+typedef struct {
+    int id;
+    int width, height;
+    int data_size;
+    int num_planes;
+    int *pitches;
+    int *offsets;
+    char *data;
+    void *obdata;
+} xvimage_stub;
+
+typedef unsigned int (*fn_XvQueryExtension_t)(xdisplay *, unsigned int *, unsigned int *,
+                                              unsigned int *, unsigned int *, unsigned int *);
+typedef int (*fn_XvQueryAdaptors_t)(xdisplay *, xwindow, unsigned long *, xvadaptor_stub **);
+typedef int (*fn_XvGrabPort_t)(xdisplay *, xport_stub, unsigned long /*Time*/);
+typedef int (*fn_XvUngrabPort_t)(xdisplay *, xport_stub, unsigned long);
+typedef xvimage_stub *(*fn_XvCreateImage_t)(xdisplay *, xport_stub, int, char *, int, int);
+typedef int (*fn_XvPutImage_t)(xdisplay *, xport_stub, xwindow, void * /*GC*/, xvimage_stub *,
+                               int, int, unsigned int, unsigned int,
+                               int, int, unsigned int, unsigned int);
+typedef int (*fn_XvStopVideo_t)(xdisplay *, xport_stub, xwindow);
+typedef void (*fn_XvFreeAdaptorInfo_t)(xvadaptor_stub *);
+/* 从 libX11 借的两个口(XvImage 结构释放 / X 错误处理器装配) */
+typedef int (*fn_XFree_t)(void *);
+typedef void *(*fn_XSetErrorHandler_t)(int (*)(xdisplay *, void *));
+
+static struct {
+    void *lib;
+    fn_XvQueryExtension_t XvQueryExtension;
+    fn_XvQueryAdaptors_t XvQueryAdaptors;
+    fn_XvGrabPort_t XvGrabPort;
+    fn_XvUngrabPort_t XvUngrabPort;
+    fn_XvCreateImage_t XvCreateImage;
+    fn_XvPutImage_t XvPutImage;
+    fn_XvStopVideo_t XvStopVideo;
+    fn_XvFreeAdaptorInfo_t XvFreeAdaptorInfo;
+    fn_XFree_t XFree;
+    fn_XSetErrorHandler_t XSetErrorHandler;
+    unsigned long port;    /* 进程已 grab 的端口(多图层共享; 端口是服务器稀缺资源) */
+    int port_valid;
+} xvideo;
+
+/* 图层表(同 macOS g_vl 口径: 进程窗口少, 定长表够用)。容量比 macOS 的 8
+   收窄到 4 —— Xv 端口更稀缺, 超出时 attach 返回 0 优雅退 CPU 逐帧。 */
+#define HN_XVL_CAP 4
+static struct {
+    hnp_window *win;
+    char id[256];
+    xwindow child;              /* 图层子窗口(XvPutImage 的摆位目标) */
+    xvimage_stub *img;          /* XvImage(XFree 释放; data 缓冲另管) */
+    unsigned char *buf;         /* img->data(解码后端落地后的写帧入口) */
+    int iw, ih;                 /* 当前图像尺寸(重建判据) */
+    int lx, ly, lw, lh;         /* 最近应用的盒(同帧跳过 move/resize/重建) */
+} g_xvl[HN_XVL_CAP];
+static int g_xvl_n;
+static int g_xvl_tried;         /* libXv 装配只试一次: 失败(缺库)不再每会话重试 */
+
+/* 诊断行开关(与 macOS 侧同一环境钮, 记忆化) */
+static int hn_xvl_trace(void) {
+    static int t = -1;
+    if (t < 0) {
+        const char *e = getenv("HN_MEDIA_TRACE");
+        t = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return t;
+}
+
+static int hn_xvl_round(float v) { return (int)(v + (v < 0 ? -0.5f : 0.5f)); }
+
+static int xvl_find(hnp_window *w, const char *id) {
+    for (int i = 0; i < g_xvl_n; i++)
+        if (g_xvl[i].win == w && strcmp(g_xvl[i].id, id) == 0) return i;
+    return -1;
+}
+
+/* X 错误处理器(no-op): 图层路径的 Xv 请求(端口/格式/摆位)在驱动差异下
+   难免瞬时 BadMatch —— 默认处理器会打印并 exit 杀掉整个进程, 装配图层
+   路径时换成"忽略本请求"姿态(GTK/Qt 同款)。X 错误是异步投递的, 没法只
+   围单个请求换处理器, 故进程级生效; 不启用视频图层(缺 libXv / 端口缺)
+   不走到这里, 窗口路径行为不变。 */
+static int hn_xv_ignore_error(xdisplay *d, void *err) { (void)d; (void)err; return 0; }
+
+/* libXv 装配(懒, 一次): 缺库或缺任一符号返回 0(attach 层面降级)。
+   XFree/XSetErrorHandler 从已装载的 libX11 借(窗口存在 ⇒ x11.lib 已在)。 */
+static int xvl_load(void) {
+    if (xvideo.lib) return 1;
+    if (g_xvl_tried) return 0;
+    g_xvl_tried = 1;
+    if (!x11.lib || !x11.dpy) return 0;
+    xvideo.lib = dlopen("libXv.so.6", RTLD_NOW);
+    if (!xvideo.lib) xvideo.lib = dlopen("libXv.so", RTLD_NOW);
+    if (!xvideo.lib) return 0;
+    xvideo.XvQueryExtension = (fn_XvQueryExtension_t)dlsym(xvideo.lib, "XvQueryExtension");
+    xvideo.XvQueryAdaptors  = (fn_XvQueryAdaptors_t)dlsym(xvideo.lib, "XvQueryAdaptors");
+    xvideo.XvGrabPort       = (fn_XvGrabPort_t)dlsym(xvideo.lib, "XvGrabPort");
+    xvideo.XvUngrabPort     = (fn_XvUngrabPort_t)dlsym(xvideo.lib, "XvUngrabPort");
+    xvideo.XvCreateImage    = (fn_XvCreateImage_t)dlsym(xvideo.lib, "XvCreateImage");
+    xvideo.XvPutImage       = (fn_XvPutImage_t)dlsym(xvideo.lib, "XvPutImage");
+    xvideo.XvStopVideo      = (fn_XvStopVideo_t)dlsym(xvideo.lib, "XvStopVideo");
+    xvideo.XvFreeAdaptorInfo = (fn_XvFreeAdaptorInfo_t)dlsym(xvideo.lib, "XvFreeAdaptorInfo");
+    xvideo.XFree = (fn_XFree_t)dlsym(x11.lib, "XFree");
+    xvideo.XSetErrorHandler = (fn_XSetErrorHandler_t)dlsym(x11.lib, "XSetErrorHandler");
+    if (!xvideo.XvQueryExtension || !xvideo.XvQueryAdaptors || !xvideo.XvGrabPort ||
+        !xvideo.XvUngrabPort || !xvideo.XvCreateImage || !xvideo.XvPutImage ||
+        !xvideo.XvStopVideo || !xvideo.XvFreeAdaptorInfo || !xvideo.XFree)
+        return 0;
+    if (xvideo.XSetErrorHandler) xvideo.XSetErrorHandler(hn_xv_ignore_error);
+    return 1;
+}
+
+/* YV12/I420 预填"视频黑"(BT.601 有限域): Y=16, U=V=128。平面几何逐行按
+   pitches/offsets 走(驱动可能加行尾对齐, 不假设定长)。 */
+static void xvl_fill_black(xvimage_stub *img) {
+    if (!img || !img->data || !img->pitches || !img->offsets || img->num_planes != 3) return;
+    unsigned char *d = (unsigned char *)img->data;
+    for (int y = 0; y < img->height; y++)
+        memset(d + (size_t)img->offsets[0] + (size_t)y * (size_t)img->pitches[0],
+               16, (size_t)img->width);
+    for (int p = 1; p < 3; p++)
+        for (int y = 0; y < img->height / 2; y++)
+            memset(d + (size_t)img->offsets[p] + (size_t)y * (size_t)img->pitches[p],
+                   128, (size_t)(img->width / 2));
+}
+
+/* 在给定端口上建帧缓冲: YV12 → I420 依次试。格式匹配的**权威判定在 X
+   服务器**(XvCreateImage 对 port 的图像格式表校验, 不匹配返回 NULL)——
+   本侧不读 XvAdaptorInfo 格式表的抄录布局(见 xvadaptor_stub 注释)。
+   返回图像并回填 malloc 的 data 缓冲; 失败返回 NULL。 */
+static xvimage_stub *xvl_image_new(xport_stub port, int wpx, int hpx,
+                                   unsigned char **buf_out) {
+    static const int fcc[2] = { HN_XV_FOURCC('Y', 'V', '1', '2'),
+                                HN_XV_FOURCC('I', '4', '2', '0') };
+    for (int k = 0; k < 2; k++) {
+        xvimage_stub *img = xvideo.XvCreateImage(x11.dpy, port, fcc[k], NULL, wpx, hpx);
+        if (!img || img->data_size <= 0) {
+            if (img) xvideo.XFree(img);
+            continue;
+        }
+        unsigned char *buf = (unsigned char *)malloc((size_t)img->data_size);
+        if (!buf) { xvideo.XFree(img); return NULL; }
+        img->data = (char *)buf;
+        xvl_fill_black(img);
+        *buf_out = buf;
+        return img;
+    }
+    return NULL;
+}
+
+/* 拿"端口 + 帧": 优先复用进程已 grab 的端口(端口稀缺, 不因单格式不匹配
+   轻易换); 无端口则遍历带 XvImageMask 的适配器逐端口 grab, 建不出
+   YV12/I420 的端口立即 ungrab 换下一个。全部失败返回 0(attach 层面
+   如实报不支持, 调用方回退 CPU 逐帧)。 */
+static int xvl_acquire(hnp_window *w, int wpx, int hpx,
+                       unsigned char **buf_out, xvimage_stub **img_out) {
+    if (xvideo.port_valid) {
+        xvimage_stub *img = xvl_image_new(xvideo.port, wpx, hpx, buf_out);
+        if (!img) return 0;
+        *img_out = img;
+        return 1;
+    }
+    unsigned long n = 0;
+    xvadaptor_stub *ads = NULL;
+    if (!xvideo.XvQueryAdaptors ||
+        xvideo.XvQueryAdaptors(x11.dpy, w->xw, &n, &ads) != HN_X_SUCCESS)
+        return 0;
+    int got = 0;
+    /* 上界防御: n 只驱动循环计数, 巨值视为服务器异常不遍历 */
+    if (ads && n > 0 && n < 1024) {
+        for (unsigned long a = 0; a < n && !got; a++) {
+            xvadaptor_stub *ad = &ads[a];
+            if (!(ad->type & HN_XV_IMAGE_MASK)) continue;
+            for (unsigned long p = 0; p < ad->num_ports && !got; p++) {
+                xport_stub port = ad->base_id + p;
+                /* grab 返回值即结果(扩展错误码, 不走 X 错误通道): 0 = Success */
+                if (xvideo.XvGrabPort(x11.dpy, port, HN_XV_CURRENT_TIME) != HN_X_SUCCESS)
+                    continue;                     /* 被占/无效: 换下一个端口 */
+                xvimage_stub *img = xvl_image_new(port, wpx, hpx, buf_out);
+                if (img) {
+                    xvideo.port = port;
+                    xvideo.port_valid = 1;
+                    *img_out = img;
+                    got = 1;
+                } else {
+                    xvideo.XvUngrabPort(x11.dpy, port, HN_XV_CURRENT_TIME);
+                }
+            }
+        }
+    }
+    xvideo.XvFreeAdaptorInfo(ads);
+    return got;
+}
+
 int hnp_video_layer_attach(hnp_window *w, const char *player_id,
                            float x, float y, float fw, float fh) {
-    (void)w; (void)player_id; (void)x; (void)y; (void)fw; (void)fh;
-    return 0;
+    if (!w || !w->xw || !w->gc || !x11.dpy || !player_id || !*player_id) return 0;
+    if (fw <= 0 || fh <= 0) return 0;   /* 未布局/布局成 0: 不挂(macOS 同口径) */
+    int i = xvl_find(w, player_id);
+    if (i >= 0) {                       /* 已挂(热重载同 src): 重定位即帧路径 */
+        hnp_video_layer_frame(w, player_id, x, y, fw, fh);
+        return 1;
+    }
+    if (g_xvl_n >= HN_XVL_CAP) return 0;
+    if (!xvl_load()) return 0;          /* libXv 缺席 → CPU 逐帧兜底 */
+    unsigned int ver = 0, rev = 0, req = 0, evb = 0, erb = 0;
+    if (!xvideo.XvQueryExtension(x11.dpy, &ver, &rev, &req, &evb, &erb)) return 0;
+    int bw = hn_xvl_round(fw); if (bw < 1) bw = 1;
+    int bh = hn_xvl_round(fh); if (bh < 1) bh = 1;
+    int bx = hn_xvl_round(x), by = hn_xvl_round(y);   /* 存 round 值: 与 frame 的
+                                                         同盒比较一致, 首拍即跳过多余摆位 */
+
+    /* 图层子窗: 只设背景黑(CWBackPixel=1<<1; XSetWindowAttributes 的
+       background_pixel 是第 2 字段 → attrs[1], buffer 已零初始化); 不选
+       事件(输入上浮父窗, 见段注释), InputOutput 因 XvPutImage 要 Drawable。 */
+    unsigned long attrs[16] = { 0 };
+    attrs[1] = 0;                       /* background_pixel = 黑 */
+    xwindow child = x11.XCreateWindow(x11.dpy, w->xw, bx, by,
+                                      (unsigned)bw, (unsigned)bh,
+                                      0, 0 /*CopyFromParent*/, 1 /*InputOutput*/, NULL,
+                                      0x2 /*CWBackPixel*/, attrs);
+    if (!child) return 0;
+    x11.XMapWindow(x11.dpy, child);
+
+    unsigned char *buf = NULL;
+    xvimage_stub *img = NULL;
+    if (!xvl_acquire(w, bw, bh, &buf, &img)) {
+        x11.XDestroyWindow(x11.dpy, child);
+        return 0;                        /* 无可用端口/格式: 如实不支持 */
+    }
+    /* 首摆: 图层画面立起来(视频黑) */
+    xvideo.XvPutImage(x11.dpy, xvideo.port, child, w->gc, img,
+                      0, 0, (unsigned)bw, (unsigned)bh, 0, 0, (unsigned)bw, (unsigned)bh);
+    i = g_xvl_n++;
+    g_xvl[i].win = w;
+    snprintf(g_xvl[i].id, sizeof(g_xvl[i].id), "%s", player_id);
+    g_xvl[i].child = child;
+    g_xvl[i].img = img;
+    g_xvl[i].buf = buf;
+    g_xvl[i].iw = bw; g_xvl[i].ih = bh;
+    g_xvl[i].lx = bx; g_xvl[i].ly = by;
+    g_xvl[i].lw = bw; g_xvl[i].lh = bh;
+    x11.XFlush(x11.dpy);
+    if (hn_xvl_trace())
+        fprintf(stderr, "[video-layer] attach id=%s box=%.0f,%.0f %.0fx%.0f port=%lu\n",
+                player_id, (double)x, (double)y, (double)fw, (double)fh, xvideo.port);
+    return 1;
 }
+
 void hnp_video_layer_frame(hnp_window *w, const char *player_id,
                            float x, float y, float fw, float fh) {
-    (void)w; (void)player_id; (void)x; (void)y; (void)fw; (void)fh;
+    if (!w || !player_id || !x11.dpy) return;
+    int i = xvl_find(w, player_id);
+    if (i < 0) return;                  /* 未 attach 过: 静默(调用方时序防御) */
+    if (fw <= 0 || fh <= 0) return;     /* 未布局: 跳过(macOS vl_apply_frame 同款) */
+    int bx = hn_xvl_round(x), by = hn_xvl_round(y);
+    int bw = hn_xvl_round(fw); if (bw < 1) bw = 1;
+    int bh = hn_xvl_round(fh); if (bh < 1) bh = 1;
+    if (bx != g_xvl[i].lx || by != g_xvl[i].ly || bw != g_xvl[i].lw || bh != g_xvl[i].lh) {
+        x11.XMoveResizeWindow(x11.dpy, g_xvl[i].child, bx, by, (unsigned)bw, (unsigned)bh);
+        if (bw != g_xvl[i].iw || bh != g_xvl[i].ih) {
+            /* 尺寸变了: XvImage 重建(v1 重填视频黑; 解码后端落地后由后端
+               重填新缓冲)。重建失败沿用旧图 —— put 会把旧图缩放进新盒,
+               一拍宽高比失真可容忍, 下一拍再试。 */
+            unsigned char *buf = NULL;
+            xvimage_stub *img = xvl_image_new(xvideo.port, bw, bh, &buf);
+            if (img) {
+                free(g_xvl[i].buf);
+                if (g_xvl[i].img) xvideo.XFree(g_xvl[i].img);
+                g_xvl[i].img = img;
+                g_xvl[i].buf = buf;
+                g_xvl[i].iw = bw;
+                g_xvl[i].ih = bh;
+            }
+        }
+        g_xvl[i].lx = bx; g_xvl[i].ly = by; g_xvl[i].lw = bw; g_xvl[i].lh = bh;
+    }
+    /* 每拍摆图 = 内容推进通道(见段注释); 子窗内容丢失的恢复也走这里 */
+    if (xvideo.port_valid && g_xvl[i].img)
+        xvideo.XvPutImage(x11.dpy, xvideo.port, g_xvl[i].child, w->gc, g_xvl[i].img,
+                          0, 0, (unsigned)g_xvl[i].iw, (unsigned)g_xvl[i].ih,
+                          0, 0, (unsigned)bw, (unsigned)bh);
 }
+
 void hnp_video_layer_detach(hnp_window *w, const char *player_id) {
-    (void)w; (void)player_id;
+    if (!w || !player_id) return;
+    int i = xvl_find(w, player_id);
+    if (i < 0) return;                  /* 幂等 */
+    if (x11.dpy) {
+        if (xvideo.XvStopVideo && xvideo.port_valid)   /* overlay 资源收尾(必为幂等) */
+            xvideo.XvStopVideo(x11.dpy, xvideo.port, g_xvl[i].child);
+        x11.XDestroyWindow(x11.dpy, g_xvl[i].child);
+    }
+    free(g_xvl[i].buf);
+    if (xvideo.XFree && g_xvl[i].img) xvideo.XFree(g_xvl[i].img);
+    g_xvl[i] = g_xvl[g_xvl_n - 1];
+    g_xvl_n--;
+    /* 末层摘除: 端口归还服务器(稀缺资源不留进程) */
+    if (g_xvl_n == 0 && xvideo.port_valid && x11.dpy) {
+        xvideo.XvUngrabPort(x11.dpy, xvideo.port, HN_XV_CURRENT_TIME);
+        xvideo.port_valid = 0;
+    }
+    if (hn_xvl_trace())
+        fprintf(stderr, "[video-layer] detach id=%s\n", player_id);
+}
+
+/* 窗口关闭的图层清理(hnp_window_close 开头调用; 此时父窗/GC 还在) */
+static void hn_xvl_close_window(hnp_window *w) {
+    int again = 1;
+    while (again) {                     /* detach 是 swap-removal: 命中即重扫 */
+        again = 0;
+        for (int i = 0; i < g_xvl_n; i++) {
+            if (g_xvl[i].win == w) {
+                hnp_video_layer_detach(w, g_xvl[i].id);
+                again = 1;
+                break;
+            }
+        }
+    }
 }

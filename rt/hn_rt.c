@@ -640,28 +640,63 @@ static void render_trace(int bw, int bh, float scale) {
     fflush(stdout);
 }
 
+/* ---------------- GPU 渲染后端(弱桩 + 渲染分支) ----------------
+ * hn_gpu.c(hnapp 目标入列)提供强定义覆盖这里的弱桩 —— 与 hnp_macos.c 的
+ * hnp_media_player_for_src 弱桩同一手法("弱定义+强定义覆盖是 Mach-O/ELF
+ * 通吃的口径")。不链 hn_gpu.c 的构建(probe 现场编译等)落空到桩:
+ * 恒"不可用" → 一切走 hnsoft, 行为零漂移。 */
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+void hn_gpu_set_host(const void *host) { (void)host; }
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+int hn_gpu_available(const hn_display_list *dl) { (void)dl; return 0; }
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
+                         float scale, unsigned char **out_bgra) {
+    (void)dl; (void)w; (void)h; (void)bg; (void)scale; (void)out_bgra;
+    return 0;
+}
+
+void hn_rt_set_gpu_host(const void *host) { hn_gpu_set_host(host); }
+
 /* 光栅段(全路径/ambient 轻路径共用): 显示列表 → RGBA → 预乘 BGRA。
    HiDPI: 位图按 (逻辑 × scale) 出图, 显示列表坐标在 paint 时乘 scale
-   (hnsoft_render_scaled), 文本随字号 ×scale 走 FreeType —— 真 2x 光栅。 */
+   (hnsoft_render_scaled), 文本随字号 ×scale 走 FreeType —— 真 2x 光栅。
+   GPU 分支(契约口径): 宿主注入(壳在 HN_GPU=metal 时调 hn_rt_set_gpu_host)
+   且本帧指令全支持(hn_gpu_available 逐指令扫) → hn_gpu_render_scaled 直接
+   产出**预乘 BGRA**(与下方 CPU 路径 "RGBA 非预乘 → 预乘 BGRA" 的换算产物
+   同口径, blit 语义一致); 表缺席/init 失败/指令不支持/任一步失败 → 静默
+   落回 hnsoft —— 回退是**逐帧**的(同一会话里 GPU 帧与 CPU 帧可自由穿插)。 */
 static int rt_raster(hn_rt *rt) {
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
     float scale = rt_scale(rt);
     int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);
     hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
-    unsigned char *rgba = hnsoft_render_scaled(dl, bw, bh, bg, scale);
-    if (!rgba) return 0;
-    int n = bw * bh;
-    free(rt->bgra);
-    rt->bgra = (unsigned char *)malloc((size_t)n * 4);
-    if (!rt->bgra) { free(rgba); return 0; }
-    /* RGBA 非预乘 → BGRA 预乘(三平台 blit 的统一约定) */
-    for (int i = 0; i < n; i++) {
-        unsigned char r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
-        if (a != 255) { r = (unsigned char)((r * a) / 255); g = (unsigned char)((g * a) / 255); b = (unsigned char)((b * a) / 255); }
-        rt->bgra[i * 4] = b; rt->bgra[i * 4 + 1] = g; rt->bgra[i * 4 + 2] = r; rt->bgra[i * 4 + 3] = a;
+    unsigned char *bgra = NULL;
+    if (hn_gpu_available(dl))
+        hn_gpu_render_scaled(dl, bw, bh, bg, scale, &bgra);
+    if (!bgra) {
+        unsigned char *rgba = hnsoft_render_scaled(dl, bw, bh, bg, scale);
+        if (!rgba) return 0;
+        int n = bw * bh;
+        bgra = (unsigned char *)malloc((size_t)n * 4);
+        if (!bgra) { free(rgba); return 0; }
+        /* RGBA 非预乘 → BGRA 预乘(三平台 blit 的统一约定) */
+        for (int i = 0; i < n; i++) {
+            unsigned char r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
+            if (a != 255) { r = (unsigned char)((r * a) / 255); g = (unsigned char)((g * a) / 255); b = (unsigned char)((b * a) / 255); }
+            bgra[i * 4] = b; bgra[i * 4 + 1] = g; bgra[i * 4 + 2] = r; bgra[i * 4 + 3] = a;
+        }
+        free(rgba);
     }
-    free(rgba);
+    free(rt->bgra);
+    rt->bgra = bgra;
     render_trace(bw, bh, scale);
     return 1;
 }
@@ -2236,16 +2271,39 @@ int hn_rt_synthetic(hn_rt *rt, const char *kind, const char *target) {
 /* 渲染为 PNG 落盘(--shot / daemon shot op)。
    口径: 跟随 rt 的渲染缩放 —— 缺省 1.0, 所以既有探针(hnapp --shot /
    hncore render / pet_probe 等)的 360x360 确定性锚不变; 只有显式
-   hn_rt_set_scale(2) 的路径(真窗壳 / hidpi_probe 离屏单测)才出 2x PNG。 */
+   hn_rt_set_scale(2) 的路径(真窗壳 / hidpi_probe 离屏单测)才出 2x PNG。
+   后端口径(与 rt_raster 一致): HN_GPU 未设(宿主槽 NULL)→ 恒 hnsoft 1x
+   确定性 —— 既有探针零漂移; HN_GPU=metal **显式给出** → shot 也走 GPU
+   (离屏与真窗同一后端; gpu_probe 借此拿 GPU 落盘做对照)。GPU 产出是
+   **预乘 BGRA**, PNG 需要**非预乘 RGBA**(hnsoft 口径) → 反预乘换算
+   (rgb×255/a, 换算链推导见 hn_gpu.c 头注 1): 底色不透明时 alpha 恒 255,
+   往返无损; 半透明像素有 ±1 舍入(探针容差 ±40 吸收)。 */
 int hn_rt_shot(hn_rt *rt, const char *path) {
     if (!rt || !path) return 0;
     rt_render(rt);
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
     int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);
-    unsigned char *rgba = hnsoft_render_scaled(dl, bw, bh,
-                                               rt->transparent ? 0x00000000u : 0x0B0E13FFu,
-                                               rt_scale(rt));
+    hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
+    unsigned char *rgba = NULL;
+    if (hn_gpu_available(dl)) {
+        unsigned char *bgra = NULL;
+        if (hn_gpu_render_scaled(dl, bw, bh, bg, rt_scale(rt), &bgra) && bgra) {
+            rgba = (unsigned char *)malloc((size_t)bw * bh * 4);
+            if (rgba) {
+                for (int i = 0; i < bw * bh; i++) {
+                    unsigned a = bgra[i * 4 + 3];
+                    rgba[i * 4 + 0] = a ? (unsigned char)((bgra[i * 4 + 2] * 255 + a / 2) / a) : 0;
+                    rgba[i * 4 + 1] = a ? (unsigned char)((bgra[i * 4 + 1] * 255 + a / 2) / a) : 0;
+                    rgba[i * 4 + 2] = a ? (unsigned char)((bgra[i * 4 + 0] * 255 + a / 2) / a) : 0;
+                    rgba[i * 4 + 3] = (unsigned char)a;
+                }
+            }
+            free(bgra);
+        }
+    }
+    if (!rgba)
+        rgba = hnsoft_render_scaled(dl, bw, bh, bg, rt_scale(rt));
     if (!rgba) return 0;
     size_t pn = 0;
     unsigned char *png = hnsoft_encode_png(rgba, bw, bh, &pn);

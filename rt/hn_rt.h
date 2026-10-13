@@ -135,6 +135,14 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc);
    之前调用, 之后创建的每个 context 都拿到它。NULL = 媒体禁用(缺省)。 */
 void hn_rt_set_media(const hn_media_host *host);
 
+/* ---------------- GPU 渲染后端宿主(壳注入; 缺省 CPU/hnsoft) ----------------
+ * 全局槽(与 hn_rt_set_media 同款): 壳在 hn_rt_open 之前调用。表类型 =
+ * platform/hn_platform.h 的 hnp_gpu_host —— 本头不 include 平台头, 以
+ * const void* 进(类型安全由调用点保证: hn_app.c 同时含两个头)。NULL =
+ * 缺省, 一切走 hnsoft(行为零漂移)。开关与环境钮(HN_GPU=metal)在壳侧。
+ * 渲染分支与回退口径见 hn_rt.c 的 rt_raster / hn_rt_shot。 */
+void hn_rt_set_gpu_host(const void *host);
+
 /* ---------------- sys:// 桥(单源) ---------------- */
 
 /* sys:// → HTML 片段(malloc; free)。非 sys:// 或未知路由返回 NULL。

@@ -654,7 +654,10 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   同步给图层, 热重载/关闭即 detach。**离屏 = CPU 拉帧**: `--shot`/
   `--advance` 探针路径不经图层(确定性口径不破), 合成宿主/`hncore` 同旧。
   验收: `media_window_probe.sh`(图层模式 CPU<60% + 截图帧差视觉证据 +
-  回退档对照)。
+  回退档对照)。**Linux 同契约 Xv 原语**(`platform/hnp_linux.c`: libXv
+  运行期 dlopen —— attach=grab 端口+建 XvImage 图层子窗, frame=XvPutImage
+  摆位, detach=停摆释放; libXv 缺席/无可用端口时 attach 返 0, CPU 逐帧
+  兜底不变; Linux 解码后端落地后此原语即插即用)。
 - **WASM 运行时(wasm3, 纯计算导出)**: 内嵌 **wasm3**(MIT, vendor 快照最小
   11 源 + LICENSE, `-std=c99` 零警告零外部依赖, 三平台无条件编入)。引擎封装
   `hn_wasm_load/call/free` + 实例表 `hn_wasm_install/by_id/unload`(id 1..32);

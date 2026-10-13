@@ -720,4 +720,23 @@ void hn_media_intrinsic(hn_context *c, hn_node *n, int *w, int *h);
 int  hn_media_poll_frame(hn_context *c, hn_node *n, const unsigned char **rgba,
                          int *w, int *h, int *stride, double *pts);
 
+/* ---------- GPU 渲染后端(引擎侧翻译器, hn_gpu.c; 契约见
+   platform/hn_platform.h 尾部"GPU 渲染后端"段) ----------
+ * 宿主槽与 hn_media_host 同款: 壳(经 hn_rt_set_gpu_host)注入平台原语表,
+ * 表类型 = hnp_gpu_host —— 引擎头不反向包含平台头, 以 const void* 进出。
+ * hn_rt 对这三个符号有**弱桩**(rt/hn_rt.c): 不链 hn_gpu.c 的构建里桩生效
+ * (恒回退 hnsoft), hnapp 目标里本文件的强定义覆盖 —— 与 hnp_macos.c 的
+ * 媒体弱桩同一手法(仓库已验证的 Mach-O/ELF 通吃口径)。 */
+void hn_gpu_set_host(const void *host);
+/* 本帧显示列表是否可整体走 GPU(表在 + init 成功 + 逐指令 ⊆ supported 位集
+   + 细粒度条件: 圆角/阴影/文字阴影/图片解码等, 见 hn_gpu.c 头注 6)。
+   O(n) 便宜; 每帧渲染前调一次。 */
+int  hn_gpu_available(const hn_display_list *dl);
+/* GPU 光栅一帧: 等价于 hnsoft_render_scaled 的 GPU 版, 但直接产出**预乘
+   BGRA**(Metal readback 原样, 与 rt_raster 的 CPU 路径产物同口径, blit 直用;
+   与 hnsoft 非预乘 RGBA 的换算推导见 hn_gpu.c 头注 1)。缓冲 malloc(调用方
+   free)。任何一步失败返回 0(调用方整帧回退 hnsoft —— 逐帧静默)。 */
+int  hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
+                          float scale, unsigned char **out_bgra);
+
 #endif

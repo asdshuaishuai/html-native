@@ -97,10 +97,18 @@ X11_TRACE=(_NET_WM_STATE _NET_WM_STATE_ABOVE _NET_WM_STATE_BELOW _NET_WM_STATE_S
            _MOTIF_WM_HINTS
            XShapeCombineRectangles XTranslateCoordinates XMoveWindow
            XChangeProperty XSendEvent)
+# 视频图层(Xv)原语痕迹: hn_platform.h 尾部契约(hnp_video_layer_attach/frame/
+# detach)的 Linux 实现走 XVideo 扩展(platform/hnp_linux.c 文件尾, libXv 运行期
+# dlopen)—— dlsym 符号名同为字面 .rodata 字符串, 交叉产物不运行也能断言
+# "Xv 原语真的编进去了"。(dlopen 路径字面量 libXv.so.6 与上面 libX11/libXext
+# 同款会被 musl 静态折叠, 不做硬断言。)
+XVIDEO_TRACE=(XvQueryExtension XvQueryAdaptors XvGrabPort XvUngrabPort
+              XvCreateImage XvPutImage XvStopVideo XvFreeAdaptorInfo)
 say "② 符号级断言(产物 .rodata 实现痕迹):"
 for bin in "$OUT"/hnapp-linux-x86_64 "$OUT"/hnapp-linux-aarch64; do
     [ -f "$bin" ] || continue
     assert_strs "$bin" "${X11_TRACE[@]}"
+    assert_strs "$bin" "${XVIDEO_TRACE[@]}"
     # nm 尽力而为: zig 链接产物只保留部分局部符号(LTO 折叠), 符号缺席
     # 不判负 —— 字符串断言是硬门禁。
     if nm "$bin" >/dev/null 2>&1; then
@@ -136,9 +144,28 @@ if grep -q "XTranslateCoordinates(x11.dpy, w->xw" platform/hnp_linux.c; then
     ok "hnp_window_origin → XTranslateCoordinates(几何记忆采样口已接)"
 else bad "hnp_window_origin 未走 XTranslateCoordinates"; fi
 
+# 视频图层契约(hn_platform.h 尾部)在 hnp_linux.c 里的原语形态:
+# attach = grab port + 建 XvImage(YV12/I420), frame = XvPutImage 摆位,
+# detach = XvStopVideo/释放收尾。libXv 缺席/无可用端口 → attach 返 0,
+# 调用方(app/hn_media_platform.c)回退 CPU 逐帧 —— 降级链不做 SHM 管线。
+say "  (视频图层契约对账: hn_platform.h 尾部 → hnp_linux.c Xv 原语):"
+if grep -q "XvGrabPort" platform/hnp_linux.c && grep -q "XvCreateImage" platform/hnp_linux.c; then
+    ok "attach = XvGrabPort + XvCreateImage(grab 端口 + 建 YV12/I420 帧缓冲)"
+else bad "视频图层 attach 缺 XvGrabPort/XvCreateImage"; fi
+if grep -q "XvPutImage(x11.dpy" platform/hnp_linux.c; then
+    ok "frame = XvPutImage 摆位(盒跟随 + 内容推进通道)"
+else bad "视频图层 frame 缺 XvPutImage"; fi
+if grep -q "XvStopVideo" platform/hnp_linux.c && grep -q "XvFreeAdaptorInfo" platform/hnp_linux.c; then
+    ok "detach = XvStopVideo + XvFreeAdaptorInfo(+ 末层 XvUngrabPort)收尾"
+else bad "视频图层 detach 收尾不完整"; fi
+if grep -q "hn_xvl_close_window(w)" platform/hnp_linux.c; then
+    ok "hnp_window_close 先摘图层子窗(父窗/GC 仍在的顺序保证)"
+else bad "hnp_window_close 缺图层清理调用"; fi
+
 # ---------------- ④ 诚实边界 ----------------
 say "④ 边界:"
 say "  运行时验证需 Linux+X11 主机(行为级: 真悬浮/真穿透/真摆位 —— 本脚本只到编译级+符号级)"
+say "  视频图层同理: Xv 端口 grab/真摆图/降级回退需 Linux+X11+libXv 主机实测"
 
 if [ "$FAIL" -eq 0 ]; then
     say "linux_parity_check: PASS"

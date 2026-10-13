@@ -312,6 +312,20 @@ int main(int argc, char **argv) {
         setenv("HN_MEDIA_MUTE", "1", 1);
     hn_rt_set_media(hn_media_platform_host());
 
+    /* GPU 渲染后端装配(必须先于 hn_rt_open): **缺省关** —— HN_GPU 未设或
+       非 "metal" 时什么都不注入, 一切走 hnsoft(行为零漂移); HN_GPU=metal
+       显式开启 → 注入平台 GPU 原语表(macOS = hnp_gpu_metal.c 的 Metal 实现,
+       hnp_gpu_backend(); headless/linux 平台文件返回 NULL → 注了个空表,
+       等价缺省)。开启后渲染分支按帧判定(hn_rt.c rt_raster): 指令集不支持
+       → 整帧回退 hnsoft, 回退逐帧静默。--shot 探针口径见 hn_rt.c
+       hn_rt_shot 注释: 未设 HN_GPU 时恒 hnsoft 1x 确定性; 显式 metal 时
+       离屏与真窗同走 GPU。 */
+    {
+        const char *gpu = getenv("HN_GPU");
+        if (gpu && !strcmp(gpu, "metal"))
+            hn_rt_set_gpu_host(hnp_gpu_backend());
+    }
+
     size_t hlen = 0;
     char *html = read_all(path, &hlen);
     if (!html) { fprintf(stderr, "无法读取 %s\n", path); return 1; }

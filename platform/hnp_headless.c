@@ -107,6 +107,12 @@ void hnp_set_cursor(hnp_window *w, hnp_cursor c) { (void)w; (void)c; }
    static inline 兜底: 那会把真实实现静默遮蔽成 0, 属于坑)。 */
 int hnp_media_supported(void) { return 0; }
 
+/* ---------------- GPU 渲染后端(v1 无 GPU 路径) ----------------
+   headless 无 GPU 原语表: 返回 NULL —— 呼出方(引擎经 hn_rt_set_gpu_host
+   注入槽)据此整体回退 hnsoft(与 hnp_media_supported()==0 的 ABI 留位
+   同一口径; docs/platforms.md 的实现矩阵里 headless = 无)。 */
+const hnp_gpu_host *hnp_gpu_backend(void) { return NULL; }
+
 /* 原生视频图层: 无头平台没有窗口表面可挂(GPU 合成无从谈起), 空实现 ——
    attach 返回 0 = 不支持, app 侧保持 CPU 逐帧路径(与媒体 ABI 的
    "声明照常通过, 物化看平台"同一口径)。 */

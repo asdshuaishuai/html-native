@@ -281,3 +281,71 @@ void hnp_video_layer_detach(hnp_window *w, const char *player_id);
 #endif
 
 #endif /* HN_PLATFORM_H */
+
+/* ---------------- GPU 渲染后端(契约: 平台出原语, 引擎出画法) ----------------
+ *
+ * 分层铁律的 GPU 版: 本头只定义**原语表**(设备/纹理/四边形/裁剪/读回),
+ * 显示列表 → 原语的全部翻译逻辑在引擎侧(Sources/CHtmlNative/hn_gpu.c),
+ * 平台实现(hnp_gpu_metal.c 等)只提供设备原语。语义与 hnsoft_render
+ * 完全一致: 同一显示列表 + 同一背景色 + 同一缩放 → 等价 RGBA 位图;
+ * 覆盖不了的指令集, 后端用 supported 掩码声明, 呼出方整帧回退 hnsoft。
+ *
+ * 各平台实现矩阵(docs/platforms.md 为准):
+ *   macOS  = hnp_gpu_metal.c(Metal, 运行期 dlopen, MSL 源码运行期编译)
+ *   Linux  = 路线图(GL/mesa, 同一原语表)
+ *   headless = 无( supported()==0, 呼出方回退 hnsoft )
+ *   Windows = 路线图(D3D11)
+ *
+ * 呼出口径: 引擎每帧检查显示列表是否只含后端声明支持的指令;
+ * 是 → 走 GPU(readback 或直呈), 否 → hnsoft。回退是逐帧的、静默的。 */
+typedef struct hnp_gpu_host hnp_gpu_host;
+
+/* 原语句柄(纹理) */
+typedef unsigned int hnp_gpu_tex;
+
+/* 后端声明自己支持的显示列表指令位集(HN_CMD_* 逐位; 从 hn.h 数值导入,
+ * 平台头为免反向依赖以数值注释对照 —— 呼出方负责按位与检查) */
+typedef struct {
+    unsigned supported_cmds;        /* 位集: 1<<kind(按 hn_cmd.kind 数值) */
+    const char *name;               /* "metal" / "gl" / ... 诊断用 */
+} hnp_gpu_caps;
+
+struct hnp_gpu_host {
+    hnp_gpu_caps caps;
+    /* 设备生命周期(进程一次; init 失败 supported 视为 0) */
+    int  (*init)(void);
+    void (*shutdown)(void);
+    /* 帧开始: 目标尺寸(物理 px)与背景色(引擎口径 RGBA8 非预乘);
+       返回 0 = 本帧不可用(资源紧张等), 呼出方整帧回退 hnsoft */
+    int  (*begin)(int w, int h, unsigned bg);
+    /* 帧结束: 光栅完成。offscreen 口径下 readback 把 BGRA 预乘位图
+       拷进调用方缓冲(行距 = w*4); 直呈模式(后续)readback 可为空 */
+    int  (*end_readback)(unsigned char *out_bgra, int w, int h);
+    /* 纹理: RGBA8 非预乘上传; 句柄 0 = 无效。tex_update 就地更新(同尺寸) */
+    hnp_gpu_tex (*tex_create)(int w, int h, const unsigned char *rgba);
+    void (*tex_update)(hnp_gpu_tex t, const unsigned char *rgba);
+    void (*tex_free)(hnp_gpu_tex t);
+    /* 四边形批量绘制: 顶点按 4 浮点一顶点 [x,y,u,v](物理 px, y 向下),
+       四顶点一四边形, 顶点沿**周界序**(v0→v1→v2→v3 沿四边形边走,
+       顺/逆时针皆可 —— QUAD 是 3D 投影后的任意凸四边形(见 hn.h 的
+       qx/qy), RECT/图片退化为矩形时即 TL→TR→BR→BL)。周界序是 GPU 端
+       三角形拆分 (0,1,2)+(0,2,3) 绕序一致的前提(见 hnp_gpu_metal.c 的
+       IBO 注)。每四边形恒定色 + 可选纹理(uv 有效时); 混合 = 标准反预乘
+       src-over(src-one / dst-one-minus-src-alpha —— 预乘口径, 与 readback
+       的预乘约定一致; 引擎侧 hn_gpu_render_scaled 出的非预乘 RGBA 与
+       hnsoft 之间的换算见 hn_gpu.c 头注释) */
+    int  (*draw_quads)(const float *verts, int quad_count,
+                       hnp_gpu_tex tex, unsigned rgba);
+    /* 矩形裁剪栈(轴对齐; 圆角/任意路径裁剪 v1 不在此层 —— 呼出方
+       遇到这类 CLIP 整帧回退 hnsoft) */
+    void (*clip_push)(int x, int y, int w, int h);
+    void (*clip_pop)(void);
+};
+
+/* 平台装配: 返回平台 GPU 原语表; 无 GPU 后端返回 NULL(呼出方回退 hnsoft)。
+ * 呼出方(引擎经宿主注入, 与 hn_media_host/hn_gpu_host 同款全局槽)。
+ * 函数名取 hnp_gpu_backend 而非类型同名的 hnp_gpu_host: C 的普通标识符
+ * 单一命名空间里 typedef(hnp_gpu_host)与同名函数不能共存(定稿契约的
+ * 笔误 —— 原样声明在 clang 下即 "redefinition of 'hnp_gpu_host' as
+ * different kind of symbol", 任何包含本头的文件都编译不过), 修名不改结构。 */
+const hnp_gpu_host *hnp_gpu_backend(void);

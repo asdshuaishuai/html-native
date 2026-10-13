@@ -226,6 +226,12 @@ build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 # app/hn_app.c 是唯一主循环; 链接不同平台实现 = 该平台的应用。
 # headless 在本机可跑(CI/agent 无显示环境), macOS 同样可跑。
 RT_SRC="rt/hn_rt.c"
+# GPU 渲染后端引擎侧翻译器(hn_gpu.c): 只入 hnapp 的引擎数组 —— 它经宿主
+# 槽(const void*)接收平台原语表, 不引用 hnp_gpu_host() 函数本身, 因此
+# hncore(无平台文件)等目标不需要它; hn_rt.c 里是弱桩, 不链本文件的构建
+# (probe 现场编译)自动恒回退 hnsoft。平台实现(hnp_gpu_metal.c)只入列
+# macos 目标(纯 dlopen Metal, 链接期零 framework; headless/linux 的
+# hnp_gpu_host() 返回 NULL —— 与 hnp_media_supported 留位同一口径)。
 ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
         Sources/CHtmlNative/hn_md.c
         Sources/CHtmlNative/hn_fmt.c
@@ -235,6 +241,7 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
             Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
             Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
             Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
+            Sources/CHtmlNative/hn_gpu.c
             Sources/CHtmlNative/hnsoft.c)
 ENGINE_SRC+=("${WASM_SRC[@]}")
 RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3 $FT_INC"
@@ -272,7 +279,8 @@ fi
 printf '  %-22s ' "hnapp-macos-arm64"
 if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF \
         -DHN_MEDIA_PLATFORM_AVFOUNDATION -DHN_VERSION="\"$VERSION\"" \
-        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_macos.c platform/hnp_media_macos.c "${ENGINE_SRC[@]}" \
+        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_macos.c platform/hnp_media_macos.c \
+        platform/hnp_gpu_metal.c "${ENGINE_SRC[@]}" \
         -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
     printf '✓  hnapp-macos-arm64 (%s KB) 真窗口·AVFoundation 媒体宿主\n' "$(($(wc -c < "$OUT/hnapp-macos-arm64") / 1024))"
 else
