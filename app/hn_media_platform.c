@@ -56,6 +56,8 @@
 
 /* hnp_media_macos.c 的会话私有问询(本文件私有声明; 定义见该文件) */
 extern int hnp_media_layer_mode(const void *m);
+/* 显式 loop ABI(同上: 本文件私有声明, hn_platform.h 冻结不动) */
+extern void hnp_media_set_loop(hnp_media *m, int loop);
 
 static void *pf_open(void *ctx, const char *url, char *err, size_t err_cap) {
     (void)ctx;
@@ -72,6 +74,7 @@ static void pf_pause(void *ctx, void *m) { (void)ctx; hnp_media_pause((hnp_media
 static int  pf_seek(void *ctx, void *m, double sec) { (void)ctx; return hnp_media_seek((hnp_media *)m, sec); }
 static void pf_set_volume(void *ctx, void *m, float vol) { (void)ctx; hnp_media_set_volume((hnp_media *)m, vol); }
 static void pf_set_muted(void *ctx, void *m, int muted) { (void)ctx; hnp_media_set_muted((hnp_media *)m, muted); }
+static void pf_set_loop(void *ctx, void *m, int loop) { (void)ctx; hnp_media_set_loop((hnp_media *)m, loop); }
 static int  pf_duration(void *ctx, void *m, double *sec) { (void)ctx; return hnp_media_duration((hnp_media *)m, sec); }
 static int  pf_position(void *ctx, void *m, double *sec) { (void)ctx; return hnp_media_position((hnp_media *)m, sec); }
 static int  pf_state(void *ctx, void *m, int *ready, int *ended) { (void)ctx; return hnp_media_state((hnp_media *)m, ready, ended); }
@@ -92,7 +95,8 @@ static const hn_media_host g_platform_host = {
     pf_play, pf_pause, pf_seek,
     pf_set_volume, pf_set_muted,
     pf_duration, pf_position, pf_state,
-    pf_frame
+    pf_frame,
+    pf_set_loop
 };
 
 #endif /* HN_MEDIA_PLATFORM_AVFOUNDATION */

@@ -427,16 +427,45 @@ struct hnp_gpu_host {
        顺/逆时针皆可 —— QUAD 是 3D 投影后的任意凸四边形(见 hn.h 的
        qx/qy), RECT/图片退化为矩形时即 TL→TR→BR→BL)。周界序是 GPU 端
        三角形拆分 (0,1,2)+(0,2,3) 绕序一致的前提(见 hnp_gpu_metal.c 的
-       IBO 注)。每四边形恒定色 + 可选纹理(uv 有效时); 混合 = 标准反预乘
-       src-over(src-one / dst-one-minus-src-alpha —— 预乘口径, 与 readback
-       的预乘约定一致; 引擎侧 hn_gpu_render_scaled 出的非预乘 RGBA 与
-       hnsoft 之间的换算见 hn_gpu.c 头注释) */
+       IBO 注)。每四边形恒定色 + 可选纹理(uv 有效时); 混合由 opts 低两位
+       选择(见下), 缺省 = 标准反预乘 src-over(src-one /
+       dst-one-minus-src-alpha —— 预乘口径, 与 readback 的预乘约定一致;
+       引擎侧 hn_gpu_render_scaled 出的非预乘 RGBA 与 hnsoft 之间的换算
+       见 hn_gpu.c 头注释)。
+       ── v2 契约修订: 新增第 5 参 opts(0 = v1 行为逐位不变) ──
+         bit 0-1  混合模式 = HN_BLEND_* 数值直传(0 src-over / 1 lighter /
+                  2 multiply / 3 screen)。与 hnsoft blend_mode 的等价口径:
+                  lighter = 预乘加法(One/One, UNORM 自动饱和钳制 —— 与
+                  hnsoft 的 min(1,·) 全域精确); multiply/screen 的固定功能
+                  混合因子(DstColor·S' + (1-sa)·D' / (1-DstColor)·S' + D')
+                  在**目标不透明**(da=1, 页面底色不透明即恒成立)时与
+                  hnsoft 的非预乘公式逐式等价(推导见 hnp_gpu_metal.c 因子
+                  表注); 半透明目标上是标准 GPU 口径与 hnsoft 的结构性差异
+                  (±, 诚实声明 —— 可分离混合项在预乘域除不掉 dst 的 da,
+                  固定功能等价换算只对 da=1 封闭)。alpha 通道四种模式恒
+                  source-over(几何合成恒 source-over, 与 hnsoft 同口径)。
+         bit 2-3  纹理寻址(仅 tex!=0 时有意义): 0=clamp(缺省, v1)、
+                  1=repeat 双轴重复(pattern repeat)、2=u 重复/v 钳边
+                  (repeat-x)、3=v 重复/u 钳边(repeat-y)。
+         其余位保留, 必须传 0。 */
     int  (*draw_quads)(const float *verts, int quad_count,
-                       hnp_gpu_tex tex, unsigned rgba);
-    /* 矩形裁剪栈(轴对齐; 圆角/任意路径裁剪 v1 不在此层 —— 呼出方
-       遇到这类 CLIP 整帧回退 hnsoft) */
+                       hnp_gpu_tex tex, unsigned rgba, unsigned opts);
+    /* 矩形裁剪栈(轴对齐; 圆角 v1 不在此层 —— 呼出方遇到圆角 CLIP
+       整帧回退 hnsoft) */
     void (*clip_push)(int x, int y, int w, int h);
     void (*clip_pop)(void);
+    /* ── v2 契约修订: 精确路径裁剪(A8 掩码) ──
+       引擎侧把折线多边形(非零环绕, 逐像素中心判定, 与 hnsoft pip_poly
+       同式)栅格化成一张 RGBA 掩码纹理(覆盖二值: 内=不透明/外=全透明,
+       走既有 tex_create 上传), 这里入栈: 帧内掩码矩形 ox,oy,w,h(设备 px)
+       与裁剪栈前层交叠成 scissor, 掩码绑片段纹理槽 1 —— 后续 draw_quads
+       在栈顶有掩码期间自动按"采样掩码 × 颜色"出片段(管线自动切换,
+       引擎无需逐 draw 声明)。与 clip_push 共用同一栈, 用既有 clip_pop
+       出栈(配平由引擎保证)。返回 1 = 已入栈; 0 = 失败(纹理无效等),
+       呼出方整帧回退 hnsoft。嵌套路径裁剪(路径内再入路径)不做 —— 掩码
+       槽单个, 呼出方(hn_gpu_available)扫到即整帧回退。 */
+    int  (*clip_mask_push)(hnp_gpu_tex mask, float ox, float oy,
+                           float w, float h);
 };
 
 /* 平台装配: 返回平台 GPU 原语表; 无 GPU 后端返回 NULL(呼出方回退 hnsoft)。

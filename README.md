@@ -646,6 +646,14 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   桌宠自己换句、canvas 折线自己滚 —— `examples/pet.html`(气泡 3s 轮播 +
   `hnMeshParam` 眨眼)与 `examples/canvas-demo.html`(500ms 实时折线);
   口径由 `tools/timer_probe.sh` 37 断言钉死
+- **JS 事件监听(`addEventListener`/`removeEventListener`)**: 元素包装 /
+  `document` / `window` 三级注册, 引擎输入事件(点击/按键/输入/滚动/移动)
+  沿**命中链冒泡**派发(目标→祖先 id 链→document→window), 回调收到
+  `{type, target, currentTarget, clientX/Y, key, code, detail, preventDefault(),
+  stopPropagation()}` 标准事件对象 —— `preventDefault` 取消默认行为(hx 载体
+  不执行/字符不插入), `stopPropagation` 截断剩余链路; IME 组字期间按键不
+  派发, 零监听器页面零成本(行为逐位不变)。`examples/events.html`(键盘显示
+  + 三层冒泡)已转真; 口径由 `tools/events_probe.sh` 钉死
 - **媒体元素(`<video>`/`<audio>`, 解码委托平台)**: 元素解析照常, 语义是仿
   HTMLMediaElement 的**六态状态机**(IDLE/LOADING/READY/PLAYING/PAUSED/ENDED),
   声明属性即语义(`src`/`autoplay`/`loop`/`muted`/`volume`, seek 钳制到

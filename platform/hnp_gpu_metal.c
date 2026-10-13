@@ -1,4 +1,4 @@
-/* hnp_gpu_metal.c — GPU 渲染后端 v1: hnp_gpu_host 的 Metal 实现(纯 C99)
+/* hnp_gpu_metal.c — GPU 渲染后端 v2: hnp_gpu_host 的 Metal 实现(纯 C99)
  *
  * 与 hnp_macos.c 同一手法: 运行期 dlopen Metal.framework + objc_msgSend,
  * 零 ObjC 头文件 / 零 .m / 零编译期 SDK 依赖 —— 连链接期都不需要 Metal
@@ -17,11 +17,12 @@
  *      呼出方整体回退 hnsoft, 优雅降级)。Shared 免去 Managed 双副本的
  *      synchronizeResource 同步, getBytes 直接读。
  *   2. 采样纹理 = MTLPixelFormatRGBA8Unorm + **预乘**上传(引擎给非预乘
- *      RGBA8, 本层入纹理前预乘)。混合 = src-one / dst-one-minus-src
- *      (预乘 src-over)。与 hnsoft 的非预乘 readback 之间的换算关系:
- *      hnsoft 在非预乘空间做 over 后写回非预乘; 本层全部预乘, over 数学
- *      等价(逐步推导见 hn_gpu.c 头注释), 差异只剩 8bit 舍入(±1/通道)
- *      与边缘 AA 覆盖率(整数坐标盒逐位一致, 见 hn_gpu.c 的取整注释)。
+ *      RGBA8, 本层入纹理前预乘)。混合 = 按指令的 blend 模式选管线(v2;
+ *      缺省 src-one / dst-one-minus-src-alpha 预乘 src-over)。与 hnsoft
+ *      的非预乘 readback 之间的换算关系: hnsoft 在非预乘空间做合成后写回
+ *      非预乘; 本层全部预乘, over 数学等价(逐步推导见 hn_gpu.c 头注释),
+ *      差异只剩 8bit 舍入(±1/通道)与边缘 AA 覆盖率(整数坐标盒逐位一致,
+ *      见 hn_gpu.c 的取整注释)。
  *   3. 坐标系: 引擎顶点物理 px、y 向下、原点左上; 顶点着色器把 y 翻到
  *      NDC(clipY = 1 - 2y/H), 帧缓冲第 0 行 = NDC y=+1 = 引擎 y=0 ——
  *      纹理 uv(0,0) 即左上, 图片/字形上传顶上到底下, 不再翻转。
@@ -31,10 +32,21 @@
  *      执行, 复用同一段缓冲会让所有 draw 读到最后一次写入, 实测如此);
  *      索引缓冲一次建满容量(同向绕序拆分, 见 IBO 注释), 一次
  *      drawIndexedPrimitives 画整个 draw_quads 调用。
+ *   5. v2 增量(契约修订见 hn_platform.h draw_quads/clip_mask_push 注):
+ *      - 混合模式: 4 片段入口 × 4 混合模式 = 16 管线, init 一次建满;
+ *        因子表(multiply=DstColor/(1-SrcAlpha), screen=(1-DstColor)/One,
+ *        lighter=One/One 饱和加)在目标不透明(da=1)时与 hnsoft 非预乘
+ *        公式逐式等价 —— 推导在因子表注; alpha 通道恒 source-over。
+ *      - pattern 寻址: 4 只采样器(clamp/repeat/repeat-x/repeat-y),
+ *        draw_quads opts bit2-3 选只; 平铺的 uv/带裁剪在引擎侧算好。
+ *      - 路径裁剪: clip_mask_push 入栈的掩码纹理常驻绑片段槽 1, 掩码 uv
+ *        由片段位置现场导出(免第二套顶点属性); 管线按"栈顶有掩码"自动
+ *        切到 *_mask 片段入口。
  *
  * supported_cmds 位集(诚实声明 —— 位值 = hn_cmd_kind 数值, 数值对照见
  * include/hn.h; 平台头为免反向依赖以数值注释):
- *   1=RECT 2=TEXT 3=IMAGE 4=CLIP_PUSH 5=CLIP_POP 6=QUAD 9=BITMAP。
+ *   1=RECT 2=TEXT 3=IMAGE 4=CLIP_PUSH 5=CLIP_POP 6=QUAD 9=BITMAP
+ *   11=PDATA 12=PATTERN 13=CLIP_PATH_PUSH(v2 新增三类的原语支撑见上)。
  *   7=POLYGON / 8=MESH / 10=CLEAR_RECT 不声明 —— 原语表没有任意路径填充
  *   与"替换式局部清空"; 呼出方(hn_gpu_available)扫到即整帧回退 hnsoft。
  */
@@ -42,6 +54,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <dlfcn.h>
 
 #include "hn_platform.h"
@@ -77,9 +90,15 @@ static obj_t (*o_msgSend)(obj_t, sel_t, ...);
 /* MTLLoadAction: DontCare=0 Load=1 Clear=2; MTLStoreAction: DontCare=0 Store=1 */
 #define MTL_LA_CLEAR 2
 #define MTL_SA_STORE 1
-/* MTLBlendFactor: Zero=0 One=1 SourceAlpha=4 OneMinusSourceAlpha=5 */
+/* MTLBlendFactor(Metal.h): Zero=0 One=1 SourceAlpha=4 OneMinusSourceAlpha=5
+   DestColor=6 OneMinusDestColor=7 —— v2 混合模式因子表用(值逐值抄 SDK 头) */
 #define MTL_BF_ONE 1
 #define MTL_BF_ONE_MINUS_SRC_ALPHA 5
+#define MTL_BF_DST_COLOR 6
+#define MTL_BF_ONE_MINUS_DST_COLOR 7
+/* MTLSamplerAddressMode(Metal.h): ClampToEdge=0 Repeat=2(v2 pattern 寻址) */
+#define MTL_SAM_CLAMP 0
+#define MTL_SAM_REPEAT 2
 /* MTLPrimitiveType: Triangle = 3; MTLIndexType: UInt32 = 1 */
 #define MTL_PT_TRIANGLE 3
 #define MTL_IT_U32 1
@@ -98,11 +117,17 @@ static int g_tex_n;
 
 static obj_t g_device;        /* id<MTLDevice> */
 static obj_t g_queue;         /* id<MTLCommandQueue> */
-static obj_t g_pso_solid;     /* 纯色管线 */
-static obj_t g_pso_tex;       /* 带纹理管线 */
-static obj_t g_samp;          /* 线性采样器(全部纹理统一线性 —— 1:1 映射时
-                                 线性采样在像素中心精确命中文素中心 = 与
-                                 最近采样逐位一致; 见 hn_gpu.c 的字形/图片注释) */
+/* 管线族[v2]: 4 片段入口 × 4 混合模式(init 一次建满)。
+   片段维: 0=solid 1=tex 2=solid_mask 3=tex_mask(位 1 = 带纹理, 位 2 = 带
+   掩码 —— draw_quads 按纹理/栈顶掩码现算下标); 混合维 = HN_BLEND_* 数值
+   (0 over 1 lighter 2 multiply 3 screen)。 */
+#define PSO_FRAG_N 4
+#define PSO_BLEND_N 4
+static obj_t g_pso[PSO_FRAG_N][PSO_BLEND_N];
+/* 采样器族[v2]: 0=clamp(v1 口径, 全部旧路径) 1=repeat 双轴 2=u 重复/v 钳边
+   (pattern repeat-x) 3=v 重复/u 钳边(repeat-y)。掩码采样恒 0 号(钳边)。 */
+#define SAMP_N 4
+static obj_t g_samp[SAMP_N];
 static obj_t g_vbuf;          /* 帧内顶点 arena(Shared; 追加偏移制, 见下) */
 static unsigned long g_vcap_bytes;   /* g_vbuf 容量(字节) */
 static size_t g_voff;         /* 本帧已用顶点字节(arena 写头; begin 归零) */
@@ -118,28 +143,40 @@ static obj_t g_pool;          /* 有界 autorelease 池(帧窗口; 手法同 hnp
                                  pool_push —— commandBuffer/encoder/RPD 按
                                  autorelease 归还, 无池逐帧泄漏) */
 
-/* 裁剪栈(轴对齐交叠; MTLScissorRect 是单矩形 —— 栈顶 = 交集) */
+/* 裁剪栈(轴对齐交叠; MTLScissorRect 是单矩形 —— 栈顶 = 交集)。
+   v2: 条目可带路径掩码(clip_mask_push 入栈; mask != NULL 时掩码绑片段
+   槽 1, 后续 draw_quads 的片段 = 颜色 × 掩码采样)。scissor 只吃矩形
+   包围盒交叠(掩码本体在片段级生效), 与 hnsoft 的 bbox 快速拒绝同口径。 */
 #define CLIP_CAP 32
-static struct { int x0, y0, x1, y1; } g_clip[CLIP_CAP];
+static struct {
+    int x0, y0, x1, y1;
+    obj_t mask;               /* id<MTLTexture>(掩码; NULL = 纯矩形层) */
+    float mox, moy, imw, imh; /* 掩码矩形原点 + 1/尺寸(uniform 直用) */
+} g_clip[CLIP_CAP];
 static int g_clip_n;
 
 static int g_ready;           /* init 成功(进程一次) */
 
 /* ---------------- MSL 源码(运行期编译) ----------------
- * 顶点: 物理像素直通变换(y 翻转见文件头注 3); 片段两入口复用同一库:
- *   hn_fs_solid — 纯色(顶点色 uniform)
- *   hn_fs_tex   — 纹理采样 × uniform 色(预乘域相乘 = 颜色 × 覆盖率)
- * struct U 的 C 侧镜像见 mtl_uniforms(偏移逐项对齐: float4@0, w@16, h@20) */
+ * 顶点: 物理像素直通变换(y 翻转见文件头注 3); 片段四入口复用同一库:
+ *   hn_fs_solid      — 纯色(顶点色 uniform)
+ *   hn_fs_tex        — 纹理采样 × uniform 色(预乘域相乘 = 颜色 × 覆盖率)
+ *   hn_fs_solid_mask — 纯色 × 掩码(clip_mask_push 期间的路径裁剪)
+ *   hn_fs_tex_mask   — 纹理 × uniform 色 × 掩码
+ * 掩码 uv 不走顶点属性 —— 片段位置即设备 px(与引擎同系), 由 uniform 的
+ * 掩码矩形现场导出: muv = (pos.xy - mox,moy) × (1/mw, 1/mh)。
+ * struct U 的 C 侧镜像见 mtl_uniforms(float4 16 字节对齐: color@0,
+ * xfrm@16, mask@32)。 */
 static const char *MSL_SRC =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
-"struct U { float4 color; float w; float h; float pad; };\n"
+"struct U { float4 color; float4 xfrm; float4 mask; };\n"
 "struct VOut { float4 pos [[position]]; float2 uv; };\n"
 "vertex VOut hn_vs(constant float* verts [[buffer(0)]],\n"
 "                  constant U& u [[buffer(1)]], uint vid [[vertex_id]]) {\n"
 "    float x = verts[vid*4+0], y = verts[vid*4+1];\n"
 "    VOut o;\n"
-"    o.pos = float4(x / u.w * 2.0 - 1.0, 1.0 - y / u.h * 2.0, 0.0, 1.0);\n"
+"    o.pos = float4(x / u.xfrm.x * 2.0 - 1.0, 1.0 - y / u.xfrm.y * 2.0, 0.0, 1.0);\n"
 "    o.uv  = float2(verts[vid*4+2], verts[vid*4+3]);\n"
 "    return o;\n"
 "}\n"
@@ -150,10 +187,26 @@ static const char *MSL_SRC =
 "fragment float4 hn_fs_tex(VOut i [[stage_in]], texture2d<float> t [[texture(0)]],\n"
 "                          sampler s [[sampler(0)]], constant U& u [[buffer(0)]]) {\n"
 "    return t.sample(s, i.uv) * u.color;\n"
+"}\n"
+"fragment float4 hn_fs_solid_mask(VOut i [[stage_in]],\n"
+"                                 texture2d<float> m [[texture(1)]],\n"
+"                                 sampler ms [[sampler(1)]],\n"
+"                                 constant U& u [[buffer(0)]]) {\n"
+"    float2 muv = (i.pos.xy - u.mask.xy) * u.mask.zw;\n"
+"    return u.color * m.sample(ms, muv);\n"
+"}\n"
+"fragment float4 hn_fs_tex_mask(VOut i [[stage_in]], texture2d<float> t [[texture(0)]],\n"
+"                               texture2d<float> m [[texture(1)]],\n"
+"                               sampler s [[sampler(0)]], sampler ms [[sampler(1)]],\n"
+"                               constant U& u [[buffer(0)]]) {\n"
+"    float2 muv = (i.pos.xy - u.mask.xy) * u.mask.zw;\n"
+"    return t.sample(s, i.uv) * u.color * m.sample(ms, muv);\n"
 "}\n";
 
-/* mtl_uniforms 的 C 镜像(MSL struct U 逐项对齐, 见上) */
-typedef struct { float color[4]; float w, h, pad; } mtl_uniforms;
+/* mtl_uniforms 的 C 镜像(MSL struct U 逐项对齐, 见上):
+ *   color = 预乘 float4; xfrm = (帧宽, 帧高, -, -); mask = (mox, moy,
+ *   1/掩码宽, 1/掩码高) —— 栈顶无掩码时填 (0,0,1,1)(非 mask 片段不读)。 */
+typedef struct { float color[4]; float xfrm[4]; float mask[4]; } mtl_uniforms;
 
 /* 诊断: NSError 一行(失败原因可见, 与平台层"一行 stderr"惯例一致) */
 static void nserr_line(const char *what, obj_t err) {
@@ -256,50 +309,106 @@ static int mtl_init(void) {
     if (!HAS_SEL(g_device, "newRenderPipelineStateWithDescriptor:error:")) return 0;
 
     obj_t f_vs = MSG1(obj_t, lib, "newFunctionWithName:", nsstr("hn_vs"));
-    obj_t f_fs_solid = MSG1(obj_t, lib, "newFunctionWithName:", nsstr("hn_fs_solid"));
-    obj_t f_fs_tex = MSG1(obj_t, lib, "newFunctionWithName:", nsstr("hn_fs_tex"));
-    if (!f_vs || !f_fs_solid || !f_fs_tex) { MSG0(void, lib, "release"); return 0; }
-
-    /* 两管线(同库不同片段入口): BGRA8Unorm + 预乘 src-over 混合
-       (src-one / dst-one-minus-src-alpha —— 与 hnsoft readback 的换算注释
-       见文件头注 2 与 hn_gpu.c 头注释) */
-    for (int p = 0; p < 2; p++) {
-        obj_t pd = MSG0(obj_t, o_getClass("MTLRenderPipelineDescriptor"), "alloc");
-        pd = MSG0(obj_t, pd, "init");
-        MSG1(void, pd, "setVertexFunction:", f_vs);
-        MSG1(void, pd, "setFragmentFunction:", p == 0 ? f_fs_solid : f_fs_tex);
-        obj_t ca = color_attachment(pd, 0);
-        if (!ca) { MSG0(void, pd, "release"); MSG0(void, lib, "release"); return 0; }
-        MSGUL(void, ca, "setPixelFormat:", MTL_PF_BGRA8);
-        MSGUL(void, ca, "setBlendingEnabled:", 1ul);
-        MSGUL(void, ca, "setSourceRGBBlendFactor:", MTL_BF_ONE);
-        MSGUL(void, ca, "setSourceAlphaBlendFactor:", MTL_BF_ONE);
-        MSGUL(void, ca, "setDestinationRGBBlendFactor:", MTL_BF_ONE_MINUS_SRC_ALPHA);
-        MSGUL(void, ca, "setDestinationAlphaBlendFactor:", MTL_BF_ONE_MINUS_SRC_ALPHA);
-        obj_t pso_err = NULL;
-        obj_t pso = ((obj_t (*)(obj_t, sel_t, obj_t, void **))o_msgSend)(
-            g_device, o_sel("newRenderPipelineStateWithDescriptor:error:"),
-            pd, &pso_err);
-        MSG0(void, pd, "release");
-        if (!pso) { nserr_line("管线创建失败", pso_err);
-                    MSG0(void, f_vs, "release"); MSG0(void, f_fs_solid, "release");
-                    MSG0(void, f_fs_tex, "release"); MSG0(void, lib, "release");
-                    return 0; }
-        if (p == 0) g_pso_solid = pso; else g_pso_tex = pso;
+    obj_t f_fs[PSO_FRAG_N];
+    f_fs[0] = MSG1(obj_t, lib, "newFunctionWithName:", nsstr("hn_fs_solid"));
+    f_fs[1] = MSG1(obj_t, lib, "newFunctionWithName:", nsstr("hn_fs_tex"));
+    f_fs[2] = MSG1(obj_t, lib, "newFunctionWithName:", nsstr("hn_fs_solid_mask"));
+    f_fs[3] = MSG1(obj_t, lib, "newFunctionWithName:", nsstr("hn_fs_tex_mask"));
+    int missing_fn = 0;
+    for (int fi = 0; fi < PSO_FRAG_N; fi++) if (!f_fs[fi]) missing_fn = 1;
+    if (!f_vs || missing_fn) {
+        MSG0(void, f_vs, "release");
+        for (int fi = 0; fi < PSO_FRAG_N; fi++)
+            if (f_fs[fi]) MSG0(void, f_fs[fi], "release");
+        MSG0(void, lib, "release");
+        return 0;
     }
+
+    /* 16 管线(4 片段入口 × 4 混合模式): BGRA8Unorm + 预乘域混合。
+     * 混合因子表(v2, 契约 hn_platform.h draw_quads 注的推导落点):
+     * 记源预乘 S'=s·sa、目标预乘 D'=d·da。hnsoft 在非预乘域定义
+     *   out' = sa·B(s,d) + (1-sa)·da·d   (out' = 合成结果×合成 alpha)
+     * 逐模式展开并对照固定功能式 f1·S' + f2·D':
+     *   over:     out' = S' + D'·(1-sa)              → (One, 1-SrcAlpha)
+     *   lighter:  out' = S' + D'(饱和加, UNORM 写出自动钳到 1)
+     *             alpha 同为 sa+da 钳制               → (One, One)
+     *   multiply: out' = S'·d + D'·(1-sa), d=D'/da → da=1 时 d=D':
+     *             out' = S'·D' + D'·(1-sa)           → (DstColor, 1-SrcAlpha)
+     *   screen:   sa·B = S' + sa·d - S'·d, 加 (1-sa)·da·d; da=1 时 d=D':
+     *             合并 = S' + D' - S'·D'              → (1-DstColor, One)
+     * multiply/screen 的固定功能换算在**目标不透明**(da=1; 页面底色不
+     * 透明即恒成立)时与 hnsoft 逐式等价; 半透明目标上除不掉 D'/da 的商,
+     * 是固定功能混合的结构性边界(契约诚实声明)。alpha 通道四种模式恒
+     * source-over(out_a = sa + da·(1-sa) —— 与 hnsoft 的 oa 同式;
+     * lighter 的 alpha 例外 = sa+da 钳制, hnsoft 同)。 */
+    static const struct { unsigned char s_rgb, d_rgb, s_a, d_a; } BLEND_FACTORS[PSO_BLEND_N] = {
+        { MTL_BF_ONE, MTL_BF_ONE_MINUS_SRC_ALPHA, MTL_BF_ONE, MTL_BF_ONE_MINUS_SRC_ALPHA },
+        { MTL_BF_ONE, MTL_BF_ONE,                 MTL_BF_ONE, MTL_BF_ONE },
+        { MTL_BF_DST_COLOR, MTL_BF_ONE_MINUS_SRC_ALPHA, MTL_BF_ONE, MTL_BF_ONE_MINUS_SRC_ALPHA },
+        { MTL_BF_ONE_MINUS_DST_COLOR, MTL_BF_ONE, MTL_BF_ONE, MTL_BF_ONE_MINUS_SRC_ALPHA },
+    };
+    for (int fi = 0; fi < PSO_FRAG_N; fi++) {
+        for (int b = 0; b < PSO_BLEND_N; b++) {
+            obj_t pd = MSG0(obj_t, o_getClass("MTLRenderPipelineDescriptor"), "alloc");
+            pd = MSG0(obj_t, pd, "init");
+            MSG1(void, pd, "setVertexFunction:", f_vs);
+            MSG1(void, pd, "setFragmentFunction:", f_fs[fi]);
+            obj_t ca = color_attachment(pd, 0);
+            if (!ca) {
+                for (int k = 0; k < PSO_FRAG_N; k++) MSG0(void, f_fs[k], "release");
+                MSG0(void, f_vs, "release");
+                MSG0(void, lib, "release");
+                return 0;
+            }
+            MSGUL(void, ca, "setPixelFormat:", MTL_PF_BGRA8);
+            MSGUL(void, ca, "setBlendingEnabled:", 1ul);
+            MSGUL(void, ca, "setSourceRGBBlendFactor:", BLEND_FACTORS[b].s_rgb);
+            MSGUL(void, ca, "setDestinationRGBBlendFactor:", BLEND_FACTORS[b].d_rgb);
+            MSGUL(void, ca, "setSourceAlphaBlendFactor:", BLEND_FACTORS[b].s_a);
+            MSGUL(void, ca, "setDestinationAlphaBlendFactor:", BLEND_FACTORS[b].d_a);
+            obj_t pso_err = NULL;
+            obj_t pso = ((obj_t (*)(obj_t, sel_t, obj_t, void **))o_msgSend)(
+                g_device, o_sel("newRenderPipelineStateWithDescriptor:error:"),
+                pd, &pso_err);
+            MSG0(void, pd, "release");
+            if (!pso) {
+                nserr_line("管线创建失败", pso_err);
+                for (int k = 0; k < PSO_FRAG_N; k++) MSG0(void, f_fs[k], "release");
+                MSG0(void, f_vs, "release"); MSG0(void, lib, "release");
+                for (int y = 0; y < PSO_FRAG_N; y++)
+                    for (int x = 0; x < PSO_BLEND_N; x++)
+                        if (g_pso[y][x]) { MSG0(void, g_pso[y][x], "release"); g_pso[y][x] = NULL; }
+                return 0;
+            }
+            g_pso[fi][b] = pso;
+        }
+    }
+    for (int fi = 0; fi < PSO_FRAG_N; fi++) MSG0(void, f_fs[fi], "release");
     MSG0(void, f_vs, "release");
-    MSG0(void, f_fs_solid, "release");
-    MSG0(void, f_fs_tex, "release");
     MSG0(void, lib, "release");
 
-    /* 线性采样器(理由见 g_samp 注释)。MTLDevice 协议只有无 error: 变体 */
-    obj_t sd = MSG0(obj_t, o_getClass("MTLSamplerDescriptor"), "alloc");
-    sd = MSG0(obj_t, sd, "init");
-    MSGUL(void, sd, "setMinFilter:", 1ul);   /* MTLSamplerMinMagFilterLinear = 1 */
-    MSGUL(void, sd, "setMagFilter:", 1ul);
-    g_samp = MSG1(obj_t, g_device, "newSamplerStateWithDescriptor:", sd);
-    MSG0(void, sd, "release");
-    if (!g_samp) return 0;
+    /* 采样器族(全部线性 —— 1:1 映射时线性采样在像素中心精确命中文素
+       中心 = 与最近采样逐位一致, 见 hn_gpu.c 的字形/图片注释; 平铺 uv 的
+       半文素偏移让 repeat 边界处像素中心同样落在文素中心, 见 hn_gpu.c
+       的 pattern 注)。MTLDevice 协议只有无 error: 变体。寻址模式:
+       0=clamp(v1) 1=双轴 repeat 2=u repeat/v clamp 3=v repeat/u clamp。 */
+    for (int si = 0; si < SAMP_N; si++) {
+        obj_t sd = MSG0(obj_t, o_getClass("MTLSamplerDescriptor"), "alloc");
+        sd = MSG0(obj_t, sd, "init");
+        MSGUL(void, sd, "setMinFilter:", 1ul);   /* MTLSamplerMinMagFilterLinear = 1 */
+        MSGUL(void, sd, "setMagFilter:", 1ul);
+        MSGUL(void, sd, "setSAddressMode:",
+              (si == 1 || si == 2) ? (unsigned long)MTL_SAM_REPEAT : (unsigned long)MTL_SAM_CLAMP);
+        MSGUL(void, sd, "setTAddressMode:",
+              (si == 1 || si == 3) ? (unsigned long)MTL_SAM_REPEAT : (unsigned long)MTL_SAM_CLAMP);
+        g_samp[si] = MSG1(obj_t, g_device, "newSamplerStateWithDescriptor:", sd);
+        MSG0(void, sd, "release");
+        if (!g_samp[si]) {
+            for (int k = 0; k < SAMP_N; k++)
+                if (g_samp[k]) { MSG0(void, g_samp[k], "release"); g_samp[k] = NULL; }
+            return 0;
+        }
+    }
 
     /* 索引缓冲一次建满: 每四边形 6 索引, 拆分 (0,1,2)+(0,2,3) —— 对**周界
        序**(v0→v1→v2→v3 沿边走, 顺/逆时针皆可)的凸四边形, 两个三角形绕序
@@ -331,9 +440,11 @@ static void mtl_shutdown(void) {
     g_vcap_bytes = 0;
     g_voff = 0;
     if (g_ibuf) { MSG0(void, g_ibuf, "release"); g_ibuf = NULL; }
-    if (g_pso_solid) { MSG0(void, g_pso_solid, "release"); g_pso_solid = NULL; }
-    if (g_pso_tex) { MSG0(void, g_pso_tex, "release"); g_pso_tex = NULL; }
-    if (g_samp) { MSG0(void, g_samp, "release"); g_samp = NULL; }
+    for (int y = 0; y < PSO_FRAG_N; y++)
+        for (int x = 0; x < PSO_BLEND_N; x++)
+            if (g_pso[y][x]) { MSG0(void, g_pso[y][x], "release"); g_pso[y][x] = NULL; }
+    for (int k = 0; k < SAMP_N; k++)
+        if (g_samp[k]) { MSG0(void, g_samp[k], "release"); g_samp[k] = NULL; }
     if (g_queue) { MSG0(void, g_queue, "release"); g_queue = NULL; }
     if (g_device) { MSG0(void, g_device, "release"); g_device = NULL; }
     if (g_pool) { MSG0(void, g_pool, "drain"); g_pool = NULL; }
@@ -507,6 +618,19 @@ static int mtl_begin(int w, int h, unsigned bg) {
     return 1;
 }
 
+/* scissor = 裁剪栈顶矩形(空交叠 → 零面积, 什么都不画; hnsoft 的 clip
+ * 判定同样全挡)。push/pop 共用。 */
+static void clip_apply_scissor(void) {
+    int sw = g_clip[g_clip_n - 1].x1 - g_clip[g_clip_n - 1].x0;
+    int sh = g_clip[g_clip_n - 1].y1 - g_clip[g_clip_n - 1].y0;
+    if (sw < 0) sw = 0;
+    if (sh < 0) sh = 0;
+    MTLScissorRect_ sr = { (unsigned long)g_clip[g_clip_n - 1].x0,
+                           (unsigned long)g_clip[g_clip_n - 1].y0,
+                           (unsigned long)sw, (unsigned long)sh };
+    ((void (*)(obj_t, sel_t, MTLScissorRect_))o_msgSend)(g_enc, o_sel("setScissorRect:"), sr);
+}
+
 /* 裁剪: 轴对齐矩形入栈, scissor = 与栈内逐层**交叠**(hnsoft fb_push_clip
  * 同一口径 —— 引擎语义是矩形交叠, 不是替换)。像素坐标直通。 */
 static void mtl_clip_push(int x, int y, int w, int h) {
@@ -522,38 +646,55 @@ static void mtl_clip_push(int x, int y, int w, int h) {
         g_clip[g_clip_n].y0 = y0 > by0 ? y0 : by0;
         g_clip[g_clip_n].x1 = x1 < bx1 ? x1 : bx1;
         g_clip[g_clip_n].y1 = y1 < by1 ? y1 : by1;
+        g_clip[g_clip_n].mask = NULL;   /* 矩形层无掩码(pop 按 mask 判型) */
         g_clip_n++;
     }
-    /* 空交叠 → 零面积 scissor(什么都不画; hnsoft 的 clip 判定同样全挡) */
-    int sw = g_clip[g_clip_n - 1].x1 - g_clip[g_clip_n - 1].x0;
-    int sh = g_clip[g_clip_n - 1].y1 - g_clip[g_clip_n - 1].y0;
-    if (sw < 0) sw = 0;
-    if (sh < 0) sh = 0;
-    MTLScissorRect_ sr = { (unsigned long)g_clip[g_clip_n - 1].x0,
-                           (unsigned long)g_clip[g_clip_n - 1].y0,
-                           (unsigned long)sw, (unsigned long)sh };
-    ((void (*)(obj_t, sel_t, MTLScissorRect_))o_msgSend)(g_enc, o_sel("setScissorRect:"), sr);
+    clip_apply_scissor();
+}
+
+/* v2: 路径裁剪入栈(契约见 hn_platform.h clip_mask_push 注)。掩码纹理由
+ * 引擎栅格化(逐像素中心二值覆盖, 与 hnsoft pip_poly 同式), 这里只做:
+ * 包围盒与前层交叠成 scissor + 掩码记入栈顶(draw_quads 按栈顶自动切
+ * *_mask 管线并把掩码矩形写进 uniform)。返回 1 = 已入栈。 */
+static int mtl_clip_mask_push(hnp_gpu_tex mask, float ox, float oy,
+                              float w, float h) {
+    if (!g_enc) return 0;
+    int i = (int)mask - 1;
+    if (mask == 0 || i < 0 || i >= g_tex_n || !g_tex[i].tex || w <= 0 || h <= 0) return 0;
+    int x0 = (int)floorf(ox), y0 = (int)floorf(oy);
+    int x1 = (int)ceilf(ox + w), y1 = (int)ceilf(oy + h);
+    int bx0 = 0, by0 = 0, bx1 = g_rtw, by1 = g_rth;
+    if (g_clip_n > 0) {
+        bx0 = g_clip[g_clip_n - 1].x0; by0 = g_clip[g_clip_n - 1].y0;
+        bx1 = g_clip[g_clip_n - 1].x1; by1 = g_clip[g_clip_n - 1].y1;
+    }
+    if (g_clip_n >= CLIP_CAP) return 0;
+    g_clip[g_clip_n].x0 = x0 > bx0 ? x0 : bx0;
+    g_clip[g_clip_n].y0 = y0 > by0 ? y0 : by0;
+    g_clip[g_clip_n].x1 = x1 < bx1 ? x1 : bx1;
+    g_clip[g_clip_n].y1 = y1 < by1 ? y1 : by1;
+    g_clip[g_clip_n].mask = g_tex[i].tex;
+    g_clip[g_clip_n].mox = ox;
+    g_clip[g_clip_n].moy = oy;
+    g_clip[g_clip_n].imw = 1.0f / w;
+    g_clip[g_clip_n].imh = 1.0f / h;
+    g_clip_n++;
+    clip_apply_scissor();
+    return 1;
 }
 
 static void mtl_clip_pop(void) {
     if (!g_enc) return;
     if (g_clip_n > 0) g_clip_n--;
-    MTLScissorRect_ sr;
     if (g_clip_n > 0) {
-        int sw = g_clip[g_clip_n - 1].x1 - g_clip[g_clip_n - 1].x0;
-        int sh = g_clip[g_clip_n - 1].y1 - g_clip[g_clip_n - 1].y0;
-        if (sw < 0) sw = 0;
-        if (sh < 0) sh = 0;
-        sr.x = (unsigned long)g_clip[g_clip_n - 1].x0;
-        sr.y = (unsigned long)g_clip[g_clip_n - 1].y0;
-        sr.width = (unsigned long)sw;
-        sr.height = (unsigned long)sh;
+        clip_apply_scissor();
     } else {
+        MTLScissorRect_ sr;
         sr.x = 0; sr.y = 0;
         sr.width = (unsigned long)g_rtw;
         sr.height = (unsigned long)g_rth;
+        ((void (*)(obj_t, sel_t, MTLScissorRect_))o_msgSend)(g_enc, o_sel("setScissorRect:"), sr);
     }
-    ((void (*)(obj_t, sel_t, MTLScissorRect_))o_msgSend)(g_enc, o_sel("setScissorRect:"), sr);
 }
 
 /* ---------------- 四边形批量绘制 ----------------
@@ -587,20 +728,47 @@ static void premul_color(unsigned rgba, float *out4) {
     out4[3] = a;
 }
 
+/* v2: opts —— bit0-1 混合模式(HN_BLEND_* 直传), bit2-3 纹理寻址
+ * (0 clamp 1 repeat 2 repeat-x 3 repeat-y; 契约见 hn_platform.h)。
+ * 管线/采样器选择:
+ *   片段维 = (tex?1:0) | (栈顶有掩码?2:0) —— 掩码期间片段自动乘掩码采样;
+ *   混合维 = opts&3;
+ *   采样器 = (opts>>2)&3(掩码槽恒 0 号钳边采样器)。 */
 static int mtl_draw_quads(const float *verts, int quad_count,
-                          hnp_gpu_tex tex, unsigned rgba) {
+                          hnp_gpu_tex tex, unsigned rgba, unsigned opts) {
     if (!g_enc || !verts || quad_count <= 0) return 0;
     size_t need = (size_t)quad_count * 16 * 4;   /* 4 顶点 × 4 float */
     if (!vbuf_ensure(need)) return 0;
     memcpy((unsigned char *)MSG0(void *, g_vbuf, "contents") + g_voff, verts, need);
 
+    int blend = (int)(opts & 3u);
+    int addr = (int)((opts >> 2) & 3u);
+    obj_t mask_tex = NULL;
     mtl_uniforms u;
     premul_color(rgba, u.color);
-    u.w = (float)g_rtw;
-    u.h = (float)g_rth;
-    u.pad = 0.0f;
+    u.xfrm[0] = (float)g_rtw;
+    u.xfrm[1] = (float)g_rth;
+    u.xfrm[2] = 0.0f;
+    u.xfrm[3] = 0.0f;
+    /* 掩码 = 栈内**最近**的路径层(自顶向下找首个带掩码条目): 路径层之上
+       再叠矩形层时, 多边形判定仍要生效(hnsoft fb_clip_ok 逐层判定同口径;
+       嵌套路径已被呼出方整帧回退挡掉, 活动掩码至多一个 —— 单槽够用) */
+    for (int ci = g_clip_n - 1; ci >= 0; ci--) {
+        if (g_clip[ci].mask) {
+            mask_tex = g_clip[ci].mask;
+            u.mask[0] = g_clip[ci].mox;
+            u.mask[1] = g_clip[ci].moy;
+            u.mask[2] = g_clip[ci].imw;
+            u.mask[3] = g_clip[ci].imh;
+            break;
+        }
+    }
+    if (!mask_tex) {
+        u.mask[0] = 0.0f; u.mask[1] = 0.0f; u.mask[2] = 1.0f; u.mask[3] = 1.0f;
+    }
+    int fi = (tex ? 1 : 0) | (mask_tex ? 2 : 0);
 
-    MSG1(void, g_enc, "setRenderPipelineState:", tex ? g_pso_tex : g_pso_solid);
+    MSG1(void, g_enc, "setRenderPipelineState:", g_pso[fi][blend]);
     ((void (*)(obj_t, sel_t, obj_t, unsigned long, unsigned long))o_msgSend)(
         g_enc, o_sel("setVertexBuffer:offset:atIndex:"), g_vbuf,
         (unsigned long)g_voff, 0ul);
@@ -614,7 +782,15 @@ static int mtl_draw_quads(const float *verts, int quad_count,
         ((void (*)(obj_t, sel_t, obj_t, unsigned long))o_msgSend)(
             g_enc, o_sel("setFragmentTexture:atIndex:"), g_tex[i].tex, 0ul);
         ((void (*)(obj_t, sel_t, obj_t, unsigned long))o_msgSend)(
-            g_enc, o_sel("setFragmentSamplerState:atIndex:"), g_samp, 0ul);
+            g_enc, o_sel("setFragmentSamplerState:atIndex:"), g_samp[addr], 0ul);
+    }
+    if (mask_tex) {
+        /* 掩码槽(纹理/采样器各 1 号): 恒钳边寻址(掩码 uv 由片段位置导出,
+           恒落 [0,1) 内 —— scissor 已把片段限制在掩码矩形交叠里)。 */
+        ((void (*)(obj_t, sel_t, obj_t, unsigned long))o_msgSend)(
+            g_enc, o_sel("setFragmentTexture:atIndex:"), mask_tex, 1ul);
+        ((void (*)(obj_t, sel_t, obj_t, unsigned long))o_msgSend)(
+            g_enc, o_sel("setFragmentSamplerState:atIndex:"), g_samp[0], 1ul);
     }
 
     int done = 0;
@@ -656,11 +832,14 @@ static int mtl_end_readback(unsigned char *out_bgra, int w, int h) {
 }
 
 /* supported_cmds: 1=RECT 2=TEXT 3=IMAGE 4=CLIP_PUSH 5=CLIP_POP 6=QUAD
-   9=BITMAP(数值 = hn_cmd_kind, 对照注释见文件头) */
+   9=BITMAP 11=PDATA 12=PATTERN 13=CLIP_PATH_PUSH(数值 = hn_cmd_kind,
+   对照注释见文件头; v2 新增 11/12/13 —— 原语支撑 = draw_quads opts +
+   clip_mask_push) */
 #define HNC_BIT(kind) (1u << (kind))
 static const hnp_gpu_host g_metal_host = {
     { HNC_BIT(1) | HNC_BIT(2) | HNC_BIT(3) | HNC_BIT(4) | HNC_BIT(5)
-      | HNC_BIT(6) | HNC_BIT(9), "metal" },
+      | HNC_BIT(6) | HNC_BIT(9) | HNC_BIT(11) | HNC_BIT(12) | HNC_BIT(13),
+      "metal" },
     mtl_init,
     mtl_shutdown,
     mtl_begin,
@@ -671,6 +850,7 @@ static const hnp_gpu_host g_metal_host = {
     mtl_draw_quads,
     mtl_clip_push,
     mtl_clip_pop,
+    mtl_clip_mask_push,
 };
 
 const hnp_gpu_host *hnp_gpu_backend(void) {

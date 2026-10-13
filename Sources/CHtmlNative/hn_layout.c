@@ -1024,20 +1024,65 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
 
 typedef struct { hn_node *n; float ml, mr, mt, mb; } fitem;
 
-static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
-                         float cx, float cy, float cw, float cross_h,
-                         const hn_text_backend *tb, int measuring) {
-    int cnt = 0;
-    for (hn_node *ch = n->first; ch; ch = ch->next) {
-        if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE) continue;
-        if (ch->kind == HN_TEXT && ch->text_len == 0) continue;
-        if (is_out_of_flow(ch)) continue;      /* 浮层不参与 flex 排版 */
-        cnt++;
-    }
-    if (!cnt) { n->pref_w = 0; return 0; }
+/* ---- flex 子项表的有界缓存(参照 hnsoft.c poly_scratch_ensure 手法) ----
+   此前每次 layout_flex 都 malloc/free 一套 items(外加一份 line 行号表,
+   calloc), 而 relayout 是稳态高频路径(动画/媒体页每帧全页重排) —— 缓存化
+   后只有首次见到更大规模才扩容一次(1.25x 头部, **只增不减**), 稳态零分配。
+   layout_flex 是**递归**的(嵌套 flex: pass1/pass2 的 layout_box 会再进
+   layout_flex), 单一模块级缓冲会被内层调用改写 —— 因此**按递归深度各留
+   一个槽位**(现实文档 ≤32 层; 更深回退一次性堆分配, 由调用方负责释放)。
+   布局是单线程主循环, 免锁。line 表所有 cnt 项在换行扫描时先写后读,
+   无需 calloc 清零。 */
+#define FLEX_SCRATCH_MAX_DEPTH 32
+static fitem *g_flex_items[FLEX_SCRATCH_MAX_DEPTH];
+static int    g_flex_icap[FLEX_SCRATCH_MAX_DEPTH];
+static int   *g_flex_line[FLEX_SCRATCH_MAX_DEPTH];
+static int    g_flex_lcap[FLEX_SCRATCH_MAX_DEPTH];
+static int    g_flex_depth = 0;
 
-    fitem *items = malloc(sizeof(fitem) * (size_t)cnt);
-    if (!items) abort();
+/* 进入一层 flex: 取本深度槽位的 items/line, 不足则 1.25x 扩容。
+   *heap=1 表示超深回退了堆(释放时须 free)。返回 0 = OOM(扩容失败;
+   与旧 malloc 失败口径一致, 调用方 abort —— 排版无"跳过"语义)。 */
+static int flex_scratch_acquire(int n, fitem **items, int **line, int *heap) {
+    *heap = 0;
+    int d = g_flex_depth;
+    if (d >= FLEX_SCRATCH_MAX_DEPTH) {
+        /* 超深嵌套(>32 层, 现实文档不会出现): 回退一次性堆 */
+        *items = (fitem *)malloc(sizeof(fitem) * (size_t)n);
+        *line = (int *)malloc(sizeof(int) * (size_t)n);
+        if (!*items || !*line) { free(*items); free(*line); return 0; }
+        *heap = 1;
+    } else {
+        if (n > g_flex_icap[d]) {
+            int nc = n + n / 4 + 16;   /* 1.25x 头部: 免逐帧小步扩容 */
+            fitem *ni = (fitem *)realloc(g_flex_items[d], sizeof(fitem) * (size_t)nc);
+            if (!ni) return 0;
+            g_flex_items[d] = ni;
+            g_flex_icap[d] = nc;
+        }
+        if (n > g_flex_lcap[d]) {
+            int nc = n + n / 4 + 16;
+            int *nl = (int *)realloc(g_flex_line[d], sizeof(int) * (size_t)nc);
+            if (!nl) return 0;
+            g_flex_line[d] = nl;
+            g_flex_lcap[d] = nc;
+        }
+        *items = g_flex_items[d];
+        *line = g_flex_line[d];
+    }
+    g_flex_depth++;
+    return 1;
+}
+
+static void flex_scratch_release(fitem *items, int *line, int heap) {
+    if (heap) { free(items); free(line); }
+    if (g_flex_depth > 0) g_flex_depth--;
+}
+
+static float layout_flex_body(hn_context *c, hn_node *n, const hn_style *st,
+                              float cx, float cy, float cw, float cross_h,
+                              const hn_text_backend *tb, int measuring,
+                              fitem *items, int *line, int cnt) {
     int k = 0;
     for (hn_node *ch = n->first; ch; ch = ch->next) {
         if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE) continue;
@@ -1109,10 +1154,10 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
     float used_cross = 0;
 
     /* flex-wrap: 先按主轴可用尺寸把子项切成若干行(行方向)或列(列方向)。
-       行号存在 line[i]; 未换行时全为 0(与原单行路径完全一致, 零行为差异)。 */
-    int *line = (int *)calloc((size_t)cnt, sizeof(int));
+       行号存在 line[i]; 未换行时全为 0(与原单行路径完全一致, 零行为差异)。
+       line 来自复用槽(不必清零: 下面扫描对全部 cnt 项先写后读)。 */
     int nlines = 1;
-    if (line) {
+    {
         int cur = 0;
         float acc = 0;
         for (int i = 0; i < cnt; i++) {
@@ -1162,8 +1207,6 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
 
         if (measuring) {
             n->pref_w = sum + gap_total;
-            free(line);
-            free(items);
             return n->pref_h;
         }
 
@@ -1288,8 +1331,6 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
             line_cross_off += lcross_avail + (L + 1 < nlines ? st->gap : 0);
         }
         used_cross = cross_avail;
-        free(line);
-        line = NULL;
     } else {
         /* 列方向: 主轴 = 纵向, 受 cross_h(容器定高)约束 */
         float sum = 0, grow = 0;
@@ -1313,7 +1354,6 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
                 float uw = items[i].ml + items[i].n->bw + items[i].mr;
                 if (uw > n->pref_w) n->pref_w = uw;
             }
-            free(items);
             return sum + gap_total;
         }
 
@@ -1381,8 +1421,30 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
         }
     }
 
-    free(items);
     return used_cross;
+}
+
+/* 包装: 数子项(空容器零行为不变) → 取本深度复用槽 → 跑排版 → 归还深度。
+   缓冲本体不释放(只增不减), 超深堆回退由 release 按 heap 标记释放。 */
+static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
+                         float cx, float cy, float cw, float cross_h,
+                         const hn_text_backend *tb, int measuring) {
+    int cnt = 0;
+    for (hn_node *ch = n->first; ch; ch = ch->next) {
+        if (ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE) continue;
+        if (ch->kind == HN_TEXT && ch->text_len == 0) continue;
+        if (is_out_of_flow(ch)) continue;      /* 浮层不参与 flex 排版 */
+        cnt++;
+    }
+    if (!cnt) { n->pref_w = 0; return 0; }
+
+    fitem *items = NULL;
+    int *line = NULL;
+    int heap = 0;
+    if (!flex_scratch_acquire(cnt, &items, &line, &heap)) abort();  /* OOM: 与旧 malloc 失败同口径 */
+    float r = layout_flex_body(c, n, st, cx, cy, cw, cross_h, tb, measuring, items, line, cnt);
+    flex_scratch_release(items, line, heap);
+    return r;
 }
 
 static float layout_box(hn_context *c, hn_node *n, float x, float y,

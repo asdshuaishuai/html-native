@@ -52,6 +52,13 @@ struct hn_rt {
     char id[128];              /* store 隔离键 */
     void *js_rt;               /* JSRuntime *(QuickJS; lazy init) */
     void *js_ctx;              /* JSContext * */
+    /* JS 事件层节流状态(字段本身与 QuickJS 无关, 无 JS 构建也占这几字节):
+       scroll 事件每帧至多一次(hn_rt_frame 重臂); mousemove 坐标/命中变化
+       才派发。 */
+    int scroll_armed;          /* 1 = 本帧还没发过 scroll(hn_rt_open 置 1) */
+    int mm_valid;              /* mousemove 上次派发状态有效 */
+    float mm_x, mm_y;          /* mousemove 上次派发坐标 */
+    hn_node *mm_hit;           /* mousemove 上次派发命中元素 */
     /* 轮询表(hx-trigger="every Ns") */
     struct { hn_node *node; double due, sec; } polls[16];
     int poll_n;
@@ -74,6 +81,20 @@ struct hn_rt {
     struct { int id; JSValue cb; } raf_q[64];
     int raf_n;
     int raf_seq;
+    /* JS 事件监听器表(addEventListener; 上限 256, 与定时器表同款管理):
+       target = 元素 id 串或 "document"/"window" —— 只存 id 串不存节点指针,
+       派发时按 id 现查命中链, 文档换装天然无悬挂。capture 记录但 v1 派发
+       是单相冒泡(见 rt_js_dispatch 头注)。 */
+#define HN_LISTENERS_MAX 256
+    struct {
+        int id;              /* 句柄(>0; 0 = 空槽) */
+        char target[64];
+        char type[24];
+        int capture;
+        JSValue fn;          /* 回调(持有引用; 关闭/换装统一释放) */
+    } listeners[HN_LISTENERS_MAX];
+    int listen_n;
+    int listen_seq;
 #endif
 };
 
@@ -288,6 +309,12 @@ static void run_doc_scripts(hn_rt *rt);
 static void js_scope_bind_rt(hn_rt *rt);
 static void js_scope_unbind_rt(hn_rt *rt);
 static int js_timers_drain(hn_rt *rt, int *repaint);
+/* JS 事件层(addEventListener 注册表与命中链冒泡派发; QuickJS 有实现,
+   无 JS 构建为恒 0 的 stub —— 调用点无需知道差别) */
+static void js_listeners_clear(hn_rt *rt);
+static int rt_js_has_listener(hn_rt *rt, const char *type);
+static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
+                          float x, float y, const char *utf8, int key, int detail);
 
 char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *store_id) {
     if (!url || strncmp(url, "sys://", 6)) return NULL;
@@ -890,6 +917,7 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     rt->w = d->w > 0 ? d->w : 480;
     rt->h = d->h > 0 ? d->h : 700;
     rt->scale = 1.0f;   /* HiDPI: 真窗壳开窗后经 hn_rt_set_scale 抬到 backing */
+    rt->scroll_armed = 1;   /* scroll 事件节流: 首帧前就允许一次 */
 
     hn_doc *doc = hn_parse_html(d->html, d->html_len);
     if (!doc) { free(rt); return NULL; }
@@ -1692,7 +1720,7 @@ static const char *CANVAS_GLUE_JS =
    glue_done/timer_glue_done = 各 glue 已装入(每 scope 只装一次)。 */
 #define JS_MAX_SCOPES 32
 static struct { char key[128]; JSRuntime *rt; JSContext *ctx; js_bridge bridge;
-                int glue_done, timer_glue_done; } js_scopes[JS_MAX_SCOPES];
+                int glue_done, timer_glue_done, event_glue_done; } js_scopes[JS_MAX_SCOPES];
 static int js_scope_n = 0;
 
 static JSContext *js_scope_get(const char *key) {
@@ -1709,6 +1737,7 @@ static JSContext *js_scope_get(const char *key) {
     memset(&js_scopes[js_scope_n].bridge, 0, sizeof(js_bridge));
     js_scopes[js_scope_n].glue_done = 0;
     js_scopes[js_scope_n].timer_glue_done = 0;
+    js_scopes[js_scope_n].event_glue_done = 0;
     JS_SetContextOpaque(ctx, &js_scopes[js_scope_n].bridge);
     js_scope_n++;
     return ctx;
@@ -1739,8 +1768,8 @@ static void js_scope_unbind_rt(hn_rt *rt) {
         if (js_scopes[i].bridge.rt == rt) js_scopes[i].bridge.rt = NULL;
 }
 
-/* 释放 rt 定时器/RAF 表持有的全部 JSValue 引用(hn_rt_close 调; 必须在
-   JS 上下文消亡前 —— 上下文属 js_scopes 全局表, 生命周期长于任何 rt)。 */
+/* 释放 rt 定时器/RAF/监听器表持有的全部 JSValue 引用(hn_rt_close 调;
+   必须在 JS 上下文消亡前 —— 上下文属 js_scopes 全局表, 生命周期长于任何 rt)。 */
 static void js_rt_release_timers(hn_rt *rt) {
     JSContext *ctx = js_scope_find(rt->id);
     if (ctx) {
@@ -1757,6 +1786,7 @@ static void js_rt_release_timers(hn_rt *rt) {
     }
     rt->timer_n = 0;
     rt->raf_n = 0;
+    js_listeners_clear(rt);   /* 监听器表同批归还(引用同属 scope 上下文) */
 }
 
 /* ---------------- JS 定时器与 RAF(帧驱动) ----------------
@@ -1856,6 +1886,296 @@ static JSValue js_hn_raf_cancel(JSContext *ctx, JSValueConst _, int argc, JSValu
     }
     return JS_UNDEFINED;
 }
+
+/* ---------------- JS 事件层(addEventListener → 命中链冒泡派发) ----------------
+ * 注册表在 rt 上({target id 串, type 串, fn, capture}, 上限 256), C 原生
+ * __hn* 桥登记/摘除, 标准签名由 EVENT_GLUE_JS 转接(元素方法形态
+ * el.addEventListener / document.addEventListener / window.addEventListener,
+ * 另给元素对象挂 textContent/value 读写)。派发在 C 侧(rt_js_dispatch):
+ * 引擎输入事件(点击/按键/输入/滚动/移动)按命中链(目标→祖先 id 链, 链尾补
+ * document/window)冒泡序调监听器, 事件对象由 glue 构造(preventDefault/
+ * stopPropagation 在对象上置标志字段), 派发后 C 读标志 —— _pd 返回给调用
+ * 点跳过默认行为, _sp 截断剩余链路。
+ * 无宿主 rt 的 eval(daemon 裸 scope)注册监听器返回 0 —— 事件由输入路径
+ * 派发, 输入属于 rt, 没有宿主就没有派发点(与定时器同一纪律)。 */
+
+/* __hnAddListener(target, type, fn, capture) → 句柄(>0; 表满/非函数 0) */
+static JSValue js_hn_add_listener(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_rt *rt = b ? b->rt : NULL;
+    if (!rt || argc < 3 || !JS_IsFunction(ctx, argv[2])) return JS_NewInt32(ctx, 0);
+    const char *target = JS_ToCString(ctx, argv[0]);
+    const char *type = JS_ToCString(ctx, argv[1]);
+    if (!target || !type || !target[0] || !type[0]) {
+        if (target) JS_FreeCString(ctx, target);
+        if (type) JS_FreeCString(ctx, type);
+        return JS_NewInt32(ctx, 0);
+    }
+    int slot = -1;
+    for (int i = 0; i < HN_LISTENERS_MAX; i++)
+        if (!rt->listeners[i].id) { slot = i; break; }
+    if (slot >= 0) {
+        int32_t cap = 0;
+        if (argc > 3) JS_ToInt32(ctx, &cap, argv[3]);
+        int id = ++rt->listen_seq;
+        rt->listeners[slot].id = id;
+        snprintf(rt->listeners[slot].target, sizeof(rt->listeners[slot].target), "%s", target);
+        snprintf(rt->listeners[slot].type, sizeof(rt->listeners[slot].type), "%s", type);
+        rt->listeners[slot].capture = cap != 0;
+        rt->listeners[slot].fn = JS_DupValue(ctx, argv[2]);
+        rt->listen_n++;
+    }   /* 表满: 句柄 0(与定时器表同口径) */
+    JS_FreeCString(ctx, target);
+    JS_FreeCString(ctx, type);
+    return JS_NewInt32(ctx, slot >= 0 ? rt->listeners[slot].id : 0);
+}
+
+/* __hnRemoveListener(target, type, fn): 按函数同一性(JS_SameValue)摘除
+   全部匹配(目标+类型+同一函数引用; 与浏览器 removeEventListener 语义对齐) */
+static JSValue js_hn_remove_listener(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_rt *rt = b ? b->rt : NULL;
+    if (!rt || argc < 3) return JS_UNDEFINED;
+    const char *target = JS_ToCString(ctx, argv[0]);
+    const char *type = JS_ToCString(ctx, argv[1]);
+    if (target && type) {
+        for (int i = 0; i < HN_LISTENERS_MAX; i++) {
+            if (!rt->listeners[i].id) continue;
+            if (strcmp(rt->listeners[i].target, target) || strcmp(rt->listeners[i].type, type))
+                continue;
+            if (!JS_SameValue(ctx, rt->listeners[i].fn, argv[2])) continue;
+            JS_FreeValue(ctx, rt->listeners[i].fn);
+            rt->listeners[i].fn = JS_UNDEFINED;
+            rt->listeners[i].id = 0;
+            rt->listen_n--;
+        }
+    }
+    if (target) JS_FreeCString(ctx, target);
+    if (type) JS_FreeCString(ctx, type);
+    return JS_UNDEFINED;
+}
+
+/* __hnGetValue(id) → 控件当前值(元素包装 value 属性的读端; 找不到 id = 空串) */
+static JSValue js_hn_get_value(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    if (argc < 1 || !b || !b->doc) return JS_NewString(ctx, "");
+    const char *id = JS_ToCString(ctx, argv[0]);
+    hn_node *n = id ? hn_doc_find_by_id(b->doc, id) : NULL;
+    size_t vl = 0;
+    const char *v = n ? hn_node_value(n, &vl) : NULL;
+    JSValue r = JS_NewStringLen(ctx, v && vl ? v : "", v ? vl : 0);
+    if (id) JS_FreeCString(ctx, id);
+    return r;
+}
+
+/* 释放监听器表持有的全部 JSValue 引用(hn_rt_close / 文档换装调用)。
+   必须在 JS 上下文消亡前 —— 上下文属 js_scopes 全局表。换装时旧元素 id
+   随旧文档消失, 监听器一并清空(文档脚本重跑会重新注册)。 */
+static void js_listeners_clear(hn_rt *rt) {
+    JSContext *ctx = js_scope_find(rt->id);
+    if (ctx) {
+        for (int i = 0; i < HN_LISTENERS_MAX; i++) {
+            if (!rt->listeners[i].id) continue;
+            JS_FreeValue(ctx, rt->listeners[i].fn);
+            rt->listeners[i].fn = JS_UNDEFINED;
+            rt->listeners[i].id = 0;
+        }
+        /* 顺手 GC: 回调闭包可能成环(自引用), 引用清零后让环可回收
+           (与 js_rt_release_timers 同一手势; GC 走 scope 的 runtime) */
+        for (int i = 0; i < js_scope_n; i++)
+            if (!strcmp(js_scopes[i].key, rt->id)) JS_RunGC(js_scopes[i].rt);
+    }
+    rt->listen_n = 0;
+}
+
+/* 表里是否存在该类型的监听器(派发的快速路径: 无监听器零成本早退 ——
+   无 JS 页面的输入行为逐位不变的锚) */
+static int rt_js_has_listener(hn_rt *rt, const char *type) {
+    if (!rt) return 0;
+    for (int i = 0; i < HN_LISTENERS_MAX; i++) {
+        if (!rt->listeners[i].id) continue;
+        if (!strcmp(rt->listeners[i].type, type)) return 1;
+    }
+    return 0;
+}
+
+/* 键名映射: HN_KT_* → DOM 风格 key 串(可打印字符用 utf8 原文) */
+static const char *kt_key_name(int key, const char *utf8) {
+    switch (key) {
+    case HN_KT_RETURN: case HN_KT_ENTER_NUMPAD: return "Enter";
+    case HN_KT_ESCAPE: return "Escape";
+    case HN_KT_TAB: return "Tab";
+    case HN_KT_BACKSPACE: return "Backspace";
+    case HN_KT_DELETE: return "Delete";
+    case HN_KT_LEFT: return "ArrowLeft";
+    case HN_KT_RIGHT: return "ArrowRight";
+    case HN_KT_UP: return "ArrowUp";
+    case HN_KT_DOWN: return "ArrowDown";
+    case HN_KT_HOME: return "Home";
+    case HN_KT_END: return "End";
+    case HN_KT_PAGE_UP: return "PageUp";
+    case HN_KT_PAGE_DOWN: return "PageDown";
+    case HN_KT_SPACE: return " ";
+    case HN_KT_F1: return "F1";
+    case HN_KT_F2: return "F2";
+    case HN_KT_F3: return "F3";
+    case HN_KT_F4: return "F4";
+    case HN_KT_F5: return "F5";
+    case HN_KT_F6: return "F6";
+    case HN_KT_F7: return "F7";
+    case HN_KT_F8: return "F8";
+    case HN_KT_F9: return "F9";
+    case HN_KT_F10: return "F10";
+    case HN_KT_F11: return "F11";
+    case HN_KT_F12: return "F12";
+    default: return (utf8 && *utf8) ? utf8 : "";
+    }
+}
+
+/* code 串: DOM KeyboardEvent.code 风格(KeyA/Digit3/Space/Enter/ArrowLeft/…;
+   无法识别的键 "Unidentified")。修饰键: 平台壳当前不向 hn_rt_key 传 mods,
+   shift 由可打印大写字母推断(其余恒 false —— 事件对象字段齐备, 管道后补) */
+static void kt_code_name(int key, const char *utf8, char *out, size_t cap) {
+    const char *special = NULL;
+    switch (key) {
+    case HN_KT_RETURN: case HN_KT_ENTER_NUMPAD: special = "Enter"; break;
+    case HN_KT_ESCAPE: special = "Escape"; break;
+    case HN_KT_TAB: special = "Tab"; break;
+    case HN_KT_BACKSPACE: special = "Backspace"; break;
+    case HN_KT_DELETE: special = "Delete"; break;
+    case HN_KT_LEFT: special = "ArrowLeft"; break;
+    case HN_KT_RIGHT: special = "ArrowRight"; break;
+    case HN_KT_UP: special = "ArrowUp"; break;
+    case HN_KT_DOWN: special = "ArrowDown"; break;
+    case HN_KT_HOME: special = "Home"; break;
+    case HN_KT_END: special = "End"; break;
+    case HN_KT_PAGE_UP: special = "PageUp"; break;
+    case HN_KT_PAGE_DOWN: special = "PageDown"; break;
+    case HN_KT_SPACE: special = "Space"; break;
+    case HN_KT_F1: special = "F1"; break;
+    case HN_KT_F2: special = "F2"; break;
+    case HN_KT_F3: special = "F3"; break;
+    case HN_KT_F4: special = "F4"; break;
+    case HN_KT_F5: special = "F5"; break;
+    case HN_KT_F6: special = "F6"; break;
+    case HN_KT_F7: special = "F7"; break;
+    case HN_KT_F8: special = "F8"; break;
+    case HN_KT_F9: special = "F9"; break;
+    case HN_KT_F10: special = "F10"; break;
+    case HN_KT_F11: special = "F11"; break;
+    case HN_KT_F12: special = "F12"; break;
+    default: break;
+    }
+    if (special) { snprintf(out, cap, "%s", special); return; }
+    if (utf8 && utf8[0] && utf8[1] == 0) {
+        unsigned char c = (unsigned char)utf8[0];
+        if (c >= 'a' && c <= 'z') { snprintf(out, cap, "Key%c", c - ('a' - 'A')); return; }
+        if (c >= 'A' && c <= 'Z') { snprintf(out, cap, "Key%c", c); return; }
+        if (c >= '0' && c <= '9') { snprintf(out, cap, "Digit%c", c); return; }
+    }
+    snprintf(out, cap, "Unidentified");
+}
+
+/* 事件对象标志读取(_pd/_sp; glue 的 preventDefault/stopPropagation 置位) */
+static int rt_ev_flag(JSContext *ctx, JSValue ev, const char *name) {
+    JSValue v = JS_GetPropertyStr(ctx, ev, name);
+    int b = JS_ToBool(ctx, v);   /* 非布尔/缺失 → 0 */
+    JS_FreeValue(ctx, v);
+    return b == 1;
+}
+
+/* 派发: type 事件沿命中链冒泡。链 = 引擎 hn_event_path_*(目标→祖先, 只含
+   有 id 的元素) + "document" + "window" 两级链尾。单相派发(v1): capture
+   监听器也在冒泡序执行(注册表记录标志, 捕获阶段留给后续轮次)。同节点
+   多监听器按注册序; stopPropagation 在当前节点全部监听器跑完后截断
+   (DOM 语义: 不打断同层, 只停冒泡)。返回 preventDefault 与否。
+   无监听器(快速路径)/无 JS 上下文/glue 未装载 → 0(零成本零回归)。 */
+static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
+                          float x, float y, const char *utf8, int key, int detail) {
+    if (!rt || !type) return 0;
+    if (!rt_js_has_listener(rt, type)) return 0;
+    JSContext *ctx = js_scope_find(rt->id);
+    if (!ctx) return 0;
+    /* 桥环境对准当前文档(hot reload 语义, 与 js_timers_drain 同一份) */
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    for (int i = 0; i < js_scope_n; i++) {
+        if (js_scopes[i].ctx == ctx) {
+            js_scopes[i].bridge.doc = doc;
+            js_scopes[i].bridge.ctx = rt->ctx;
+            break;
+        }
+    }
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue mk = JS_GetPropertyStr(ctx, global, "__hnMakeEvent");
+    int pd = 0;
+    if (JS_IsFunction(ctx, mk)) {
+        /* 事件对象由 glue 构造(字段面 + preventDefault/stopPropagation) */
+        JSValue t = JS_NewString(ctx, type);
+        JSValue ev = JS_Call(ctx, mk, JS_UNDEFINED, 1, (JSValueConst *)&t);
+        JS_FreeValue(ctx, t);
+        if (!JS_IsException(ev)) {
+            /* 命中链(冒泡序): id 串拷进栈缓冲 —— 派发期间回调可能改文档,
+               不持节点属性指针。上限 32 个 id 节点 + document + window。 */
+#define HN_EV_CHAIN_MAX 34
+            char chain[HN_EV_CHAIN_MAX][64];
+            int chain_n = 0;
+            int plen = target ? hn_event_path_len(target) : 0;
+            for (int i = 0; i < plen && chain_n < HN_EV_CHAIN_MAX - 2; i++) {
+                hn_node *pn = hn_event_path_at(target, i);
+                const char *pid = pn ? hn_node_attr(pn, "id") : NULL;
+                if (pid && *pid) snprintf(chain[chain_n++], sizeof(chain[0]), "%s", pid);
+            }
+            snprintf(chain[chain_n++], sizeof(chain[0]), "document");
+            snprintf(chain[chain_n++], sizeof(chain[0]), "window");
+            JS_SetPropertyStr(ctx, ev, "target",
+                              JS_NewString(ctx, chain_n > 2 ? chain[0] : ""));
+            JS_SetPropertyStr(ctx, ev, "clientX", JS_NewFloat64(ctx, (double)x));
+            JS_SetPropertyStr(ctx, ev, "clientY", JS_NewFloat64(ctx, (double)y));
+            JS_SetPropertyStr(ctx, ev, "key", JS_NewString(ctx, kt_key_name(key, utf8)));
+            char code[32];
+            kt_code_name(key, utf8, code, sizeof(code));
+            JS_SetPropertyStr(ctx, ev, "code", JS_NewString(ctx, code));
+            JS_SetPropertyStr(ctx, ev, "detail", JS_NewInt32(ctx, detail));
+            if (utf8 && utf8[0] && utf8[1] == 0 &&
+                utf8[0] >= 'A' && utf8[0] <= 'Z')
+                JS_SetPropertyStr(ctx, ev, "shift", JS_TRUE);
+            /* 冒泡: 每节点先快照命中监听器(回调里可能 remove 改表), 再按
+               注册序 Dup-调用-释放; 节点跑完读 _sp 决定截断。 */
+            for (int ci = 0; ci < chain_n; ci++) {
+                JS_SetPropertyStr(ctx, ev, "currentTarget", JS_NewString(ctx, chain[ci]));
+                JSValue fns[16];
+                int fn_n = 0;
+                for (int i = 0; i < HN_LISTENERS_MAX && fn_n < 16; i++) {
+                    if (!rt->listeners[i].id) continue;
+                    if (strcmp(rt->listeners[i].type, type)) continue;
+                    if (strcmp(rt->listeners[i].target, chain[ci])) continue;
+                    fns[fn_n++] = JS_DupValue(ctx, rt->listeners[i].fn);
+                }
+                for (int i = 0; i < fn_n; i++) {
+                    JSValue r = JS_Call(ctx, fns[i], JS_UNDEFINED, 1, (JSValueConst *)&ev);
+                    if (JS_IsException(r)) {
+                        JSValue e = JS_GetException(ctx);
+                        const char *msg = JS_ToCString(ctx, e);
+                        fprintf(stderr, "[event] %s\n", msg ? msg : "exception");
+                        if (msg) JS_FreeCString(ctx, msg);
+                        JS_FreeValue(ctx, e);
+                    }
+                    JS_FreeValue(ctx, r);
+                    JS_FreeValue(ctx, fns[i]);
+                }
+                if (rt_ev_flag(ctx, ev, "_sp")) break;   /* 冒泡截断 */
+            }
+            pd = rt_ev_flag(ctx, ev, "_pd");
+        } else {
+            JS_FreeValue(ctx, JS_GetException(ctx));   /* 事件对象构造失败: 静默 */
+        }
+        JS_FreeValue(ctx, ev);
+    }
+    JS_FreeValue(ctx, mk);
+    JS_FreeValue(ctx, global);
+    return pd;
+}
+
 
 /* 统一回调调用: RAF 带时间戳(clock_ms, 仿 DOMHighResTimeStamp);
    定时器展开参数数组(上限 8 个, 多余丢弃 —— 最小版可变参)。异常吞掉
@@ -1973,6 +2293,74 @@ static const char *TIMER_GLUE_JS =
 "  g.cancelAnimationFrame=function(h){__hnRAFCancel(+h||0);};"
 "})(globalThis);";
 
+/* 事件监听标准签名 glue: __hn* 内部桥 → 浏览器同款 API。
+ *   - 元素方法形态: document.getElementById(id) 返回**缓存的元素包装**
+ *     (addEventListener/removeEventListener + textContent/value 读写 +
+ *     getContext —— canvas glue 的最小 document 由本 glue 先行创建并
+ *     取代, canvas 用法不受影响: hnGet2D 自带按 id 缓存);
+ *   - document.addEventListener / window.addEventListener 直达注册表
+ *     ("document"/"window" 两个保留 target, 冒泡链尾自动命中);
+ *   - __hnMakeEvent(type): 事件对象工厂 —— C 派发器调用它造对象, 再逐
+ *     节点填 currentTarget。preventDefault/stopPropagation 按 DOM 纪律
+ *     只置标志字段(_pd/_sp), 由 C 派发后读取。
+ * 幂等(__hnMakeEvent 检查), 每 scope 只装一次; **装载顺序在 canvas glue
+ * 之前**(document 得由本 glue 创建, canvas glue 的 `if (!g.document)` 让位)。 */
+static const char *EVENT_GLUE_JS =
+"(function(g){"
+"  if (g.__hnMakeEvent) return;"
+"  function capOf(o){return (o===true||(o&&o.capture))?1:0;}"
+"  var EVCACHE={};"
+"  function hnEl(id){"
+"    id=String(id);"
+"    var z=EVCACHE[id];"
+"    if (z) return z;"
+"    z={id:id};"
+"    z.addEventListener=function(type,fn,opts){"
+"      if (typeof fn!=='function') return 0;"
+"      return __hnAddListener(id,String(type),fn,capOf(opts));};"
+"    z.removeEventListener=function(type,fn){"
+"      if (typeof fn!=='function') return;"
+"      __hnRemoveListener(id,String(type),fn);};"
+"    z.getContext=function(kind){return (kind==='2d'||kind==='2D')?hnGet2D(id):null;};"
+"    Object.defineProperty(z,'textContent',{"
+"      set:function(v){hnSetText(id,String(v));},"
+"      get:function(){return '';}});"
+"    Object.defineProperty(z,'value',{"
+"      set:function(v){hnSetValue(id,String(v));},"
+"      get:function(){return __hnGetValue(id);}});"
+"    EVCACHE[id]=z;"
+"    return z;"
+"  }"
+"  if (!g.document || !g.document.__hnevents) {"
+"    g.document={"
+"      __hnevents:true,"
+"      getElementById:function(id){return hnEl(id);},"
+"      addEventListener:function(type,fn,opts){"
+"        if (typeof fn!=='function') return 0;"
+"        return __hnAddListener('document',String(type),fn,capOf(opts));},"
+"      removeEventListener:function(type,fn){"
+"        if (typeof fn!=='function') return;"
+"        __hnRemoveListener('document',String(type),fn);}"
+"    };"
+"  }"
+"  g.window=g;"
+"  g.addEventListener=function(type,fn,opts){"
+"    if (typeof fn!=='function') return 0;"
+"    return __hnAddListener('window',String(type),fn,capOf(opts));};"
+"  g.removeEventListener=function(type,fn){"
+"    if (typeof fn!=='function') return;"
+"    __hnRemoveListener('window',String(type),fn);};"
+"  g.__hnMakeEvent=function(type){"
+"    var ev={type:String(type||''),target:'',currentTarget:'',"
+"            clientX:0,clientY:0,key:'',code:'',detail:0,"
+"            shift:false,ctrl:false,alt:false,meta:false,"
+"            _pd:false,_sp:false};"
+"    ev.preventDefault=function(){this._pd=true;};"
+"    ev.stopPropagation=function(){this._sp=true;};"
+"    return ev;"
+"  };"
+"})(globalThis);";
+
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     JSContext *ctx = js_scope_get(scope_key ? scope_key : "default");
     if (!ctx) return NULL;
@@ -2026,7 +2414,32 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_raf, "__hnRAF", 1));
     JS_SetPropertyStr(ctx, global, "__hnRAFCancel",
         JS_NewCFunction(ctx, js_hn_raf_cancel, "__hnRAFCancel", 1));
+    /* 事件层内部桥(标准签名由 EVENT_GLUE_JS 转接) */
+    JS_SetPropertyStr(ctx, global, "__hnAddListener",
+        JS_NewCFunction(ctx, js_hn_add_listener, "__hnAddListener", 4));
+    JS_SetPropertyStr(ctx, global, "__hnRemoveListener",
+        JS_NewCFunction(ctx, js_hn_remove_listener, "__hnRemoveListener", 3));
+    JS_SetPropertyStr(ctx, global, "__hnGetValue",
+        JS_NewCFunction(ctx, js_hn_get_value, "__hnGetValue", 1));
     JS_FreeValue(ctx, global);
+
+    /* 事件 glue(元素包装 + document/window addEventListener + 事件对象
+       工厂): **先于 canvas glue 装载** —— document 由本 glue 创建(带
+       getContext), canvas glue 的 `if (!g.document)` 自然让位 */
+    int event_glue_loaded = 0;
+    for (int i = 0; i < js_scope_n; i++)
+        if (js_scopes[i].ctx == ctx) { event_glue_loaded = js_scopes[i].event_glue_done; break; }
+    if (!event_glue_loaded) {
+        JSValue gr = JS_Eval(ctx, EVENT_GLUE_JS, strlen(EVENT_GLUE_JS),
+                             "<event-glue>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(gr)) {
+            JSValue e = JS_GetException(ctx);
+            JS_FreeValue(ctx, e);
+        }
+        JS_FreeValue(ctx, gr);
+        for (int i = 0; i < js_scope_n; i++)
+            if (js_scopes[i].ctx == ctx) { js_scopes[i].event_glue_done = 1; break; }
+    }
 
     /* canvas 2D glue(hnGet2D + 状态机): 每 scope 只装一次(幂等定义,
        重复 eval 也安全, 这里省掉重复解析成本) */
@@ -2124,13 +2537,21 @@ static void run_doc_scripts(hn_rt *rt) {
 }
 
 #else
-/* 无 QuickJS 构建: 定时器/RAF 全套 no-op(hn_rt_open/close/frame 的调用点
-   无需知道差别 —— 表恒空, 帧节拍不含 JS 信号)。js_rt_free 空实现。 */
+/* 无 QuickJS 构建: 定时器/RAF/事件层全套 no-op(hn_rt_open/close/frame/
+   button/key/scroll/pointer_move 的调用点无需知道差别 —— 表恒空, 帧节拍
+   不含 JS 信号, 派发恒 0)。js_rt_free 空实现。 */
 static void js_rt_free(hn_rt *rt) { (void)rt; }
 static void js_rt_release_timers(hn_rt *rt) { (void)rt; }
 static void js_scope_bind_rt(hn_rt *rt) { (void)rt; }
 static void js_scope_unbind_rt(hn_rt *rt) { (void)rt; }
 static int js_timers_drain(hn_rt *rt, int *repaint) { (void)rt; (void)repaint; return 0; }
+static void js_listeners_clear(hn_rt *rt) { (void)rt; }
+static int rt_js_has_listener(hn_rt *rt, const char *type) { (void)rt; (void)type; return 0; }
+static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
+                          float x, float y, const char *utf8, int key, int detail) {
+    (void)rt; (void)type; (void)target; (void)x; (void)y; (void)utf8; (void)key; (void)detail;
+    return 0;
+}
 
 /* 文档内联 <script> 执行同样依赖 QuickJS: 无 JS 引擎时不跑(eval 口径
    会如实报告"QuickJS 未编入本产物", 这里保持同一降级纪律)。 */
@@ -2168,6 +2589,7 @@ int hn_rt_render(hn_rt *rt, const char *html, size_t len) {
     hn_context_set_doc(rt->ctx, doc);
     doc_ctx_bind(doc, rt->ctx);        /* 新文档重新登记(eval 桥按 doc 反查) */
     rt->poll_built = 0;
+    js_listeners_clear(rt);            /* 换装清空监听器: 旧元素 id 已随旧文档消失, 不留悬挂 */
     int ok = rt_render(rt);
     if (ok) { run_doc_scripts(rt); run_load_actions(rt); rt_render(rt); }
     return ok;
@@ -2228,6 +2650,7 @@ extern int hn_media_light_render_ok(hn_context *c);
 int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     if (!rt) return -1;
     if (repaint) *repaint = 0;
+    rt->scroll_armed = 1;   /* scroll 事件节流重臂(每 pump 至多派发一次) */
 #ifdef HN_HAVE_QUICKJS
     rt->clock_ms += dt_ms > 0 ? (double)dt_ms : 0;   /* 虚拟单调钟: 随帧步进 */
 #endif
@@ -2332,10 +2755,39 @@ int hn_rt_pointer_move(hn_rt *rt, float x, float y) {
        hover 不变, 但网格 hn-mesh-look 的指向每一步都要跟上)。 */
     hn_context_set_pointer(rt->ctx, x, y);
     hn_node *n = hn_context_hit_node(rt->ctx, x, y);
-    if (n == rt->hover) return 0;
-    rt->hover = n;
-    hn_context_set_hover(rt->ctx, n);
-    return rt_render(rt);
+    int rendered = 0;
+    if (n != rt->hover) {
+        rt->hover = n;
+        hn_context_set_hover(rt->ctx, n);
+        rendered = rt_render(rt);
+    }
+    /* JS mousemove: 仅存在监听器时派发(否则零成本, hover 语义照旧);
+       节流至"坐标或命中元素变化" —— 同一位置的重复移动不重发。 */
+    if (rt_js_has_listener(rt, "mousemove") &&
+        (!rt->mm_valid || rt->mm_x != x || rt->mm_y != y || rt->mm_hit != n)) {
+        rt->mm_valid = 1;
+        rt->mm_x = x;
+        rt->mm_y = y;
+        rt->mm_hit = n;
+        if (rt_js_dispatch(rt, "mousemove", n, x, y, NULL, 0, 0))
+            rendered = rt_render(rt);
+    }
+    return rendered;
+}
+
+int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {
+    (void)dx;
+    if (!rt) return 0;
+    hn_node *n = hn_context_hit_node(rt->ctx, x, y);
+    if (n && hn_node_scroll_by(n, 0, -dy * 18.0f)) {
+        /* JS scroll: 节流每帧至多一次(hn_rt_frame 重臂); 无监听器零成本 */
+        if (rt->scroll_armed) {
+            rt->scroll_armed = 0;
+            rt_js_dispatch(rt, "scroll", n, x, y, NULL, 0, 0);
+        }
+        return rt_render(rt);
+    }
+    return 0;
 }
 
 int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
@@ -2346,6 +2798,12 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
            n ? hn_node_tag(n) : "?", id ? id : "(none)");
     rt->focus = n ? hn_node_ancestor_input(n) : NULL;
     if (rt->focus) hn_context_set_focus(rt->ctx, rt->focus);
+    /* JS click: 命中链冒泡派发(目标→祖先 id 链→document→window)。无监听
+       器时在注册表扫描处零成本早退 —— 无 JS 页面行为逐位不变(hx 页零回归
+       锚)。preventDefault → 跳过 hx 载体与链接激活(默认行为被取消),
+       监听器可能已改文档, 重渲染后返回。 */
+    if (rt_js_dispatch(rt, "click", n, x, y, NULL, 0, 1))
+        return rt_render(rt);
     hn_node *carrier = hx_carrier(n);
     if (carrier) {
         const char *url = hn_node_attr(carrier, "hx-post") ? hn_node_attr(carrier, "hx-post")
@@ -2364,14 +2822,6 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
         if (url[0]) sys_open_url(url);
         return rt_render(rt);
     }
-    return 0;
-}
-
-int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {
-    (void)dx;
-    if (!rt) return 0;
-    hn_node *n = hn_context_hit_node(rt->ctx, x, y);
-    if (n && hn_node_scroll_by(n, 0, -dy * 18.0f)) return rt_render(rt);
     return 0;
 }
 
@@ -2438,6 +2888,9 @@ static int rt_edit_insert2(hn_rt *rt, const char *ins, int del_before, int del_a
     buf[nl] = 0;
     hn_node_set_value(rt->focus, buf, nl);   /* set_value 把 caret 移到末尾 */
     hn_node_set_caret(rt->focus, head + (int)in);
+    /* value 变更 → 焦点元素派发 input(键入/删除/粘贴共用此路径; 无监听器
+       时派发在注册表扫描处零成本早退) */
+    rt_js_dispatch(rt, "input", rt->focus, 0, 0, NULL, 0, 0);
     return 1;
 }
 static int rt_edit_insert(hn_rt *rt, const char *ins, int del_bytes) {
@@ -2495,10 +2948,11 @@ int hn_rt_ime_commit(hn_rt *rt, const char *text) {
     memcpy(buf + g_ime_base_len, text, tl);
     buf[g_ime_base_len + tl] = 0;
     hn_node_set_value(rt->focus, buf, (size_t)g_ime_base_len + tl);
-    /* caret 落上屏串末尾(set_value 已是末尾), 清基础态 */
+    /* caret 落上屏串末尾(set_value 已是末尾), 清基础态; value 变更 → input */
     g_ime_active = 0;
     g_ime_base_len = 0;
     g_ime_base[0] = 0;
+    rt_js_dispatch(rt, "input", rt->focus, 0, 0, NULL, 0, 0);
     return rt_render(rt);
 }
 
@@ -2577,8 +3031,19 @@ static hn_node *rt_focus_next(hn_rt *rt, int back) {
 }
 
 int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8) {
-    if (!rt || !down) return 0;
+    if (!rt) return 0;
     hn_node *target = rt->focus ? rt->focus : hn_doc_root(hn_context_doc(rt->ctx));
+    if (!down) {
+        /* keyup: 派发后无内建键语义(引擎只处理按下) */
+        rt_js_dispatch(rt, "keyup", target, 0, 0, utf8, key, 0);
+        return 0;
+    }
+    /* JS keydown: 焦点链冒泡派发(焦点→祖先→document→window)。IME 组字期间
+       不派发(组字由 IME 事件独占; 平台在组字期本就不发本路径, 这里双保险,
+       见 hnp_macos.c 的 IME 路由)。preventDefault → 跳过全部内建键行为
+       (插字符/删除/焦点轮换/hx 提交), 监听器可能已改文档, 重渲染后返回。 */
+    if (!g_ime_active && rt_js_dispatch(rt, "keydown", target, 0, 0, utf8, key, 0))
+        return rt_render(rt);
     if (key == HN_KT_RETURN) {
         /* textarea: 回车插入换行(浏览器语义); input: hx 提交 */
         if (rt->focus && hn_node_input_kind(rt->focus) == HN_IN_TEXTAREA)

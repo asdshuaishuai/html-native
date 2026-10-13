@@ -184,7 +184,8 @@ typedef struct {
     hn_context *ctx;
     int w, h;
     int transparent;
-    unsigned char *px;      /* hnsoft 输出 RGBA(非预乘) */
+    unsigned char *px;      /* hnsoft 输出 RGBA(非预乘; 复用缓冲, 只增不减) */
+    int px_cap;             /* px 复用槽容量(字节; hnsoft_render_reuse 维护) */
     unsigned char *bgra;    /* 预乘 BGRA(NSImage 需要) */
     obj_t win;
     obj_t iv;               /* NSImageView(内容视图) */
@@ -211,15 +212,18 @@ static void tb_metrics(void *ctx, const hn_font_desc *font,
     hnsoft_metrics(font, ascent, descent, leading);
 }
 
-/* 布局 + 光栅。清单声明透明时底色调全透明, 否则近黑夜色(与 hncore render 同口径)。 */
+/* 布局 + 光栅。清单声明透明时底色调全透明, 否则近黑夜色(与 hncore render 同口径)。
+   走 hnsoft_render_reuse 复用缓冲: 帧循环(动画/媒体页 16ms 一拍)每帧重渲染,
+   一次性 hnsoft_render 等于"每帧 malloc+free 一张全页位图"(~2MB × 帧率)的
+   分配器 churn。slot(px/px_cap)挂在 app_t 上随渲染器实例释放(main 收尾),
+   只增不减, 像素与一次性变体逐位一致。 */
 static int app_render(int w, int h) {
     hn_context_layout(g_app.ctx, (float)w, (float)h, &g_tb);
     const hn_display_list *dl = hn_context_display_list(g_app.ctx);
     if (!dl) return 0;
     hn_color bg = g_app.transparent ? 0x00000000u : 0x0B0E13FFu;
-    free(g_app.px);
-    g_app.px = hnsoft_render(dl, w, h, bg);
-    return g_app.px != NULL;
+    unsigned char *px = hnsoft_render_reuse(dl, w, h, bg, &g_app.px, &g_app.px_cap);
+    return px != NULL;   /* 失败时旧缓冲原地保留(契约), 但本帧不上屏 */
 }
 
 /* RGBA(非预乘) → BGRA 预乘(NSImage/CGImage 的 ARGB32 约定, 与 X11/
@@ -899,6 +903,8 @@ int main(int argc, char **argv) {
 
     surface_destroy();
     hn_context_destroy(ctx);
+    free(g_app.px);   /* 复用缓冲随渲染器实例释放(只增不减, 此处一次收口) */
+    g_app.px = NULL;
     free(html);
     free(css);
     return 0;

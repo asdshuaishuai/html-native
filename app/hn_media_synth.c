@@ -29,6 +29,9 @@ typedef struct {
     int    playing;
     float  vol;
     int    muted;
+    int    loop;       /* 显式 loop ABI 记账(与 vol/muted 同口径的声明落位;
+                          合成宿主无到尾通知可回绕, 循环仍由引擎状态机
+                          seek(0) 完成 —— 宿主侧纯存储, 供诊断/回读) */
     double last_pts;   /* frame() 判"新帧": pts 未变 → 0(内容未变) */
 } synth_media;
 
@@ -153,6 +156,13 @@ static void synth_set_muted(void *ctx, void *m, int muted) {
     if (m) ((synth_media *)m)->muted = muted ? 1 : 0;
 }
 
+/* 显式 loop ABI: 声明落位纯记账(见 synth_media.loop 字段注释) —— 合成宿主
+   的假时钟在 dur 处停住, 回绕由引擎状态机 seek(0) 完成, 这里恒不影响行为。 */
+static void synth_set_loop(void *ctx, void *m, int loop) {
+    (void)ctx;
+    if (m) ((synth_media *)m)->loop = loop ? 1 : 0;
+}
+
 static int synth_duration(void *ctx, void *m, double *sec) {
     (void)ctx;
     synth_media *s = (synth_media *)m;
@@ -223,7 +233,8 @@ static const hn_media_host g_synth_host = {
     synth_play, synth_pause, synth_seek,
     synth_set_volume, synth_set_muted,
     synth_duration, synth_position, synth_state,
-    synth_frame
+    synth_frame,
+    synth_set_loop
 };
 
 /* ---------------- 公开入口 ---------------- */

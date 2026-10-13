@@ -83,8 +83,10 @@ typedef enum hn_cmd_kind {
    source-over 缺省; 其余三档的像素公式(hnsoft 逐式实现, cairo 用原生
    算子映射): multiply = s·d, screen = s+d-s·d, lighter = 预乘加法钳制。
    未列出的模式引擎侧回落 source-over 并置一次性 stderr 提示。
-   注意: GPU 后端(hn_gpu.c)暂不消费 blend 字段 —— 含混合模式的帧在 GPU
-   宿主上按 source-over 呈现, 软件路径(hnsoft)为权威实现(见 openIssues)。 */
+   GPU 后端(hn_gpu.c v2 起)消费 blend 字段: draw_quads opts 直传, 固定
+   功能因子表在目标不透明时与 hnsoft 公式逐式等价(lighter 全域精确),
+   半透明目标是固定功能混合的结构性边界(推导见 hn_platform.h GPU 契约
+   段 draw_quads 注与 hnp_gpu_metal.c 因子表注)。 */
 enum {
     HN_BLEND_SRC_OVER = 0,
     HN_BLEND_LIGHTER  = 1,
@@ -241,6 +243,13 @@ typedef struct hn_media_host {
        pts_sec 写该帧显示时间戳(秒)。 */
     int   (*frame)(void *ctx, void *m, unsigned char *rgba, size_t cap,
                    int *w, int *h, double *pts_sec);
+    /* 声明 loop 属性显式落宿主(open 成功后与 set_volume/set_muted 同拍
+       调用; 可 NULL —— 旧宿主表缺此项时引擎跳过, 向后兼容)。
+       动机: 平台无 loop ABI 时, macOS 宿主只能靠"到尾通知后 1s 内收到
+       seek(0)"**推断** loop —— 自然到尾后 1s 内手动重播会被误闩成循环。
+       显式后: loop=1 的会话由宿主在到尾通知直接回绕(首圈即通知驱动);
+       引擎侧状态机回绕(seek(0) 保 PLAYING)仍是契约语义, 两者并存。 */
+    void  (*set_loop)(void *ctx, void *m, int loop);
 } hn_media_host;
 
 /* 注入媒体宿主(运行时持有表内存; NULL = 媒体禁用 —— 元素照常解析,

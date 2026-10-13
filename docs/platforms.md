@@ -24,7 +24,7 @@ Neb(NO-WEB)的跨平台策略不是"每个平台移植一遍", 而是**契约先
 | · x,y 开窗位(`hn-window WxH@x,y`) | ✅ 非 AUTO 即 `setFrameOrigin`(`hnp_macos.c:232`) | ✅ 非 AUTO 即 XMoveWindow(`hnp_linux.c:400`) | ❌ 无屏幕坐标 | ❌ 同上 |
 | · origin 读回(几何记忆的采样口, `hnp_window_origin`) | ✅(`hnp_macos.c:301`) | ✅ XTranslateCoordinates(`hnp_linux.c:472`) | ❌ 恒返 0, 调用方整段跳过(`hnp_headless.c:73`) | ❌ 同上 |
 | **媒体**(契约: `hn.h` `hn_media_host`; 装配: `app/hn_media_platform.c`; 合成替身单一来源: `app/hn_media_synth.c`) | | | | |
-| · 播放(<video>/<audio> 状态机出声/出帧) | ✅ AVFoundation 运行期 dlopen(`hnp_media_macos.c`, `supported()=1`) | ⚠️ synth 合成替身(梯度帧+假时钟, 确定性可断言; 真解码是路线图) | ⚠️ 同 Linux(synth) | ❌ 旧壳未装配宿主(c->media==NULL → 占位 RECT) |
+| · 播放(<video>/<audio> 状态机出声/出帧; loop 显式 ABI: 引擎 `set_loop` open 落宿主, 到尾通知直接回绕, 不再推断) | ✅ AVFoundation 运行期 dlopen(`hnp_media_macos.c`, `supported()=1`) | ⚠️ synth 合成替身(梯度帧+假时钟, 确定性可断言; 真解码是路线图) | ⚠️ 同 Linux(synth) | ❌ 旧壳未装配宿主(c->media==NULL → 占位 RECT) |
 | · 抽帧(`host.frame` → HN_CMD_BITMAP) | ✅ AVPlayer NV12→RGBA(`hnp_media_frame`) | ⚠️ synth 64x64 梯度帧 | ⚠️ 同 Linux | ❌ 无帧(占位) |
 | · 音频出声 | ✅ AVPlayer 直出 | ⚠️ synth 不出真声 | ⚠️ 同 Linux | ❌ |
 | **视频图层**(契约: `hn_platform.h` 尾部 `hnp_video_layer_attach/frame/detach`; 装配: 壳/hn_rt 媒体路径) | ✅ **AVPlayerLayer 原生图层直通**(`hnp_macos.c:450` attach/frame/detach): 解码帧由系统合成器直接合成, 像素不过 CPU; `media_window_probe` 实测图层模式 10s CPU 0.30 cores(硬线 <60%), `HN_MEDIA_LAYER=0` 退回 CPU 逐帧 | ✅ **Xv 原语就位**(`hnp_linux.c:889` libXv 运行期 dlopen: grab 端口 + XvImage 图层子窗 + XvPutImage 摆位; libXv 缺席/无端口 attach 返 0 → CPU 逐帧兜底); ⚠️ **行为级待验**(需 Linux+X11+libXv 主机; `linux_parity_check.sh` 到符号级) | ❌ 无表面(离屏路径恒 CPU 拉帧, 确定性口径) | ❌ 路线图 |

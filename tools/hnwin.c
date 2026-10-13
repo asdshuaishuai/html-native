@@ -174,7 +174,8 @@ typedef struct {
     hn_context *ctx;
     int w, h;               /* client 区尺寸(CSS px) */
     int transparent;        /* manifest: 逐像素 alpha 窗口 */
-    unsigned char *px;      /* hnsoft 输出的 RGBA 位图 */
+    unsigned char *px;      /* hnsoft 输出的 RGBA 位图(复用缓冲, 只增不减) */
+    int px_cap;             /* px 复用槽容量(字节; hnsoft_render_reuse 维护) */
     HBITMAP dib;            /* 不透明窗口用的 DIB section */
     unsigned char *dib_bits;
     hn_node *hover;         /* 当前 hover 元素(避免每像素重排) */
@@ -204,14 +205,28 @@ static void tb_metrics(void *ctx, const hn_font_desc *font,
     hnsoft_metrics(font, ascent, descent, leading);
 }
 
+/* 帧循环光栅(挂在 g_app.px/px_cap 复用槽上): hnsoft 走 hnsoft_render_reuse
+   —— 动画/媒体页 16ms 一拍, 一次性 hn_render_px(hnsoft_render) 等于"每帧
+   malloc+free 一张全页位图"的分配器 churn; 复用槽只增不减, 像素逐位一致。
+   cairo 后端暂无复用变体: 保底一次性路径(slot 归零, 下一帧重新起步),
+   像素与 hnsoft 同源(同一显示列表)。 */
+static unsigned char *app_raster(const hn_display_list *dl, int w, int h) {
+#ifdef HN_USE_CAIRO
+    free(g_app.px);
+    g_app.px = NULL;
+    g_app.px_cap = 0;
+    return hn_render_px(dl, w, h, 0x00000000);
+#else
+    return hnsoft_render_reuse(dl, w, h, 0x00000000, &g_app.px, &g_app.px_cap);
+#endif
+}
+
 /* 布局 + 软件光栅。宽高变化或内容变化后调用。 */
 static int app_render(int w, int h) {
     hn_context_layout(g_app.ctx, (float)w, (float)h, &g_tb);
     const hn_display_list *dl = hn_context_display_list(g_app.ctx);
     if (!dl) return 0;
-    free(g_app.px);
-    g_app.px = hn_render_px(dl, w, h, 0x00000000);
-    return g_app.px != NULL;
+    return app_raster(dl, w, h) != NULL;
 }
 
 /* RGBA(直通) → BGRA 预乘, 供 DIB / UpdateLayeredWindow 使用。
@@ -483,8 +498,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             float dy = (float)(-(short)HIWORD(wp) / WHEEL_DELTA * 48);
             if (hn_node_scroll_by(s, 0, dy)) {
                 hn_context_repaint(g_app.ctx);
-                free(g_app.px);
-                g_app.px = hn_render_px(hn_context_display_list(g_app.ctx), g_app.w, g_app.h, 0x00000000);
+                app_raster(hn_context_display_list(g_app.ctx), g_app.w, g_app.h);
                 app_present(hwnd);
             }
         }
@@ -504,8 +518,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         poll_tick();
         /* 过渡动画推进; 返回 1 表示仍在跑 —— 继续帧循环 */
         if (hn_context_anim_tick(g_app.ctx, 16.0f)) {
-            free(g_app.px);
-            g_app.px = hn_render_px(hn_context_display_list(g_app.ctx), g_app.w, g_app.h, 0x00000000);
+            app_raster(hn_context_display_list(g_app.ctx), g_app.w, g_app.h);
             app_present(hwnd);
         }
         return 0;

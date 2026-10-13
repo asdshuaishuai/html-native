@@ -64,9 +64,13 @@ static void sess_open(hn_context *c, hn_media_session *s) {
     }
     s->state = HN_MEDIA_LOADING;
     s->duration = -1;
-    /* 声明属性在 open 时落到宿主(音量/静音是宿主侧状态; loop 是引擎侧语义) */
+    /* 声明属性在 open 时落到宿主(音量/静音是宿主侧状态; loop 既是引擎侧
+       状态机语义, 也经显式 set_loop ABI 落宿主 —— 平台宿主按 loop=1 在到尾
+       通知直接回绕, 不再靠"到尾后 1s 内 seek(0)"的闩锁推断)。表项可缺
+       (旧宿主), 缺则跳过。 */
     if (c->media->set_volume) c->media->set_volume(c->media->ctx, s->handle, s->volume);
     if (c->media->set_muted)  c->media->set_muted(c->media->ctx, s->handle, s->muted);
+    if (c->media->set_loop)   c->media->set_loop(c->media->ctx, s->handle, s->loop);
 }
 
 /* 首次触达建会话; 无宿主/无 src 则 NULL(整套媒体代码路径零激活)。

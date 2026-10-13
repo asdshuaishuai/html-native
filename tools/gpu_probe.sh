@@ -17,8 +17,16 @@
 #   ③ readback 口径: 空白处像素 = 预乘底色字节(BGRA = b,g,r,a);
 #   ④ POLYGON 指令 → hn_gpu_available()==0(整帧回退判定), 且
 #      hn_gpu_render_scaled 拒绝(呼出方回退 hnsoft → 无伪影, 逐位一致);
+#      v2 回归: 含 MESH 的页同样整帧回退(位集不含);
 #   ⑤ QUAD(任意四顶点)可走 GPU 且与 hnsoft 色差同容差;
-#   ⑥ CPU 对照(信息值不判定): 同一页面 metal vs hnsoft 的 rusage 每帧耗时。
+#   ⑥ 混合模式四页(multiply/screen/lighter/source-over 各一): 重叠/非重叠
+#      采样点 GPU vs hnsoft 色差 ≤ 40/通道; hnsoft 各模式输出互异(测试有牙);
+#   ⑦ pattern 三页(repeat/repeat-x/no-repeat): 象限色块源图的平铺周期
+#      采样断言(带外像素 = 底色, 两路同判);
+#   ⑧ pdata 页: RGBA 块(脏矩形子区)贴入的像素断言;
+#   ⑨ cpath 裁剪页: 路径内/外像素断言(GPU 与 hnsoft 同判定);
+#   ⑩ CPU 对照(信息值不判定): 同页 metal vs hnsoft 的 rusage 每帧耗时
+#      (含混合页与 pattern 页)。
 #
 # 用法:
 #   bash tools/gpu_probe.sh                 跑全部断言(门禁口径)
@@ -205,6 +213,80 @@ static double ru_ms(void) {
          + (double)(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000.0;
 }
 
+/* ---- v2 断言助手(原始 hn_cmd 页: GPU 与 hnsoft 同一显示列表双渲染) ---- */
+
+/* 双路渲染: 返回非预乘 RGBA(gpu 失败 = NULL) */
+static int render_pair(const hn_display_list *dl,
+                       unsigned char **gpu, unsigned char **cpu) {
+    *gpu = NULL;
+    *cpu = NULL;
+    unsigned char *bgra = NULL;
+    if (!hn_gpu_render_scaled(dl, BW, BH, BG, 1.0f, &bgra) || !bgra) return 0;
+    *gpu = gpu_rgba(bgra, BW, BH);
+    free(bgra);
+    if (!*gpu) return 0;
+    *cpu = hnsoft_render_scaled(dl, BW, BH, BG, 1.0f);
+    return *cpu != NULL;
+}
+
+/* 采样点四通道最大差 */
+static int pt_diff(const unsigned char *a, const unsigned char *b, int x, int y) {
+    int worst = 0;
+    for (int ch = 0; ch < 4; ch++) {
+        int d = abs((int)a[(y * BW + x) * 4 + ch] - (int)b[(y * BW + x) * 4 + ch]);
+        if (d > worst) worst = d;
+    }
+    return worst;
+}
+
+/* 采样点与期望色(RGBA 非预乘)的距离 */
+static int pt_near(const unsigned char *px, int x, int y, unsigned rgba, int tol) {
+    int want[4] = { (int)((rgba >> 24) & 0xFF), (int)((rgba >> 16) & 0xFF),
+                    (int)((rgba >> 8) & 0xFF), (int)(rgba & 0xFF) };
+    for (int ch = 0; ch < 4; ch++) {
+        int d = abs((int)px[(y * BW + x) * 4 + ch] - want[ch]);
+        if (d > tol) return d;
+    }
+    return 0;
+}
+
+/* 原始 cmd 页的 CPU 对照计时(信息值): metal vs hnsoft ms/帧 */
+static void perf_cmds(const char *tag, const hn_display_list *dl) {
+    if (!hn_gpu_available(dl)) {
+        printf("  [perf] %s: 跳过(页不可走 GPU)\n", tag);
+        return;
+    }
+    enum { N = 120 };
+    double t0, t1;
+    unsigned char *b = NULL;
+    for (int i = 0; i < 5; i++) {   /* 预热(管线/纹理缓存) */
+        free(b);
+        b = NULL;
+        hn_gpu_render_scaled(dl, BW, BH, BG, 1.0f, &b);
+    }
+    free(b);
+    t0 = ru_ms();
+    for (int i = 0; i < N; i++) {
+        b = NULL;
+        hn_gpu_render_scaled(dl, BW, BH, BG, 1.0f, &b);
+        free(b);
+    }
+    t1 = ru_ms();
+    double gpu_ms = (t1 - t0) / N;
+    for (int i = 0; i < 5; i++) {
+        unsigned char *r = hnsoft_render_scaled(dl, BW, BH, BG, 1.0f);
+        free(r);
+    }
+    t0 = ru_ms();
+    for (int i = 0; i < N; i++) {
+        unsigned char *r = hnsoft_render_scaled(dl, BW, BH, BG, 1.0f);
+        free(r);
+    }
+    t1 = ru_ms();
+    printf("  [perf] %s: metal=%.3f ms/帧 vs hnsoft=%.3f ms/帧(信息值不判定)\n",
+           tag, gpu_ms, (t1 - t0) / N);
+}
+
 int main(int argc, char **argv) {
     const char *png_dir = argc > 1 ? argv[1] : NULL;
     printf("%s: GPU 渲染后端 v1(Metal)探针\n", BANNER);
@@ -362,8 +444,509 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* ---- ⑥ CPU 对照(信息值): 同页 metal vs hnsoft 每帧耗时 ---- */
+    /* ---- ④b v2 回退回归: 含 MESH 的页仍整帧回退(位集不含) ---- */
     {
+        hn_cmd cmds[2];
+        hn_display_list m;
+        float mv[12] = { 0 };
+        memset(cmds, 0, sizeof(cmds));
+        cmds[0].kind = HN_CMD_RECT;
+        cmds[0].x = 10; cmds[0].y = 10; cmds[0].w = 50; cmds[0].h = 40;
+        cmds[0].fill = 0xFF3B30FF;
+        cmds[1].kind = HN_CMD_MESH;
+        cmds[1].mesh_verts = mv;
+        cmds[1].mesh_uv = mv;
+        cmds[1].mesh_cols = 1;
+        cmds[1].mesh_rows = 1;
+        m.cmds = cmds;
+        m.count = 2;
+        char msg[128];
+        snprintf(msg, sizeof(msg), "mixed(RECT+MESH) available=%d(期望 0)", hn_gpu_available(&m));
+        ck(hn_gpu_available(&m) == 0, "MESH 页整帧回退判定(v2 回归)", msg);
+        unsigned char *out = NULL;
+        int rejected = !hn_gpu_render_scaled(&m, 64, 64, BG, 1.0f, &out);
+        free(out);
+        ck(rejected, "MESH 页 render 拒绝(整帧回退 hnsoft)",
+           rejected ? "render 返回 0" : "render 竟然成功");
+    }
+
+    /* ---- ⑥ 混合模式四页(multiply/screen/lighter/source-over 各一) ----
+       页面: 不透明底色上不透明红盒 + 50% 蓝盒(带 blend) —— 重叠区目标
+       不透明 = 契约等价换算的封闭域(推导见 hn_platform.h draw_quads 注),
+       采样点 GPU vs hnsoft ≤ 40/通道(预期 0-1); 另断言 hnsoft 各模式
+       输出互异(证明断言有牙 —— GPU 若把 blend 当 source-over 画立刻超差)。 */
+    {
+        const int modes[4] = { HN_BLEND_MULTIPLY, HN_BLEND_SCREEN,
+                               HN_BLEND_LIGHTER, HN_BLEND_SRC_OVER };
+        const char *mnames[4] = { "multiply", "screen", "lighter", "source-over" };
+        unsigned ov_hnsoft[4] = { 0 };
+        int ox = 80, oy = 50;   /* 重叠区采样点(红盒∩蓝盒内部) */
+        for (int mi = 0; mi < 4; mi++) {
+            hn_cmd cmds[2];
+            hn_display_list m;
+            memset(cmds, 0, sizeof(cmds));
+            cmds[0].kind = HN_CMD_RECT;
+            cmds[0].x = 10; cmds[0].y = 10; cmds[0].w = 100; cmds[0].h = 80;
+            cmds[0].fill = 0xFF3B30FF;                    /* 不透明红 */
+            cmds[1].kind = HN_CMD_RECT;
+            cmds[1].x = 60; cmds[1].y = 30; cmds[1].w = 120; cmds[1].h = 90;
+            cmds[1].fill = 0x3D74FF80;                    /* 50% 蓝 */
+            cmds[1].blend = (unsigned char)modes[mi];
+            m.cmds = cmds;
+            m.count = 2;
+            if (!hn_gpu_available(&m)) { ck(0, mnames[mi], "available==0(应支持)"); continue; }
+            unsigned char *gpu, *cpu;
+            if (!render_pair(&m, &gpu, &cpu)) { ck(0, mnames[mi], "渲染失败"); continue; }
+            int d_ov = pt_diff(cpu, gpu, ox, oy);         /* 重叠区(目标不透明) */
+            int d_bonly = pt_diff(cpu, gpu, 150, 110);    /* 蓝独占区(底色上) */
+            int d_ronly = pt_diff(cpu, gpu, 30, 20);      /* 红独占区(混合外) */
+            int fullmax = 0;
+            for (int i = 0; i < BW * BH * 4; i++) {
+                int d = abs((int)cpu[i] - (int)gpu[i]);
+                if (d > fullmax) fullmax = d;
+            }
+            ov_hnsoft[mi] = ((unsigned)cpu[(oy * BW + ox) * 4] << 24)
+                          | ((unsigned)cpu[(oy * BW + ox) * 4 + 1] << 16)
+                          | ((unsigned)cpu[(oy * BW + ox) * 4 + 2] << 8)
+                          | (unsigned)cpu[(oy * BW + ox) * 4 + 3];
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "重叠=%d 蓝独占=%d 红独占=%d 全幅max=%d(容差40)", d_ov, d_bonly, d_ronly, fullmax);
+            ck(d_ov <= 40 && d_bonly <= 40 && d_ronly <= 40,
+               mnames[mi], msg);
+            free(gpu);
+            free(cpu);
+        }
+        /* 有牙: hnsoft 的 multiply/screen/lighter 重叠区与 source-over 互异 */
+        int teeth = 1;
+        for (int mi = 0; mi < 3; mi++) {
+            int diff = 0;
+            for (int ch = 0; ch < 4; ch++) {
+                int a = (int)((ov_hnsoft[mi] >> (24 - ch * 8)) & 0xFF);
+                int b = (int)((ov_hnsoft[3] >> (24 - ch * 8)) & 0xFF);
+                int d = abs(a - b);
+                if (d > diff) diff = d;
+            }
+            if (diff < 8) teeth = 0;
+        }
+        ck(teeth, "混合模式断言有牙(hnsoft 各模式重叠区互异)",
+           teeth ? "multiply/screen/lighter 均偏离 source-over ≥8/通道" : "有模式与 source-over 撞色");
+    }
+
+    /* ---- ⑦ pattern 三页(repeat/repeat-x/no-repeat) ----
+       源图 = 64×64 四象限色块(TL 红/TR 绿/BL 蓝/BR 黄), 锚点 = 画布原点
+       (0,0)。断言: 平铺周期采样点(首瓦片四象限 + 跨瓦片折回)+ 覆盖带外
+       像素 = 底色(repeat-x 纵越界 / no-repeat 双轴越界, GPU 与 hnsoft
+       同判)。容差 ±40/通道(既有口径; 预期 0-1 —— 1:1 平铺文素精确)。 */
+    {
+        char quad_path[1024];
+        if (png_dir) snprintf(quad_path, sizeof(quad_path), "%s/gp64quad.png", png_dir);
+        else snprintf(quad_path, sizeof(quad_path), "/tmp/hn_gpu_probe_gp64quad.png");
+        {
+            unsigned char *px = (unsigned char *)malloc(64 * 64 * 4);
+            for (int y = 0; y < 64; y++)
+                for (int x = 0; x < 64; x++) {
+                    /* RGBA 字节序逐字节写(hn_png/hnsoft 口径; 不按机器序
+                       整块 memcpy —— 小端下会把 R 与 A 对调) */
+                    unsigned c = (x < 32 ? (y < 32 ? 0xD94848FFu : 0x3D74FFFFu)
+                                         : (y < 32 ? 0x2ECC71FFu : 0xFFD60AFFu));
+                    unsigned char *p = px + ((size_t)y * 64 + x) * 4;
+                    p[0] = (unsigned char)((c >> 24) & 0xFF);
+                    p[1] = (unsigned char)((c >> 16) & 0xFF);
+                    p[2] = (unsigned char)((c >> 8) & 0xFF);
+                    p[3] = (unsigned char)(c & 0xFF);
+                }
+            size_t pn = 0;
+            unsigned char *png = hnsoft_encode_png(px, 64, 64, &pn);
+            FILE *f = fopen(quad_path, "wb");
+            if (!png || !f) { printf("  [FAIL] pattern 测试图片写盘失败\n"); return 1; }
+            fwrite(png, 1, pn, f);
+            fclose(f);
+            free(png);
+            free(px);
+        }
+        const int reps[3] = { HN_PAT_REPEAT, HN_PAT_REPEAT_X, HN_PAT_NONE };
+        const char *rnames[3] = { "pattern repeat", "pattern repeat-x", "pattern no-repeat" };
+        /* 采样表: x, y, 期望色(平铺折回后的象限色 / BG = 带外) */
+        const struct { int x, y; unsigned want; const char *tag; } PT[3][6] = {
+            { /* repeat: 四象限 + 双轴折回 */
+              { 12,  12, 0xD94848FFu, "TL" }, { 44,  12, 0x2ECC71FFu, "TR" },
+              { 12,  44, 0x3D74FFFFu, "BL" }, { 44,  44, 0xFFD60AFFu, "BR" },
+              { 76,  76, 0xD94848FFu, "折回TL" }, { 140, 108, 0x3D74FFFFu, "折回BL" } },
+            { /* repeat-x: 纵带 [0,64) 内平铺, 带外 = 底色 */
+              { 12,  12, 0xD94848FFu, "TL" }, { 44,  44, 0xFFD60AFFu, "BR" },
+              { 76,  12, 0xD94848FFu, "横折回" }, { 12,  80, 0x00000000u, "带外=底色" },
+              { 44,  40, 0xFFD60AFFu, "BR2" }, { 172, 30, 0x2ECC71FFu, "TR折回" } },
+            { /* no-repeat: 只画源矩形投影 (0..64)², 之外 = 底色 */
+              { 12,  12, 0xD94848FFu, "TL" }, { 44,  44, 0xFFD60AFFu, "BR" },
+              { 76,  12, 0x00000000u, "x越界" }, { 12,  80, 0x00000000u, "y越界" },
+              { 30,  60, 0x3D74FFFFu, "BL" }, { 60,  60, 0xFFD60AFFu, "BR2" } },
+        };
+        for (int ri = 0; ri < 3; ri++) {
+            hn_cmd c;
+            hn_display_list m;
+            memset(&c, 0, sizeof(c));
+            c.kind = HN_CMD_PATTERN;
+            c.text = quad_path;
+            c.pattern_rep = (unsigned char)reps[ri];
+            c.pat_ox = 0; c.pat_oy = 0;               /* 锚点 = 画布原点 */
+            c.x = 10; c.y = 10; c.w = 200; c.h = 120;
+            m.cmds = &c;
+            m.count = 1;
+            if (!hn_gpu_available(&m)) { ck(0, rnames[ri], "available==0(应支持)"); continue; }
+            unsigned char *gpu, *cpu;
+            if (!render_pair(&m, &gpu, &cpu)) { ck(0, rnames[ri], "渲染失败"); continue; }
+            int worst = 0, worst_at = -1, want_fail = 0;
+            for (int pi = 0; pi < 6; pi++) {
+                int d = pt_diff(cpu, gpu, PT[ri][pi].x, PT[ri][pi].y);
+                if (d > worst) { worst = d; worst_at = pi; }
+                if (PT[ri][pi].want == 0x00000000u) {
+                    /* 带外: 两路都应是底色(对 hnsoft 权威判定) */
+                    int db = pt_near(cpu, PT[ri][pi].x, PT[ri][pi].y, BG, 8)
+                           + pt_near(gpu, PT[ri][pi].x, PT[ri][pi].y, BG, 40);
+                    if (db > 48) want_fail = 1;
+                } else if (pt_near(cpu, PT[ri][pi].x, PT[ri][pi].y, PT[ri][pi].want, 40)) {
+                    want_fail = 1;   /* hnsoft 自身就该是象限色(采样表对表) */
+                }
+            }
+            char msg[160];
+            snprintf(msg, sizeof(msg), "最大色差=%d/255(@%s) 采样表=%s(容差40)",
+                     worst, worst_at >= 0 ? PT[ri][worst_at].tag : "?",
+                     want_fail ? "MISMATCH" : "ok");
+            ck(worst <= 40 && !want_fail, rnames[ri], msg);
+            free(gpu);
+            free(cpu);
+        }
+    }
+
+    /* ---- ⑧ pdata 页(putImageData 块 + 脏矩形子区贴入) ---- */
+    {
+        /* 32×20 RGBA 块: 左 16 列红 / 右 16 列绿(全不透明; 逐字节 RGBA) */
+        static unsigned char blk[32 * 20 * 4];
+        for (int y = 0; y < 20; y++)
+            for (int x = 0; x < 32; x++) {
+                unsigned c = x < 16 ? 0xD94848FFu : 0x2ECC71FFu;
+                unsigned char *p = blk + ((size_t)y * 32 + x) * 4;
+                p[0] = (unsigned char)((c >> 24) & 0xFF);
+                p[1] = (unsigned char)((c >> 16) & 0xFF);
+                p[2] = (unsigned char)((c >> 8) & 0xFF);
+                p[3] = (unsigned char)(c & 0xFF);
+            }
+        hn_cmd c;
+        hn_display_list m;
+        memset(&c, 0, sizeof(c));
+        c.kind = HN_CMD_PDATA;
+        c.bitmap = blk;
+        c.bitmap_stride = 32 * 4;
+        c.bitmap_w = 32;
+        c.bitmap_h = 20;
+        c.x = 40; c.y = 30; c.w = 16; c.h = 10;      /* 脏矩形 1:1 贴入 */
+        c.isx = 4; c.isy = 2; c.isw = 16; c.ish = 10;
+        c.has_isrc = 1;
+        m.cmds = &c;
+        m.count = 1;
+        if (hn_gpu_available(&m)) {
+            unsigned char *gpu, *cpu;
+            if (render_pair(&m, &gpu, &cpu)) {
+                int d1 = pt_diff(cpu, gpu, 45, 34);   /* 块内红列(9,2) */
+                int d2 = pt_diff(cpu, gpu, 52, 34);   /* 块内绿列(16,2) */
+                int d3 = pt_diff(cpu, gpu, 55, 39);   /* 块内绿列(19,9) */
+                int o1 = pt_near(cpu, 38, 34, BG, 8) + pt_near(gpu, 38, 34, BG, 40);
+                int o2 = pt_near(cpu, 45, 41, BG, 8) + pt_near(gpu, 45, 41, BG, 40);
+                int r_ok = !pt_near(cpu, 45, 34, 0xD94848FFu, 40)
+                        && !pt_near(gpu, 45, 34, 0xD94848FFu, 40);
+                int g_ok = !pt_near(cpu, 52, 34, 0x2ECC71FFu, 40)
+                        && !pt_near(gpu, 52, 34, 0x2ECC71FFu, 40);
+                char msg[160];
+                snprintf(msg, sizeof(msg),
+                         "块内差=%d/%d/%d 带外底色=%s 象限色=%s(容差40)",
+                         d1, d2, d3, (o1 <= 48 && o2 <= 48) ? "ok" : "MISMATCH",
+                         (r_ok && g_ok) ? "ok" : "MISMATCH");
+                ck(d1 <= 40 && d2 <= 40 && d3 <= 40 && o1 <= 48 && o2 <= 48 && r_ok && g_ok,
+                   "pdata 块贴入(脏矩形子区)", msg);
+            } else {
+                ck(0, "pdata 块贴入(脏矩形子区)", "渲染失败");
+            }
+            free(gpu);
+            free(cpu);
+        } else {
+            ck(0, "pdata 块贴入(脏矩形子区)", "available==0(应支持)");
+        }
+    }
+
+    /* ---- ⑨ cpath 裁剪页(路径内/外像素断言, GPU 与 hnsoft 同判定) ---- */
+    {
+        float tri[6] = { 30, 20, 210, 60, 60, 140 };   /* 非零环绕单多边形 */
+        hn_cmd cmds[4];
+        hn_display_list m;
+        memset(cmds, 0, sizeof(cmds));
+        cmds[0].kind = HN_CMD_RECT;
+        cmds[0].x = 10; cmds[0].y = 10; cmds[0].w = 220; cmds[0].h = 140;
+        cmds[0].fill = 0x30D5C8FF;                    /* 裁剪下的内容(青) */
+        cmds[1].kind = HN_CMD_CLIP_PATH_PUSH;
+        cmds[1].poly = tri;
+        cmds[1].poly_n = 3;
+        cmds[2].kind = HN_CMD_RECT;
+        cmds[2].x = 10; cmds[2].y = 10; cmds[2].w = 220; cmds[2].h = 140;
+        cmds[2].fill = 0xFFD60AFF;                    /* 被裁的黄 */
+        cmds[3].kind = HN_CMD_CLIP_POP;
+        m.cmds = cmds;
+        m.count = 4;
+        if (hn_gpu_available(&m)) {
+            unsigned char *gpu, *cpu;
+            if (render_pair(&m, &gpu, &cpu)) {
+                /* 质心(100,73)在三角形内 = 黄; (15,15)在矩形不在路径 = 青;
+                   (235,155)在盒外 = 底色 —— 两路同判 */
+                int d_in = pt_diff(cpu, gpu, 100, 73);
+                int d_out = pt_diff(cpu, gpu, 15, 15);
+                int d_bg = pt_diff(cpu, gpu, 235, 155);
+                int in_ok = !pt_near(cpu, 100, 73, 0xFFD60AFFu, 40)
+                         && !pt_near(gpu, 100, 73, 0xFFD60AFFu, 40);
+                int out_ok = !pt_near(cpu, 15, 15, 0x30D5C8FFu, 40)
+                          && !pt_near(gpu, 15, 15, 0x30D5C8FFu, 40);
+                int bg_ok = !pt_near(cpu, 235, 155, BG, 8)
+                         && !pt_near(gpu, 235, 155, BG, 40);
+                int fullmax = 0;
+                for (int i = 0; i < BW * BH * 4; i++) {
+                    int d = abs((int)cpu[i] - (int)gpu[i]);
+                    if (d > fullmax) fullmax = d;
+                }
+                char msg[160];
+                snprintf(msg, sizeof(msg),
+                         "内=%d 外=%d 盒外=%d 全幅max=%d 判定=%s/%s/%s(容差40)",
+                         d_in, d_out, d_bg, fullmax,
+                         in_ok ? "内黄ok" : "内MISMATCH",
+                         out_ok ? "外青ok" : "外MISMATCH",
+                         bg_ok ? "底ok" : "底MISMATCH");
+                ck(d_in <= 40 && d_out <= 40 && d_bg <= 40 && in_ok && out_ok && bg_ok,
+                   "cpath 精确裁剪(非零环绕)", msg);
+            } else {
+                ck(0, "cpath 精确裁剪(非零环绕)", "渲染失败");
+            }
+            free(gpu);
+            free(cpu);
+        } else {
+            ck(0, "cpath 精确裁剪(非零环绕)", "available==0(应支持)");
+        }
+    }
+
+    /* ---- ⑨b 路径层上叠矩形裁剪(掩码跨层存活): 栈 [cpath, clip, ...] ----
+       hnsoft 逐层判定(多边形层 + 矩形层同时生效); GPU 侧掩码绑定必须
+       跨矩形层存活(最近路径层搜索)。序: 橙画在 路径∩矩形(矩形还开着) →
+       弹矩形层 → 黄画在整条路径内(掩码必须还在) —— 路径∩矩形 = 橙,
+       路径独占 = 黄, 路径外 = 青。 */
+    {
+        float tri[6] = { 30, 20, 210, 60, 60, 140 };
+        hn_cmd cmds[6];
+        memset(cmds, 0, sizeof(cmds));
+        cmds[0].kind = HN_CMD_RECT;
+        cmds[0].x = 10; cmds[0].y = 10; cmds[0].w = 220; cmds[0].h = 140;
+        cmds[0].fill = 0x30D5C8FF;
+        cmds[1].kind = HN_CMD_CLIP_PATH_PUSH;
+        cmds[1].poly = tri;
+        cmds[1].poly_n = 3;
+        cmds[2].kind = HN_CMD_CLIP_PUSH;              /* 路径层上叠矩形层 */
+        cmds[2].x = 50; cmds[2].y = 40; cmds[2].w = 120; cmds[2].h = 90;
+        cmds[3].kind = HN_CMD_RECT;
+        cmds[3].x = 10; cmds[3].y = 10; cmds[3].w = 220; cmds[3].h = 140;
+        cmds[3].fill = 0xFF9F0AFF;                    /* 路径∩矩形 = 橙 */
+        cmds[4].kind = HN_CMD_CLIP_POP;               /* 弹矩形层(路径层仍开) */
+        cmds[5].kind = HN_CMD_RECT;
+        cmds[5].x = 10; cmds[5].y = 100; cmds[5].w = 220; cmds[5].h = 50;
+        cmds[5].fill = 0xFFD60AFF;                    /* 只剩路径层(下半): 黄
+                                                         —— 不覆盖 ∩ 区的橙 */
+        hn_display_list m = { cmds, 6 };
+        if (hn_gpu_available(&m)) {
+            unsigned char *gpu, *cpu;
+            if (render_pair(&m, &gpu, &cpu)) {
+                int d1 = pt_diff(cpu, gpu, 100, 73);  /* 路径∩矩形 = 橙 */
+                int d2 = pt_diff(cpu, gpu, 63, 135);  /* 路径内矩形外 = 黄 */
+                int d3 = pt_diff(cpu, gpu, 15, 15);   /* 路径外 = 青 */
+                int o_ok = !pt_near(cpu, 100, 73, 0xFF9F0AFFu, 40)
+                        && !pt_near(gpu, 100, 73, 0xFF9F0AFFu, 40);
+                int y_ok = !pt_near(cpu, 63, 135, 0xFFD60AFFu, 40)
+                        && !pt_near(gpu, 63, 135, 0xFFD60AFFu, 40);
+                int t_ok = !pt_near(cpu, 15, 15, 0x30D5C8FFu, 40)
+                        && !pt_near(gpu, 15, 15, 0x30D5C8FFu, 40);
+                char msg[160];
+                snprintf(msg, sizeof(msg), "路径∩矩形=%d 路径独占=%d 路径外=%d 判定=%s/%s/%s",
+                         d1, d2, d3,
+                         o_ok ? "橙ok" : "橙MISMATCH",
+                         y_ok ? "黄ok" : "黄MISMATCH",
+                         t_ok ? "青ok" : "青MISMATCH");
+                ck(d1 <= 40 && d2 <= 40 && d3 <= 40 && o_ok && y_ok && t_ok,
+                   "cpath+clip 叠栈(掩码跨层存活)", msg);
+            } else {
+                ck(0, "cpath+clip 叠栈(掩码跨层存活)", "渲染失败");
+            }
+            free(gpu);
+            free(cpu);
+        } else {
+            ck(0, "cpath+clip 叠栈(掩码跨层存活)", "available==0(应支持)");
+        }
+    }
+
+    /* ---- ⑨c 多子路径 cpath(segs 点数表, 子路径各自闭合) ----
+       两个不相交三角形 = 一条 CLIP_PATH_PUSH(segs=[3,3]): 任一三角形内
+       = 黄, 两形之间 = 青。覆盖 path_mask_raster 的 segs 分段闭合边。 */
+    {
+        float two[12] = { 30, 20, 100, 30, 50, 80,     /* 子路径 1: 左上三角 */
+                          150, 60, 210, 130, 130, 130 }; /* 子路径 2: 右下三角 */
+        int segs[2] = { 3, 3 };
+        hn_cmd cmds[4];
+        memset(cmds, 0, sizeof(cmds));
+        cmds[0].kind = HN_CMD_RECT;
+        cmds[0].x = 10; cmds[0].y = 10; cmds[0].w = 220; cmds[0].h = 140;
+        cmds[0].fill = 0x30D5C8FF;
+        cmds[1].kind = HN_CMD_CLIP_PATH_PUSH;
+        cmds[1].poly = two;
+        cmds[1].poly_n = 6;
+        cmds[1].clip_segs = segs;
+        cmds[1].clip_nsegs = 2;
+        cmds[2].kind = HN_CMD_RECT;
+        cmds[2].x = 10; cmds[2].y = 10; cmds[2].w = 220; cmds[2].h = 140;
+        cmds[2].fill = 0xFFD60AFF;
+        cmds[3].kind = HN_CMD_CLIP_POP;
+        hn_display_list m = { cmds, 4 };
+        if (hn_gpu_available(&m)) {
+            unsigned char *gpu, *cpu;
+            if (render_pair(&m, &gpu, &cpu)) {
+                int d1 = pt_diff(cpu, gpu, 55, 40);    /* 子路径 1 内 = 黄 */
+                int d2 = pt_diff(cpu, gpu, 165, 105);  /* 子路径 2 内 = 黄 */
+                int d3 = pt_diff(cpu, gpu, 110, 90);   /* 两形之间 = 青 */
+                int in1 = !pt_near(cpu, 55, 40, 0xFFD60AFFu, 40)
+                       && !pt_near(gpu, 55, 40, 0xFFD60AFFu, 40);
+                int in2 = !pt_near(cpu, 165, 105, 0xFFD60AFFu, 40)
+                       && !pt_near(gpu, 165, 105, 0xFFD60AFFu, 40);
+                int mid = !pt_near(cpu, 110, 90, 0x30D5C8FFu, 40)
+                       && !pt_near(gpu, 110, 90, 0x30D5C8FFu, 40);
+                char msg[160];
+                snprintf(msg, sizeof(msg), "子路径1=%d 子路径2=%d 形间=%d 判定=%s/%s/%s",
+                         d1, d2, d3,
+                         in1 ? "黄ok" : "黄MISMATCH",
+                         in2 ? "黄ok" : "黄MISMATCH",
+                         mid ? "青ok" : "青MISMATCH");
+                ck(d1 <= 40 && d2 <= 40 && d3 <= 40 && in1 && in2 && mid,
+                   "cpath 多子路径(segs 分段)", msg);
+            } else {
+                ck(0, "cpath 多子路径(segs 分段)", "渲染失败");
+            }
+            free(gpu);
+            free(cpu);
+        } else {
+            ck(0, "cpath 多子路径(segs 分段)", "available==0(应支持)");
+        }
+    }
+
+    /* ---- ⑨d ppath(pattern 多边形目标 = 掩码基建共用) ----
+       象限色块 repeat 平铺 + 三角形目标: 形内 = 平铺象限色, 形外 = 底色。 */
+    {
+        char quad_path[1024];
+        if (png_dir) snprintf(quad_path, sizeof(quad_path), "%s/gp64quad.png", png_dir);
+        else snprintf(quad_path, sizeof(quad_path), "/tmp/hn_gpu_probe_gp64quad.png");
+        float tri[6] = { 30, 20, 210, 40, 80, 140 };
+        hn_cmd c;
+        memset(&c, 0, sizeof(c));
+        c.kind = HN_CMD_PATTERN;
+        c.text = quad_path;
+        c.pattern_rep = HN_PAT_REPEAT;
+        c.pat_ox = 0;
+        c.pat_oy = 0;
+        c.poly = tri;
+        c.poly_n = 3;
+        hn_display_list m = { &c, 1 };
+        if (hn_gpu_available(&m)) {
+            unsigned char *gpu, *cpu;
+            if (render_pair(&m, &gpu, &cpu)) {
+                int d1 = pt_diff(cpu, gpu, 40, 30);    /* 形内(第一瓦 TR 绿) */
+                int d2 = pt_diff(cpu, gpu, 60, 50);    /* 形内(BR 黄) */
+                int d3 = pt_diff(cpu, gpu, 15, 100);   /* 形外 = 底色 */
+                int in1 = !pt_near(cpu, 40, 30, 0x2ECC71FFu, 40)
+                       && !pt_near(gpu, 40, 30, 0x2ECC71FFu, 40);
+                int in2 = !pt_near(cpu, 60, 50, 0xFFD60AFFu, 40)
+                       && !pt_near(gpu, 60, 50, 0xFFD60AFFu, 40);
+                int out = !pt_near(cpu, 15, 100, BG, 8)
+                       && !pt_near(gpu, 15, 100, BG, 40);
+                char msg[160];
+                snprintf(msg, sizeof(msg), "形内=%d/%d 形外=%d 判定=%s/%s/%s",
+                         d1, d2, d3,
+                         in1 ? "绿ok" : "绿MISMATCH",
+                         in2 ? "黄ok" : "黄MISMATCH",
+                         out ? "底ok" : "底MISMATCH");
+                ck(d1 <= 40 && d2 <= 40 && d3 <= 40 && in1 && in2 && out,
+                   "ppath pattern 多边形目标(掩码)", msg);
+            } else {
+                ck(0, "ppath pattern 多边形目标(掩码)", "渲染失败");
+            }
+            free(gpu);
+            free(cpu);
+        } else {
+            ck(0, "ppath pattern 多边形目标(掩码)", "available==0(应支持)");
+        }
+    }
+
+    /* ---- ⑩ CPU 对照(信息值): 同页 metal vs hnsoft 每帧耗时 ----
+       基线页(既有)之外追混合页与 pattern 页(v2 新消费路径的对照)。 */
+    {
+        /* 混合页: 大盒 multiply 两层(重叠区大, 混合逐像素工作量可观) */
+        hn_cmd bcmds[3];
+        hn_display_list bm;
+        memset(bcmds, 0, sizeof(bcmds));
+        bcmds[0].kind = HN_CMD_RECT;
+        bcmds[0].x = 0; bcmds[0].y = 0; bcmds[0].w = BW; bcmds[0].h = BH;
+        bcmds[0].fill = 0x30D5C8FF;
+        bcmds[1].kind = HN_CMD_RECT;
+        bcmds[1].x = 0; bcmds[1].y = 0; bcmds[1].w = BW; bcmds[1].h = BH;
+        bcmds[1].fill = 0xD94848C0u;
+        bcmds[1].blend = HN_BLEND_MULTIPLY;
+        bcmds[2].kind = HN_CMD_RECT;
+        bcmds[2].x = 30; bcmds[2].y = 20; bcmds[2].w = BW - 60; bcmds[2].h = BH - 40;
+        bcmds[2].fill = 0x3D74FF80u;
+        bcmds[2].blend = HN_BLEND_SCREEN;
+        bm.cmds = bcmds;
+        bm.count = 3;
+        perf_cmds("混合页(全幅 multiply+screen)", &bm);
+
+        /* pattern 页(repeat 平铺 200×120) */
+        {
+            char quad_path[1024];
+            if (png_dir) snprintf(quad_path, sizeof(quad_path), "%s/gp64quad.png", png_dir);
+            else snprintf(quad_path, sizeof(quad_path), "/tmp/hn_gpu_probe_gp64quad.png");
+            hn_cmd pc;
+            hn_display_list pm;
+            memset(&pc, 0, sizeof(pc));
+            pc.kind = HN_CMD_PATTERN;
+            pc.text = quad_path;
+            pc.pattern_rep = HN_PAT_REPEAT;
+            pc.pat_ox = 0;
+            pc.pat_oy = 0;
+            pc.x = 10; pc.y = 10; pc.w = 200; pc.h = 120;
+            pm.cmds = &pc;
+            pm.count = 1;
+            perf_cmds("pattern 页(repeat 平铺)", &pm);
+        }
+
+        /* cpath 页(掩码栅格每帧重算 —— 成本口径的信息值) */
+        {
+            float tri[6] = { 30, 20, 210, 60, 60, 140 };
+            hn_cmd cc[4];
+            hn_display_list cm;
+            memset(cc, 0, sizeof(cc));
+            cc[0].kind = HN_CMD_RECT;
+            cc[0].x = 10; cc[0].y = 10; cc[0].w = 220; cc[0].h = 140;
+            cc[0].fill = 0x30D5C8FF;
+            cc[1].kind = HN_CMD_CLIP_PATH_PUSH;
+            cc[1].poly = tri;
+            cc[1].poly_n = 3;
+            cc[2].kind = HN_CMD_RECT;
+            cc[2].x = 10; cc[2].y = 10; cc[2].w = 220; cc[2].h = 140;
+            cc[2].fill = 0xFFD60AFF;
+            cc[3].kind = HN_CMD_CLIP_POP;
+            cm.cmds = cc;
+            cm.count = 4;
+            perf_cmds("cpath 页(掩码栅格)", &cm);
+        }
+
         dl = layout(
             "<html><body style=\"background:#0B0E13\">"
             "<div style=\"position:absolute;left:10px;top:10px;width:80px;height:60px;background:#FF3B30\"></div>"

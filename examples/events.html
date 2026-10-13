@@ -1,9 +1,3 @@
-<!--
-  ⚠️ 状态(2026-10): 本页演示的 JS addEventListener/keydown 监听属于
-  **路线图**能力 —— C99/QuickJS 桥当前未接 JS 事件派发(hx-* 声明式
-  交互可用, 键鼠事件走 hx-trigger)。本页保留为路线图目标形态,
-  直接渲染时脚本会报 TypeError(不发生崩溃, 但交互不生效)。
--->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -36,7 +30,7 @@ kbd { background: #ffffff12; border: 1 solid var(--line); border-radius: 5;
     <div class="hint">键盘事件冒泡 · JS 监听 · hx 声明的 hover/focus</div>
   </div>
 
-  <!-- 键盘事件: 按任意键记录 -->
+  <!-- 键盘事件: document 级监听(按键沿焦点链冒泡到 document) -->
   <div>
     <div class="hint" style="margin-bottom:5">按任意键(试试方向键 / Enter / Shift+A)</div>
     <div id="keys">等待按键…</div>
@@ -64,8 +58,8 @@ kbd { background: #ffffff12; border: 1 solid var(--line); border-radius: 5;
 </div>
 
 <script>
-  // 键盘事件: 展示 key / 修饰键 / 键码
-  document.getElementById('keys').addEventListener('keydown', function (e) {
+  // 键盘事件: document 级 addEventListener; 事件对象带 key/code/修饰键
+  document.addEventListener('keydown', function (e) {
     var mods = [];
     if (e.shift) mods.push('Shift');
     if (e.ctrl) mods.push('Ctrl');
@@ -73,15 +67,18 @@ kbd { background: #ffffff12; border: 1 solid var(--line); border-radius: 5;
     if (e.meta) mods.push('Cmd');
     document.getElementById('keys').textContent =
       'key="' + (e.key || '(无)') + '"' + (mods.length ? '  ' + mods.join('+') : '') +
-      '  keyCode=' + e.keyCode;
+      '  code=' + e.code;
   });
 
-  // 冒泡演示: 三层各自监听, 记录事件经过的层级顺序
+  // 冒泡演示: 三层各自监听, 记录事件经过的层级顺序与点击计数
   var path = [];
+  var clicks = 0;
   function rec(name) {
-    return function () {
+    return function (e) {
+      if (name === 'inner') { path = []; clicks++; }   // 冒泡起点: 重置链路并计数
       path.push(name);
-      document.getElementById('stack').textContent = '命中链: ' + path.join(' → ');
+      document.getElementById('stack').textContent =
+        '命中链: ' + path.join(' → ') + '(第 ' + clicks + ' 次点击, target=' + e.target + ')';
     };
   }
   document.getElementById('lvl-inner').addEventListener('click', rec('inner'));

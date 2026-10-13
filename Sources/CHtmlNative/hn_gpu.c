@@ -38,11 +38,33 @@
  * 5. 图片: hn_png_decode 同源解码; 1:1 尺寸绘制时 GPU 像素中心精确命中
  *    源图文素(与 hnsoft 的最近采样一致); 缩放绘制 GPU 线性 vs hnsoft
  *    最近, 邻文素级差异(探针取 1:1, 真窗观感线性更平滑)。
- * 6. 不支持→回退的细目(hn_gpu_available, 契约"呼出方整帧回退"):
+ * 6. 混合模式(v2 消费 hn_cmd.blend): draw_quads opts bit0-1 直传
+ *    HN_BLEND_*, 平台侧因子表在**目标不透明**时与 hnsoft blend_mode 的
+ *    非预乘公式逐式等价(推导见 hnp_gpu_metal.c 因子表注; lighter 的
+ *    饱和加全域精确); 半透明目标是固定功能混合的结构性边界(契约诚实
+ *    声明)。alpha 通道恒 source-over(几何合成恒 source-over, hnsoft 同)。
+ *    批次键 = (纹理, 色, blend, 寻址) —— 任一变化冲批。
+ * 7. PATTERN(v2): 源图走既有图片解码缓存; 平铺在引擎侧折算成 uv + 寻址
+ *    模式(opts bit2-3): repeat=双轴 Repeat / repeat-x=u 重复 v 钳边 /
+ *    repeat-y=v 重复 u 钳边 / no-repeat=全钳边; 采样带按 hnsoft
+ *    pattern_sample 的覆盖域折出(图案锚点 = 画布原点, 采样 = (像素-锚点)
+ *    /scale, uv 取文素中心 = 半文素偏移, repeat 边界无跨缝插值)。多边形
+ *    目标(ppath)= 多边形栅格成 A8 掩码(见 8)后按矩形目标同路平铺。
+ * 8. CLIP_PATH(v2): 折线多边形(子路径按 clip_segs 分段闭合)CPU 扫描线
+ *    栅格成**二值**掩码纹理(非零环绕, 逐像素中心判定 —— 与 hnsoft
+ *    pip_poly/fb_clip_ok 同式同判定), clip_mask_push 入栈绑片段槽 1,
+ *    片段 = 颜色 × 掩码采样。掩码每帧每 op 现栅格(包围盒∩视口定界),
+ *    pop+冲批后即 free。嵌套路径裁剪(路径内再入路径)不做 —— 掩码槽单个,
+ *    hn_gpu_available 扫到即整帧回退。
+ * 9. PDATA(v2): RGBA 块与 BITMAP 同一条位图缓存路径(块指针 = 账本稳定的
+ *    malloc 块), 脏矩形 = isrc 源子矩形 → uv 子区域贴入。满幅不透明触发
+ *    新帧的清账语义在账本侧(hn_canvas), GPU 侧无感。
+ * 10. 不支持→回退的细目(hn_gpu_available, 契约"呼出方整帧回退"):
  *    POLYGON / MESH / CLEAR_RECT(位集未声明)、RECT 带阴影或圆角>0.5px
  *    (四边形原语没有 SDF 圆角与模糊)、TEXT 带阴影、圆角 CLIP(>0.5px,
  *    scissor 是轴对齐)、HN_NO_TEXT 构建的 TEXT、图片解码失败(hnsoft 会
- *    画占位虚线框 —— 回退保语义)。
+ *    画占位虚线框 —— 回退保语义)、嵌套路径裁剪/多边形图案叠路径裁剪
+ *    (单掩码槽)、掩码栅格或纹理资源紧张(逐帧诚实回退)。
  */
 /* strdup 在 POSIX 而非 ISO C —— 与 hn_rt.c 同款 feature-test(交叉构建
    (musl)的 -std=c99 下不定义它就拿不到声明)。 */
@@ -207,7 +229,8 @@ static int utf8_next(const unsigned char *s, size_t len, size_t i, int *cp) {
 /* 图片缓存: 按路径(hnsoft 每帧重解; GPU 侧缓存纹理 —— 上传一次反复采样,
    这正是 GPU 路径的性能来源之一)。负结果也缓存(与引擎 GIF 缓存同一纪律,
    避免 availableness 在两次询问间翻转)。上限 64 张, LRU 逐出。 */
-typedef struct { char *path; hnp_gpu_tex tex; int ok; unsigned used; } img_ent;
+typedef struct { char *path; hnp_gpu_tex tex; int ok; unsigned used;
+                 int w, h; } img_ent;   /* w/h: PATTERN uv 折算要源尺寸 */
 static img_ent g_imgs[64];
 static int g_img_n;
 
@@ -310,6 +333,8 @@ static img_ent *img_lookup(const char *path) {
     e->path = strdup(path ? path : "");
     e->tex = tex;
     e->ok = ok;
+    e->w = iw;
+    e->h = ih;
     e->used = ++g_frame_clock;
     return e;
 }
@@ -490,17 +515,30 @@ static const glyph_ent *glyph_get(int cp, int size_px) {
 }
 #endif /* !HN_NO_TEXT */
 
-/* ---------------- 四边形批(同色同纹理的连续 quad 合成一次 draw_quads) ---------------- */
+/* ---------------- 四边形批(同色同纹理同混合同寻址的连续 quad 合成一次
+   draw_quads; 任一键变化冲批 —— v2 批次键见头注 6) ---------------- */
 
 static float *g_qv;             /* 顶点数组(4 顶点 × 4 float/quad) */
 static int g_qv_cap, g_qv_n;    /* 容量按 quad 计 */
 static hnp_gpu_tex g_q_tex;
 static unsigned g_q_rgba;
+static unsigned g_q_blend;      /* 当前批混合模式(HN_BLEND_* 直传 opts) */
+static unsigned g_q_addr;       /* 当前批纹理寻址(0 clamp 1 rep 2 rep-x 3 rep-y) */
+static unsigned g_q_blend_pend; /* 下一条 quad 的状态(emit_* 入口经 draw_state 装填;
+                                   首个 quad 入批时与批键比对, 不符即冲批) */
+static unsigned g_q_addr_pend;
 static int g_q_any;
+
+/* 每指令装填绘制状态(emit_* 入口各调一次) */
+static void draw_state(unsigned blend, unsigned addr) {
+    g_q_blend_pend = blend & 3u;
+    g_q_addr_pend = addr & 3u;
+}
 
 static void quads_flush(void) {
     if (!g_q_any) return;
-    g_gpu->draw_quads(g_qv, g_qv_n, g_q_tex, g_q_rgba);
+    g_gpu->draw_quads(g_qv, g_qv_n, g_q_tex, g_q_rgba,
+                      g_q_blend | (g_q_addr << 2));
     g_q_any = 0;
     g_qv_n = 0;
 }
@@ -511,9 +549,12 @@ static void quad_emit(hnp_gpu_tex tex, unsigned rgba,
                       float x2, float y2, float x3, float y3,
                       float u0, float v0, float u1, float v1,
                       float u2, float v2, float u3, float v3) {
-    if (tex != g_q_tex || rgba != g_q_rgba) quads_flush();
+    if (tex != g_q_tex || rgba != g_q_rgba ||
+        g_q_blend_pend != g_q_blend || g_q_addr_pend != g_q_addr) quads_flush();
     g_q_tex = tex;
     g_q_rgba = rgba;
+    g_q_blend = g_q_blend_pend;
+    g_q_addr = g_q_addr_pend;
     if (g_qv_n + 1 > g_qv_cap) {
         int nc = g_qv_cap ? g_qv_cap * 2 : 1024;
         float *nv = (float *)realloc(g_qv, (size_t)nc * 16 * sizeof(float));
@@ -542,8 +583,10 @@ static void quad_rect(hnp_gpu_tex tex, unsigned rgba,
 
 /* ---------------- 指令翻译 ---------------- */
 
-/* 一条 RECT(hnsoft paint_rect 口径: 先填充/渐变后描边; 取整口径见头注 2) */
+/* 一条 RECT(hnsoft paint_rect 口径: 先填充/渐变后描边; 取整口径见头注 2;
+   v2: blend 随指令入批状态) */
 static void emit_rect(const hn_cmd *c, float scale) {
+    draw_state(c->blend, 0);
     int ix = (int)floorf(c->x * scale + 0.5f);
     int iy = (int)floorf(c->y * scale + 0.5f);
     int iw = (int)floorf(c->w * scale + 0.5f);
@@ -629,6 +672,7 @@ static void emit_rect(const hn_cmd *c, float scale) {
    角点参数 → LUT uv 双线性插值(hnsoft 是逐三角形重心插值, 对角线附近有
    二阶小差); 门禁与 hnsoft 同式) */
 static void emit_quad_cmd(const hn_cmd *c, float scale) {
+    draw_state(c->blend, 0);
     fcolor col = unpack(c->fill);
     int grad = (c->gradient || c->grad_kind) != 0;
     if (grad) {
@@ -658,6 +702,7 @@ static void emit_quad_cmd(const hn_cmd *c, float scale) {
 /* 一条 TEXT(hnsoft paint_text 逐项对齐: 空格不落笔不进笔、letter_spacing
    不参与绘制、坐标 (int) 截断、(码点,物理字号) 缓存键) */
 static void emit_text(const hn_cmd *c, float scale) {
+    draw_state(c->blend, 0);
 #ifndef HN_NO_TEXT
     int size_px = (int)(c->font.size_px * scale + 0.5f);
     if (size_px < 4) return;
@@ -690,18 +735,236 @@ static void emit_text(const hn_cmd *c, float scale) {
 #endif
 }
 
+/* ---------------- v2: 路径掩码栅格(CLIP_PATH / ppath 共用基建) ---------------- */
+
+/* 折线多边形(子路径按 segs 表分段闭合)扫成**二值** A8 覆盖 → RGBA 掩码
+ * 纹理(白×覆盖, 宿主上传即预乘白)。判定逐像素中心(fy = y+0.5)、非零
+ * 环绕、交点式与方向权重逐式抄 hnsoft 的 pip_poly/paint_pattern 扫描线
+ * (闭合多边形总环绕 = 0 → 前缀和非零 ⇔ 右侧后缀和非零, 与逐点 pip 同
+ * 判定 —— 探针以 hnsoft 为对照校准过)。掩码矩形 = 顶点包围盒 ∩ 视口
+ * (视口外掩码不可见, 顺带给成本封顶)。返回 0 = 包围盒空(clip 语义 =
+ * 什么都不画)或栅格失败(资源紧张, 呼出方按 ok=0 整帧回退)。
+ * 每 op 现栅格不缓存: cmd.poly 指向显示列表临时区(每次 repaint 换指针),
+ * 缓存键不稳; 扫描线 O(高×边数), 探针/常规页量级可忽略(诚实成本注)。 */
+static hnp_gpu_tex path_mask_raster(const hn_cmd *c, float rs, int vw, int vh,
+                                    float *ox, float *oy, float *mw, float *mh) {
+    const float *poly = c->poly;
+    int n = c->poly_n;
+    const int *segs = c->clip_segs;
+    int nsegs = c->clip_nsegs;
+    if (!poly || n < 3) return 0;
+    float minx = poly[0] * rs, maxx = minx, miny = poly[1] * rs, maxy = miny;
+    for (int i = 1; i < n; i++) {
+        float x = poly[i * 2] * rs, y = poly[i * 2 + 1] * rs;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+    }
+    int x0 = (int)floorf(minx), y0 = (int)floorf(miny);
+    int x1 = (int)ceilf(maxx), y1 = (int)ceilf(maxy);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > vw) x1 = vw;
+    if (y1 > vh) y1 = vh;
+    if (x1 - x0 <= 0 || y1 - y0 <= 0) return 0;   /* 视口外/空 → 裁剪全挡 */
+    int w = x1 - x0, h = y1 - y0;
+    unsigned char *rgba = (unsigned char *)malloc((size_t)w * h * 4);
+    if (!rgba) return 0;
+    memset(rgba, 0, (size_t)w * h * 4);
+    /* 每条扫描线: 收交点(方向权重) → 排序 → 非零前缀和开区间 → 置覆盖。
+       交点槽上限: 单行交点数超槽 = 超复杂路径(诚实降级 —— 静默截断会
+       画错环绕, 返回 0 让呼出方整帧回退 hnsoft)。 */
+    enum { MAX_HIT = 512 };
+    typedef struct { float x; int wind; } xhit_t;
+    xhit_t hits[MAX_HIT];
+    int oflow = 0;
+    for (int y = y0; y < y1; y++) {
+        float fy = (float)y + 0.5f;
+        int nh = 0;
+        int start = 0;
+        for (int s = 0; s <= (segs ? nsegs : 0); s++) {
+            int cnt = segs ? segs[s] : n;
+            if (cnt < 0) cnt = 0;
+            if (start + cnt > n) cnt = n - start;
+            if (cnt >= 3) {
+                for (int e = 0; e < cnt; e++) {
+                    int e2 = (e + 1) % cnt;
+                    float ay = poly[(start + e) * 2 + 1] * rs;
+                    float by = poly[(start + e2) * 2 + 1] * rs;
+                    if ((ay <= fy && by > fy) || (by <= fy && ay > fy)) {
+                        if (nh >= MAX_HIT) { oflow = 1; break; }
+                        float t = (fy - ay) / (by - ay);
+                        hits[nh].x = poly[(start + e) * 2] * rs
+                                   + t * (poly[(start + e2) * 2] - poly[(start + e) * 2]) * rs;
+                        hits[nh].wind = (by > ay) ? 1 : -1;
+                        nh++;
+                    }
+                }
+                if (oflow) break;
+            }
+            start += segs ? segs[s] : n;
+            if (start >= n) break;
+        }
+        if (oflow) break;
+        /* 插入排序(交点通常个位数) */
+        for (int a = 1; a < nh; a++) {
+            xhit_t k = hits[a];
+            int b = a - 1;
+            while (b >= 0 && hits[b].x > k.x) { hits[b + 1] = hits[b]; b--; }
+            hits[b + 1] = k;
+        }
+        for (int k = 0; k + 1 < nh; k++) {
+            int wsum = 0;
+            for (int q = 0; q <= k; q++) wsum += hits[q].wind;
+            if (wsum == 0) continue;                 /* 非零环绕外 */
+            int px0 = (int)ceilf(hits[k].x - 0.5f);  /* 像素中心 ∈ [lx, rx) */
+            int px1 = (int)ceilf(hits[k + 1].x - 0.5f);
+            if (px0 < x0) px0 = x0;
+            if (px1 > x1) px1 = x1;
+            for (int x = px0; x < px1; x++) {
+                unsigned char *p = rgba + ((size_t)(y - y0) * w + (x - x0)) * 4;
+                p[0] = 255; p[1] = 255; p[2] = 255; p[3] = 255;
+            }
+        }
+    }
+    if (oflow) { free(rgba); return 0; }
+    hnp_gpu_tex tex = g_gpu->tex_create(w, h, rgba);
+    free(rgba);
+    if (!tex) return 0;
+    *ox = (float)x0;
+    *oy = (float)y0;
+    *mw = (float)w;
+    *mh = (float)h;
+    return tex;
+}
+
+/* ---------------- v2: PDATA(putImageData 块贴入) ----------------
+ * 块与 BITMAP 同一条指针缓存路径(账本块是稳定 malloc, 内容每帧可能被
+ * 新 putImageData 覆盖 —— 命中即整幅 tex_update, 与 hnsoft 每帧重混合
+ * 同量级带宽); 脏矩形已由 paint 侧折成 isrc 源子矩形 → uv 子区域 1:1
+ * 贴入。满幅不透明触发新帧的清账在账本侧, GPU 无感。失败(块坏/纹理
+ * 资源紧张)= 整帧回退, 不静默画错。 */
+static void emit_pdata(const hn_cmd *c, float scale, int *ok) {
+    draw_state(c->blend, 0);
+    hnp_gpu_tex t = bmp_tex(c);
+    if (!t) { *ok = 0; return; }
+    int ix = (int)floorf(c->x * scale + 0.5f);
+    int iy = (int)floorf(c->y * scale + 0.5f);
+    int iw = (int)floorf(c->w * scale + 0.5f);
+    int ih = (int)floorf(c->h * scale + 0.5f);
+    if (iw <= 0 || ih <= 0) return;
+    float pw = (float)(c->bitmap_w ? c->bitmap_w : 1);
+    float ph = (float)(c->bitmap_h ? c->bitmap_h : 1);
+    float u0 = c->isx / pw, v0 = c->isy / ph;
+    quad_rect(t, 0xFFFFFFFFu, (float)ix, (float)iy, (float)iw, (float)ih,
+              u0, v0, c->isw / pw, c->ish / ph);
+}
+
+/* ---------------- v2: PATTERN(createPattern 平铺填充) ----------------
+ * hnsoft paint_pattern 的 GPU 复刻: 采样坐标 = (设备像素 - 图案锚点)
+ * / scale(锚点 = 画布原点, 不随 fillRect 平移), 源文素 = 采样坐标取整。
+ * GPU 折算: uv 取**文素中心**(半文素偏移; uv@边 = (边+0.5-锚点)·k) +
+ * 寻址模式交由采样器(repeat=双轴 Repeat / repeat-x=u 重复 v 钳边 /
+ * repeat-y=v 重复 u 钳边 / no-repeat=全钳边)。覆盖带与 hnsoft 的
+ * pattern_sample 返回 0 域一致: repeat-x 只画 dv∈[0,ih)(负侧 -1..0 的
+ * (int) 截断豁行由钳边采样同样落到首行文素 —— 与 hnsoft 逐像素同判定),
+ * no-repeat 只画源矩形投影。多边形目标(ppath)= 包围盒掩码(路径栅格
+ * 基建)内按矩形目标同路平铺。缺图: 与 hnsoft 同为无覆盖(hn_gpu_available
+ * 已把解码失败挡成整帧回退, 这里防御)。 */
+static void emit_pattern(const hn_cmd *c, float scale, int vw, int vh, int *ok) {
+    img_ent *e = img_lookup(c->text ? c->text : "");
+    if (!e->ok || !e->tex || e->w <= 0 || e->h <= 0) { *ok = 0; return; }
+    draw_state(c->blend, (c->pattern_rep == HN_PAT_REPEAT) ? 1u
+                       : (c->pattern_rep == HN_PAT_REPEAT_X) ? 2u
+                       : (c->pattern_rep == HN_PAT_REPEAT_Y) ? 3u : 0u);
+    float iw = (float)e->w, ih = (float)e->h;
+    float kx = 1.0f / (scale * iw), ky = 1.0f / (scale * ih);
+    float ax = c->pat_ox, ay = c->pat_oy;   /* 锚点(设备 px; hnsoft 同径) */
+
+    /* 目标矩形 = rect(poly==NULL)或闭合多边形包围盒, 折到设备 px 并钳视口
+       (hnsoft 逐像素循环同样钳 fb 边界) */
+    float bx0f, by0f, bx1f, by1f;
+    hnp_gpu_tex pmask = 0;
+    float pmx = 0, pmy = 0, pmw = 0, pmh = 0;
+    if (!c->poly) {
+        bx0f = c->x * scale; by0f = c->y * scale;
+        bx1f = (c->x + c->w) * scale; by1f = (c->y + c->h) * scale;
+    } else {
+        if (c->poly_n < 3) return;
+        bx0f = c->poly[0] * scale; bx1f = bx0f;
+        by0f = c->poly[1] * scale; by1f = by0f;
+        for (int i = 1; i < c->poly_n; i++) {
+            float x = c->poly[i * 2] * scale, y = c->poly[i * 2 + 1] * scale;
+            if (x < bx0f) bx0f = x;
+            if (x > bx1f) bx1f = x;
+            if (y < by0f) by0f = y;
+            if (y > by1f) by1f = y;
+        }
+        /* 多边形 → 掩码裁剪(ppath; 掩码基建与 CLIP_PATH 共用)。叠在已有
+           路径裁剪里 = 嵌套掩码, hn_gpu_available 已挡(这里防御回退)。 */
+        pmask = path_mask_raster(c, scale, vw, vh, &pmx, &pmy, &pmw, &pmh);
+        if (!pmask) { *ok = 0; return; }
+        quads_flush();
+        if (!g_gpu->clip_mask_push(pmask, pmx, pmy, pmw, pmh)) {
+            g_gpu->tex_free(pmask);
+            *ok = 0;
+            return;
+        }
+    }
+    int bx0 = (int)floorf(bx0f), by0 = (int)floorf(by0f);
+    int bx1 = (int)ceilf(bx1f), by1 = (int)ceilf(by1f);
+    if (bx0 < 0) bx0 = 0;
+    if (by0 < 0) by0 = 0;
+    if (bx1 > vw) bx1 = vw;
+    if (by1 > vh) by1 = vh;
+
+    /* 覆盖带(hnsoft pattern_sample 的"返回 0"域折成像素区间; 负侧半行的
+       (int) 截断豁由钳边采样补齐 —— 见函数头注) */
+    int X0 = bx0, X1 = bx1, Y0 = by0, Y1 = by1;
+    if (c->pattern_rep == HN_PAT_REPEAT_Y || c->pattern_rep == HN_PAT_NONE) {
+        int b0 = (int)floorf(ax - scale) + 1, b1 = (int)ceilf(ax + iw * scale);
+        if (X0 < b0) X0 = b0;
+        if (X1 > b1) X1 = b1;
+    }
+    if (c->pattern_rep == HN_PAT_REPEAT_X || c->pattern_rep == HN_PAT_NONE) {
+        int b0 = (int)floorf(ay - scale) + 1, b1 = (int)ceilf(ay + ih * scale);
+        if (Y0 < b0) Y0 = b0;
+        if (Y1 > b1) Y1 = b1;
+    }
+    if (X1 - X0 > 0 && Y1 - Y0 > 0) {
+        /* uv@边 = (边 + 0.5 - 锚点)·k —— 像素中心恰落文素中心, repeat
+           边界无跨缝插值; 钳边模式下越界角 uv 由 ClampToEdge 吸收(采样
+           像素中心恒在覆盖带内, 角外推不产生采样) */
+        quad_rect(e->tex, 0xFFFFFFFFu, (float)X0, (float)Y0,
+                  (float)(X1 - X0), (float)(Y1 - Y0),
+                  ((float)X0 + 0.5f - ax) * kx, ((float)Y0 + 0.5f - ay) * ky,
+                  (float)(X1 - X0) * kx, (float)(Y1 - Y0) * ky);
+    }
+    if (pmask) {
+        quads_flush();
+        g_gpu->clip_pop();
+        g_gpu->tex_free(pmask);
+    }
+}
+
 /* ---------------- 可用性(hn_gpu_available, 契约"呼出方整帧回退") ---------------- */
 
 int hn_gpu_available(const hn_display_list *dl) {
     if (!dl || !host_ready()) return 0;
+    /* 路径裁剪开合栈(位 + 计数): 单掩码槽 —— "路径内再入路径"与"ppath
+       叠在任何未关路径上"都做不了, 扫到即整帧回退。溢出(>31 层)同样
+       诚实回退。pdepth = 栈内未关闭的路径层数(掩码槽被占即非零)。 */
+    unsigned pstack = 0;
+    int psp = 0, pdepth = 0;
     for (int i = 0; i < dl->count; i++) {
         const hn_cmd *c = &dl->cmds[i];
-        if ((unsigned)c->kind > 10) return 0;
+        if ((unsigned)c->kind > 13) return 0;
         if (!(g_gpu->caps.supported_cmds & (1u << c->kind))) return 0;
         switch (c->kind) {
         case HN_CMD_RECT:
             if (c->shadow) return 0;                    /* box-shadow: 四边形原语无模糊 */
-            if (c->radius > 0.5f) return 0;             /* 圆角: 无 SDF(v1 回退, 头注 6) */
+            if (c->radius > 0.5f) return 0;             /* 圆角: 无 SDF(v1 回退, 头注 10) */
             if ((c->gradient || c->grad_kind) && c->gn_stops > 16)
                 return 0;                               /* LUT 缓存键容量界(诚实降级) */
             break;
@@ -720,13 +983,43 @@ int hn_gpu_available(const hn_display_list *dl) {
             break;
         case HN_CMD_CLIP_PUSH:
             if (c->radius > 0.5f) return 0;             /* scissor 轴对齐, 圆角裁不精确 */
+            if (psp >= 31) return 0;
+            pstack = (pstack << 1);                     /* 矩形层压 0 */
+            psp++;
+            break;
+        case HN_CMD_PDATA:
+            /* 块字段有效性(hn_paint 已保证; 直呼 render 的误用防御) */
+            if (!c->bitmap || c->bitmap_w <= 0 || c->bitmap_h <= 0
+                || c->bitmap_stride <= 0) return 0;
+            break;
+        case HN_CMD_PATTERN:
+            if (!img_lookup(c->text ? c->text : "")->ok) return 0;   /* 缺图回退保真 */
+            if (c->poly) {                              /* ppath 需掩码 */
+                if (c->poly_n < 3) return 0;
+                if (pdepth > 0) return 0;               /* 叠路径裁剪 = 嵌套掩码 */
+            }
+            break;
+        case HN_CMD_CLIP_PATH_PUSH:
+            if (!c->poly || c->poly_n < 3) return 0;
+            if (pdepth > 0) return 0;                   /* 嵌套路径裁剪(头注 8) */
+            if (psp >= 31) return 0;
+            pstack = (pstack << 1) | 1u;                /* 路径层压 1 */
+            psp++;
+            pdepth++;
+            break;
+        case HN_CMD_CLIP_POP:
+            if (psp > 0) {
+                pdepth -= (int)(pstack & 1u);
+                pstack >>= 1;
+                psp--;
+            }
             break;
         case HN_CMD_POLYGON:
         case HN_CMD_MESH:
         case HN_CMD_CLEAR_RECT:
             return 0;                                   /* 位集未声明(防御性重复) */
         default:
-            break;                                      /* QUAD/BITMAP/CLIP_POP 直通 */
+            break;                                      /* QUAD/BITMAP 直通 */
         }
     }
     return 1;
@@ -745,6 +1038,17 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
     g_qv_n = 0;
     g_q_tex = 0;
     g_q_rgba = 0;
+    g_q_blend = 0;
+    g_q_addr = 0;
+    g_q_blend_pend = 0;
+    g_q_addr_pend = 0;
+
+    /* 引擎侧裁剪配平栈(与平台栈平行): 记每层是否有掩码纹理, POP 时据此
+       释放掩码(矩形层无资源)。深度上界与 available 的 31 一致;
+       pdepth = 活动路径层数(ppath 嵌套防御; available 同口径)。 */
+    struct { int is_mask; hnp_gpu_tex tex; } cstack[32];
+    int csp = 0;
+    int pdepth = 0;
 
     int ok = 1;
     for (int i = 0; i < dl->count && ok; i++) {
@@ -760,6 +1064,7 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
             emit_text(c, rs);
             break;
         case HN_CMD_IMAGE: {
+            draw_state(c->blend, 0);
             img_ent *e = img_lookup(c->text ? c->text : "");
             int ix = (int)floorf(c->x * rs + 0.5f);
             int iy = (int)floorf(c->y * rs + 0.5f);
@@ -771,6 +1076,7 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
             break;
         }
         case HN_CMD_BITMAP: {
+            draw_state(c->blend, 0);
             hnp_gpu_tex t = bmp_tex(c);
             int ix = (int)floorf(c->x * rs + 0.5f);
             int iy = (int)floorf(c->y * rs + 0.5f);
@@ -781,14 +1087,61 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
                           (float)iw, (float)ih, 0, 0, 1, 1);
             break;
         }
+        case HN_CMD_PDATA:
+            emit_pdata(c, rs, &ok);
+            break;
+        case HN_CMD_PATTERN:
+            if (c->poly && pdepth > 0) {   /* ppath 叠未关路径 = 嵌套掩码, 回退 */
+                ok = 0;
+                break;
+            }
+            emit_pattern(c, rs, w, h, &ok);
+            break;
         case HN_CMD_CLIP_PUSH:
             quads_flush();   /* 裁剪状态切换前冲批 —— 批内 quad 必须吃当条的 scissor */
             g_gpu->clip_push((int)floorf(c->x * rs + 0.5f), (int)floorf(c->y * rs + 0.5f),
                              (int)floorf(c->w * rs + 0.5f), (int)floorf(c->h * rs + 0.5f));
+            if (csp < 32) { cstack[csp].is_mask = 0; cstack[csp].tex = 0; csp++; }
             break;
+        case HN_CMD_CLIP_PATH_PUSH: {
+            quads_flush();
+            /* 嵌套路径裁剪: available 已挡(单掩码槽); 直呼 render 防御回退 */
+            if (pdepth > 0 || csp >= 32) { ok = 0; break; }
+            float mox, moy, pmw, pmh;
+            hnp_gpu_tex mt = path_mask_raster(c, rs, w, h, &mox, &moy, &pmw, &pmh);
+            if (mt) {
+                if (!g_gpu->clip_mask_push(mt, mox, moy, pmw, pmh)) {
+                    g_gpu->tex_free(mt);
+                    ok = 0;
+                    break;
+                }
+                cstack[csp].is_mask = 1;
+                cstack[csp].tex = mt;
+                csp++;
+                pdepth++;
+            } else {
+                /* 空包围盒(视口外多边形)= 裁剪全挡: 零面积矩形层占位,
+                   hnsoft 的 bbox 空交叠同判(全部像素画不出来) */
+                g_gpu->clip_push(0, 0, 0, 0);
+                cstack[csp].is_mask = 0;
+                cstack[csp].tex = 0;
+                csp++;
+            }
+            break;
+        }
         case HN_CMD_CLIP_POP:
             quads_flush();
             g_gpu->clip_pop();
+            if (csp > 0) {
+                csp--;
+                if (cstack[csp].is_mask) {
+                    /* 掩码纹理释放: draw_quads 已编码, command buffer 自持
+                       被引用资源(与顶点 arena 换缓冲同一口径) */
+                    g_gpu->tex_free(cstack[csp].tex);
+                    cstack[csp].tex = 0;
+                    pdepth--;
+                }
+            }
             break;
         case HN_CMD_POLYGON:
         case HN_CMD_MESH:

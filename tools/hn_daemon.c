@@ -147,6 +147,11 @@ typedef struct {
     int alive;
     char *html;          /* 原始 HTML(persist 用) */
     size_t html_len;
+    unsigned char *shot_buf;  /* shot op 的 hnsoft 复用缓冲(全页 RGBA, 只增
+                                 不减) —— agent 高频回看, 一次性 hnsoft_render
+                                 每次都新分配一张全页位图; slot 随应用实例
+                                 存活, app_destroy 释放 */
+    int shot_cap;             /* shot_buf 容量(字节; hnsoft_render_reuse 维护) */
 } dapp;
 
 static dapp g_apps[HN_DAEMON_MAX_APPS];
@@ -179,6 +184,9 @@ static hn_context *app_ctx(dapp *a) {
 static void app_destroy(dapp *a) {
     if (a->rt) hn_rt_close(a->rt);
     free(a->html);
+    free(a->shot_buf);    /* 复用缓冲随应用实例释放(app_create 时为 NULL, free 安全) */
+    a->shot_buf = NULL;
+    a->shot_cap = 0;
     a->rt = NULL;
     a->alive = 0;
 }
@@ -1059,7 +1067,10 @@ static void handle_line(const char *line, char *out, size_t cap) {
         const hn_display_list *dl = hn_context_display_list(app_ctx(a));
         int rc = 1;
         if (dl) {
-            unsigned char *px = hnsoft_render(dl, a->w, a->h, 0x0B0E13FFu);
+            /* 复用缓冲(hnsoft_render_reuse): slot 挂在 dapp 上只增不减,
+               shot 反复打不反复分配全页位图; 像素与一次性变体逐位一致。 */
+            unsigned char *px = hnsoft_render_reuse(dl, a->w, a->h, 0x0B0E13FFu,
+                                                    &a->shot_buf, &a->shot_cap);
             if (px) {
                 size_t pn = 0;
                 unsigned char *png = hnsoft_encode_png(px, a->w, a->h, &pn);
@@ -1068,7 +1079,7 @@ static void handle_line(const char *line, char *out, size_t cap) {
                     if (f) { fwrite(png, 1, pn, f); fclose(f); rc = 0; }
                     free(png);
                 }
-                free(px);
+                /* px 不 free: 复用槽原地保留, 下次 shot 直接复用 */
             }
         }
         free(p);

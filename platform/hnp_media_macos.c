@@ -29,10 +29,11 @@
  *  5) pause 态直接 seek 视频轨停在 0.000 —— 必须 play→seek→settle→pause;
  *  6) ended 用 position>=duration 推导(rate 播完仍 1.00, 不可靠);
  *  7) CMTime(24B 结构体)按值传/收, 函数指针原型写对即可(arm64 实测正确);
- *  8) loop 回绕根治(2026-10): actionAtItemEnd=None(撞尾不 pause, 补发的
- *     play 不再被吃) + 到尾通知 AVPlayerItemDidPlayToEndTimeNotification
- *     的 selector 观察者直接 seek(0)+play —— position≈duration 启发式只兜
- *     首圈(loop 闩锁后退役), 风暴与秒级停顿都从根上消失, 见"到尾通知"段。
+ *  8) loop 回绕(2026-10 起显式 ABI): actionAtItemEnd=None(撞尾不 pause,
+ *     补发的 play 不再被吃) + 到尾通知 AVPlayerItemDidPlayToEndTimeNotification
+ *     的 selector 观察者直接 seek(0)+play —— 回绕条件是引擎 set_loop 显式
+ *     声明(旧"到尾后 1s 内 seek(0)"闩锁推断已删: 自然到尾后手动重播会被
+ *     误闩), 见"到尾通知"段; 0.5s 停滞自愈继续兜底。
  *
  * 明确不做(media-design.md §9): http(s) 流媒体(open 如实失败)、字幕、DRM、
  * FFmpeg、wasm 解码、播放器 UI、playbackRate。单线程使用(与引擎同一约定)。
@@ -198,21 +199,23 @@ struct hnp_media {
     int stall_cnt;                 /* 同值连续采样计数(playing 态专用) */
     int layer_mode;                /* 1 = 原生 AVPlayerLayer 直出(帧不再外送,
                                       hnp_media_frame 早退 —— CPU 拉帧/转换归零) */
-    /* —— loop 回绕根治(到尾通知主路径, 2026-10) ——
-       旧路线: 引擎靠 position≈duration 启发式轮询触发 seek(0), 落位窗口里
-       每 16ms 重触发(seek 风暴), 且播放器撞尾自动 pause 吃掉补发的 play
-       (最坏 ≤2s 停顿)。现: actionAtItemEnd=None 撞尾不 pause; 到尾系统
-       通知(AVPlayerItemDidPlayToEndTimeNotification)经观察者直接回绕;
-       引擎在"到尾后 1s 内"发 seek(0)+play 即闩为 loop 会话 —— 平台无 loop
-       属性 ABI(hn_platform.h 冻结), 以引擎回绕签名推断, 首wrap仍走引擎
-       (启发式只兜第一圈, 之后通知是主路径; 0.5s 停滞自愈继续兜底)。 */
+    /* —— loop 回绕(到尾通知主路径; 2026-10 起为**显式 ABI**) ——
+       引擎经 hn_media_host.set_loop 把 <video loop> 声明显式落到会话
+       (open 后同拍) —— loop=1 的会话到尾通知直接 seek(0)+play 回绕,
+       **首圈即通知驱动**。旧推断路线(引擎在"到尾后 1s 内"发 seek(0) 即闩
+       为 loop)已删除: 它会把"自然到尾后马上手动重播"误闩成循环。
+       仍配套: actionAtItemEnd=None(撞尾不 pause, 补发的 play 不被吃)+
+       0.5s 停滞自愈兜底(通知丢失时引擎状态机回绕仍能续上)。 */
     int obs_registered;            /* 到尾通知已注册(close 配对摘除, 防悬空) */
-    int loop_latched;              /* 引擎回绕签名已见 → 后续到尾通知直接回绕 */
+    int loop_explicit;             /* 引擎显式声明的 loop(set_loop 落账;
+                                      0 = 非 loop: 到尾通知不回绕) */
     int wrap_pending;              /* 通知回绕 seek 在途: position 对旧尾读数报 0 */
     int ended_seen;                /* 到尾通知累计次数(诊断/探针观测点) */
     int wrap_cnt;                  /* 通知驱动回绕累计次数(探针观测点) */
     int seek_cnt;                  /* seek 累计次数(探针 seek 风暴观测点) */
-    double ended_wall;             /* 最近一次到尾通知的单调时刻(now_mono) */
+    double ended_wall;             /* 最近一次到尾通知的单调时刻(now_mono;
+                                      纯诊断记账, 旧闩锁推断窗口已随显式
+                                      loop ABI 退役) */
 };
 
 int hnp_media_supported(void) { return 1; }
@@ -410,7 +413,8 @@ static double cur_position(hnp_media *m) {
  * ClassPair **之前**挂, 注册后 add_method 静默返回 NO → 分发即消息转发崩)。
  *
  * 处理器流程: 通知.object = 播完的 AVPlayerItem → 按指针查会话注册表 →
- * 记账(ended_wall/ended_seen) → loop 已闩锁且播放态则 seek(0)+play 一次。
+ * 记账(ended_wall/ended_seen) → 显式 loop(hnp_media_set_loop 落账)且播放态
+ * 则 seek(0)+play 一次 —— 首圈即通知驱动(引擎 open 后即声明 loop)。
  * 非主线程投递(AVFoundation 内部队可能)时经 dispatch_async_f 转交主线程
  * —— 全部会话状态变更保持在引擎同一线程(单线程契约), 零竞态。
  *
@@ -464,13 +468,13 @@ static void media_handle_item_end(obj_t item) {
     m->ended_wall = now_mono();
     m->ended_seen++;
     int wrap = 0;
-    if (m->loop_latched && m->playing && m->duration_known) {
+    if (m->loop_explicit && m->playing && m->duration_known) {
         media_wrap_now(m, "notif");
         wrap = 1;
     }
     if (media_trace())
         fprintf(stderr, "[media-end] n=%d loop=%d playing=%d wrap=%d\n",
-                m->ended_seen, m->loop_latched, m->playing, wrap);
+                m->ended_seen, m->loop_explicit, m->playing, wrap);
 }
 
 /* dispatch_async_f 主线程落点(通知非主线程投递时) */
@@ -552,19 +556,22 @@ static void refresh_duration(hnp_media *m) {
     if (s == s && s > 0.0) { m->duration = s; m->duration_known = 1; }
 }
 
+/* 显式 loop ABI(引擎 hn_media_host.set_loop 直转, open 后同拍调用):
+   loop=1 的会话由到尾通知直接回绕(首圈即通知驱动)。旧"到尾后 1s 内收到
+   seek(0)(播放态)即闩 loop"的推断已删 —— 自然到尾后 1s 内手动重播会被
+   误闩成循环, 显式声明没有这类歧义。非 loop 会话到尾停在末帧(引擎置
+   ENDED), 通知不回绕。 */
+void hnp_media_set_loop(hnp_media *m, int loop) {
+    if (!m) return;
+    m->loop_explicit = loop ? 1 : 0;
+}
+
 int hnp_media_seek(hnp_media *m, double sec) {
     if (!m || !m->player || g_once <= 0) return 0;
     m->seek_cnt++;
-    /* loop 闩锁: 引擎在"到尾通知后 1s 内"发来的 seek(0)(播放态)是 loop
-       回绕签名 —— 闩上后, 后续到尾由通知处理器直接回绕(启发式主路径退役;
-       非 loop 的 ENDED→replay 发生在 pause 态, 不命中)。窗口 1s: 引擎的
-       启发式在到尾后 ≤1 拍(~16ms)必触发, 用户手动回开头远晚于此。 */
-    double since_end = m->ended_seen ? now_mono() - m->ended_wall : -1.0;
-    if (m->playing && sec <= 0.001 && since_end >= 0 && since_end < 1.0)
-        m->loop_latched = 1;
     if (media_trace())
-        fprintf(stderr, "[media-seek] n=%d sec=%.3f playing=%d loop=%d since_end=%.3f\n",
-                m->seek_cnt, sec, m->playing, m->loop_latched, since_end);
+        fprintf(stderr, "[media-seek] n=%d sec=%.3f playing=%d loop=%d\n",
+                m->seek_cnt, sec, m->playing, m->loop_explicit);
     m->wrap_pending = 0;   /* 显式 seek 意图最高: 作废回绕在途抑制 */
     media_pump();
     refresh_duration(m);
