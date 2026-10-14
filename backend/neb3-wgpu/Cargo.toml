@@ -1,0 +1,16 @@
+[package]
+name = "neb3-wgpu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Optional Rust/wgpu 3D backend for the Neb engine (C ABI)"
+repository = "https://github.com/asdshuaishuai/html-native"
+
+[lib]
+name = "neb3_wgpu"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+# Phase B+: wgpu = "30", image = "0.25", glam = "0.30"
+# Deliberately empty in Phase A: the ABI skeleton builds with zero deps so the
+# default C99 build never needs a Rust toolchain.

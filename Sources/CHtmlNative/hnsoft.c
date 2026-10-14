@@ -707,6 +707,81 @@ static int poly_scratch_ensure(int n, float **px, float **py, xhit **hits) {
     return 1;
 }
 
+static int poly_inside(const float *px, const float *py, int n,
+                       float x, float y, int even_odd) {
+    int parity = 0, winding = 0;
+    for (int i = 0; i < n; i++) {
+        int j = (i + n - 1) % n;
+        float yi = py[i], yj = py[j];
+        int crosses = ((yi > y) != (yj > y));
+        if (!crosses) continue;
+        float xcross = px[j] + (px[i] - px[j]) * (y - yj) / (yi - yj);
+        if (x < xcross) {
+            parity ^= 1;
+            winding += yi > yj ? 1 : -1;
+        }
+    }
+    return even_odd ? parity : winding != 0;
+}
+
+static float poly_edge_coverage(const float *px, const float *py, int n,
+                                float x, float y, int even_odd,
+                                float lx, float rx) {
+    /* Only boundary pixels take fixed sub-samples. Interior pixels stay on
+       the original single-sample path; the candidate span is expanded by one
+       pixel so a sloped edge cannot fall between scanline endpoints. */
+    if (x >= lx + 0.5f && x <= rx - 0.5f) return 1.0f;
+    int hit = 0;
+    for (int sy = 0; sy < 4; sy++) {
+        for (int sx = 0; sx < 4; sx++) {
+            float qx = floorf(x) + ((float)sx + 0.5f) * 0.25f;
+            float qy = floorf(y) + ((float)sy + 0.5f) * 0.25f;
+            hit += poly_inside(px, py, n, qx, qy, even_odd);
+        }
+    }
+    return (float)hit * 0.0625f;
+}
+
+/* Triangles are the common three.js path. Rasterize them directly with the
+   same barycentric edge coverage used by textured meshes; scanline polygon
+   filling otherwise samples only one horizontal intersection per row and
+   makes shallow edges visibly stair-step. */
+static void paint_polygon_triangle(fb *f, const hn_cmd *c,
+                                   const float *px, const float *py,
+                                   float scale, float alpha) {
+    float x0 = px[0], y0 = py[0], x1 = px[1], y1 = py[1], x2 = px[2], y2 = py[2];
+    float den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+    if (fabsf(den) < 1e-6f) return;
+    float k0 = 2.0f * fabsf(den) /
+               fmaxf(fabsf(y1 - y2) + fabsf(x2 - x1), 1e-6f);
+    float k1 = 2.0f * fabsf(den) /
+               fmaxf(fabsf(y2 - y0) + fabsf(x0 - x2), 1e-6f);
+    float k2 = 2.0f * fabsf(den) /
+               fmaxf(fabsf(y0 - y1) + fabsf(x1 - x0), 1e-6f);
+    float minx = fminf(x0, fminf(x1, x2)), maxx = fmaxf(x0, fmaxf(x1, x2));
+    float miny = fminf(y0, fminf(y1, y2)), maxy = fmaxf(y0, fmaxf(y1, y2));
+    int ix0 = (int)floorf(minx) - 1, ix1 = (int)ceilf(maxx) + 1;
+    int iy0 = (int)floorf(miny) - 1, iy1 = (int)ceilf(maxy) + 1;
+    fcolor base = unpack(c->fill);
+    base.a *= alpha;
+    for (int yy = iy0; yy <= iy1; yy++) {
+        for (int xx = ix0; xx <= ix1; xx++) {
+            float fx = (float)xx + 0.5f, fy = (float)yy + 0.5f;
+            float w0 = ((y1-y2)*(fx-x2) + (x2-x1)*(fy-y2)) / den;
+            float w1 = ((y2-y0)*(fx-x2) + (x0-x2)*(fy-y2)) / den;
+            float w2 = 1.0f - w0 - w1;
+            float cov = 1.0f;
+            if (w0 < 0) cov = fminf(cov, 1.0f + w0*k0);
+            if (w1 < 0) cov = fminf(cov, 1.0f + w1*k1);
+            if (w2 < 0) cov = fminf(cov, 1.0f + w2*k2);
+            if (cov <= 0) continue;
+            fcolor col = c->grad_kind ? grad_at(c, fx, fy, scale) : base;
+            col.a *= cov;
+            fb_blend(f, xx, yy, col);
+        }
+    }
+}
+
 static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     if (!c->poly || c->poly_n < 3) return;
     int n = c->poly_n;
@@ -774,12 +849,13 @@ static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float o
                 if (!inside) continue;
                 float lx = hits[k].x, rx = hits[k + 1].x;
                 if (rx <= lx) continue;
-                for (int xx = (int)floorf(lx); xx <= (int)ceilf(rx); xx++) {
+                int xi0 = (int)floorf(lx) - 1;
+                int xi1 = (int)ceilf(rx) + 1;
+                for (int xx = xi0; xx <= xi1; xx++) {
                     float fx = (float)xx + 0.5f;
-                    float cov = 0;
-                    if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
-                    else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;
-                    if (cov <= 0) continue;
+                    float cov = poly_edge_coverage(px, py, n, fx, fy,
+                                                   c->even_odd, lx, rx);
+                    if (cov <= 0.0f) continue;
                     fcolor cc = grad ? grad_at(c, fx, fy, scale) : fillc;
                     cc.a *= cov;
                     fb_blend(f, xx, s, cc);

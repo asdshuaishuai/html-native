@@ -22,7 +22,7 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
      Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
      Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c \
-     Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c \
+     Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c Sources/CHtmlNative/neb3_soft.c \
      Sources/CHtmlNative/hnsoft.c)
 # hn_pe/hn_cubism/hn_three 与 hn_paint.c 同列(paint_walk 硬引用三个 *_paint,
 # 缺任一源即链接失败; 未定义 SDK 宏时前两者降级为空操作, 口径同
