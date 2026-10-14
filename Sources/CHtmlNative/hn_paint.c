@@ -1279,6 +1279,11 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
     /* 线宽/字号等"长度"按两轴均档(非等比缩放时各向误差最小) */
     float ks = (kx + ky) * 0.5f;
 
+    /* canvas_ity 后端(HN_CANVAS_BACKEND=ity): 账本 op 经高质量软光栅
+       出帧 → BITMAP 并入显示列表; 失败回落下方 ledger 重放。 */
+    if (hn_canvas_paint_ity(c, id, l, cw, ch, box_w, box_h, ox, oy, alpha))
+        return;
+
     hn_cmd cp;
     memset(&cp, 0, sizeof(cp));
     cp.kind = HN_CMD_CLIP_PUSH;
