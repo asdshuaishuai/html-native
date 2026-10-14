@@ -643,6 +643,10 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   回调里调 `hnSetText`/`hnCanvas2D` 走既有 repaint 管道落像素。
   节拍合成取最小者: **RAF 待决→16 / 定时器表非空→min(16, 最近到期) /
   动画→16 / hx 轮询→期限 / 全无→-1**(空闲零空转口径不变)。
+  **blit 合并**: 事件爆发(mousemove 连发/滚轮/按键)在同一拍内排干队列、
+  状态逐事件更新, 平台全量拷贝**每拍至多一次** —— 此前每个状态变化事件
+  立即整面 blit(HiDPI 1440p@2x ≈ 20MB/次), 快速划过 hover 面一次爆发
+  十几次全浪费在中间态; 现与浏览器"输入先于 rAF 合成一帧"同语义。
   桌宠自己换句、canvas 折线自己滚 —— `examples/pet.html`(气泡 3s 轮播 +
   `hnMeshParam` 眨眼)与 `examples/canvas-demo.html`(500ms 实时折线);
   口径由 `tools/timer_probe.sh` 37 断言钉死

@@ -521,10 +521,21 @@ int main(int argc, char **argv) {
         }
     }
     unsigned long last_trace = 0;
+    /* blit 合并(性能治理): 事件处理只置 need_blit, 排干队列后一次 blit。
+       之前每个状态变化事件立即全量 blit —— HiDPI 下一次 blit 是整面
+       位图拷贝(1440p@2x ≈ 20MB), 鼠标快速划过 hover 面时一次爆发可
+       连发十几次, 内存带宽大头全浪费在中间态上。引擎侧 hn_rt_pointer_
+       move 的逐事件重渲染不动(状态必须每步跟上), 只省平台拷贝。 */
+    int need_blit = 0;
     while (!quit) {
         if (g_app_term) quit = 1;   /* SIGTERM/SIGINT: 退窗前补写几何(下方出口) */
         hnp_event ev;
-        if (hnp_pump(&ev, pump_ms)) {
+        /* 内层排干: 首次调用按 pump_ms 睡到事件来, 之后 0 超时纯轮询,
+           队列空即出。爆发事件在同一拍内连续派发(先于本拍帧 tick),
+           与浏览器"输入事件先于 rAF 合并"的语义一致。 */
+        int drained = 0;
+        while (!quit && hnp_pump(&ev, drained ? 0 : pump_ms)) {
+            drained = 1;
             switch (ev.kind) {
             case HNP_EV_CLOSE: quit = 1; break;
             case HNP_EV_RESIZE:
@@ -535,21 +546,21 @@ int main(int argc, char **argv) {
                     geo_dirty_at = hnp_now_ms();
                 }
                 hn_rt_reflow(rt);
-                blit_now(rt, w);
+                need_blit = 1;
                 sync_ime_focus(rt, w);   /* 重排后焦点盒可能变 */
                 break;
-            case HNP_EV_EXPOSE: blit_now(rt, w); break;
+            case HNP_EV_EXPOSE: need_blit = 1; break;
             case HNP_EV_POINTER_MOVE:
-                if (hn_rt_pointer_move(rt, (float)ev.x, (float)ev.y)) blit_now(rt, w);
+                if (hn_rt_pointer_move(rt, (float)ev.x, (float)ev.y)) need_blit = 1;
                 break;
             case HNP_EV_BUTTON_DOWN:
-                if (hn_rt_button(rt, 1, (float)ev.x, (float)ev.y, ev.button)) blit_now(rt, w);
+                if (hn_rt_button(rt, 1, (float)ev.x, (float)ev.y, ev.button)) need_blit = 1;
                 /* IME 焦点盒同步: 点击后焦点可能落到/离开可编辑控件 ——
                    把新焦点盒喂平台(候选窗摆位/输入上下文激活态)。 */
                 sync_ime_focus(rt, w);
                 break;
             case HNP_EV_SCROLL:
-                if (hn_rt_scroll(rt, ev.dx, ev.dy, (float)ev.x, (float)ev.y)) blit_now(rt, w);
+                if (hn_rt_scroll(rt, ev.dx, ev.dy, (float)ev.x, (float)ev.y)) need_blit = 1;
                 break;
             case HNP_EV_KEY_DOWN:
                 /* Esc: 组字中由 IME 消费(平台在组字期间不发本事件); 到这里
@@ -559,22 +570,22 @@ int main(int argc, char **argv) {
                    (hnp_clipboard_get 拿系统剪贴板), 无平台桥时落回引擎的
                    同源后端(sys://clipboard)。Ctrl+C 等是终端习惯; mac 用 ⌘。 */
                 if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'c' || ev.utf8[0] == 'C')) {
-                    if (hn_rt_edit(rt, HN_EDIT_COPY, NULL)) blit_now(rt, w);
+                    if (hn_rt_edit(rt, HN_EDIT_COPY, NULL)) need_blit = 1;
                     break;
                 }
                 if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'v' || ev.utf8[0] == 'V')) {
                     char cb[8192] = { 0 };
                     const char *txt = NULL;
                     if (hnp_clipboard_get(w, cb, sizeof(cb)) && cb[0]) txt = cb;
-                    if (hn_rt_edit(rt, HN_EDIT_PASTE, txt)) blit_now(rt, w);
+                    if (hn_rt_edit(rt, HN_EDIT_PASTE, txt)) need_blit = 1;
                     break;
                 }
                 if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'x' || ev.utf8[0] == 'X')) {
-                    if (hn_rt_edit(rt, HN_EDIT_CUT, NULL)) blit_now(rt, w);
+                    if (hn_rt_edit(rt, HN_EDIT_CUT, NULL)) need_blit = 1;
                     break;
                 }
                 if ((ev.mods & 10) && ev.utf8 && (ev.utf8[0] == 'a' || ev.utf8[0] == 'A')) {
-                    if (hn_rt_edit(rt, HN_EDIT_SELECT_ALL, NULL)) blit_now(rt, w);
+                    if (hn_rt_edit(rt, HN_EDIT_SELECT_ALL, NULL)) need_blit = 1;
                     break;
                 }
                 /* m = 媒体静音开关(手工验收 walkthrough: 试听/肃静两态);
@@ -583,17 +594,17 @@ int main(int argc, char **argv) {
                 if (ev.utf8 && (ev.utf8[0] == 'm' || ev.utf8[0] == 'M') &&
                     !(ev.mods & 10) && hn_media_platform_toggle_mute(rt))
                     break;
-                if (hn_rt_key(rt, 1, (int)ev.key, ev.utf8)) blit_now(rt, w);
+                if (hn_rt_key(rt, 1, (int)ev.key, ev.utf8)) need_blit = 1;
                 /* Tab 轮换/点击换焦点后 IME 盒跟动 */
                 if (ev.key == HNP_KEY_TAB) sync_ime_focus(rt, w);
                 break;
             case HNP_EV_IME_PREEDIT:
                 /* 输入法组字中间态: 预编辑串直插(最小实现见 hn_rt_ime_preedit) */
-                if (hn_rt_ime_preedit(rt, ev.utf8 ? ev.utf8 : "", ev.cursor)) blit_now(rt, w);
+                if (hn_rt_ime_preedit(rt, ev.utf8 ? ev.utf8 : "", ev.cursor)) need_blit = 1;
                 sync_ime_focus(rt, w);   /* 组字中焦点盒可能随行变化 */
                 break;
             case HNP_EV_IME_COMMIT:
-                if (hn_rt_ime_commit(rt, ev.utf8 ? ev.utf8 : "")) blit_now(rt, w);
+                if (hn_rt_ime_commit(rt, ev.utf8 ? ev.utf8 : "")) need_blit = 1;
                 sync_ime_focus(rt, w);
                 break;
             case HNP_EV_SCALE_CHANGED: {
@@ -606,7 +617,7 @@ int main(int argc, char **argv) {
                 if (!(e2 && *e2)) {
                     g_render_scale = rs;
                     hn_rt_set_scale(rt, rs);
-                    blit_now(rt, w);
+                    need_blit = 1;
                     printf("[scale] 事件驱动重设: scale=%.0f bmp=%dx%d\n",
                            (double)rs, hn_rt_bitmap_width(rt), hn_rt_bitmap_height(rt));
                     fflush(stdout);
@@ -673,14 +684,16 @@ int main(int argc, char **argv) {
                         ww = hn_rt_width(rt); wh = hn_rt_height(rt);
                         hnp_window_resize(w, ww, wh);
                     }
-                    blit_now(rt, w);
+                    need_blit = 1;
                 }
             }
         }
         int repaint = 0;
         int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
-        if (repaint) blit_now(rt, w);
+        /* 唯一 blit 出口: 本拍排干的事件(need_blit)与帧 tick(repaint)
+           合并成一次平台拷贝。 */
+        if (need_blit || repaint) { blit_now(rt, w); need_blit = 0; }
         /* ---- 视频图层同步(真窗 GPU 合成): <video> 盒跟随布局/滚动/resize,
            首拍 attach(此后该会话 pf_frame 早退, CPU 拉帧归零), 元素消失/
            热重载换文档时 detach。离屏路径(--shot/--advance)不到这里。 ---- */
