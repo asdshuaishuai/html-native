@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: 'PingFang SC';
+          src: local('PingFang SC');
+        }
+        @font-face {
+          font-family: 'Hiragino Sans GB';
+          src: local('Hiragino Sans GB');
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          background: #0e1220;
+          font-family: "PingFang SC", "Hiragino Sans GB", ui-sans-serif, system-ui, sans-serif;
+          color: #f2f5ff;
+          overflow: hidden;
+        }
+        #f07-glow {
+          position: absolute;
+          left: 50%;
+          top: 470px;
+          width: 1400px;
+          height: 760px;
+          margin-left: -700px;
+          background: radial-gradient(closest-side, rgba(79, 124, 255, 0.45), rgba(79, 124, 255, 0) 72%);
+          opacity: 0;
+          will-change: transform, opacity;
+        }
+        #f07-ghost {
+          position: absolute;
+          left: 50%;
+          top: 40px;
+          margin-left: -490px;
+          font-size: 300px;
+          font-weight: 800;
+          color: #a7b6ff;
+          opacity: 0.04;
+          white-space: nowrap;
+          will-change: transform;
+        }
+        .f07-stage {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+        }
+        #f07-l1 {
+          font-size: 56px;
+          font-weight: 600;
+          color: #c9d4f2;
+          letter-spacing: 0.04em;
+          will-change: transform, opacity;
+        }
+        #f07-l2 {
+          font-size: 82px;
+          font-weight: 800;
+          margin-top: 30px;
+          letter-spacing: 0.02em;
+          will-change: transform, opacity;
+        }
+        #f07-l2 .q {
+          color: #a7b6ff;
+        }
+        #f07-l3 {
+          font-size: 34px;
+          color: #93a0c2;
+          margin-top: 42px;
+          letter-spacing: 0.06em;
+          will-change: transform, opacity;
+        }
+        #f07-l3 .em {
+          color: #3ecf6f;
+        }
+        #f07-rule {
+          width: 520px;
+          height: 3px;
+          margin-top: 56px;
+          background: linear-gradient(90deg, rgba(79, 124, 255, 0), #4f7cff, rgba(79, 124, 255, 0));
+          transform-origin: center center;
+          will-change: transform, opacity;
+        }
+        #f07-repo {
+          display: flex;
+          align-items: center;
+          gap: 22px;
+          margin-top: 40px;
+          will-change: transform, opacity;
+        }
+        #f07-repo .cell {
+          font-size: 28px;
+          color: #dbe4ff;
+          letter-spacing: 0.08em;
+        }
+        #f07-repo .chip {
+          font-size: 24px;
+          color: #a7b6ff;
+          border: 2px solid rgba(167, 182, 255, 0.45);
+          border-radius: 999px;
+          padding: 6px 22px;
+          letter-spacing: 0.12em;
+        }
+      </style>
+
+      <div id="root" data-composition-id="f07-ending" data-width="1920" data-height="1080">
+        <div id="f07-ghost" data-layout-allow-overflow="true">Neb</div>
+        <div id="f07-glow" data-layout-ignore="true"></div>
+
+        <div class="f07-stage">
+          <div id="f07-l1">agent 时代的渲染引擎，价值不在渲染本身</div>
+          <div id="f07-l2">而在<span class="q">「渲染结果可被机器验证」</span></div>
+          <div id="f07-l3">探针锚定的像素口径，就是 <span class="em">agent 与像素之间的翻译层</span></div>
+          <div id="f07-rule"></div>
+          <div id="f07-repo">
+            <span class="cell">github.com/asdshuaishuai/html-native</span>
+            <span class="chip">MIT</span>
+            <span class="chip">Neb = NO-WEB</span>
+          </div>
+        </div>
+      </div>
+
+      <script>
+        const tl = gsap.timeline({ paused: true });
+
+        tl.fromTo("#f07-l1", { opacity: 0, y: 34 }, { opacity: 1, y: 0, duration: 0.7, ease: "power3.out" }, 0.4);
+        tl.fromTo("#f07-l2", { opacity: 0, scale: 0.94, y: 24 }, { opacity: 1, scale: 1, y: 0, duration: 0.8, ease: "power3.out" }, 0.95);
+        tl.fromTo("#f07-l3", { opacity: 0, y: 22 }, { opacity: 1, y: 0, duration: 0.7, ease: "power2.out" }, 1.7);
+        tl.fromTo("#f07-rule", { opacity: 0, scaleX: 0 }, { opacity: 1, scaleX: 1, duration: 0.7, ease: "power3.inOut" }, 2.1);
+        tl.fromTo("#f07-repo", { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.7, ease: "power2.out" }, 2.5);
+
+        // glow blooms behind the key line, then breathes slowly
+        tl.fromTo("#f07-glow", { opacity: 0, scale: 0.9 }, { opacity: 0.26, scale: 1, duration: 1.2, ease: "power2.out" }, 1.0);
+        const glow = document.getElementById("f07-glow");
+        const ph = { p: 0 };
+        tl.to(
+          ph,
+          {
+            p: Math.PI * 2 * 2.2,
+            duration: 7.4,
+            ease: "none",
+            onUpdate: () => {
+              const s = Math.sin(ph.p);
+              glow.style.opacity = String(0.26 + s * 0.03);
+              glow.style.transform = `scale(${1 + s * 0.014})`;
+            },
+          },
+          2.2,
+        );
+
+        const ghost = document.getElementById("f07-ghost");
+        const gp = { p: 0 };
+        tl.to(
+          gp,
+          {
+            p: Math.PI * 2 * 1.0,
+            duration: 8.2,
+            ease: "none",
+            onUpdate: () => {
+              ghost.style.transform = `translate(${Math.sin(gp.p) * -10}px, ${Math.cos(gp.p) * 6}px)`;
+            },
+          },
+          0.6,
+        );
+
+        window.__timelines["f07-ending"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

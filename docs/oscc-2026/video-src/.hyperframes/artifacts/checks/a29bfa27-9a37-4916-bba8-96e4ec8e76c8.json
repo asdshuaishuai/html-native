@@ -1,0 +1,514 @@
+{
+  "ok": true,
+  "strict": false,
+  "browserSkipped": false,
+  "lint": {
+    "ok": true,
+    "errorCount": 0,
+    "warningCount": 5,
+    "infoCount": 0,
+    "findings": [
+      {
+        "code": "nested_media_start_basis_ambiguous",
+        "severity": "warning",
+        "message": "<video id=\"f04-v2\"> has data-start=\"4.5\" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.",
+        "selector": "#f04-v2",
+        "dataAttributes": {},
+        "sourceFile": "/Volumes/data/dev/coding/deepcodeUI/oscc-neb-video/compositions/frames/04-demo.html",
+        "bbox": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "time": 0,
+        "fixHint": "Keep data-start=\"4.5\" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis=\"global\"; otherwise convert it to local time by subtracting the host start."
+      },
+      {
+        "code": "nested_media_start_basis_ambiguous",
+        "severity": "warning",
+        "message": "<video id=\"f04-v3\"> has data-start=\"9\" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.",
+        "selector": "#f04-v3",
+        "dataAttributes": {},
+        "sourceFile": "/Volumes/data/dev/coding/deepcodeUI/oscc-neb-video/compositions/frames/04-demo.html",
+        "bbox": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "time": 0,
+        "fixHint": "Keep data-start=\"9\" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis=\"global\"; otherwise convert it to local time by subtracting the host start."
+      },
+      {
+        "code": "nested_media_start_basis_ambiguous",
+        "severity": "warning",
+        "message": "<video id=\"f04-v4\"> has data-start=\"14.5\" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.",
+        "selector": "#f04-v4",
+        "dataAttributes": {},
+        "sourceFile": "/Volumes/data/dev/coding/deepcodeUI/oscc-neb-video/compositions/frames/04-demo.html",
+        "bbox": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "time": 0,
+        "fixHint": "Keep data-start=\"14.5\" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis=\"global\"; otherwise convert it to local time by subtracting the host start."
+      },
+      {
+        "code": "nested_media_start_basis_ambiguous",
+        "severity": "warning",
+        "message": "<video id=\"f04-v5\"> has data-start=\"19\" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.",
+        "selector": "#f04-v5",
+        "dataAttributes": {},
+        "sourceFile": "/Volumes/data/dev/coding/deepcodeUI/oscc-neb-video/compositions/frames/04-demo.html",
+        "bbox": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "time": 0,
+        "fixHint": "Keep data-start=\"19\" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis=\"global\"; otherwise convert it to local time by subtracting the host start."
+      },
+      {
+        "code": "nested_media_start_basis_ambiguous",
+        "severity": "warning",
+        "message": "<video id=\"f04-v6\"> has data-start=\"24.5\" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.",
+        "selector": "#f04-v6",
+        "dataAttributes": {},
+        "sourceFile": "/Volumes/data/dev/coding/deepcodeUI/oscc-neb-video/compositions/frames/04-demo.html",
+        "bbox": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "time": 0,
+        "fixHint": "Keep data-start=\"24.5\" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis=\"global\"; otherwise convert it to local time by subtracting the host start."
+      }
+    ],
+    "filesScanned": 8
+  },
+  "runtime": {
+    "ok": true,
+    "errorCount": 0,
+    "warningCount": 0,
+    "infoCount": 0,
+    "findings": []
+  },
+  "layout": {
+    "ok": true,
+    "errorCount": 0,
+    "warningCount": 0,
+    "infoCount": 8,
+    "findings": [
+      {
+        "code": "canvas_overflow",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip > div:nth-of-type(1)",
+        "message": "Text extends outside the composition canvas.",
+        "rect": {
+          "left": -1217.33,
+          "top": 941.5,
+          "right": -1116.94,
+          "bottom": 978.5,
+          "width": 100.39,
+          "height": 37
+        },
+        "containerSelector": "#root",
+        "text": "纯 C99",
+        "fixHint": "Move the text inward, reduce its size, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 0,
+          "right": 1920,
+          "bottom": 1080,
+          "width": 1920,
+          "height": 1080
+        },
+        "overflow": {
+          "left": 1217.33
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": -1217.33,
+          "y": 941.5,
+          "width": 100.39,
+          "height": 37
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      },
+      {
+        "code": "canvas_overflow",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip > div:nth-of-type(2)",
+        "message": "Text extends outside the composition canvas.",
+        "rect": {
+          "left": -886.81,
+          "top": 941.5,
+          "right": -799.44,
+          "bottom": 978.5,
+          "width": 87.37,
+          "height": 37
+        },
+        "containerSelector": "#root",
+        "text": "零依赖",
+        "fixHint": "Move the text inward, reduce its size, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 0,
+          "right": 1920,
+          "bottom": 1080,
+          "width": 1920,
+          "height": 1080
+        },
+        "overflow": {
+          "left": 886.81
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": -886.81,
+          "y": 941.5,
+          "width": 87.37,
+          "height": 37
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      },
+      {
+        "code": "canvas_overflow",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip > div:nth-of-type(3)",
+        "message": "Text extends outside the composition canvas.",
+        "rect": {
+          "left": -570.62,
+          "top": 941.5,
+          "right": -467.62,
+          "bottom": 978.5,
+          "width": 103,
+          "height": 37
+        },
+        "containerSelector": "#root",
+        "text": "零 SDK",
+        "fixHint": "Move the text inward, reduce its size, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 0,
+          "right": 1920,
+          "bottom": 1080,
+          "width": 1920,
+          "height": 1080
+        },
+        "overflow": {
+          "left": 570.62
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": -570.62,
+          "y": 941.5,
+          "width": 103,
+          "height": 37
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      },
+      {
+        "code": "canvas_overflow",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip > div:nth-of-type(4)",
+        "message": "Text extends outside the composition canvas.",
+        "rect": {
+          "left": -260.83,
+          "top": 941.5,
+          "right": -129.42,
+          "bottom": 978.5,
+          "width": 131.41,
+          "height": 37
+        },
+        "containerSelector": "#root",
+        "text": "10 类指令",
+        "fixHint": "Move the text inward, reduce its size, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 0,
+          "right": 1920,
+          "bottom": 1080,
+          "width": 1920,
+          "height": 1080
+        },
+        "overflow": {
+          "left": 260.83
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": -260.83,
+          "y": 941.5,
+          "width": 131.41,
+          "height": 37
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      },
+      {
+        "code": "canvas_overflow",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip > div:nth-of-type(11)",
+        "message": "Text extends outside the composition canvas.",
+        "rect": {
+          "left": 2000.06,
+          "top": 941.5,
+          "right": 2145.67,
+          "bottom": 978.5,
+          "width": 145.61,
+          "height": 37
+        },
+        "containerSelector": "#root",
+        "text": "三后端同源",
+        "fixHint": "Move the text inward, reduce its size, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 0,
+          "right": 1920,
+          "bottom": 1080,
+          "width": 1920,
+          "height": 1080
+        },
+        "overflow": {
+          "right": 225.67
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": 2000.06,
+          "y": 941.5,
+          "width": 145.61,
+          "height": 37
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      },
+      {
+        "code": "canvas_overflow",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip > div:nth-of-type(12)",
+        "message": "Text extends outside the composition canvas.",
+        "rect": {
+          "left": 2338.63,
+          "top": 941.5,
+          "right": 2455.11,
+          "bottom": 978.5,
+          "width": 116.48,
+          "height": 37
+        },
+        "containerSelector": "#root",
+        "text": "探针锚定",
+        "fixHint": "Move the text inward, reduce its size, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 0,
+          "right": 1920,
+          "bottom": 1080,
+          "width": 1920,
+          "height": 1080
+        },
+        "overflow": {
+          "right": 535.11
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": 2338.63,
+          "y": 941.5,
+          "width": 116.48,
+          "height": 37
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      },
+      {
+        "code": "container_overflow",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip",
+        "message": "Element extends outside a clipping layout container.",
+        "rect": {
+          "left": -1328.12,
+          "top": 932,
+          "right": 2535.88,
+          "bottom": 988,
+          "width": 3864,
+          "height": 56
+        },
+        "containerSelector": "#f03-marquee",
+        "fixHint": "Resize/reposition the child or container, or mark intentional overflow with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 918,
+          "right": 1920,
+          "bottom": 1002,
+          "width": 1920,
+          "height": 84
+        },
+        "overflow": {
+          "left": 1328.12,
+          "right": 615.88
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": -1328.12,
+          "y": 932,
+          "width": 3864,
+          "height": 56
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      },
+      {
+        "code": "panel_out_of_canvas",
+        "severity": "info",
+        "time": 27.5,
+        "selector": "#f03-strip > div:nth-of-type(5)",
+        "message": "Painted panel extends outside the composition canvas.",
+        "rect": {
+          "left": -32.12,
+          "top": 932,
+          "right": 267.88,
+          "bottom": 988,
+          "width": 300,
+          "height": 56
+        },
+        "containerSelector": "#root",
+        "text": "三后端同源",
+        "fixHint": "Move the panel inward, or mark intentional off-canvas animation with data-layout-allow-overflow.",
+        "containerRect": {
+          "left": 0,
+          "top": 0,
+          "right": 1920,
+          "bottom": 1080,
+          "width": 1920,
+          "height": 1080
+        },
+        "overflow": {
+          "left": 32.12
+        },
+        "dataAttributes": {},
+        "sourceFile": "compositions/frames/03-architecture.html",
+        "bbox": {
+          "x": -32.12,
+          "y": 932,
+          "width": 300,
+          "height": 56
+        },
+        "firstSeen": 27.5,
+        "lastSeen": 27.5,
+        "occurrences": 1,
+        "heldMs": 0,
+        "times": [
+          27.5
+        ]
+      }
+    ],
+    "duration": 99,
+    "samples": [
+      5.5,
+      16.5,
+      27.5,
+      38.5,
+      49.5,
+      60.5,
+      71.5,
+      82.5,
+      93.5
+    ],
+    "transitionSamples": [],
+    "transitionSamplesDropped": 0,
+    "tolerance": 2,
+    "totalIssueCount": 8,
+    "truncated": false
+  },
+  "motion": {
+    "ok": true,
+    "errorCount": 0,
+    "warningCount": 0,
+    "infoCount": 0,
+    "findings": [],
+    "enabled": false,
+    "samples": 0
+  },
+  "contrast": {
+    "ok": true,
+    "errorCount": 0,
+    "warningCount": 0,
+    "infoCount": 0,
+    "findings": [],
+    "enabled": true,
+    "samples": [
+      5.5,
+      27.5,
+      49.5,
+      71.5,
+      93.5
+    ],
+    "checked": 57,
+    "passed": 57
+  },
+  "hdr": {
+    "autoPromotion": null,
+    "inspection": "available"
+  },
+  "snapshots": {
+    "enabled": false,
+    "files": [],
+    "times": [],
+    "findingFiles": []
+  }
+}

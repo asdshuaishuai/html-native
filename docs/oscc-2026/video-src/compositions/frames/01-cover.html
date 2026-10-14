@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: 'PingFang SC';
+          src: local('PingFang SC');
+        }
+        @font-face {
+          font-family: 'Hiragino Sans GB';
+          src: local('Hiragino Sans GB');
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          background: #0e1220;
+          font-family: "PingFang SC", "Hiragino Sans GB", ui-sans-serif, system-ui, sans-serif;
+          color: #f2f5ff;
+          overflow: hidden;
+        }
+        #f01-ghost {
+          position: absolute;
+          right: -140px;
+          bottom: -110px;
+          font-size: 340px;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+          color: #4f7cff;
+          opacity: 0.05;
+          white-space: nowrap;
+          will-change: transform;
+        }
+        #f01-glow {
+          position: absolute;
+          left: -260px;
+          top: 40px;
+          width: 1100px;
+          height: 900px;
+          background: radial-gradient(closest-side, rgba(79, 124, 255, 0.5), rgba(79, 124, 255, 0) 72%);
+          opacity: 0;
+          will-change: transform, opacity;
+        }
+        #f01-glow2 {
+          position: absolute;
+          right: -180px;
+          top: 480px;
+          width: 760px;
+          height: 760px;
+          background: radial-gradient(closest-side, rgba(167, 182, 255, 0.34), rgba(167, 182, 255, 0) 70%);
+          opacity: 0;
+          will-change: transform, opacity;
+        }
+        #f01-grid {
+          position: absolute;
+          inset: 0;
+          background-image: linear-gradient(rgba(167, 182, 255, 0.05) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(167, 182, 255, 0.05) 1px, transparent 1px);
+          background-size: 120px 120px;
+        }
+        .f01-stage {
+          position: absolute;
+          inset: 0;
+          padding: 120px 140px;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+        }
+        #f01-brand {
+          position: absolute;
+          top: 84px;
+          left: 140px;
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          font-size: 26px;
+          letter-spacing: 0.14em;
+          color: #93a0c2;
+          will-change: transform, opacity;
+        }
+        #f01-brand .dot {
+          width: 12px;
+          height: 12px;
+          border-radius: 50%;
+          background: #3ecf6f;
+        }
+        #f01-brand .tag {
+          color: #a7b6ff;
+        }
+        #f01-kicker {
+          font-size: 30px;
+          letter-spacing: 0.5em;
+          color: #93a0c2;
+          margin-bottom: 34px;
+          will-change: transform, opacity;
+        }
+        #f01-t1 {
+          font-size: 96px;
+          font-weight: 700;
+          line-height: 1.16;
+          letter-spacing: 0.01em;
+          will-change: transform, opacity;
+        }
+        #f01-t2 {
+          font-size: 132px;
+          font-weight: 800;
+          line-height: 1.2;
+          letter-spacing: 0.01em;
+          will-change: transform, opacity;
+        }
+        #f01-t2 .hl {
+          color: #a7b6ff;
+        }
+        #f01-rule {
+          width: 620px;
+          height: 4px;
+          margin: 44px 0 30px;
+          background: linear-gradient(90deg, #4f7cff, rgba(79, 124, 255, 0));
+          transform-origin: left center;
+          will-change: transform, opacity;
+        }
+        #f01-sub {
+          font-size: 32px;
+          color: #c9d4f2;
+          letter-spacing: 0.06em;
+          will-change: transform, opacity;
+        }
+        #f01-sub .sep {
+          color: #4f7cff;
+          margin: 0 14px;
+        }
+      </style>
+
+      <div id="root" data-composition-id="f01-cover" data-width="1920" data-height="1080">
+        <div id="f01-grid" data-layout-ignore="true"></div>
+        <div id="f01-ghost" data-layout-allow-overflow="true">NO-WEB</div>
+        <div id="f01-glow" data-layout-ignore="true"></div>
+        <div id="f01-glow2" data-layout-ignore="true"></div>
+
+        <div class="f01-stage">
+          <div id="f01-kicker">agent 时代的新渲染层</div>
+          <div id="f01-t1">agent 写下的</div>
+          <div id="f01-t2"><span class="hl">HTML</span>，就是原生窗</div>
+          <div id="f01-rule"></div>
+          <div id="f01-sub">为 AI agent 定制的 HTML 原生渲染引擎<span class="sep">·</span>桌宠 / 数字人 / 数据大屏 / 流式会话</div>
+        </div>
+
+        <div id="f01-brand"><span class="dot"></span><span>html-native</span><span class="tag">Neb = NO-WEB</span></div>
+      </div>
+
+      <script>
+        const tl = gsap.timeline({ paused: true });
+
+        // brand row: fade from top
+        tl.fromTo("#f01-brand", { opacity: 0, y: -22 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, 0.15);
+
+        // title lines: waterfall arrival (whip from below)
+        tl.fromTo("#f01-t1", { opacity: 0, y: 78 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.4);
+        tl.fromTo("#f01-t2", { opacity: 0, y: 80 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.56);
+        tl.fromTo("#f01-kicker", { opacity: 0, y: 44 }, { opacity: 1, y: 0, duration: 0.16, ease: "power4.out" }, 0.74);
+
+        // hairline rule sweeps open
+        tl.fromTo("#f01-rule", { opacity: 0, scaleX: 0 }, { opacity: 1, scaleX: 1, duration: 0.6, ease: "power3.inOut" }, 0.86);
+
+        // subtitle support fade
+        tl.fromTo("#f01-sub", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.55, ease: "power2.out" }, 1.02);
+
+        // glow blooms behind the title settle
+        tl.fromTo("#f01-glow", { opacity: 0, scale: 0.86 }, { opacity: 0.3, scale: 1, duration: 1.0, ease: "power2.out" }, 0.5);
+        tl.fromTo("#f01-glow2", { opacity: 0, scale: 0.9 }, { opacity: 0.22, scale: 1, duration: 1.0, ease: "power2.out" }, 0.9);
+
+        // bounded ambient breathe on glows (finite phase tween)
+        const g1 = document.getElementById("f01-glow");
+        const g2 = document.getElementById("f01-glow2");
+        const phase = { p: 0 };
+        tl.to(
+          phase,
+          {
+            p: Math.PI * 2 * 1.6,
+            duration: 4.2,
+            ease: "none",
+            onUpdate: () => {
+              const s = Math.sin(phase.p);
+              g1.style.opacity = String(0.3 + s * 0.03);
+              g1.style.transform = `scale(${1 + s * 0.015})`;
+              g2.style.opacity = String(0.22 + Math.sin(phase.p + Math.PI / 2) * 0.025);
+            },
+          },
+          1.5,
+        );
+
+        // ghost text slow drift
+        const ghost = document.getElementById("f01-ghost");
+        const gp = { p: 0 };
+        tl.to(
+          gp,
+          {
+            p: Math.PI * 2 * 1.1,
+            duration: 4.4,
+            ease: "none",
+            onUpdate: () => {
+              ghost.style.transform = `translate(${Math.sin(gp.p) * 14}px, ${Math.cos(gp.p * 0.9) * -8}px)`;
+            },
+          },
+          0.6,
+        );
+
+        window.__timelines["f01-cover"] = tl;
+      </script>
+    </template>
+  </body>
+</html>

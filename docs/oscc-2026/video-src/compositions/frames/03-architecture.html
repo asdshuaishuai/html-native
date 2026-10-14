@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <template>
+      <style>
+        @font-face {
+          font-family: 'PingFang SC';
+          src: local('PingFang SC');
+        }
+        @font-face {
+          font-family: 'Hiragino Sans GB';
+          src: local('Hiragino Sans GB');
+        }
+        #root {
+          position: absolute;
+          inset: 0;
+          background: #0e1220;
+          font-family: "PingFang SC", "Hiragino Sans GB", ui-sans-serif, system-ui, sans-serif;
+          color: #f2f5ff;
+          overflow: hidden;
+        }
+        #f03-glow {
+          position: absolute;
+          left: -260px;
+          bottom: -320px;
+          width: 980px;
+          height: 980px;
+          background: radial-gradient(closest-side, rgba(62, 207, 111, 0.26), rgba(62, 207, 111, 0) 72%);
+          opacity: 0.16;
+        }
+        #f03-ghost {
+          position: absolute;
+          right: -70px;
+          top: -90px;
+          font-size: 360px;
+          font-weight: 800;
+          color: #4f7cff;
+          opacity: 0.05;
+          white-space: nowrap;
+          will-change: transform;
+        }
+        .f03-head {
+          position: absolute;
+          left: 140px;
+          top: 104px;
+        }
+        #f03-kicker {
+          display: inline-block;
+          font-size: 24px;
+          letter-spacing: 0.4em;
+          color: #a7b6ff;
+          border: 2px solid rgba(167, 182, 255, 0.4);
+          border-radius: 999px;
+          padding: 10px 28px 10px 34px;
+          will-change: transform, opacity;
+        }
+        #f03-title {
+          font-size: 80px;
+          font-weight: 800;
+          margin-top: 24px;
+          will-change: transform, opacity;
+        }
+        #f03-note {
+          position: absolute;
+          right: 140px;
+          top: 128px;
+          font-size: 26px;
+          color: #93a0c2;
+          letter-spacing: 0.06em;
+          will-change: transform, opacity;
+        }
+        .f03-layers {
+          position: absolute;
+          left: 140px;
+          top: 356px;
+          width: 1640px;
+          display: flex;
+          flex-direction: column;
+          gap: 24px;
+        }
+        .f03-layer {
+          height: 128px;
+          border-radius: 20px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0 48px;
+          transform-origin: left center;
+          will-change: transform, opacity;
+        }
+        .f03-layer .name {
+          font-size: 42px;
+          font-weight: 700;
+        }
+        .f03-layer .meta {
+          font-size: 27px;
+          color: #c9d4f2;
+          letter-spacing: 0.04em;
+        }
+        #f03-l1 {
+          background: rgba(79, 124, 255, 0.16);
+          border: 3px solid #4f7cff;
+        }
+        #f03-l1 .name {
+          color: #ffffff;
+        }
+        #f03-l1 .badge {
+          display: inline-block;
+          font-size: 22px;
+          color: #0e1220;
+          background: #4f7cff;
+          border-radius: 8px;
+          padding: 4px 14px;
+          margin-right: 20px;
+          font-weight: 700;
+          letter-spacing: 0.1em;
+        }
+        #f03-l2 {
+          background: rgba(167, 182, 255, 0.1);
+          border: 2px solid rgba(167, 182, 255, 0.55);
+        }
+        #f03-l3 {
+          background: rgba(62, 207, 111, 0.09);
+          border: 2px solid rgba(62, 207, 111, 0.5);
+        }
+        .f03-link {
+          position: absolute;
+          left: 208px;
+          width: 3px;
+          height: 24px;
+          background: rgba(167, 182, 255, 0.4);
+        }
+        .f03-marquee {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: 918px;
+          height: 84px;
+          overflow: hidden;
+          border-top: 1px solid rgba(167, 182, 255, 0.16);
+          border-bottom: 1px solid rgba(167, 182, 255, 0.16);
+          display: flex;
+          align-items: center;
+          opacity: 0;
+          will-change: opacity;
+        }
+        .f03-strip {
+          display: flex;
+          gap: 24px;
+          width: max-content;
+          will-change: transform;
+        }
+        .f03-chip {
+          width: 300px;
+          height: 56px;
+          border-radius: 999px;
+          border: 2px solid rgba(79, 124, 255, 0.5);
+          color: #dbe4ff;
+          font-size: 26px;
+          letter-spacing: 0.12em;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 12px;
+        }
+        .f03-chip .d {
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          background: #3ecf6f;
+        }
+      </style>
+
+      <div id="root" data-composition-id="f03-architecture" data-width="1920" data-height="1080">
+        <div id="f03-glow" data-layout-ignore="true"></div>
+        <div id="f03-ghost" data-layout-allow-overflow="true">Neb</div>
+
+        <div class="f03-head">
+          <div id="f03-kicker">回答</div>
+          <div id="f03-title">Neb 的回答</div>
+        </div>
+        <div id="f03-note">一个引擎核心 · 三个同源后端 · 一条显示列表</div>
+
+        <div class="f03-layers">
+          <div class="f03-layer" id="f03-l1">
+            <span class="name"><span class="badge">CORE</span>Neb 引擎核心</span>
+            <span class="meta">纯 C99 · 显示列表 10 类指令</span>
+          </div>
+          <div class="f03-layer" id="f03-l2">
+            <span class="name">rt 运行时</span>
+            <span class="meta">原生窗宿主 · 桌宠 / 数字人 / 大屏 / 会话</span>
+          </div>
+          <div class="f03-layer" id="f03-l3">
+            <span class="name">platform 平台层</span>
+            <span class="meta">hnsoft 纯 C 光栅 / cairo / Metal v1 · 三后端同源</span>
+          </div>
+        </div>
+
+        <div class="f03-marquee" id="f03-marquee">
+          <div class="f03-strip" id="f03-strip" data-layout-allow-overflow="true">
+            <div class="f03-chip"><span class="d"></span>纯 C99</div>
+            <div class="f03-chip"><span class="d"></span>零依赖</div>
+            <div class="f03-chip"><span class="d"></span>零 SDK</div>
+            <div class="f03-chip"><span class="d"></span>10 类指令</div>
+            <div class="f03-chip"><span class="d"></span>三后端同源</div>
+            <div class="f03-chip"><span class="d"></span>探针锚定</div>
+            <div class="f03-chip"><span class="d"></span>纯 C99</div>
+            <div class="f03-chip"><span class="d"></span>零依赖</div>
+            <div class="f03-chip"><span class="d"></span>零 SDK</div>
+            <div class="f03-chip"><span class="d"></span>10 类指令</div>
+            <div class="f03-chip"><span class="d"></span>三后端同源</div>
+            <div class="f03-chip"><span class="d"></span>探针锚定</div>
+          </div>
+        </div>
+      </div>
+
+      <script>
+        const tl = gsap.timeline({ paused: true });
+
+        tl.fromTo("#f03-kicker", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.18, ease: "power4.out" }, 0.2);
+        tl.fromTo("#f03-title", { opacity: 0, y: 64 }, { opacity: 1, y: 0, duration: 0.2, ease: "power4.out" }, 0.34);
+        tl.fromTo("#f03-note", { opacity: 0, y: -18 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 0.6);
+
+        // architecture bars sweep open top-down
+        ["#f03-l1", "#f03-l2", "#f03-l3"].forEach((sel, i) => {
+          tl.fromTo(sel, { opacity: 0, scaleX: 0.12 }, { opacity: 1, scaleX: 1, duration: 0.7, ease: "power3.inOut" }, 0.9 + i * 0.55);
+        });
+
+        // keyword marquee: fade in, then one finite linear travel
+        tl.fromTo("#f03-marquee", { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power2.out" }, 1.6);
+        // strip = 2 copies of 6 chips (copy period 1944px); travel stays under the gap threshold (1944)
+        tl.fromTo("#f03-strip", { x: 0 }, { x: -1700, duration: 9.6, ease: "none" }, 2.0);
+
+        const ghost = document.getElementById("f03-ghost");
+        const gp = { p: 0 };
+        tl.to(
+          gp,
+          {
+            p: Math.PI * 2 * 1.2,
+            duration: 9.4,
+            ease: "none",
+            onUpdate: () => {
+              ghost.style.transform = `translate(${Math.sin(gp.p) * -14}px, ${Math.cos(gp.p) * 8}px)`;
+            },
+          },
+          0.4,
+        );
+
+        window.__timelines["f03-architecture"] = tl;
+      </script>
+    </template>
+  </body>
+</html>
