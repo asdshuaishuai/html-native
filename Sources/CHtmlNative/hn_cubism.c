@@ -16,8 +16,12 @@
  * 全部从 Core 读回 —— 不重实现 Cubism 的形变数学(keyform 插值/
  * deformer 树/部件透明度传播都是 Core 的十年沉淀)。
  *
- * 遮罩(mask) v1 不做: 被遮罩的 drawable 照常绘制 —— 视觉上高光/腮红
- * 可能溢出轮廓, 后续以离屏掩码槽补齐(与 CLIP_PATH 的掩码机制同源)。
+ * 遮罩(mask): mask drawable 三角汤 → CLIP_PATH_PUSH 多子路径裁剪 →
+ * 画本 drawable → CLIP_POP; 反转 mask(csmIsInvertedMask) 暂按普通。
+ * 已知差距: 部件拼装观感仍有散乱(疑似逐 drawable Multiply/Screen
+ * 颜色与离屏掩码口径), 精修方法: Playwright + 官方 Web runtime
+ * (live2dcubismcore.min.js + pixi-live2d-display)渲染同模型出对照图,
+ * 逐层比对定位差异层。moc 一致性已验(consistency=1, mocVer=3)。
  */
 #include <math.h>
 #include <stdio.h>
@@ -166,6 +170,11 @@ struct hn_cubism *hn_cubism_acquire(hn_context *c, const char *m3_path) {
     {
         unsigned long long a = ((unsigned long long)(size_t)cb->moc_buf + 63) & ~63ull;
         memcpy((void *)a, moc_bytes, mlen);
+            int cons = csmHasMocConsistency((void *)a, cb->moc_size);
+        if (getenv("HN_CUBISM_TRACE"))
+            fprintf(stderr, "[cubism] mocVer=%d latest=%d consistency=%d\\n",
+                    csmGetMocVersion((void *)a, cb->moc_size),
+                    csmGetLatestMocVersion(), cons);
         cb->moc = csmReviveMocInPlace((void *)a, cb->moc_size);
     }
     if (!cb->moc) { free(moc_rel_path); hn_cubism_release(cb); return NULL; }
@@ -446,6 +455,8 @@ void hn_cubism_paint(hn_context *c, hn_node *n,
         if (i < 0) break;
         float op = hn_cubism_opacity(cb, i);
         if (op <= 0.01f) continue;
+        csmFlags dflag = csmGetDrawableDynamicFlags(cb->model)[i];
+        if (!(dflag & csmIsVisible)) continue;     /* 本帧不可见(Core 动态) */
         int nix = hn_cubism_index_count(cb, i);
         const unsigned short *ix = hn_cubism_indices(cb, i);
         const float *pv = hn_cubism_verts(cb, i);
@@ -454,6 +465,54 @@ void hn_cubism_paint(hn_context *c, hn_node *n,
 
         const char *tp = hn_cubism_texture_path(cb, hn_cubism_texture_index(cb, i));
         if (!tp || !*tp) continue;
+
+        /* ---- 遮罩(mask): 被 mask 的 drawable 以 mask 形状裁剪后再画。
+            mask 形状 = 各 mask drawable 的三角汤(屏幕坐标), 每三角独立
+            子路径(segs=3)做非零环绕并集 —— 与官方"离屏掩码"的可见效果
+            一致; 反转 mask(csmIsInvertedMask) v1 暂按普通 mask 处理。 *\/ */
+        int nm = csmGetDrawableMaskCounts(cb->model)[i];
+        const int *mlist = csmGetDrawableMasks(cb->model)[i];
+        int pushed_clip = 0;
+        if (nm > 0 && mlist) {
+            int total = 0, nseg = 0;
+            for (int m = 0; m < nm; m++) {
+                int mi = mlist[m];
+                if (mi < 0 || mi >= cb->n_draw) continue;
+                total += hn_cubism_index_count(cb, mi);
+                nseg += hn_cubism_index_count(cb, mi) / 3;
+            }
+            if (total > 0 && nseg > 0) {
+                float *soup = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)total * 2);
+                int *segs = (int *)hn_arena_alloc(a, sizeof(int) * (size_t)nseg);
+                if (soup && segs) {
+                    int p = 0, sg = 0;
+                    for (int m = 0; m < nm; m++) {
+                        int mi = mlist[m];
+                        if (mi < 0 || mi >= cb->n_draw) continue;
+                        int cnt = hn_cubism_index_count(cb, mi);
+                        const unsigned short *mix = hn_cubism_indices(cb, mi);
+                        const float *mv = hn_cubism_verts(cb, mi);
+                        if (cnt <= 0 || !mix || !mv) continue;
+                        for (int j = 0; j < cnt; j++) {
+                            int vi = mix[j];
+                            soup[p * 2]     = ox + (orgx + mv[vi * 2] * ppu) * s;
+                            soup[p * 2 + 1] = oy + (orgy - mv[vi * 2 + 1] * ppu) * s;
+                            p++;
+                            if (j % 3 == 2) segs[sg++] = 3;
+                        }
+                    }
+                    if (p == total && sg == nseg) {
+                        hn_cmd mc;
+                        memset(&mc, 0, sizeof(mc));
+                        mc.kind = HN_CMD_CLIP_PATH_PUSH;
+                        mc.poly = soup; mc.poly_n = total;
+                        mc.clip_segs = segs; mc.clip_nsegs = nseg;
+                        hn_paint_push(c, &mc);
+                        pushed_clip = 1;
+                    }
+                }
+            }
+        }
         if (trace && k == 0) {
             int vc = hn_cubism_vertex_count(cb, i);
             const float *vv = hn_cubism_verts(cb, i);
@@ -464,7 +523,7 @@ void hn_cubism_paint(hn_context *c, hn_node *n,
                     if (ux < mnx) mnx = ux; if (ux > mxx) mxx = ux;
                     if (uy < mny) mny = uy; if (uy > mxy) mxy = uy;
                 }
-                fprintf(stderr, "[cubism] d0 verts=%d range=[%.3f..%.3f, %.3f..%.3f]\\n",
+                fprintf(stderr, "[cubism] d0 verts=%d range=[%.3f..%.3f, %.3f..%.3f]\n",
                         vc, mnx, mxx, mny, mxy);
             }
         }
@@ -501,6 +560,12 @@ void hn_cubism_paint(hn_context *c, hn_node *n,
         cmd.x = sx; cmd.y = sy; cmd.w = bw; cmd.h = bh;   /* 后端剔除用 */
         hn_paint_push(c, &cmd);
         nvis++;
+        if (pushed_clip) {
+            hn_cmd pop;
+            memset(&pop, 0, sizeof(pop));
+            pop.kind = HN_CMD_CLIP_POP;
+            hn_paint_push(c, &pop);
+        }
     }
     if (trace) fprintf(stderr, "[cubism] emitted=%d\n", nvis);
     (void)nvis;

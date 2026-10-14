@@ -33,7 +33,7 @@ gen_move() {  # gen_move SRC DST WIN  — 不透明窗: 只改清单挪位
 }
 
 gen_card examples/showcase-pet.html   examples/_live-pet.html   "360x360@420,200"
-gen_move examples/showcase-miku.html  examples/_live-miku.html  "420x560@900,200"
+gen_move examples/showcase-live.html  examples/_live-miku.html  "420x560@900,200"
 gen_move examples/showcase-dash.html  examples/_live-dash.html  "1660x930@1700,160"
 gen_move examples/showcase-media.html examples/_live-media.html "520x820@360,600"
 

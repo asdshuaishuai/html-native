@@ -32,7 +32,7 @@ record_once() {
     echo "· 桌宠(t≈1.6 起, 门控 1.6-37.2)"
     "$HN" open pet examples/_live-pet.html --window >/dev/null 2>&1
     sleep 7
-    echo "· Live2D 数字人(t≈8.6 起, 门控 8.6-37.8)"
+    echo "· PainterEngine 数字人(t≈8.6 起, 门控 8.6-37.8)"
     "$HN" open miku examples/_live-miku.html --window >/dev/null 2>&1
     sleep 7
     echo "· 数据大屏(t≈15.6 起, 门控 15.6-38.4)"

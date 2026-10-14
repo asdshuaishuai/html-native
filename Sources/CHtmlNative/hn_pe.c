@@ -5,6 +5,7 @@
  * 再以 HN_CMD_BITMAP 上屏(透明底 RGBA — PE 缺省 PX_COLOR_FORMAT_RGBA
  * 与引擎位图契约零转换)。rig(呼吸/摇摆/跳跃)由引擎按 ext_clock 驱动
  * —— 演示"引擎驱动 + PE 渲染"的分层; PX_Live 框架接入后续再上。
+ * 未定义 HN_HAVE_PE(构建未含 PE 源)时整模块出局, paint 为空操作。
  */
 #include <math.h>
 #include <stdio.h>
@@ -13,6 +14,8 @@
 
 #include "hn_internal.h"
 #include "hn_png.h"
+
+#ifdef HN_HAVE_PE
 #include "PX_Surface.h"
 #include "PX_Texture.h"
 
@@ -34,8 +37,8 @@ static struct pe_tex g_pe_cache[PE_CACHE];
 
 static void pe_init(void) {
     if (pe_inited) return;
-    pe_mp_storage = MP_Create(pe_mp_buf, PE_MP_SIZE);   /* PE 约定: 池头按值返回, 使用方持指针 */
-    pe_mp = &pe_mp_storage;
+    pe_mp_storage = MP_Create(pe_mp_buf, PE_MP_SIZE);
+    pe_mp = &pe_mp_storage;     /* PE 约定: 池头按值返回, 使用方持指针 */
     pe_inited = 1;
 }
 
@@ -65,15 +68,16 @@ static struct pe_tex *pe_tex_acquire(hn_context *c, const char *path) {
     t->rgba = rgba;
     t->w = w; t->h = h;
     pe_init();
-    if (!PX_TextureCreate(pe_mp, &t->tex, w, h)) { return NULL; }
+    if (!pe_mp || !PX_TextureCreate(pe_mp, &t->tex, w, h)) return NULL;
     /* RGBA → px_color(缺省 PX_COLOR_FORMAT_RGBA: 内存同序, 逐像素拷) */
     px_color *px = t->tex.surfaceBuffer;
     for (int i = 0; i < w * h; i++) {
-        {
-            px_color cc; cc._argb.r = rgba[i * 4]; cc._argb.g = rgba[i * 4 + 1];
-            cc._argb.b = rgba[i * 4 + 2]; cc._argb.a = rgba[i * 4 + 3];
-            px[i] = cc;
-        }
+        px_color cc;
+        cc._argb.r = rgba[i * 4];
+        cc._argb.g = rgba[i * 4 + 1];
+        cc._argb.b = rgba[i * 4 + 2];
+        cc._argb.a = rgba[i * 4 + 3];
+        px[i] = cc;
     }
     return t;
 }
@@ -102,11 +106,12 @@ void hn_pe_paint(hn_context *c, hn_node *n,
         g_pe_surf_w[slot] = W; g_pe_surf_h[slot] = H;
     }
     {
-        px_color z; z._argb.r = 0; z._argb.g = 0; z._argb.b = 0; z._argb.a = 0;
+        px_color z;
+        z._argb.r = 0; z._argb.g = 0; z._argb.b = 0; z._argb.a = 0;
         PX_SurfaceClear(s, 0, 0, W - 1, H - 1, z);
     }
 
-    /* rig: 呼吸(整体缩放) + 摇摆(微旋转) + 跳跃(y 位移), 4s 周期 */
+    /* rig: 呼吸(整体缩放) + 摇摆(微旋转) + 跳跃(y 位移) */
     float clk = (float)(n->ext_clock) * 0.001f;
     float breathe = 1.0f + 0.025f * sinf(clk * 1.57f);
     float sway = 0.06f * sinf(clk * 0.9f);
@@ -126,3 +131,12 @@ void hn_pe_paint(hn_context *c, hn_node *n,
     cmd.fill = 0xFFFFFF00u | (unsigned)(alpha * 255.0f);
     hn_paint_push(c, &cmd);
 }
+
+#else /* !HN_HAVE_PE —— 构建未含 PE: 空操作(hn-live 节点不落像素) */
+
+void hn_pe_paint(hn_context *c, hn_node *n,
+                 float bw, float bh, float sx, float sy, float alpha) {
+    (void)c; (void)n; (void)bw; (void)bh; (void)sx; (void)sy; (void)alpha;
+}
+
+#endif /* HN_HAVE_PE */

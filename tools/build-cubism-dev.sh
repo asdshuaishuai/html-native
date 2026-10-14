@@ -10,7 +10,7 @@ zig cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off \
   -DHN_MEDIA_PLATFORM_AVFOUNDATION -DHN_VERSION='"cubism"' \
   app/hn_app.c app/hn_media_platform.c app/hn_media_synth.c rt/hn_rt.c \
   platform/hnp_macos.c platform/hnp_media_macos.c platform/hnp_gpu_metal.c \
-  Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
+  Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
   Sources/CHtmlNative/hn_md.c Sources/CHtmlNative/hn_fmt.c Sources/CHtmlNative/hn_css.c \
   Sources/CHtmlNative/hn_style.c Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
   Sources/CHtmlNative/hn_media.c Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
