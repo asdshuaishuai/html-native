@@ -20,3 +20,4 @@ dist/
 # 运行时产物(本地状态)
 *.log
 examples/_rec-*.html
+examples/_live-*.html

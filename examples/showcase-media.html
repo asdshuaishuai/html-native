@@ -1,0 +1,110 @@
+<html><head>
+<!-- showcase-media — 竞赛演示·媒体窗(展示页, 520x820)
+     ================================================================
+     <video> 真窗走 AVPlayerLayer GPU 合成直通(帧不过 CPU); 可视化条是
+     Canvas 2D 帧循环。深底青绿主题, 播放器 chrome 纯 CSS。 -->
+<meta charset="utf-8">
+<meta name="hn-window" content="520x820">
+<meta name="hn-title" content="Neb · 媒体运行时">
+<meta name="hn-theme" content="dark">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%;
+               background: linear-gradient(170deg, #0a0e18, #0d1422 55%, #0a101c); }
+
+  .t { position: absolute; left: 32; top: 30; font-size: 24; color: #eef4fb; }
+  .t b { color: #39c5bb; }
+  .s { position: absolute; left: 33; top: 66; font-size: 12; color: #8b97ab; }
+
+  .vcard { position: absolute; left: 24; top: 100; width: 472; height: 282;
+           box-sizing: border-box; padding: 10;
+           background: rgba(18, 24, 38, 0.85);
+           border: 1 solid rgba(255, 255, 255, 0.07); border-radius: 18; }
+  .vcard video { width: 452; height: 254; border-radius: 10; }
+
+  .vcap { position: absolute; left: 34; top: 390; width: 452;
+          font-size: 11; color: rgba(139, 151, 171, 0.85); }
+  .vcap b { color: #39c5bb; }
+
+  .acard { position: absolute; left: 24; top: 424; width: 472; height: 210;
+           box-sizing: border-box; padding: 16 10 10 10;
+           background: rgba(18, 24, 38, 0.85);
+           border: 1 solid rgba(255, 255, 255, 0.07); border-radius: 18; }
+  .acard canvas { width: 452; height: 168; }
+  .acap { position: absolute; left: 34; top: 612; width: 452;
+          font-size: 11; color: rgba(139, 151, 171, 0.85); }
+  .acap b { color: #39c5bb; }
+
+  /* 播放器 chrome: 进度 + 时间 + 控制 */
+  .bar { position: absolute; left: 32; top: 668; width: 456; height: 6;
+         background: rgba(255, 255, 255, 0.10); border-radius: 3; }
+  .bar-in { position: absolute; left: 0; top: 0; width: 62%; height: 6;
+            background: linear-gradient(90deg, #39c5bb, #4f8cff); border-radius: 3; }
+  .tm { position: absolute; left: 32; top: 682; width: 456; font-size: 11;
+        color: #8b97ab; }
+  .tm-l { position: absolute; left: 0; }   /* 文本流内左右分列(引擎无 float) */
+  .tm .r { position: absolute; left: 400; }
+  .ctrl { position: absolute; left: 32; top: 716; width: 456; height: 54;
+          background: rgba(18, 24, 38, 0.85);
+          border: 1 solid rgba(255, 255, 255, 0.07); border-radius: 14; }
+  .c1 { position: absolute; left: 76; top: 731; font-size: 17; color: #dfe9f5; }
+  .c2 { position: absolute; left: 168; top: 729; font-size: 19; color: #39c5bb; }
+  .c3 { position: absolute; left: 262; top: 731; font-size: 17; color: #dfe9f5; }
+  .c4 { position: absolute; left: 356; top: 731; font-size: 17; color: #dfe9f5; }
+  .foot { position: absolute; left: 24; top: 786; width: 472; text-align: center;
+          font-size: 11; color: rgba(139, 151, 171, 0.8); }
+  .foot b { color: #39c5bb; }
+</style>
+</head><body>
+  <div class="t">Neb <b>媒体运行时</b></div>
+  <div class="s">声明即播放 · 解码委托平台 · 引擎不认识解码器</div>
+
+  <div class="vcard">
+    <video src="assets/demo.mp4" autoplay loop muted></video>
+  </div>
+  <div class="vcap"><b>AVPlayerLayer</b> GPU 合成直通 · 帧不过 CPU · 关窗即释放</div>
+
+  <div class="acard">
+    <canvas id="viz" width="904" height="336"></canvas>
+  </div>
+  <div class="acap"><b>Canvas 2D</b> 可视化 · requestAnimationFrame 帧循环 · 32 频段</div>
+
+  <div class="bar"><div class="bar-in"></div></div>
+  <div class="tm">01:28<span class="r">02:15</span></div>
+  <div class="ctrl"></div>
+  <div class="c1">暂停</div>
+  <div class="c2">播放</div>
+  <div class="c3">循环</div>
+  <div class="c4">静音</div>
+
+  <div class="foot">音频走 <b>AVPlayer</b> 直出 · 静音键 = m · 音量属性即语义</div>
+
+<script>
+/* 可视化: 32 频段, 平滑伪谱(多正弦叠加), 帧循环驱动 */
+var cv = document.getElementById('viz');
+var g = cv.getContext('2d');
+var W = 904, H = 336, t = 0, N = 32;
+function frame() {
+  t += 0.02;
+  g.clearRect(0, 0, W, H);
+  var bw = W / N;
+  for (var i = 0; i < N; i++) {
+    var v = 0.34 + 0.30 * Math.sin(t * 1.7 + i * 0.55)
+                 + 0.18 * Math.sin(t * 2.9 + i * 1.31)
+                 + 0.10 * Math.sin(t * 4.3 + i * 2.17);
+    if (v < 0.06) v = 0.06;
+    var h = v * (H - 24);
+    var gr = g.createLinearGradient(0, H - h, 0, H);
+    gr.addColorStop(0, '#4fd8c8');
+    gr.addColorStop(1, 'rgba(79,140,255,0.55)');
+    g.fillStyle = gr;
+    var x = i * bw + bw * 0.18, w = bw * 0.64;
+    g.fillRect(x, H - h - 12, w, h);
+    /* 峰顶帽 */
+    g.fillStyle = 'rgba(232,244,251,0.75)';
+    g.fillRect(x, H - h - 18, w, 4);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body></html>

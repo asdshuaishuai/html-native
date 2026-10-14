@@ -1,0 +1,119 @@
+<html><head>
+<!-- showcase-dash — 竞赛演示·数据大屏(展示页, 1660x930)
+     ================================================================
+     真实系统数据(sys:// hx 片段自动轮询换入) + 引擎 Canvas 实时波场。
+     深空青绿主题, 无 ✓/✗ 调试清单 —— 每一块都是"活"的。 -->
+<meta charset="utf-8">
+<meta name="hn-window" content="1660x930">
+<meta name="hn-title" content="Neb · 系统总览">
+<meta name="hn-theme" content="dark">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%;
+               background: linear-gradient(160deg, #0a0e18, #0d1422 60%, #0a101c); }
+
+  /* 引擎无 h1 默认样式/无 right: 定位/absolute 勾嵌 absolute 会双重绘制
+     —— 头部子元素直接挂 body, 全部页面级绝对坐标(老页同口径) */
+  .head-t { position: absolute; left: 48; top: 34; font-size: 32; color: #eef4fb; }
+  .head-t b { color: #39c5bb; }
+  .head-s { position: absolute; left: 50; top: 80; font-size: 13; color: #8b97ab; }
+  .head-c { position: absolute; left: 1168; top: 40; width: 444;
+            font-size: 24; color: #9fb3c8; text-align: right; }
+  .head-l { position: absolute; left: 1168; top: 80; width: 444;
+            font-size: 12; color: #39c5bb; text-align: right; }
+
+  .card { position: absolute; box-sizing: border-box; padding: 20 22;
+          background: rgba(18, 24, 38, 0.85);
+          border: 1 solid rgba(255, 255, 255, 0.07); border-radius: 18; }
+  .card .t { font-size: 13; color: #8b97ab; margin: 0 0 12 0; }
+  .card .t b { color: #39c5bb; font-weight: normal; }
+
+  .c-host { left: 48; top: 122; width: 500; height: 386; }
+  .c-batt { left: 48; top: 524; width: 500; height: 368; }
+  .c-cpu  { left: 568; top: 122; width: 500; height: 386; }
+  .c-mem  { left: 568; top: 524; width: 500; height: 368; }
+  .c-wave { left: 1088; top: 122; width: 524; height: 770; }
+
+  /* sys 片段换入区: 引擎自动皮肤化(主题 dark), 原样呈现即真实 */
+  .frag { margin-top: 6; }
+
+  .wavecap { position: absolute; left: 22; bottom: 18; width: 480;
+             font-size: 12; color: #8b97ab; }
+  .wavecap b { color: #39c5bb; font-weight: normal; }
+  .foot { position: absolute; left: 48; top: 902; width: 1564; text-align: center;
+          font-size: 12; color: rgba(139, 151, 171, 0.8); }
+  .foot b { color: #39c5bb; font-weight: normal; }
+</style>
+</head><body>
+  <div class="head-t">Neb <b>系统总览</b></div>
+  <div class="head-s">HTML + CSS + JS → 原生窗口 · 无浏览器运行时 · 数据全部来自本机</div>
+  <div class="head-c" id="clock">--:--:--</div>
+  <div class="head-l">● LIVE · hx every 2s 自动换入</div>
+
+  <div class="card c-host">
+    <div class="t">主机 <b>sys://host</b></div>
+    <div class="frag" id="f-host" hx-get="sys://host" hx-trigger="load every 8s"></div>
+  </div>
+  <div class="card c-cpu">
+    <div class="t">处理器占用 <b>sys://cpu · 双采样</b></div>
+    <div class="frag" id="f-cpu" hx-get="sys://cpu" hx-trigger="load every 2s"></div>
+  </div>
+  <div class="card c-mem">
+    <div class="t">内存 <b>sys://memory</b></div>
+    <div class="frag" id="f-mem" hx-get="sys://memory" hx-trigger="load every 3s"></div>
+  </div>
+  <div class="card c-batt">
+    <div class="t">电源与磁盘 <b>sys://battery / disk</b></div>
+    <div class="frag" id="f-batt" hx-get="sys://battery" hx-trigger="load every 5s"></div>
+    <div class="frag" id="f-disk" hx-get="sys://disk" hx-trigger="load every 9s"></div>
+  </div>
+
+  <div class="card c-wave">
+    <div class="t">引擎实时渲染 <b>Canvas 2D · 帧循环驱动</b></div>
+    <canvas id="wave" width="960" height="1260" style="width:480;height:630"></canvas>
+    <div class="wavecap">三层波场 · <b>requestAnimationFrame</b> 逐帧求值 · 空闲自动降频</div>
+  </div>
+
+  <div class="foot">一份 <b>HTML</b> 声明整个窗体 — 引擎解析即物化 · 无 WebView · 无浏览器内核</div>
+
+<script>
+/* 时钟: 每秒一次 */
+function pad(n) { return n < 10 ? '0' + n : '' + n; }
+function tick() {
+  var d = new Date();
+  hnSetText('clock', d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+            '  ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()));
+}
+tick();
+setInterval(tick, 1000);
+
+/* 波场: 三层正弦叠加, 相位随帧推进 */
+var wv = document.getElementById('wave');
+var g = wv.getContext('2d');
+var W = 960, H = 1260, t = 0;
+var layers = [
+  { amp: 52, base: 430, len: 0.0062, spd: 0.55, col: 'rgba(57,197,187,0.34)' },
+  { amp: 64, base: 560, len: 0.0048, spd: 0.90, col: 'rgba(79,140,255,0.26)' },
+  { amp: 40, base: 690, len: 0.0080, spd: 1.35, col: 'rgba(168,107,255,0.22)' }
+];
+function frame() {
+  t += 0.016;
+  g.clearRect(0, 0, W, H);
+  for (var i = 0; i < layers.length; i++) {
+    var L = layers[i];
+    g.beginPath();
+    g.moveTo(0, H);
+    for (var x = 0; x <= W; x += 12) {
+      var y = L.base + Math.sin(x * L.len + t * L.spd * 3) * L.amp
+                     + Math.sin(x * L.len * 2.3 + t * L.spd * 5) * L.amp * 0.3;
+      g.lineTo(x, y);
+    }
+    g.lineTo(W, H);
+    g.closePath();
+    g.fillStyle = L.col;
+    g.fill();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body></html>

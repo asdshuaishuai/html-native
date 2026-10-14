@@ -1,0 +1,56 @@
+<html><head>
+<!-- showcase-miku — 竞赛演示·Live2D motion 窗(展示页, 非开发自检页)
+     ================================================================
+     画面: Canvas 2D 手绘全息虚拟歌手(原创扁平角色), 官方 Miku 样例包的
+     Idle motion3.json(转头/眨眼/体摆) 经 hn-live2d → hn-mesh 驱动形变
+     —— 数据是官方的, 立绘是引擎画的, 网格变形是引擎原语。
+     设计: 深空底 + 青绿(#39C5BB)主题 + 舞台光环, 无任何 ✓/✗/路径调试文案。
+-->
+<meta charset="utf-8">
+<meta name="hn-window" content="420x560">
+<meta name="hn-title" content="Neb · Live2D Motion">
+<meta name="hn-theme" content="dark">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%;
+               background: linear-gradient(180deg, #0a0e18, #0e1524 55%, #0a101c); }
+
+  /* 舞台: 顶部微光 + 地环 */
+  .halo { position: absolute; left: 60; top: 30; width: 300; height: 300;
+          background: linear-gradient(180deg, rgba(57,197,187,0.20), rgba(57,197,187,0));
+          border-radius: 50%; animation: halo-breathe 5s ease-in-out infinite; }
+  @keyframes halo-breathe { 0% { opacity: 0.7; } 50% { opacity: 1; } 100% { opacity: 0.7; } }
+
+  /* 角色: canvas 立绘, 官方 motion → 网格形变(眨眼/点头/体摆) */
+  .diva { position: absolute; left: 40; top: 36; width: 340; height: 452; }
+  .diva canvas { width: 340; height: 452; }
+
+  /* 角色: 立绘(assets/showcase-diva.png, 引擎 Canvas 2D 绘制后落盘的资产)
+     官方 motion → 网格形变(眨眼/点头/体摆) —— img+hn-mesh+hn-live2d
+     是验证过的形变通路(motion 采样在引擎 C 侧, hncore 双帧即异)。 */
+  .diva { position: absolute; left: 40; top: 36; width: 340; height: 452; }
+  .diva img { width: 340; height: 452; }
+
+  .floor { position: absolute; left: 86; top: 486; width: 248; height: 10;
+           background: linear-gradient(90deg, rgba(57,197,187,0), rgba(57,197,187,0.45), rgba(57,197,187,0));
+           border-radius: 50%; }
+
+  .caption { position: absolute; left: 30; top: 512; width: 360; text-align: center;
+             font-size: 12; color: #9fb3c8; }
+  .caption b { color: #39c5bb; font-weight: normal; }
+  .sub { position: absolute; left: 30; top: 532; width: 360; text-align: center;
+         font-size: 9.5; color: rgba(139,151,171,0.75); }
+</style>
+</head><body>
+  <div class="halo"></div>
+
+  <div class="diva">
+    <img src="assets/showcase-diva.png"
+         hn-mesh="16x16" hn-mesh-anchor="chest"
+         hn-live2d="assets/miku/miku_pro/runtime/miku_sample_t04.model3.json"
+         hn-live2d-motion="Idle" hn-live2d-index="0">
+  </div>
+  <div class="floor"></div>
+
+  <div class="caption">官方 <b>motion3.json</b> → Neb 网格 rig · 转头 / 眨眼 / 体摆</div>
+  <div class="sub">Live2D 运行时包接入 · moc3 之外的公开数据全部真解析</div>
+</body></html>
