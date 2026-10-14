@@ -73,9 +73,15 @@ typedef enum hn_cmd_kind {
                              isrc 字段, 不许静默画错) */
     HN_CMD_PATTERN = 12,  /* createPattern 平铺填充: rect(poly==NULL)或闭合
                              多边形(poly!=NULL)目标 + 平铺模式 pattern_rep */
-    HN_CMD_CLIP_PATH_PUSH = 13 /* 精确路径裁剪入栈: 折线多边形(poly/poly_n,
+    HN_CMD_CLIP_PATH_PUSH = 13, /* 精确路径裁剪入栈: 折线多边形(poly/poly_n,
                              子路径点数表 clip_segs; 缺省单多边形)。与
                              CLIP_POP 配对(cairo 侧 = save+clip) */
+    HN_CMD_TRIS = 14       /* Cubism drawable 三角汤(Live2D moc3 渲染):
+                             mesh_verts/mesh_uv = 顶点汤(每三角 3 顶点,
+                             已展开), mesh_cols = 三角形数, text = 贴图路径,
+                             fill.a = 整体不透明度, blend = Additive→LIGHTER
+                             / Multiply→MULTIPLY */
+
 
 } hn_cmd_kind;
 

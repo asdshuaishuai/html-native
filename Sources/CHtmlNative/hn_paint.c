@@ -1607,6 +1607,21 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         }
     }
 
+    /* Cubism(moc3) 真引擎: hn-cubism="model3.json"(官方 Core 绑定;
+       未链 Core 落占位卡)。优先于 hn-mesh —— 同节点两者并存时 moc3 赢。 */
+    if (n->tag && hn_node_attr(n, "hn-cubism")) {
+        hn_cubism_paint(c, n, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
+                        tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by), alpha);
+        goto clip_done;
+    }
+
+    /* PainterEngine 软渲染: hn-live="<image>"(呼吸/摇摆 rig 引擎驱动) */
+    if (n->tag && hn_node_attr(n, "hn-live")) {
+        hn_pe_paint(c, n, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
+                    tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by), alpha);
+        goto clip_done;
+    }
+
     /* 网格变形贴图(Live2D 类效果原语): hn-mesh="cols x rows" 或脚本写入顶点 */
     if (n->tag && (hn_node_attr(n, "hn-mesh") || n->mesh_verts)) {
         const char *msrc = hn_node_attr(n, "src");

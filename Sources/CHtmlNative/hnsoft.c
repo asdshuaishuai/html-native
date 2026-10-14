@@ -925,6 +925,63 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha, float scale) {
     }
 }
 
+/*/* ---------------- 三角汤(Cubism drawable) ----------------
+ * HN_CMD_TRIS: mesh_verts/mesh_uv = **顶点汤**(每三角 3 顶点, 已由
+ * 发射侧从索引展开), mesh_cols = 三角形数, text = 贴图路径,
+ * fill.a = 整体不透明度。与 paint_mesh 同一颗三角形仿射贴图内核
+ * (逐像素重心插值 + fb_blend —— f->blend 由派发层按指令设置,
+ * Additive=MESH 的 LIGHTER / Multiply=MULTIPLY 全都现成)。 */
+static void paint_tris(fb *f, const hn_cmd *c, float alpha, float scale) {
+    if (!c->mesh_verts || !c->mesh_uv || c->mesh_cols <= 0) return;
+    int iw = 0, ih = 0;
+    const unsigned char *ipx = image_pixels_cached(c->text ? c->text : "", &iw, &ih);
+    if (getenv("HN_CUBISM_TRACE"))
+        fprintf(stderr, "[tris] ntri=%d img=%p %dx%d path=%.60s\n", c->mesh_cols,
+                (void *)ipx, iw, ih, c->text ? c->text : "");
+    float ga = (float)(c->fill & 0xFFu) / 255.0f * alpha;
+    if (ga <= 0.004f) return;
+    if (!ipx) return;   /* 无解码器: 静默(Cubism 页面必有解码器, 与 MESH 的
+                           示意网格不同 —— 三角汤画线只会更乱) */
+    int ntri = c->mesh_cols;
+    for (int t = 0; t < ntri; t++) {
+        int a = t * 3, b = t * 3 + 1, d = t * 3 + 2;
+        float x0 = c->mesh_verts[a * 2] * scale, y0 = c->mesh_verts[a * 2 + 1] * scale;
+        float x1 = c->mesh_verts[b * 2] * scale, y1 = c->mesh_verts[b * 2 + 1] * scale;
+        float x2 = c->mesh_verts[d * 2] * scale, y2 = c->mesh_verts[d * 2 + 1] * scale;
+        float u0 = c->mesh_uv[a * 2], v0 = c->mesh_uv[a * 2 + 1];
+        float u1 = c->mesh_uv[b * 2], v1 = c->mesh_uv[b * 2 + 1];
+        float u2 = c->mesh_uv[d * 2], v2 = c->mesh_uv[d * 2 + 1];
+        float den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+        if (fabsf(den) < 1e-6f) continue;
+        if (c->mesh_rows == 1 && den > 0.0f) continue;   /* TRIS 背面剔除(试验):
+            mesh_rows=1 标记"单面", 负面积(屏幕顺绕)跳过 */
+        float minx = x0, maxx = x0, miny = y0, maxy = y0;
+        if (x1 < minx) minx = x1; if (x1 > maxx) maxx = x1;
+        if (x2 < minx) minx = x2; if (x2 > maxx) maxx = x2;
+        if (y1 < miny) miny = y1; if (y1 > maxy) maxy = y1;
+        if (y2 < miny) miny = y2; if (y2 > maxy) maxy = y2;
+        for (int yy = (int)floorf(miny); yy <= (int)ceilf(maxy); yy++) {
+            float fy = (float)yy + 0.5f;
+            for (int xx = (int)floorf(minx); xx <= (int)ceilf(maxx); xx++) {
+                float fx = (float)xx + 0.5f;
+                float w0 = ((y1 - y2) * (fx - x2) + (x2 - x1) * (fy - y2)) / den;
+                float w1 = ((y2 - y0) * (fx - x2) + (x0 - x2) * (fy - y2)) / den;
+                float w2 = 1.0f - w0 - w1;
+                if (w0 < -0.02f || w1 < -0.02f || w2 < -0.02f) continue;
+                float u = w0 * u0 + w1 * u1 + w2 * u2;
+                float v = w0 * v0 + w1 * v1 + w2 * v2;
+                int sxp = (int)(u * (float)iw), syp = (int)(v * (float)ih);
+                if (sxp < 0) sxp = 0; else if (sxp >= iw) sxp = iw - 1;
+                if (syp < 0) syp = 0; else if (syp >= ih) syp = ih - 1;
+                const unsigned char *p = &ipx[(syp * iw + sxp) * 4];
+                fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f,
+                               p[3] / 255.0f * ga };
+                fb_blend(f, xx, yy, col);
+            }
+        }
+    }
+}
+
 /* ---------------- 文本(FreeType) ---------------- */
 
 #ifndef HN_NO_TEXT
@@ -1619,6 +1676,9 @@ static void render_cmds(fb *f, const hn_display_list *dl, float rs) {
             break;
         case HN_CMD_MESH:
             paint_mesh(f, c, 1.0f, rs);
+            break;
+        case HN_CMD_TRIS:
+            paint_tris(f, c, 1.0f, rs);
             break;
         case HN_CMD_CLIP_POP:
             fb_pop_clip(f);

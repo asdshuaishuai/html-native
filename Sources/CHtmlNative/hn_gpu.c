@@ -1016,6 +1016,7 @@ int hn_gpu_available(const hn_display_list *dl) {
             break;
         case HN_CMD_POLYGON:
         case HN_CMD_MESH:
+        case HN_CMD_TRIS:
         case HN_CMD_CLEAR_RECT:
             return 0;                                   /* 位集未声明(防御性重复) */
         default:
@@ -1145,6 +1146,7 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
             break;
         case HN_CMD_POLYGON:
         case HN_CMD_MESH:
+        case HN_CMD_TRIS:
         case HN_CMD_CLEAR_RECT:
             ok = 0;   /* 可用性检查已挡; 防御性兜底(直呼 render 的误用) */
             break;

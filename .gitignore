@@ -21,3 +21,5 @@ dist/
 *.log
 examples/_rec-*.html
 examples/_live-*.html
+vendor/cubism/include/
+vendor/cubism/lib/

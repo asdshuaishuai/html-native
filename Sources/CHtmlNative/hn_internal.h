@@ -695,9 +695,25 @@ int    hn_context_gif_count(const hn_context *c);
 /* 该元素要按 GIF 播放的源(见 hn_gif.c 尾部注释); 非 GIF 返回 NULL */
 const char *hn_node_gif_src(hn_node *n);
 
-/* 网格变形(hn_mesh.c): 发射 MESH 指令 */
+/*/* 网格变形(hn_mesh.c): 发射 MESH 指令 */
 void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
                   float bw, float bh, float sx, float sy, float alpha);
+
+/*/* ---------- Cubism(moc3) 真引擎(hn_cubism.c; 官方 Core 绑定) ----------
+ * hn-cubism 属性节点: 加载 model3.json → moc3(官方 Core 解析形变) →
+ * motion3 逐参数驱动 → drawable 三角汤发射(HN_CMD_TRIS)。
+ * Core 未链接(HN_HAVE_CUBISM 未定义)时 acquire 恒 NULL —— paint 落
+ * 可见占位(下载指引+许可提示), 页面不静默空白。 */
+void hn_cubism_paint(hn_context *c, hn_node *n,
+                     float bw, float bh, float sx, float sy, float alpha);
+const char *hn_cubism_runtime_version(void);
+
+/* ---------- PainterEngine 软渲染集成(hn_pe.c; BSD-3 开源) ----------
+ * hn-live="<image>": 贴图经 PE 的 px_surface + PX_TextureRenderEx_sincos
+ * 渲染到离屏 surface, HN_CMD_BITMAP 上屏(透明底)。rig(呼吸/摇摆/跳跃)
+ * 由引擎按 ext_clock 驱动 —— "引擎驱动 + PE 渲染"分层。 */
+void hn_pe_paint(hn_context *c, hn_node *n,
+                 float bw, float bh, float sx, float sy, float alpha);
 
 /* ---------- Live2D 运行时包(hn_lottie.c 尾部; moc3 边界诚实接入) ----------
  * 解析 model3.json(FileReferences/Motions 组)、cdi3.json(参数清单)、
