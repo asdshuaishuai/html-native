@@ -59,6 +59,11 @@ struct hn_rt {
     int mm_valid;              /* mousemove 上次派发状态有效 */
     float mm_x, mm_y;          /* mousemove 上次派发坐标 */
     hn_node *mm_hit;           /* mousemove 上次派发命中元素 */
+    /* 绘制挂起(app 事件排干窗口): 爆发输入(hover 连变/滚轮/编辑)只标脏,
+       队尾 hn_rt_paint_flush 一次整渲染 —— 中间态像素从不被呈现,
+       N 次 layout+raster 合 1(与 blit 合并配套, 内存带宽第二刀)。 */
+    int paint_defer;
+    int paint_dirty;
     /* 轮询表(hx-trigger="every Ns") */
     struct { hn_node *node; double due, sec; } polls[16];
     int poll_n;
@@ -840,6 +845,9 @@ static int rt_raster(hn_rt *rt) {
 }
 
 static int rt_render(hn_rt *rt) {
+    /* 挂起窗口(app 事件排干中): 只标脏不渲染, 队尾 paint_flush 一次画。
+       返回 0 —— 调用方(app)以 flush 的返回值决定是否 blit。 */
+    if (rt->paint_defer) { rt->paint_dirty = 1; return 0; }
     hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
     /* relayout 会把动画采样值从级联重算冲掉(每帧 tick 后紧跟 render,
        kf_clock 不变)—— 零步进重采样一次再建显示列表, 过渡/关键帧的
@@ -2773,6 +2781,28 @@ int hn_rt_pointer_move(hn_rt *rt, float x, float y) {
             rendered = rt_render(rt);
     }
     return rendered;
+}
+
+/* 绘制挂起/冲刷(与 app 壳的 blit 合并配套):
+   defer(1) 期间所有输入路径的 rt_render 只标脏 —— 爆发输入的中间态
+   像素从不被呈现, N 次 layout+raster 合 1;
+   flush 在 defer 关闭后(或任意时刻 —— 内部先摘 defer)把脏帧一次画掉,
+   返回 1 表示真的渲染过(调用方据此 blit)。 */
+void hn_rt_paint_defer(hn_rt *rt, int on) {
+    if (!rt) return;
+    rt->paint_defer = on;
+    /* 注意: 关闭**不清** dirty —— 壳的口径是 defer(0) → flush, 脏标记
+       只能由 flush 消费; 提前清掉会让挂起的帧永远刷不出来。 */
+}
+
+int hn_rt_paint_flush(hn_rt *rt) {
+    if (!rt || !rt->paint_dirty) return 0;
+    rt->paint_dirty = 0;
+    int saved = rt->paint_defer;
+    rt->paint_defer = 0;
+    int r = rt_render(rt);
+    rt->paint_defer = saved;
+    return r;
 }
 
 int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {

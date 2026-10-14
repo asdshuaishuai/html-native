@@ -647,6 +647,10 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   状态逐事件更新, 平台全量拷贝**每拍至多一次** —— 此前每个状态变化事件
   立即整面 blit(HiDPI 1440p@2x ≈ 20MB/次), 快速划过 hover 面一次爆发
   十几次全浪费在中间态; 现与浏览器"输入先于 rAF 合成一帧"同语义。
+  **绘制挂起**配套第二刀: 排干期间输入路径只标脏
+  (`hn_rt_paint_defer`/`hn_rt_paint_flush`), 队尾一次整渲染 —— 爆发期
+  N 次 layout+raster 合 1(中间态像素从不被呈现); 不进 defer 的直驱
+  路径(探针)行为逐位不变, events_probe 断言钉死。
   桌宠自己换句、canvas 折线自己滚 —— `examples/pet.html`(气泡 3s 轮播 +
   `hnMeshParam` 眨眼)与 `examples/canvas-demo.html`(500ms 实时折线);
   口径由 `tools/timer_probe.sh` 37 断言钉死

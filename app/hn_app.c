@@ -532,8 +532,12 @@ int main(int argc, char **argv) {
         hnp_event ev;
         /* 内层排干: 首次调用按 pump_ms 睡到事件来, 之后 0 超时纯轮询,
            队列空即出。爆发事件在同一拍内连续派发(先于本拍帧 tick),
-           与浏览器"输入事件先于 rAF 合并"的语义一致。 */
+           与浏览器"输入事件先于 rAF 合并"的语义一致。
+           排干期间绘制挂起: 输入路径只标脏(hn_rt_paint_defer),
+           队尾 flush 一次整渲染 —— 中间态像素从不被呈现,
+           N 次 layout+raster 合 1(与 blit 合并配套的第二刀)。 */
         int drained = 0;
+        hn_rt_paint_defer(rt, 1);
         while (!quit && hnp_pump(&ev, drained ? 0 : pump_ms)) {
             drained = 1;
             switch (ev.kind) {
@@ -654,6 +658,11 @@ int main(int argc, char **argv) {
             default: break;
             }
         }
+        /* 队尾冲刷: 摘挂起, 排干期间积累的脏帧一次整渲染(hn_rt_paint_flush
+           返回 1 = 真画过 → 本拍要 blit; 热重载整文档换装后旧 rt 的脏标记
+           随之销毁, 重载路径自带 need_blit)。 */
+        hn_rt_paint_defer(rt, 0);
+        if (hn_rt_paint_flush(rt)) need_blit = 1;
         unsigned long now = hnp_now_ms();
         /* ---- 热重载轮询(~300ms 一次): 指纹变了 → 整文档换装 ----
            窗口表面/进程不动: 先开新 rt, 成功才关旧 + 重绘; 失败重试一次

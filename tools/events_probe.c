@@ -417,6 +417,35 @@ int main(void) {
         }
     }
 
+    /* ---- 绘制挂起/冲刷(app 壳 blit 合并的引擎侧配套) ----
+       defer 期间输入路径只标脏: pointer_move 返回 0(没画);
+       defer(0) 保留脏标记(只能由 flush 消费); flush 一次整渲染
+       返回 1。再 flush 无脏 → 0(幂等)。上文全部断言不经过 defer
+       —— 显式窗口之外的直驱路径行为逐位不变。
+       (主 rt 已在换装段 close, 这里开独立文档。) */
+    {
+        static const char *DEFER_HTML =
+            "<html><head><style>"
+            "#a{width:40;height:20;background:#446}"
+            "#b{width:40;height:20;background:#664}"
+            "</style></head><body>"
+            "<div id=a></div><div id=b></div></body></html>";
+        hn_rt_desc dd = { "events-probe-defer", DEFER_HTML, strlen(DEFER_HTML), NULL, 0, 200, 120 };
+        hn_rt *drt = hn_rt_open(&dd);
+        check(drt != NULL, "hn_rt_open(defer 文档)");
+        hn_rt_paint_defer(drt, 1);
+        float dx0, dy0;
+        box_center(drt, "b", &dx0, &dy0);          /* hover 从 NULL → #b 必变 */
+        check(hn_rt_pointer_move(drt, dx0, dy0) == 0,
+              "defer 期间 pointer_move 不渲染只标脏(返回 0)");
+        hn_rt_paint_defer(drt, 0);
+        check(hn_rt_paint_flush(drt) == 1, "defer(0) 后 flush 把脏帧一次画掉(返回 1)");
+        check(hn_rt_paint_flush(drt) == 0, "无脏再 flush 幂等(返回 0)");
+        hn_rt_paint_defer(drt, 0);
+        check(hn_rt_paint_flush(drt) == 0, "无事件 defer(0)+flush 为空操作");
+        hn_rt_close(drt);
+    }
+
     printf("\n结果: %d 通过, %d 失败\n", g_pass, g_fail);
     if (g_fail == 0) printf("全绿 — JS 事件层链路健康\n");
     return g_fail ? 1 : 0;

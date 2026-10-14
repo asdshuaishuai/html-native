@@ -78,6 +78,12 @@ int hn_rt_bitmap_height(const hn_rt *rt);
    若重渲染了, *repaint 置 1(平台壳据此 blit)。 */
 int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint);
 
+/* 绘制挂起/冲刷(爆发输入的成本合并, app 壳事件排干专用):
+   defer(1) 后输入路径只标脏不渲染; flush 把脏帧一次画掉(返回 1 = 真画过,
+   调用方据此 blit)。不进入 defer 的调用方(探针直驱输入函数)行为逐位不变。 */
+void hn_rt_paint_defer(hn_rt *rt, int on);
+int  hn_rt_paint_flush(hn_rt *rt);
+
 /* ---------------- 输入事件(平台壳转发) ---------------- */
 
 /* 指针移动(悬停伪类/光标)。返回 1 表示重渲染过(需 blit)。 */
