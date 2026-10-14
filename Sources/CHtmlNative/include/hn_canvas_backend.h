@@ -65,3 +65,7 @@ void hn_canvas_backend_destroy(hn_canvas_backend *b);
 /* canvas_ity 实现(可移植高质量后端, ISC, vendored; C++ 适配器
  * hn_canvas_ity.cpp; v1 支持 frect/spath/fpath/渐变/clip, 见文件头)。 */
 hn_canvas_backend *hn_canvas_backend_ity_create(int width, int height);
+
+/* CoreGraphics 实现(macOS 专属, C++ 适配器 hn_canvas_cg.cpp;
+ * 预乘 RGBA 位图 + 帧末去预乘; CoreText 文字; 全 blend 精确映射)。 */
+hn_canvas_backend *hn_canvas_backend_cg_create(int width, int height);

@@ -13,15 +13,20 @@ zig c++ -target aarch64-macos -std=c++17 -fno-exceptions -fno-rtti -O2 \
   -I "$HN_DIR/vendor/canvas_ity" -c "$ENG/hn_canvas_ity.cpp" \
   -o "$HN_DIR/hn_canvas_ity.o"
 
+zig c++ -target aarch64-macos -std=c++17 -fno-exceptions -fno-rtti -O2 \
+  -I "$HN_DIR/Sources/CHtmlNative/include" -I "$HN_DIR/Sources/CHtmlNative" \
+  -c "$HN_DIR/Sources/CHtmlNative/hn_canvas_cg.cpp" -o "$HN_DIR/hn_canvas_cg.o"
+
 zig cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off \
   -I "$HN_DIR/Sources/CHtmlNative/include" -I "$HN_DIR/Sources/CHtmlNative" -I "$HN_DIR/rt" \
   -I "$HN_DIR/platform" -I "$HN_DIR/app" -I "$HN_DIR/vendor/wasm3" \
   -I "$HN_DIR/vendor/canvas_ity" -I "$HN_DIR/vendor/painterengine" -I "$HN_DIR/vendor/painterengine/core" -I/opt/homebrew/include/freetype2 \
-  -I"$QJ/include/quickjs" -DHN_HAVE_QUICKJS -DHN_HAVE_PE \
+  -I"$QJ/include/quickjs" -DHN_HAVE_QUICKJS -DHN_HAVE_PE -DHN_HAVE_CANVAS_ITY \
   -DHN_MEDIA_PLATFORM_AVFOUNDATION -DHN_VERSION='"pe"' \
   app/hn_app.c app/hn_media_platform.c app/hn_media_synth.c rt/hn_rt.c \
   platform/hnp_macos.c platform/hnp_media_macos.c platform/hnp_gpu_metal.c \
   "$HN_DIR/hn_canvas_ity.o" \
+  "$HN_DIR/hn_canvas_cg.o" \
   $ENG/hn_pe.c $ENG/hn_cubism.c $ENG/hn_three.c $ENG/neb3_soft.c \
   $ENG/hn_arena.c $ENG/hn_html.c $ENG/hn_md.c $ENG/hn_fmt.c $ENG/hn_css.c \
   $ENG/hn_style.c $ENG/hn_layout.c $ENG/hn_paint.c $ENG/hn_media.c \
