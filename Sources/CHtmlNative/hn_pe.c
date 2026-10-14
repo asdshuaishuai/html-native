@@ -59,7 +59,14 @@ static struct pe_tex *pe_tex_acquire(hn_context *c, const char *path) {
 
     int slot = -1;
     for (int i = 0; i < PE_CACHE; i++) if (!g_pe_cache[i].path) { slot = i; break; }
-    if (slot < 0) { slot = 0; free(g_pe_cache[slot].rgba); free(g_pe_cache[slot].path); }
+    if (slot < 0) {
+        slot = 0;
+        /* 逐出: tex.surfaceBuffer 是 PE 池内存, 必须 PX_TextureFree 归还;
+           只 free rgba/path 会让池在 2 槽轮换后持续漏到 MP_Malloc 失败 */
+        PX_TextureFree(&g_pe_cache[slot].tex);
+        free(g_pe_cache[slot].rgba);
+        free(g_pe_cache[slot].path);
+    }
 
     struct pe_tex *t = &g_pe_cache[slot];
     memset(t, 0, sizeof(*t));
@@ -68,7 +75,15 @@ static struct pe_tex *pe_tex_acquire(hn_context *c, const char *path) {
     t->rgba = rgba;
     t->w = w; t->h = h;
     pe_init();
-    if (!pe_mp || !PX_TextureCreate(pe_mp, &t->tex, w, h)) return NULL;
+    if (!pe_mp || !PX_TextureCreate(pe_mp, &t->tex, w, h)) {
+        /* 失败即出清本槽: 不留带 path 的毒条目(否则同路径重试会命中空白
+           缓存, 永远加载不出)。PX_SurfaceCreate 失败时不写 tex(见
+           PX_Surface.c), 本槽无池内存可还, 直接释放宿主侧缓冲。 */
+        free(t->rgba);
+        free(t->path);
+        memset(t, 0, sizeof(*t));
+        return NULL;
+    }
     /* RGBA → px_color(缺省 PX_COLOR_FORMAT_RGBA: 内存同序, 逐像素拷) */
     px_color *px = t->tex.surfaceBuffer;
     for (int i = 0; i < w * h; i++) {
@@ -102,6 +117,9 @@ void hn_pe_paint(hn_context *c, hn_node *n,
     px_surface *s = &g_pe_surf[slot];
     if (g_pe_surf_w[slot] != W || g_pe_surf_h[slot] != H) {
         if (g_pe_surf_w[slot]) PX_SurfaceFree(s);
+        g_pe_surf_w[slot] = 0;
+        g_pe_surf_h[slot] = 0;
+        memset(s, 0, sizeof(*s));
         if (!PX_SurfaceCreate(pe_mp, W, H, s)) return;
         g_pe_surf_w[slot] = W; g_pe_surf_h[slot] = H;
     }
@@ -120,6 +138,21 @@ void hn_pe_paint(hn_context *c, hn_node *n,
     float cx = W * 0.5f, cy = H * 0.5f + (H - t->h * scale) * 0.5f - hop;
     PX_TextureRenderEx_sincos(s, &t->tex, (int)cx, (int)cy, PX_ALIGN_CENTER,
                               NULL, scale, sinf(sway), cosf(sway));
+
+    /* opacity: hnsoft 的 paint_bitmap 只消费位图像素 alpha(不读 cmd.fill 的
+       alpha 字节), 故把节点透明度直接乘进 surface 像素。surface 每帧先
+       PX_SurfaceClear(全零) 再重画, 原地乘不会跨帧累积。surface 底为全透明,
+       乘后 alpha 即"整层以该透明度合成"的精确结果。 */
+    if (alpha < 0.999f) {
+        px_color *sp = s->surfaceBuffer;
+        int fac = (int)(alpha * 255.0f + 0.5f);
+        if (fac < 0) fac = 0;
+        if (fac > 255) fac = 255;
+        for (int i = 0; i < W * H; i++) {
+            unsigned a = sp[i]._argb.a;
+            sp[i]._argb.a = (unsigned char)((a * (unsigned)fac + 127u) / 255u);
+        }
+    }
 
     hn_cmd cmd;
     memset(&cmd, 0, sizeof(cmd));

@@ -844,6 +844,18 @@ static int rt_raster(hn_rt *rt) {
     return 1;
 }
 
+/* HN_RT_RENDER_TRACE=1: 每次真渲染落一行 stderr(帧拍取证口径 —— 对比
+   "唤醒次数 vs 真渲染次数"、同帧多次渲染治理前后计数; 与 HN_CUBISM_TRACE/
+   HN_IMG_CACHE_STATS 同一约定, 缺省静默零成本)。 */
+static int g_rt_trace_on = -1;
+static long g_rt_render_n = 0;
+static void rt_render_trace(const char *kind) {
+    if (g_rt_trace_on < 0) g_rt_trace_on = getenv("HN_RT_RENDER_TRACE") ? 1 : 0;
+    if (!g_rt_trace_on) return;
+    g_rt_render_n++;
+    fprintf(stderr, "[rt-render] #%ld %s\n", g_rt_render_n, kind);
+}
+
 static int rt_render(hn_rt *rt) {
     /* 挂起窗口(app 事件排干中): 只标脏不渲染, 队尾 paint_flush 一次画。
        返回 0 —— 调用方(app)以 flush 的返回值决定是否 blit。 */
@@ -854,7 +866,9 @@ static int rt_render(hn_rt *rt) {
        中间态才真正落到像素(与 tools/hncore.c render 路径同一修法)。 */
     hn_context_anim_tick(rt->ctx, 0);
     hn_context_repaint(rt->ctx);
-    return rt_raster(rt);
+    int r = rt_raster(rt);
+    rt_render_trace("full");
+    return r;
 }
 
 /* ambient 轻路径: 本帧只有 ext_clock 类动画前进(anim_tick_ex 报
@@ -863,7 +877,9 @@ static int rt_render(hn_rt *rt) {
    relayout: 30fps 节拍 × 轻路径, 渲染成本降到全路径的约 1/4。 */
 static int rt_render_ambient(hn_rt *rt) {
     hn_context_repaint_light(rt->ctx);
-    return rt_raster(rt);
+    int r = rt_raster(rt);
+    rt_render_trace("ambient");
+    return r;
 }
 
 /* ---------------- 公开 API ---------------- */
@@ -2216,8 +2232,8 @@ static void js_invoke(JSContext *ctx, JSValue func, JSValue args,
     JS_FreeValue(ctx, r);
 }
 
-/* hn_rt_frame 的回调驱动: RAF 队头 → 到期定时器, 合计 ≤8 个; 跑过至少
-   一个就 rt_render + repaint 置位。返回是否跑过回调。 */
+/* hn_rt_frame 的回调驱动: RAF 队头 → 到期定时器, 合计 ≤8 个。只跑回调
+   不渲染 —— 返回"是否跑过回调", 渲染由 hn_rt_frame 合并进帧尾一次。 */
 static int js_timers_drain(hn_rt *rt, int *repaint) {
     if (rt->timer_n == 0 && rt->raf_n == 0) return 0;
     JSContext *ctx = js_scope_find(rt->id);
@@ -2278,7 +2294,10 @@ static int js_timers_drain(hn_rt *rt, int *repaint) {
         ran = 1;
     }
 
-    if (ran) { rt_render(rt); if (repaint) *repaint = 1; }
+    /* 不在此渲染: hn_rt_frame 按返回值把渲染合并进帧尾一次(同帧多次
+       整渲染的浪费, 见 hn_rt_frame 帧头说明)。repaint 形参保留签名
+       兼容(现由帧尾统一置位)。 */
+    (void)repaint;
     return ran;
 }
 
@@ -2663,8 +2682,20 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     rt->clock_ms += dt_ms > 0 ? (double)dt_ms : 0;   /* 虚拟单调钟: 随帧步进 */
 #endif
     /* JS 定时器与 RAF 先行(帧开头语义): 到期回调、画布/文本改动在此
-       渲染并置 repaint。 */
-    js_timers_drain(rt, repaint);
+       生效。回调是否真的跑过由返回值给出 —— 渲染合并进帧尾一次
+       (见 pend)。 */
+    /* ---- 帧内渲染合并(性能治理): 一帧至多一次 rt_render ----
+       旧口径里 定时器/RAF 排干、动画 tick、hx 轮询各自立即整渲染:
+       RAF+动画并存的页面(仪表盘/聊天流常见形态)每帧 2 次全量
+       layout+raster, 前一次的像素同拍内必被后一次覆盖 —— 从不呈现,
+       纯浪费(HN_RT_RENDER_TRACE=1 实测 120 帧 242 渲染)。
+       现改为"标记待渲染档位, 帧尾渲染一次": full > ambient(满档优先
+       —— JS 回调可能改几何, 必须 relayout 才落位)。可见输出与旧口径
+       一致: 旧口径可见的本就是最后一次渲染的帧尾状态, 只是中途多画
+       了看不见的中间帧; 定时器/回调的触发时机与顺序不动(语义零漂移)。 */
+    int pend = 0;   /* 0 无 / 1 ambient 轻路径 / 2 全路径 */
+    if (js_timers_drain(rt, NULL))
+        pend = 2;
 
     /* 动画推进 + 活跃类别分级(性能治理): interactive(过渡/关键帧/媒体/
        平滑滚动)→ 全路径渲染 + 16ms 节拍; 仅 ambient(ext_clock 类)→
@@ -2675,11 +2706,11 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     int anim = hn_context_anim_tick_ex(rt->ctx, dt_ms, &anim_cls);
     if (anim) {
         if (anim_cls == HN_ANIM_AMBIENT ||
-            (anim_cls == HN_ANIM_INTERACTIVE && hn_media_light_render_ok(rt->ctx)))
-            rt_render_ambient(rt);
-        else
-            rt_render(rt);
-        if (repaint) *repaint = 1;
+            (anim_cls == HN_ANIM_INTERACTIVE && hn_media_light_render_ok(rt->ctx))) {
+            if (pend < 1) pend = 1;
+        } else {
+            pend = 2;
+        }
     }
 
     /* 轮询表(懒建: 内容变化后重建) */
@@ -2708,11 +2739,20 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     double next = -1;
     for (int i = 0; i < rt->poll_n; i++) {
         if (now >= rt->polls[i].due) {
-            if (hx_perform(rt, rt->polls[i].node)) { rt_render(rt); if (repaint) *repaint = 1; }
+            if (hx_perform(rt, rt->polls[i].node))
+                pend = 2;      /* hx 换了内容: 档位抬满(帧尾一次渲染) */
             rt->polls[i].due = now + rt->polls[i].sec;
         }
         double wait = rt->polls[i].due - now;
         if (next < 0 || wait < next) next = wait;
+    }
+
+    /* 帧尾一次渲染(见帧头的合并说明): 档位高者胜 —— 全路径含 relayout,
+       ambient 轻路径免 relayout, 与旧口径的路径选择逐情形一致。 */
+    if (pend) {
+        if (pend == 1) rt_render_ambient(rt);
+        else rt_render(rt);
+        if (repaint) *repaint = 1;
     }
 
     /* ---- 唤醒节拍合成(取各信号的最小者; -1 = 无事可睡) ----

@@ -1615,10 +1615,20 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         goto clip_done;
     }
 
+    /* three.js 子集切片(hn_three.c): hn-three 属性节点 — CPU 场景图 +
+       透视相机 + 旋转立方体, 三角汤经 HN_CMD_POLYGON 复用既有扫描内核。 */
+    if (n->tag && hn_node_attr(n, "hn-three")) {
+        hn_three_paint(c, n, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
+                       tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by),
+                       alpha * st->opacity);   /* 自身 opacity 折入(同 lottie 分支口径) */
+        goto clip_done;
+    }
+
     /* PainterEngine 软渲染: hn-live="<image>"(呼吸/摇摆 rig 引擎驱动) */
     if (n->tag && hn_node_attr(n, "hn-live")) {
         hn_pe_paint(c, n, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
-                    tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by), alpha);
+                    tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by),
+                    alpha * st->opacity);   /* 自身 opacity 折入(同 lottie 分支口径) */
         goto clip_done;
     }
 

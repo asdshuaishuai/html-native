@@ -1084,7 +1084,7 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
             int iw = (int)floorf(c->w * rs + 0.5f);
             int ih = (int)floorf(c->h * rs + 0.5f);
             if (t && iw > 0 && ih > 0)
-                quad_rect(t, 0xFFFFFFFFu, (float)ix, (float)iy,
+                quad_rect(t, c->fill, (float)ix, (float)iy,
                           (float)iw, (float)ih, 0, 0, 1, 1);
             break;
         }

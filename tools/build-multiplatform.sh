@@ -41,7 +41,12 @@ SRC=(tools/hncore.c app/hn_media_synth.c Sources/CHtmlNative/hn_arena.c Sources/
      Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
      Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
      Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c \
+     Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c \
      Sources/CHtmlNative/hnsoft.c)
+# hn_pe/hn_cubism/hn_three 必须与 hn_paint.c 同列: paint_walk 直接调用
+# hn_pe_paint/hn_cubism_paint/hn_three_paint, 缺任一源即链接失败
+# (未定义 SDK 宏时 hn_pe/hn_cubism 整模块降级为空操作, 链入安全 ——
+#  口径同 tools/_engine_sources.sh HN_ENGINE_CORE)。
 SRC+=("${WASM_SRC[@]}")
 
 # cairo 绘制后端的额外源。与 hnsoft **同签名**(hncairo_render vs hnsoft_render),
@@ -166,6 +171,7 @@ WIN_RT=(tools/hnwin.c tools/sysbridge.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
         Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
+        Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c
         Sources/CHtmlNative/hnsoft.c)
 WIN_RT+=("${WASM_SRC[@]}")
 
@@ -190,6 +196,7 @@ LINUX_RT=(tools/hnweb_linux.c
           Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
           Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
           Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
+          Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c
           Sources/CHtmlNative/hnsoft.c)
 LINUX_RT+=("${WASM_SRC[@]}")
 build "hnweb-linux-x86_64"  "x86_64-linux-musl"  "" "-DHN_NO_TEXT" \
@@ -217,6 +224,7 @@ MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
         Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
         Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
         Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
+        Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c
         Sources/CHtmlNative/hnsoft.c)
 MAC_RT+=("${WASM_SRC[@]}")
 build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
@@ -241,6 +249,7 @@ ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
             Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
             Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
             Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
+            Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c
             Sources/CHtmlNative/hn_gpu.c
             Sources/CHtmlNative/hnsoft.c)
 ENGINE_SRC+=("${WASM_SRC[@]}")

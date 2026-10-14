@@ -715,6 +715,14 @@ const char *hn_cubism_runtime_version(void);
 void hn_pe_paint(hn_context *c, hn_node *n,
                  float bw, float bh, float sx, float sy, float alpha);
 
+/* ---------- three.js 子集垂直切片(hn_three.c) ----------
+ * hn-three 属性节点: CPU 场景图 + 透视相机 + 旋转立方体, 顶点汤经
+ * HN_CMD_POLYGON(3 顶点三角形)复用 paint_polygon 既有扫描内核出像素。
+ * 自转取节点 ext_clock(hn_context.c 环境动画通道)。见
+ * docs/threejs-support.md "已落地"节。 */
+void hn_three_paint(hn_context *c, hn_node *n,
+                    float bw, float bh, float sx, float sy, float alpha);
+
 /* ---------- Live2D 运行时包(hn_lottie.c 尾部; moc3 边界诚实接入) ----------
  * 解析 model3.json(FileReferences/Motions 组)、cdi3.json(参数清单)、
  * physics3.json(Meta 计数)与 motion3.json(v2.4 曲线求值器)。

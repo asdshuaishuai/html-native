@@ -896,6 +896,27 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha, float scale) {
                 float u2 = c->mesh_uv[d * 2], v2 = c->mesh_uv[d * 2 + 1];
                 float den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
                 if (fabsf(den) < 1e-6f) continue;      /* 折叠的退化三角形 */
+                /* 边缘 AA(解析覆盖率, 替代旧的 ±2% 重心容差二值跳过):
+                   w_i·k_i 恰为"像素中心到第 i 条边的带符号距离 ÷ 像素盒
+                   沿该边法向的投影半宽"(边长 L 在分子分母相消, 免 sqrt;
+                   半宽 = (|nx|+|ny|)/2L —— 正交边 0.5px, 45° 边 0.71px)。
+                   单侧坡道: 形内(w≥0)恒全覆盖(内部像素与旧内核逐位一致);
+                   形外覆盖率随距离线性衰减, 0 点落在形外 0.5~0.71px ——
+                   过渡只占形外**一排**像素, 视觉边缘位置外偏 ≤0.35px。
+                   共享边上两侧合计仍 ≥1(一侧恒全覆盖, 过剩覆盖), 不产生
+                   欠覆盖接缝/裂纹; w≈0⁻ 的浮点裂缝像素 cov≈1, 比旧容差
+                   更稳, 且不再像旧 -0.02 容差那样向外多涂一整圈(容差 =
+                   2%×高, 大三角形外扩可达数像素且粗细不均)。
+                   (2026-10-14 复审数值核验: 系数若写 4·|den|/sum, 坡道
+                   实际零点只有 0.25~0.35px, 45° 阶梯外排像素 cov≤0 被整
+                   排裁掉 —— 名为 AA 实为硬边; 本系数 2·|den|/sum 才满足
+                   覆盖率 = 1−距离/半宽 的解析口径。) */
+                float k0 = 2.0f * fabsf(den) /
+                           fmaxf(fabsf(y1 - y2) + fabsf(x2 - x1), 1e-6f);
+                float k1 = 2.0f * fabsf(den) /
+                           fmaxf(fabsf(y2 - y0) + fabsf(x0 - x2), 1e-6f);
+                float k2 = 2.0f * fabsf(den) /
+                           fmaxf(fabsf(y0 - y1) + fabsf(x1 - x0), 1e-6f);
                 float minx = x0, maxx = x0, miny = y0, maxy = y0;
                 if (x1 < minx) minx = x1; if (x1 > maxx) maxx = x1;
                 if (x2 < minx) minx = x2; if (x2 > maxx) maxx = x2;
@@ -908,7 +929,15 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha, float scale) {
                         float w0 = ((y1 - y2) * (fx - x2) + (x2 - x1) * (fy - y2)) / den;
                         float w1 = ((y2 - y0) * (fx - x2) + (x0 - x2) * (fy - y2)) / den;
                         float w2 = 1.0f - w0 - w1;
-                        if (w0 < -0.02f || w1 < -0.02f || w2 < -0.02f) continue;
+                        /* 多边形外时取各边坡道的最小者(不乘积): 乘积在凸角
+                           把两侧坡道相乘, 角像素覆盖被双重打折, 底层/背景
+                           透出成孤点亮斑; min 与"过剩覆盖"同一口径 —— 只
+                           会偏胖不会开裂, 直边/单边时与乘积逐位相同。 */
+                        float cov = 1.0f;
+                        if (w0 < 0.0f) { float c0 = 1.0f + w0 * k0; if (c0 < cov) cov = c0; }
+                        if (w1 < 0.0f) { float c1 = 1.0f + w1 * k1; if (c1 < cov) cov = c1; }
+                        if (w2 < 0.0f) { float c2 = 1.0f + w2 * k2; if (c2 < cov) cov = c2; }
+                        if (cov <= 0.0f) continue;
                         float u = w0 * u0 + w1 * u1 + w2 * u2;
                         float v = w0 * v0 + w1 * v1 + w2 * v2;
                         int sx = (int)(u * (float)iw), sy = (int)(v * (float)ih);
@@ -916,7 +945,7 @@ static void paint_mesh(fb *f, const hn_cmd *c, float alpha, float scale) {
                         if (sy < 0) sy = 0; else if (sy >= ih) sy = ih - 1;
                         const unsigned char *p = &ipx[(sy * iw + sx) * 4];
                         fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f,
-                                       p[3] / 255.0f * ga };
+                                       p[3] / 255.0f * ga * cov };
                         fb_blend(f, xx, yy, col);
                     }
                 }
@@ -955,6 +984,25 @@ static void paint_tris(fb *f, const hn_cmd *c, float alpha, float scale) {
         if (fabsf(den) < 1e-6f) continue;
         if (c->mesh_rows == 1 && den > 0.0f) continue;   /* TRIS 背面剔除(试验):
             mesh_rows=1 标记"单面", 负面积(屏幕顺绕)跳过 */
+        /* 边缘 AA(解析覆盖率, 与 paint_mesh 同一颗内核, 替代旧的 ±2%
+           重心容差二值跳过): w_i·k_i 恰为"像素中心到第 i 条边的带符号
+           距离 ÷ 像素盒沿该边法向的投影半宽"(边长 L 在分子分母相消,
+           免 sqrt)。单侧坡道: 形内(w≥0)恒全覆盖(内部像素逐位不变);
+           形外覆盖率随距离线性衰减, 0 点在形外 0.5~0.71px —— 过渡
+           只占一排像素。三角汤相邻三角的共享边上两侧合计仍 ≥1
+           (一侧恒全覆盖, 过剩覆盖), 不产生欠覆盖接缝; 轮廓处按覆盖率
+           alpha 混合, 硬锯齿变成 1 排灰度过渡。旧 -0.02 容差原本兼职
+           补浮点裂缝, 这里 w≈0⁻ 时 cov≈1 同样无缝且不再向外多涂一整圈
+           (容差 = 2%×高, 大三角形外扩可达数像素且粗细不均)。
+           (系数口径同 paint_mesh: 2·|den|/sum 才是解析覆盖; 4 则零点
+           减半、45° 阶梯外排整排被裁, 名为 AA 实为硬边 —— 2026-10-14
+           复审核验后统一。) */
+        float k0 = 2.0f * fabsf(den) /
+                   fmaxf(fabsf(y1 - y2) + fabsf(x2 - x1), 1e-6f);
+        float k1 = 2.0f * fabsf(den) /
+                   fmaxf(fabsf(y2 - y0) + fabsf(x0 - x2), 1e-6f);
+        float k2 = 2.0f * fabsf(den) /
+                   fmaxf(fabsf(y0 - y1) + fabsf(x1 - x0), 1e-6f);
         float minx = x0, maxx = x0, miny = y0, maxy = y0;
         if (x1 < minx) minx = x1; if (x1 > maxx) maxx = x1;
         if (x2 < minx) minx = x2; if (x2 > maxx) maxx = x2;
@@ -967,7 +1015,14 @@ static void paint_tris(fb *f, const hn_cmd *c, float alpha, float scale) {
                 float w0 = ((y1 - y2) * (fx - x2) + (x2 - x1) * (fy - y2)) / den;
                 float w1 = ((y2 - y0) * (fx - x2) + (x0 - x2) * (fy - y2)) / den;
                 float w2 = 1.0f - w0 - w1;
-                if (w0 < -0.02f || w1 < -0.02f || w2 < -0.02f) continue;
+                /* 多边形外时取各边坡道的最小者(不乘积), 理由同 paint_mesh:
+                   乘积在凸角双重打折 → 底层透出孤点亮斑; min 只偏胖不开裂,
+                   直边/单边时与乘积逐位相同。 */
+                float cov = 1.0f;
+                if (w0 < 0.0f) { float c0 = 1.0f + w0 * k0; if (c0 < cov) cov = c0; }
+                if (w1 < 0.0f) { float c1 = 1.0f + w1 * k1; if (c1 < cov) cov = c1; }
+                if (w2 < 0.0f) { float c2 = 1.0f + w2 * k2; if (c2 < cov) cov = c2; }
+                if (cov <= 0.0f) continue;
                 float u = w0 * u0 + w1 * u1 + w2 * u2;
                 float v = w0 * v0 + w1 * v1 + w2 * v2;
                 int sxp = (int)(u * (float)iw), syp = (int)(v * (float)ih);
@@ -975,7 +1030,7 @@ static void paint_tris(fb *f, const hn_cmd *c, float alpha, float scale) {
                 if (syp < 0) syp = 0; else if (syp >= ih) syp = ih - 1;
                 const unsigned char *p = &ipx[(syp * iw + sxp) * 4];
                 fcolor col = { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f,
-                               p[3] / 255.0f * ga };
+                               p[3] / 255.0f * ga * cov };
                 fb_blend(f, xx, yy, col);
             }
         }
@@ -1445,9 +1500,10 @@ static void paint_bitmap(fb *f, const hn_cmd *c, float scale, float ox, float oy
     if (!c->bitmap || c->bitmap_w <= 0 || c->bitmap_h <= 0 || c->bitmap_stride <= 0) return;
     int x0 = (int)((c->x - ox) * scale + ox), y0 = (int)((c->y - oy) * scale + oy);
     int w = (int)(c->w * scale), h = (int)(c->h * scale);
+    float layer_alpha = (float)(c->fill & 0xFFu) / 255.0f;
     blend_rgba(f, c->bitmap, c->bitmap_stride, c->bitmap_w, c->bitmap_h,
                0, 0, (float)c->bitmap_w, (float)c->bitmap_h,
-               x0, y0, w, h, alpha);
+               x0, y0, w, h, alpha * layer_alpha);
 }
 
 /* PDATA: putImageData 的 RGBA 块(引擎账本持有, 1:1 贴入; 源子矩形 =

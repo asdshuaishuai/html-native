@@ -74,20 +74,27 @@ typedef struct CGColorSpace *CGColorSpaceRef;
 #define HN_NS_DESKTOP_LEVEL  ((long)-2147483648L + 5 + 20)   /* INT32_MIN + 25 */
 
 /* NSWindowCollectionBehavior(NSWindow.h:128-149, 2026-10 抄录):
-     CanJoinAllSpaces = 1<<0 (:130)  跟随所有空间(含全屏空间旁边)
+     CanJoinAllSpaces = 1<<0 (:130)  跟随所有空间(普通空间)
      MoveToActiveSpace= 1<<1 (:131)  切空间时搬到当前活动空间
      Managed          = 1<<2 (:133)  参与 spaces/exposé(normal 级默认)
      Transient        = 1<<3 (:134)  在 spaces 中浮动, 被 exposé 隐藏
      Stationary       = 1<<4 (:135)  不被 exposé 带走 —— 桌面窗口语义
      IgnoresCycle     = 1<<6 (:138)  不进 Cmd+` 循环(浮动级默认)
-   桌宠组合 = CanJoinAllSpaces|Stationary|IgnoresCycle:
-     跟所有空间(所有桌面都看得见) + 不随 Mission Control 位移 + 不参与窗口循环。
+     FullScreenAuxiliary = 1<<8 (:146, API_AVAILABLE(macos(10.7)))
+                                  "can be shown with the fullscreen window"
+                                  (NSWindow.h:118 文档原文) —— 全屏空间旁边可见
+   桌宠组合 = CanJoinAllSpaces|Stationary|IgnoresCycle|FullScreenAuxiliary:
+     跟所有空间(所有桌面都看得见) + 不随 Mission Control 位移 + 不参与窗口
+     循环 + **全屏空间旁边也在**(只有 CanJoinAllSpaces 时全屏空间旁不出现
+     —— 组合正确性: "跟随所有空间"声明要含全屏, 必须带 Auxiliary 位)。
    注: CanJoinAllApplications(1<<18, :149)是 macOS 13+ 才有的 beat,
-   不开(留 ≤12 可运行)。 */
+   不开(留 ≤12 可运行); FullScreenAuxiliary 10.7+ 可用, 无版本顾虑。 */
 #define HN_CB_CAN_JOIN_ALL_SPACES (1UL << 0)
 #define HN_CB_STATIONARY          (1UL << 4)
 #define HN_CB_IGNORES_CYCLE       (1UL << 6)
-#define HN_CB_PET (HN_CB_CAN_JOIN_ALL_SPACES | HN_CB_STATIONARY | HN_CB_IGNORES_CYCLE)
+#define HN_CB_FULLSCREEN_AUX      (1UL << 8)
+#define HN_CB_PET (HN_CB_CAN_JOIN_ALL_SPACES | HN_CB_STATIONARY | \
+                   HN_CB_IGNORES_CYCLE | HN_CB_FULLSCREEN_AUX)
 
 static obj_t nsstr(const char *s) {
     return ((obj_t (*)(obj_t, sel_t, const char *))o_msgSend)(
@@ -297,7 +304,71 @@ static hnp_window *hn_hw_from_event(obj_t e) {
 
 static signed char hn_view_can_move_window(obj_t self, sel_t cmd) {
     (void)self; (void)cmd;
-    return 1;   /* 任意位置按下都可拖动窗口 */
+    /* 恒 1 = "可见内容即拖动面"(无边框桌宠没有标题栏)。命中区的收口
+       不在这里而在 hitTest 覆写(见下): 全透明像素处 hit 视图缺席,
+       AppKit 根本不会带着"这个视图能拖吗"的问题走到本方法 —— 拖拽
+       命中区因此只在**有像素的内容上**, 看不见的透明矩形不可拖。 */
+    return 1;
+}
+
+/* ================= 逐像素命中(透明像素点击穿透) =================
+
+   契约(hn_platform.h hn-transparent / 本次任务): 透明窗口的**全透明
+   像素应穿透到桌面/下层窗口, 半透明(alpha>0)可点**。三层机制各管一段:
+     ① WindowServer 层(系统免费给): isOpaque=NO 的窗口, WindowServer
+        对鼠标按下做**逐像素**路由 —— alpha≈0 处的点击不投递给本应用
+        (实测口径: 透明区点击"aren't delivered to your application at
+        all", 直接落到下层窗口; 小 alpha(~≤0.05)也有穿透报告 —— 边界
+        带以系统为准, 应用层不要依赖窄阈值的精确行为)。
+     ② AppKit 视图层(本文件 hitTest 覆写): 事件真被投递进来时(键窗口/
+        边界带等场景), hit 视图缺席 → NSWindow 不处理、不发背景拖拽 ——
+        与 ① 同向收口: 拖拽/点击的命中区 = 有像素的内容。
+     ③ 引擎出口(hnp_pump BUTTON_DOWN 过滤, 见 pump): 引擎用自己的
+        x/y 做命中测试, 不经过 AppKit —— 全透明像素的按下在此丢弃,
+        保证"透明处点击不落引擎"不依赖系统行为(确定性锚)。
+   采样源 = 平台自持帧缓冲 w->frame(BGRA 预乘, 原点左上 —— 与 blit 同
+   源同拍, 无额外状态)。BGRA 小端字节序: alpha 在第 4 字节(offset 3);
+   预乘不改 alpha 值, 直接读即可。 */
+
+/* 内容区坐标(引擎口径, 左上原点, CSS px)→ 帧缓冲 alpha 采样。
+   非透明窗/尚无首帧: 恒 255(与旧行为逐位一致 —— 过滤永不触发)。 */
+static unsigned char hn_alpha_at(hnp_window *w, int x, int y) {
+    if (!w || !w->transparent || !w->frame ||
+        w->cg_bw <= 0 || w->cg_bh <= 0 || w->cg_lw <= 0 || w->cg_lh <= 0)
+        return 255;
+    int bx = (int)((double)x * (double)w->cg_bw / (double)w->cg_lw);
+    int by = (int)((double)y * (double)w->cg_bh / (double)w->cg_lh);
+    if (bx < 0) bx = 0;
+    if (by < 0) by = 0;
+    if (bx >= w->cg_bw) bx = w->cg_bw - 1;
+    if (by >= w->cg_bh) by = w->cg_bh - 1;
+    return w->frame[((size_t)by * (size_t)w->cg_bw + (size_t)bx) * 4 + 3];
+}
+
+/* hitTest: — 视图层的逐像素收口(机制②)。point 在**父视图坐标系**
+   (NSView.h:220 的文档口径: "point 位于视图的父视图的坐标系中")。
+   注意父视图不总是"铺满内容区的容器": 有标题栏窗口(style=1|2|4|8)的
+   contentView 挂在主题框下, frame=(0, 标题栏高) —— 直接拿 point 判界
+   会把内容顶部一条带(误判越界)返回 nil, 而标题条区域的点反被本视图
+   认领(2026-10-14 复审修复)。故先按自身 frame 把 point 平移到**本视图
+   局部坐标**再判界; 无边框窗(透明窗恒 style=0)frame 原点是 (0,0),
+   平移为零, 逐像素契约路径逐位不变。
+   局部坐标不翻转(原点左下): engine_y = 内容高 − ly。全透明像素返回
+   nil(无命中视图 → NSWindow 不路由/不拖拽); 越界与半透明返回 self
+   (正常命中)。反查失败(映射满表等)退默认 self —— 不因记账缺失改变
+   既有可点行为。 */
+static obj_t hn_view_hit_test(obj_t self, sel_t cmd, CGPoint p) {
+    (void)cmd;
+    hnp_window *w = hn_hw_from_self(self);
+    if (!w) return self;
+    CGRect f = MSG0(CGRect, self, "frame");
+    double lx = p.x - f.origin.x, ly = p.y - f.origin.y;
+    if (lx < 0 || ly < 0 || lx >= (double)w->w || ly >= (double)w->h)
+        return NULL;
+    int ey = w->h - (int)ly;
+    if (hn_alpha_at(w, (int)lx, ey) == 0)
+        return NULL;   /* 全透明像素: 无命中视图 → 事件不进视图、不拖窗 */
+    return self;
 }
 
 /* ================= 深度 1: drawRect: 直呈 ================= */
@@ -590,6 +661,10 @@ static obj_t hn_pet_view_class(void) {
         cls = NULL;
         return NULL;
     }
+    /* ---- 逐像素命中(hitTest; 见"逐像素命中"段注释) ----
+       "@@:{CGPoint=dd}" = NSView* 返回, self, _cmd, NSPoint 参数。 */
+    add_method(cls, o_sel("hitTest:"), (void (*)(void))hn_view_hit_test,
+               "@@:{CGPoint=dd}");
     /* ---- 深度 1: 直呈 ---- */
     add_method(cls, o_sel("drawRect:"), (void (*)(void))hn_view_draw_rect,
                "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
@@ -679,11 +754,15 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
     if (d->no_shadow) MSGI(void, win, "setHasShadow:", 0);
     /* 鼠标穿透: 幽灵模式初始态(运行期切换见 hnp_window_set_click_through) */
     if (d->click_through) MSGI(void, win, "setIgnoresMouseEvents:", 1);
-    /* 无边框 + 可拖: 桌宠没有标题栏可拖, 内容就是唯一拖动面。
-       movableByWindowBackground(NSWindow.h:414) 对 borderless 窗口生效;
-       内容视图需 mouseDownCanMoveWindow=YES(NSView 默认为 1, 但
-       NSImageView 实测为 0 —— 见 hn_pet_view_class)。 */
-    if (d->borderless) MSGI(void, win, "setMovableByWindowBackground:", 1);
+    /* 无边框 + 可拖: 桌宠没有标题栏可拖, 可见内容就是唯一拖动面。
+       movableByWindowBackground(NSWindow.h:414) 生效面 = hitTest 命中的
+       视图(逐像素收口见 hn_view_hit_test —— 全透明像素无命中视图,
+       不可点也不可拖; 拖拽命中区只在内容上)。启用面: borderless 显式
+       无边框之外, transparent 也隐含无边框(style=0, 见上方 styleMask
+       注释)却此前不启用拖拽 —— 同样没有标题栏, 一并启用; 再过 manifest
+       的 hn-draggable 总开关(默认开, 页面 "0" 显式关闭)。 */
+    if ((d->borderless || d->transparent) && d->draggable)
+        MSGI(void, win, "setMovableByWindowBackground:", 1);
 
     obj_t cls = hn_pet_view_class();
     obj_t iv = cls ? MSG0(obj_t, cls, "alloc") : MSG0(obj_t, o_getClass("NSImageView"), "alloc");
@@ -1230,11 +1309,34 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     unsigned mods = ((flags & 0x20000) ? 1 : 0) | ((flags & 0x40000) ? 2 : 0)
                   | ((flags & 0x80000) ? 4 : 0) | ((flags & 0x100000) ? 8 : 0);
     switch (ty) {
-    case EV_LDOWN: ev->kind = HNP_EV_BUTTON_DOWN; ev->x = x; ev->y = y; ev->button = 0; ev->mods = mods; break;
-    case EV_LUP:   ev->kind = HNP_EV_BUTTON_UP;   ev->x = x; ev->y = y; ev->button = 0; ev->mods = mods; break;
-    case EV_RDOWN: ev->kind = HNP_EV_BUTTON_DOWN; ev->x = x; ev->y = y; ev->button = 2; ev->mods = mods; break;
+    case EV_LDOWN: case EV_RDOWN: {
+        /* 逐像素穿透的引擎出口收口(机制③, 见"逐像素命中"段注释):
+           引擎用自己的 x/y 做命中测试, 不经过 AppKit —— 透明窗口里
+           **全透明像素**上的按下在此丢弃(半透明照常)。WindowServer 的
+           逐像素路由(机制①)已把多数透明处点击挡在进程外, 这里兜住
+           键窗口/边界带等仍会投递进来的场景, 使"透明处点击不落引擎"
+           成为不依赖系统行为的确定性锚。不过 sendEvent:(AppKit 侧同样
+           不处理 —— hitTest 已返回 nil, 转发也只是空转)。非透明窗/
+           尚无首帧时 alpha 恒 255, 过滤永不触发(旧行为逐位一致)。 */
+        hnp_window *hw0 = hn_hw_from_event(e);
+        if (hw0 && hn_alpha_at(hw0, x, y) == 0) {
+            pool_pop(pool);
+            return 0;
+        }
+        ev->kind = HNP_EV_BUTTON_DOWN;
+        ev->x = x; ev->y = y; ev->button = (ty == EV_LDOWN) ? 0 : 2;
+        ev->mods = mods;
+        break;
+    }
     case EV_MOVE: case EV_LDRAG:
         ev->kind = HNP_EV_POINTER_MOVE; ev->x = x; ev->y = y; ev->mods = mods; break;
+    case EV_LUP:
+        /* 左键抬起: 引擎与 AppKit 双路都要见(与按下 case 同口径) ——
+           窗口拖动结束、AppKit 控件的 mouse-up 状态机都依赖它;
+           合并 LDOWN/RDOWN case 时误删过本分支(2026-10-14 复审恢复)。 */
+        ev->kind = HNP_EV_BUTTON_UP;
+        ev->x = x; ev->y = y; ev->button = 0; ev->mods = mods;
+        break;
     case EV_SCROLL: {
         ev->kind = HNP_EV_SCROLL;
         ev->x = x; ev->y = y;

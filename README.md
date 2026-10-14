@@ -589,8 +589,9 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   CoreGraphics 与软件光栅双后端实现)。更复杂的装配(骨骼/物理/口型同步)
   可由脚本逐帧调用 `hn_node_set_mesh_verts()` 写入顶点 —— 引擎只做
   "网格 + 贴图"的合成, rig 逻辑属于应用层。
-  ⚠️ **Live2D 的 `.moc3` 是专有格式**, 解码需要其 Cubism SDK(商业授权),
-  本项目不自研解码器; 交付的是同技术的开放原语
+  `.moc3` 模型的官方渲染由 **Cubism Core 绑定**承担(`hn-cubism`, 见下条
+  与 "Live2D (Cubism moc3) 授权说明"); 本原语是**零依赖**的同技术开放
+  实现 —— 不取 Core 也能用同一套 MESH 管线
 - **Live2D 运行时包接入(moc3 边界诚实)**: `<img src="rig.png" hn-mesh="16x14"
   hn-live2d="<model3.json>" hn-live2d-motion="Idle" hn-live2d-index="0">` ——
   引擎解析运行时包里**全部公开 JSON**: model3.json(FileReferences:
@@ -601,8 +602,11 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   形变通道**: ParamAngleX/Y→look_x/look_y、ParamAngleZ→body_x、
   ParamMouthOpenY→mouth、(ParamEyeLOpen+ParamEyeROpen)/2→**eye 闭眼压缩**
   (hn-mesh 上带向下睑方向压合, hnMeshParam 的 "eye" 传开合度 1=睁眼)。
-  **moc3 网格变形渲染 ❌ 不做**(专有格式) —— 立绘动起来靠的是官方 motion
-  数据驱动自有 rig, 模型加载带进程级 4 槽 LRU 缓存(每帧采样不复解)。
+  **本通道不依赖 Cubism Core** —— 立绘动起来靠的是官方 motion 数据驱动
+  自有 rig, 模型加载带进程级 4 槽 LRU 缓存(每帧采样不复解)。`.moc3` 的
+  网格变形渲染由 **`hn-cubism` 官方 Core 绑定**承担(见下方
+  "Live2D (Cubism moc3) 授权说明"); 未链 Core 的构建里 `hn-cubism`
+  落占位卡, 本通道不受影响。
   官方 Miku 样例(runtime 全套 + 2048 贴图)见 `examples/live2d-miku.html`,
   口径由 `tools/live2d_probe.sh`(44 断言: 包解析/四段型求值器/rig 顶点
   接线/中性位零漂移)钉死
@@ -835,6 +839,24 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   **M2 已落地**: 事件派发管道(点击/键盘/滚轮/hover, 三壳同构)
   与动画帧循环(过渡/@keyframes/Lottie/网格变形共用, 空闲零唤醒);
   新三层(`platform/hn_platform.h` + `app/hn_app.c`)是这些壳经验的收敛版。
+
+### Live2D (Cubism moc3) 授权说明
+
+`.moc3` 是 Live2D 的专有二进制格式; 形变数学(keyform 插值/deformer 树/
+部件透明度传播)由**官方 Cubism Core**(libLive2DCubismCore, 闭源运行库,
+纯 C API)承担。本项目经 `Sources/CHtmlNative/hn_cubism.c` 绑定它 ——
+页面声明 `hn-cubism="model3.json"` 即走真模型渲染, 不重实现其形变逻辑。
+
+- **Core 二进制不入 git**: 闭源运行库与仓库许可不兼容。仓库只保存
+  `tools/fetch-cubism-core.sh` —— 使用方自行运行它从 Live2D 官方 SDK
+  发布包提取头文件与静态库到 `vendor/cubism/`(该路径已进 `.gitignore`)。
+- **使用许可**: 运行提取脚本即代表接受 **Live2D Proprietary Software
+  License**(个人/小规模事業者免费授权线内免费使用; 发布应用时按 Live2D
+  要求附许可与 NOTICE 声明 —— 与 live2d-py 等社区项目的处理同一姿势)。
+- **未链 Core 的构建**(探针与默认 `build-multiplatform.sh` 不定义
+  `HN_HAVE_CUBISM`): `hn-cubism` 节点落**占位卡**(页面可见、不报错),
+  引擎其余功能不受影响; `tools/build-cubism-dev.sh` 是带 Core 的开发
+  构建入口。`hn-live2d` 运行时包通道(上一节)不依赖 Core, 任何构建可用。
 
 ## 智能 UI 组件预设(上层, include 即得)
 

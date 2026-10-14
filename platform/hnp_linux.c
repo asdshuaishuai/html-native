@@ -10,6 +10,22 @@
  * 降级为无穿透(声明照常接受, 物化看平台)。原生视频图层(文件尾)同款
  * 手法跑 XVideo 扩展(libXv): 缺席/无可用端口时 attach 如实返回 0,
  * 调用方回退 CPU 逐帧。
+ *
+ * 与 macOS 侧的对齐矩阵(能对齐的对齐, 不能的如实留位; hn_platform.h
+ * 平台能力注释为总表, 此处是 X11 侧的逐项口径):
+ *   内容拖拽(borderless/transparent 窗, hn-draggable 默认开)—— macOS 走
+ *     NSWindow.movableByWindowBackground(壳零代码); X11 无对应机制,
+ *     hnp_pump 手动等价物: 按下记锚 + XGrabPointer + MotionNotify 跟手
+ *     XMoveWindow(见 XE_BUTTONPRESS 分支)。命中过滤与 macOS 同口径:
+ *     全透明像素不发起拖拽、不进引擎(见"逐像素命中过滤"段)。
+ *   逐像素点击穿透 —— macOS 由 WindowServer 对非不透明窗口做系统级
+ *     逐像素路由; X11 只能靠 XShape 输入形状按 alpha 掩码重建矩形集
+ *     (每 blit 一次, 性能/复杂度都重, 本轮留位)。v1 只有引擎出口过滤,
+ *     差异 = 原生点击落在透明处时窗口仍接收/聚焦(无 OS 级穿透)。
+ *   跨空间组合 —— macOS 桌宠组合含 FullScreenAuxiliary(全屏空间旁边
+ *     可见, NSWindow.h:146); EWMH 无等价物(全屏空间旁浮窗是 WM/合成器
+ *     私有协议), _NET_WM_STATE_STICKY 只覆盖普通空间 —— 已知差异。
+ *   no_shadow —— compositor 私有(EWMH 未定义), 优雅忽略(见开窗注释)。
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -33,8 +49,14 @@ enum { XE_KEYPRESS = 2, XE_KEYRELEASE = 3, XE_BUTTONPRESS = 4, XE_BUTTONRELEASE 
 
 typedef struct { int type; unsigned long serial; int send_event;
                  xdisplay *display; xwindow window; } xany_stub;
+/* XButtonEvent/XMotionEvent/XKeyEvent 公共前缀(LP64): 字段偏移必须与
+ * 真实 Xlib.h 逐一对齐 —— window=32 root=40 subwindow=48 time=56
+ * x/y=64/68 x_root/y_root=72/76 state=80, 之后是 button/keycode/is_hint
+ * (这里统一叫 detail)与 same_screen。漏 root 会让其后所有字段错位 8
+ * 字节(2026-10-14: 拖拽锚点/掩码判定/命中过滤全读到错位数据, 已修)。 */
 typedef struct { int type; unsigned long serial; int send_event; xdisplay *display;
-                 xwindow window; xwindow subwindow; unsigned long time;
+                 xwindow window; xwindow root; xwindow subwindow;
+                 unsigned long time;
                  int x, y, x_root, y_root; unsigned int state; unsigned int detail;
                  int same_screen; } xdevice_stub;
 typedef struct { int type; unsigned long serial; int send_event; xdisplay *display;
@@ -105,6 +127,10 @@ typedef int (*fn_XTranslateCoordinates_t)(xdisplay *, xwindow, xwindow, int, int
 typedef int (*fn_XSendEvent_t)(xdisplay *, xwindow, int, long, xclient_stub *);
 typedef int (*fn_XChangeProperty_t)(xdisplay *, xwindow, xatom, xatom, int, int,
                                     const unsigned char *, int);
+/* 内容拖拽(borderless 窗手动拖动; X.h 常量引证见下方常量块) */
+typedef int (*fn_XGrabPointer_t)(xdisplay *, xwindow, int, unsigned int, int, int,
+                                 xwindow, unsigned long, unsigned long);
+typedef int (*fn_XUngrabPointer_t)(xdisplay *, unsigned long);
 
 /* XShape 的矩形 —— X11/extensions/shape.h 的 XRectangle(short 字段) */
 typedef struct { short x, y; unsigned short width, height; } xrect_stub;
@@ -140,7 +166,16 @@ typedef int (*fn_XShapeCombineRectangles_t)(xdisplay *, xwindow, int /*kind*/,
 
    X.h 事件掩码(逐值抄录): SubstructureNotifyMask=1<<19,
    SubstructureRedirectMask=1<<20(_NET_WM_STATE client message 发往根窗口
-   所需; 常规事件路由按 XE_* 枚举, 与上面 enum 不冲突)。 */
+   所需; 常规事件路由按 XE_* 枚举, 与上面 enum 不冲突)。
+
+   X.h 指针抓取/按键掩码(逐值抄录, /opt/homebrew/include/X11/X.h =
+   xorgproto 2025.1; 内容拖拽用):
+     ButtonReleaseMask  = 1L<<3 (:154)   —— evmask 已含
+     PointerMotionMask  = 1L<<6 (:157)   —— evmask 已含
+     Button1Mask        = 1<<8   (:246)  —— MotionNotify.state 的"左键按住"位
+     GrabModeAsync      = 1      (:319)  —— 抓取不冻结指针/键盘
+     GrabSuccess        = 0      (:323)
+     CurrentTime        = 0L     (:139)  —— 抓取/解抓的时间戳"现在"哨兵 */
 #define X_PROP_REPLACE 0            /* PropModeReplace(X11/X.h) */
 #define HN_MWM_HINTS_DECORATIONS (1UL << 1)
 #define HN_XSHAPE_INPUT    2
@@ -148,6 +183,13 @@ typedef int (*fn_XShapeCombineRectangles_t)(xdisplay *, xwindow, int /*kind*/,
 #define HN_XSHAPE_UNSORTED 0
 #define HN_SUBSTRUCT_NOTIFY   (1L << 19)
 #define HN_SUBSTRUCT_REDIRECT (1L << 20)
+#define HN_BTN1_MASK     (1 << 8)      /* Button1Mask: MotionNotify.state 左键位 */
+#define HN_GRAB_ASYNC    1             /* GrabModeAsync */
+#define HN_GRAB_SUCCESS  0
+#define HN_CURRENT_TIME  0L
+/* 抓取期间要收的事件: ButtonPressMask 1L<<2 | ButtonReleaseMask 1L<<3 |
+   PointerMotionMask 1L<<6(X.h 逐值见上)。 */
+#define HN_GRAB_EVMASK   ((1L << 2) | (1L << 3) | (1L << 6))
 
 static struct {
     void *lib;
@@ -180,6 +222,8 @@ static struct {
     fn_XTranslateCoordinates_t XTranslateCoordinates;
     fn_XSendEvent_t XSendEvent;
     fn_XChangeProperty_t XChangeProperty;
+    fn_XGrabPointer_t XGrabPointer;
+    fn_XUngrabPointer_t XUngrabPointer;
     xdisplay *dpy;
     xatom wm_protocols, wm_delete_window;
     /* 窗口形态原子(hnp_init 里按名字 intern; 0 = 不可用, 调用方跳过) */
@@ -231,6 +275,8 @@ static int x11_load(void) {
     SYM(XTranslateCoordinates, fn_XTranslateCoordinates_t);
     SYM(XSendEvent, fn_XSendEvent_t);
     SYM(XChangeProperty, fn_XChangeProperty_t);
+    SYM(XGrabPointer, fn_XGrabPointer_t);
+    SYM(XUngrabPointer, fn_XUngrabPointer_t);
     return 1;
 }
 
@@ -271,10 +317,17 @@ struct hnp_window {
     xwindow xw;
     void *gc;
     void *ximage;           /* XDestroyImage 时释放 data */
-    unsigned char *buf;     /* XImage data(预乘 BGRA) */
+    unsigned char *buf;     /* XImage data(预乘 BGRA, 原点左上) */
     int w, h;
+    int transparent;        /* hn-transparent: 逐像素 alpha 命中过滤的开关 */
+    int bw, bh;             /* 最近一次 blit 的位图尺寸(alpha 采样口径) */
     char utf8[8];
     int depth;
+    /* 内容拖拽(无标题栏窗口的手动拖动, 对齐 macOS movableByWindowBackground;
+       见 hnp_pump 的 XE_BUTTONPRESS 分支): borderless/transparent 开窗时置
+       draggable; drag_on = 左键按住的拖动进行中; off_* = 按下时指针根坐标
+       与窗口原点的偏移(拖动期间保持不动)。 */
+    int draggable, drag_on, drag_off_x, drag_off_y;
 };
 
 static hnp_window *g_windows[16];
@@ -335,6 +388,39 @@ static void hn_apply_input_shape(hnp_window *w, int on) {
                                        HN_XSHAPE_SET, HN_XSHAPE_UNSORTED);
     }
     x11.XFlush(x11.dpy);
+}
+
+/* ================= 逐像素命中过滤(与 macOS 对齐的引擎出口收口) =================
+
+   契约(hn_platform.h hn-transparent): 全透明像素穿透到桌面, 半透明可点。
+   X11 与 macOS 的能力差异(诚实口径):
+     macOS 是 WindowServer 对非不透明窗口做**逐像素**输入路由 —— 透明处
+     点击在系统层就不投递; X11 **没有**逐像素输入路由, XShape 输入形状
+     可以做到, 但要每 blit 后按 alpha 掩码重建 ShapeInput 矩形集(性能/
+     复杂度都重), 本轮不做(留位: 形状重建挂在 hnp_window_blit 尾部)。
+   v1 的对齐面 = **引擎出口过滤**(与 hnp_macos.c 的机制③同语义): 透明
+   窗口里全透明像素上的按下不进引擎、不发起拖拽 —— "透明处点击不落引擎/
+   不拖窗"由本文件保证, 不依赖 WM。差异(窗口仍会接收/聚焦透明处的原生
+   点击)是 X11 无逐像素路由的已知残留, 随上面的留位一并收口。
+   采样源 = blit 拷进 w->buf 的预乘 BGRA(原点左上; alpha 在小端第 4 字节,
+   offset 3 —— 与 hnp_macos.c 同一布局口径)。 */
+
+/* 内容区坐标(引擎口径)→ 帧缓冲 alpha。非透明窗/尚无首帧: 恒 255
+   (过滤永不触发, 与旧行为逐位一致)。 */
+static unsigned char hn_alpha_at(hnp_window *w, int x, int y) {
+    if (!w || !w->transparent || !w->buf || w->bw <= 0 || w->bh <= 0) return 255;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= w->bw) x = w->bw - 1;
+    if (y >= w->bh) y = w->bh - 1;
+    return w->buf[((size_t)y * (size_t)w->bw + (size_t)x) * 4 + 3];
+}
+
+/* X 事件窗口 → hnp_window(进程窗口少, 线性扫表)。 */
+static hnp_window *hn_hw_from_xwindow(xwindow xw) {
+    for (int i = 0; i < g_window_n; i++)
+        if (g_windows[i] && g_windows[i]->xw == xw) return g_windows[i];
+    return NULL;
 }
 
 hnp_window *hnp_window_open(const hnp_window_desc *d) {
@@ -411,6 +497,15 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
     w->gc = x11.XCreateGC(x11.dpy, w->xw, 0, NULL);
     if (!w->gc) { x11.XDestroyWindow(x11.dpy, w->xw); free(w); return NULL; }
     w->w = d->width; w->h = d->height;
+    w->transparent = d->transparent ? 1 : 0;   /* 逐像素命中过滤的开关 */
+    /* 内容拖拽启用面(对齐 macOS setMovableByWindowBackground): borderless
+       显式无边框之外, transparent 也隐含无边框(EWMH/Motif 装饰是否真去掉
+       看 WM, 但语义同为"无标题栏可拖")。启用还要过 manifest 的 hn-draggable
+       总开关(默认开, 页面 hn-draggable="0" 显式关闭 —— 2026-10-14 复审前
+       本字段解析后无消费者, 两平台都硬编码 borderless||transparent 即拖);
+       拖动实现见 hnp_pump 的 XE_BUTTONPRESS 分支(命中过滤: 全透明像素
+       不发起拖拽)。 */
+    w->draggable = d->draggable && (d->borderless || d->transparent);
     x11.XMapWindow(x11.dpy, w->xw);
     /* map 后补发: EWMH 状态第二条生效路径(不读属性的 WM) + 摆位的
        ConfigureRequest(robust 路径) + 初始鼠标穿透(幽灵模式初始态;
@@ -445,10 +540,15 @@ void hnp_window_resize(hnp_window *w, int nw, int nh) {
     if (!w) return;
     w->w = nw; w->h = nh;
     if (w->ximage) { x11.XDestroyImage(w->ximage); w->ximage = NULL; }
+    /* buf 是 XImage 的 data(XDestroyImage 连带释放)—— 指针必须一并清空:
+       resize 后到下一次 blit 之间 alpha 采样若读到悬垂指针就是 use-after-free
+       (透明像素命中过滤读 buf; 清空后 hn_alpha_at 走"无帧 → 恒 255"分支)。 */
+    w->buf = NULL;
 }
 
 void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int bh, size_t stride) {
     if (!w || !bgra_pre || !x11.dpy) return;
+    w->bw = bw; w->bh = bh;   /* alpha 采样的位图口径(逐像素命中过滤用) */
     if (!w->ximage) {
         w->buf = (unsigned char *)malloc((size_t)bw * bh * 4);
         if (!w->buf) return;
@@ -601,6 +701,39 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     }
     case XE_BUTTONPRESS: case XE_BUTTONRELEASE: {
         xdevice_stub *dv = (xdevice_stub *)&xb;
+        hnp_window *hw = hn_hw_from_xwindow(((xany_stub *)&xb)->window);
+        /* 逐像素命中过滤(见"逐像素命中过滤"段注释): 透明窗口里全透明
+           像素上的**按下**丢弃 —— 不进引擎, 也不作为拖拽起点(半透明
+           照常; 非透明窗/无帧时 alpha 恒 255, 行为不变)。抬起不过滤:
+           按下在可见像素、滑出透明区再抬起的配对不能拆散。 */
+        if (hw && type == XE_BUTTONPRESS && hn_alpha_at(hw, dv->x, dv->y) == 0)
+            return 0;
+        /* 内容拖拽(对齐 macOS movableByWindowBackground —— 该壳在 macOS
+           由 NSWindow 收按下后自动拖窗; X11 没有, 手动等价物):
+             按下(左键, 可拖窗, 命中可见像素) → 记指针-窗口偏移并
+             XGrabPointer(owner_events=1: 事件照常投递本进程; 快速拖动
+             出窗后 MotionNotify 不断流);
+             移动(左键按住) → XMoveWindow 按偏移跟手;
+             抬起 → 结束并解抓。抓取失败不阻断按下事件本身。 */
+        if (hw && type == XE_BUTTONPRESS && hw->draggable && dv->detail == 1) {
+            int ox = 0, oy = 0;
+            xwindow child = 0;
+            if (hw->drag_on) return 0;   /* 重复按下(已抓取中): 不重锚 */
+            if (x11.XTranslateCoordinates(x11.dpy, hw->xw,
+                                          x11.XDefaultRootWindow(x11.dpy),
+                                          0, 0, &ox, &oy, &child) &&
+                x11.XGrabPointer(x11.dpy, hw->xw, 1, HN_GRAB_EVMASK,
+                                 HN_GRAB_ASYNC, HN_GRAB_ASYNC, 0, 0,
+                                 HN_CURRENT_TIME) == HN_GRAB_SUCCESS) {
+                hw->drag_on = 1;
+                hw->drag_off_x = dv->x_root - ox;
+                hw->drag_off_y = dv->y_root - oy;
+            }
+        }
+        if (hw && type == XE_BUTTONRELEASE && dv->detail == 1 && hw->drag_on) {
+            hw->drag_on = 0;
+            x11.XUngrabPointer(x11.dpy, HN_CURRENT_TIME);
+        }
         ev->kind = (type == XE_BUTTONPRESS) ? HNP_EV_BUTTON_DOWN : HNP_EV_BUTTON_UP;
         ev->x = dv->x; ev->y = dv->y;
         ev->button = (dv->detail == 1) ? 0 : (dv->detail == 3) ? 2 : 1;
@@ -608,6 +741,15 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     }
     case XE_MOTIONNOTIFY: {
         xdevice_stub *dv = (xdevice_stub *)&xb;
+        hnp_window *hw = hn_hw_from_xwindow(((xany_stub *)&xb)->window);
+        /* 拖动跟手: 左键按住的拖动进行中 → 窗口原点 = 指针根坐标 − 偏移
+           (指针根坐标在抓取下不因出窗失真)。非拖动移动照常上报引擎。 */
+        if (hw && hw->drag_on && (dv->state & HN_BTN1_MASK)) {
+            x11.XMoveWindow(x11.dpy, hw->xw,
+                            dv->x_root - hw->drag_off_x,
+                            dv->y_root - hw->drag_off_y);
+            x11.XFlush(x11.dpy);   /* 跟手要即发(XPending 的隐式 flush 在下一拍) */
+        }
         ev->kind = HNP_EV_POINTER_MOVE;
         ev->x = dv->x; ev->y = dv->y;
         return 1;

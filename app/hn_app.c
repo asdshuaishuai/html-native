@@ -117,18 +117,45 @@ static double max_video_time(hn_rt *rt) {
     return best;
 }
 
-/* --shot --advance MS: 把媒体推进到 MS 毫秒处再落盘 —— 视频"动帧"的
-   确定性取样口径(两次不同 advance 的落盘必须给出不同像素, 验收 §③)。
-   synth 宿主(无媒体平台): 假时钟 16ms 步瞬时快进, 逐字节确定;
-   平台真宿主(AVPlayer): 只能真播 —— 墙钟每 16ms 走一帧直到目标时刻
-   (6s 上限防呆), 上限内未到也照落当前帧(位置单调, 帧序仍正确)。 */
+/* 文档里是否存在 <video>(advance_media 的分支判据; 与 max_video_time 同一
+   遍历手法 —— 只走 hn.h 公开遍历 API, 与引擎内部零耦合) */
+static int doc_has_video(hn_rt *rt) {
+    hn_doc *doc = rt ? hn_rt_doc(rt) : NULL;
+    hn_context *c = rt ? hn_rt_context(rt) : NULL;
+    hn_node *root = doc ? hn_doc_root(doc) : NULL;
+    if (!c || !root) return 0;
+    hn_node *stack[256];
+    int sp = 0;
+    stack[sp++] = root;
+    while (sp > 0) {
+        hn_node *n = stack[--sp];
+        const char *tag = hn_node_tag(n);
+        if (tag && !strcmp(tag, "video")) return 1;
+        for (hn_node *ch = hn_node_first_child(n); ch && sp < 256;
+             ch = hn_node_next_sibling(ch))
+            stack[sp++] = ch;
+    }
+    return 0;
+}
+
+/* --shot --advance MS: 把动画/媒体推进到 MS 毫秒处再落盘(验收 §③: 两次
+   不同 advance 的落盘必须给出不同像素)。
+   合成宿主, 或平台宿主上文档没有 <video>(ext_clock 类页面: hn-three/
+   Lottie/GIF/hn-mesh): 走虚拟钟快进 —— 16ms 步进瞬时推进, 帧数只由
+   --advance 决定, 与墙钟无关, 逐字节确定(与 hncore 的 HN_CLOCK 同口径)。
+   此前平台宿主一律进墙钟循环: 无视频页 max_video_time 恒 0 到不了目标,
+   空跑满 6s 墙钟, 实跑帧数随机器负载漂 → ext_clock 停在墙钟相关的值,
+   --advance 取不到所请求的时刻(实测 threejs-demo --advance 1500 vs 3500
+   两张图差异仅浮点尾数, 立方体朝向几乎相同)。
+   平台真宿主(AVPlayer)且有视频: 只能真播 —— 墙钟每 16ms 走一帧直到
+   目标时刻(6s 上限防呆), 上限内未到也照落当前帧(位置单调, 帧序正确)。 */
 static void advance_media(hn_rt *rt, int ms) {
     if (!rt || ms <= 0) return;
     int repaint = 0;
-    if (!strcmp(hn_media_platform_kind(), "synth")) {
+    if (!strcmp(hn_media_platform_kind(), "synth") || !doc_has_video(rt)) {
         for (long t = 0; t < ms; t += 16) hn_rt_frame(rt, 16.0f, &repaint);
-        printf("advance(synth): media t=%.3f s(目标 %.3f)\n",
-               max_video_time(rt), ms / 1000.0);
+        printf("advance(virtual): 确定性快进 %ld ms(目标 %.3f s)\n",
+               ((long)ms + 15) / 16 * 16, ms / 1000.0);
         return;
     }
     double target = ms / 1000.0;
@@ -405,6 +432,7 @@ int main(int argc, char **argv) {
     wd.transparent = man.transparent;
     wd.resizable = 1;
     wd.borderless = man.frameless;
+    wd.draggable = man.draggable;   /* hn-draggable opt-out(默认开) */
     wd.always_on_top = (man.level == HN_LEVEL_FLOATING) ? 1
                      : (man.level == HN_LEVEL_DESKTOP) ? 2 : 0;
     wd.no_shadow = !man.shadow;

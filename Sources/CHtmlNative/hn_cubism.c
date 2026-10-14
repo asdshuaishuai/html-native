@@ -38,7 +38,7 @@ struct hn_cubism;
 void hn_cubism_release(struct hn_cubism *cb);
 void hn_cubism_free(struct hn_cubism *cb);
 
-#define CB_TEX_MAX 4
+#define CB_TEX_MAX 8   /* 常见模型 2-4 张; 8 覆盖到并发贴图页, 超限打警告不静默 */
 
 struct hn_cubism {
     char *m3_path;              /* 缓存键(model3.json 路径) */
@@ -111,6 +111,11 @@ static int cb_parse_model3(struct hn_cubism *cb, hn_context *c,
     hn_json *texs = fr ? hn_json_obj_get(fr, "Textures") : NULL;
     if (texs && texs->kind == HN_JSON_ARR) {
         const char *dir = cb_dir_of(cb->m3_path);
+        if (texs->count > CB_TEX_MAX)
+            fprintf(stderr, "[cubism] %s: Textures[] 共 %d 张, 超过上限 %d, "
+                            "丢弃后 %d 张(引用它们的 drawable 将不渲染)\n",
+                    cb->m3_path, texs->count, CB_TEX_MAX,
+                    texs->count - CB_TEX_MAX);
         for (int i = 0; i < texs->count && i < CB_TEX_MAX; i++) {
             const char *tp = hn_json_str(hn_json_at(texs, i), NULL);
             if (tp) {

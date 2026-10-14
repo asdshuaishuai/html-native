@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="560x680@80,80">
+<meta name="hn-title" content="threejs-demo · 场景图+相机+软件三角光栅">
+<style>
+  /* ── three.js 子集垂直切片演示(hn-three 属性) ──
+     与 threejs-ui.html(CSS 3D + QUAD 投影口径)互补: 本页走
+     hn_three.c 的 CPU 场景图 + PerspectiveCamera + 旋转立方体,
+     三角汤经 HN_CMD_POLYGON 复用引擎既有扫描内核出像素。
+     支持度矩阵与切片边界见 docs/threejs-support.md "已落地/下一步"。
+
+     · <div hn-three> = 一个固定场景(Scene → pivot Group → Mesh(BoxGeometry))
+     · hn-three-spin="6" = 自转周期 6 秒一圈(0→360°/6s, 取节点 ext_clock,
+       HN_CLOCK / --advance 确定性取样)
+     · 逐面颜色 = Lambert 平直着色(本模块 CPU 算好进 fill; 引擎光栅无光照) */
+
+  html, body { margin: 0; }
+  body { background:#070a12; color:#e8eefc; padding:14 18;
+         font-family: sans-serif; }
+
+  .ttl { font-size:19; font-weight:700; letter-spacing:2; }
+  .tsub { font-size:10.5; color:#7d8aa5; letter-spacing:1; margin-top:2; }
+
+  .stage { margin-top:12; border:1 solid rgba(95,143,191,.28); border-radius:10;
+           background:linear-gradient(180deg,#0c1120,#090d18);
+           display:flex; align-items:center; justify-content:center; }
+  .vp  { width:440; height:440; }          /* 场景视口 = 本元素盒 */
+
+  .cap { font-size:10.5; color:#5f8fbf; letter-spacing:1.5; margin-top:12;
+         border-top:1 solid rgba(95,143,191,.22); padding-top:8; }
+  .kv  { color:#9fb3d8; }
+  .kbd { color:#6fd6ff; }
+</style>
+</head><body>
+  <div class="ttl">three.js 子集 · 垂直切片</div>
+  <div class="tsub">hn-three: CPU 场景图 + PerspectiveCamera + 旋转立方体 → 既有显示列表(HN_CMD_POLYGON)→ 既有光栅</div>
+
+  <div class="stage">
+    <div class="vp" id="cube" hn-three hn-three-spin="6"></div>
+  </div>
+
+  <div class="cap">
+    <span class="kv">场景图</span> Scene → pivot Group(rotY 动画 / rotX −20°) → Mesh(BoxGeometry 12 三角)<br>
+    <span class="kv">相机</span> PerspectiveCamera fov 50°, eye (1.7, 2.3, 3.1) lookAt 原点(固定视点)<br>
+    <span class="kv">光栅</span> 背面剔除 + 画家排序(远→近) + 逐面 Lambert 着色 → paint_polygon 既有扫描内核<br>
+    <span class="kv">取样</span> <span class="kbd">HN_CLOCK=1500 hncore paint …</span> / <span class="kbd">hn_app … --shot o.png --advance 1500</span>
+  </div>
+</body></html>

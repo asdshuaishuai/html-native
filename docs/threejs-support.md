@@ -4,7 +4,8 @@
 > 检验页: `examples/threejs-ui.html`(920x880 深色数据大屏,四个典型 three.js UI 场景)。
 > 截图: `screenshots/threejs-ui.png`(HN_CLOCK=1500)、`screenshots/threejs-ui-t0.png`(HN_CLOCK=0,立方体转 90°,证明动画在走)。
 > 口径: 本引擎**不是 WebGL**。3D = CSS 3D 变换 + 元素盒四角过 4x4 矩阵 + 透视除法(k = d/(d−z))成投影四边形(QUAD),渐变/边框/文字逐像素随面片采样。
-> 校准: 2026-10-13 按当日代码复核(深度排序/关键帧字段两处已更新, 见下)。
+> 校准: 2026-10-13 按当日代码复核(深度排序/关键帧字段两处已更新, 见下); 2026-10-14 增补
+> 软件渲染路径垂直切片(矩阵新行 + 文末"已落地/下一步"两节)。
 >
 > 注(与 README 的索引关系): 本页是 3D/QUAD 专项; 深度排序的引擎实现见
 > `Sources/CHtmlNative/hn_paint.c` 的 `paint_children_depth_sorted`(画家算法),
@@ -26,6 +27,7 @@
 | 深度缓冲 / 正确遮挡 | preserve-3d 内自动深度排序(2D 仍文档序)—— 面片按中心视空间 z 从远到近发射(画家算法,稳定排序:同深保持文档序);非 3D 内容与 z-index/2D 语义不受影响;跨 preserve-3d 边界不排序 | ✅ 已落地(`hn_paint.c` `paint_children_depth_sorted`;quad3d_probe 33 断言含"交叠区像素 = 近面片遮挡远面片"与"非 3D 交错对仍按文档序"两条对照) | 03 六面遮挡、04 卡片环(已转出交错深度,不再手工排序) |
 | OrbitControls 相机控制器 | ❌ 无运行时相机;视点固定,换角度 = 改 CSS 角度重新布局/绘制 | ❌ | — |
 | 光照 / 阴影 / PBR 材质(MeshStandardMaterial、阴影贴图) | ❌ 无光照模型、无法线、无阴影计算;仅 2D 装饰性 box-shadow/text-shadow(不随 3D 变换参与光照) | ❌ | —(demo 用渐变+亮边框冒充发光材质) |
+| 软件渲染路径(Scene/Camera/Mesh 语义的 CPU 几何管线) | `hn-three` 属性元素 → `hn_three.c`(2026-10-14 垂直切片): CPU 场景图 + PerspectiveCamera + BoxGeometry → 顶点汤 → 每三角一条 `HN_CMD_POLYGON` 复用 `paint_polygon` 既有扫描内核(不新写扫描线);自转取节点 ext_clock(`hn-three-spin` 缺省 6s/圈,HN_CLOCK/--advance 确定性取样) | 🔶 垂直切片(单固定场景: 旋转立方体) | examples/threejs-demo.html |
 | 3D 模型加载(glTF/OBJ + 纹理) | ❌ 无模型管线;几何只能用 CSS 盒/面片拼 | ❌ | — |
 | 粒子系统 / Points | ❌ 无;只能用大量小元素模拟(无实例化,性能上限低) | ❌ | — |
 
@@ -37,6 +39,62 @@
 4. `@keyframes` 采样 9 个字段:opacity / translate-x / translate-y / scale / rotate(rotate-z) / rotate-x / rotate-y / background(-color) / color;`transform` 简写与两值 translate 不进时间轴(2026-10-13 复核 `hn_context.c` `kf_collect`)。
 5. 面内偏移不要用 `transform: translate(x,y)` 叠 3D —— QUAD 平移一次、文字锚点平移两次会脱出面片(见 `examples/threejs-lab.html` 页首注)。
 6. **深度排序是面片级的**(画家算法, 按面片中心视空间 z): 互相穿插的两个面片(非前后关系)不保证逐像素正确 —— 需要逐像素深度缓冲(WebGL 语义)的场景做不到;这是"QUAD 透视投影"与真 GPU 管线的本质差别。
+
+## 已落地(2026-10-14 · three.js 子集垂直切片)
+
+上表"软件渲染路径"一行的落地内容与边界。检验对象: `Sources/CHtmlNative/hn_three.c`(新引擎源,
+声明与绘制钩子在 `hn_internal.h` / `hn_paint.c`, 环境钟分类在 `hn_context.c` anim_walk);
+检验页: `examples/threejs-demo.html`(560x680, `<div hn-three hn-three-spin="6">` 一个场景元素)。
+
+- **管线语义**(与 three.js 同构的最小面): Scene(恒等) → pivot Group(rotY=自转动画, rotX=−20° 固定倾角)
+  → Mesh(BoxGeometry: 8 顶点 12 三角, 逐面法线/基色, 尺寸 1.15) ; PerspectiveCamera fov 50°,
+  eye(1.7, 2.3, 3.1) lookAt 原点, near 0.1 / far 100, aspect = 元素盒比。矩阵数学全在模块 CPU
+  (行主 mat4, GL 口径透视/lookAt), 引擎渲染管线零改动。
+- **出像素通道**: 顶点汤(世界→视→裁剪→NDC→元素盒屏幕坐标) → 背面剔除(世界法线·视线 ≤ 0 丢)
+  → 画家排序(视空间质心 z 远→近, 稳定插入排序) → **每三角一条 `HN_CMD_POLYGON`(3 顶点)**
+  → `paint_polygon` 既有扫描内核(与 Lottie 矢量填充同一颗, 不新写扫描线)。顶点数组进引擎临时区
+  (生命周期 = 本次显示列表); 常驻开销零(无全局状态、无堆分配, 未声明 hn-three 的页面不进新路径)。
+- **为何不走 `HN_CMD_TRIS`**: TRIS 的契约是"逐像素 UV 贴图三角汤"(`hnsoft.c paint_tris`:
+  `text` 缺图 → 静默跳过), 表达不了无贴图的逐面平直着色; POLYGON 纯色填充正是本切片要的通道。
+  代价: 显示列表含 POLYGON → `hn_gpu_available` 如实拒绝 → 整帧回退 hnsoft(与 Lottie/Cubism
+  页面同一现状, 不静默画错)。
+- **逐面 Lambert 着色在本模块 CPU**(base × (0.35 + 0.65·max(0, n̂·L)), 固定方向光) —— 明暗是算好
+  进 fill 颜色的, 引擎光栅仍无光照模型, 上文"无光照"口径不变。同色相邻三角的共享边以 0.75px
+  **边法线**外扩消接缝: 每条边沿自身外法线平移 0.75px、顶点取相邻两边法线的 miter 和(`paint_polygon`
+  的半像素边缘覆盖两侧叠加只有 0.75; 边法线外扩保证共享边两侧各 ≥0.75px 垂直重叠、过剩覆盖 ≥1,
+  与 `paint_tris` 解析 AA "过剩覆盖"同一目的)。外扩机制当日实拍逐行核验: 共享对角线上欠覆盖
+  像素归零(R 恒 145, 与面内一致; 原"顶点自质心径向推"版在边中段法向分量不足, 实拍有 ~46% 掉深
+  暗缝, 已弃)。
+- **动画/确定性**: 自转角 = 节点 ext_clock(hn_context.c 环境动画类已纳入 hn-three), 周期
+  `hn-three-spin` 秒(缺省 6, 下限 0.5)。`HN_CLOCK=<ms> hncore paint|render` 与
+  `hn_app --shot … --advance <ms>` 两路都可确定性取帧(后者口径: 文档无 `<video>` 时走虚拟钟
+  16ms 步进瞬时快进, 帧数只由 --advance 决定, 与墙钟无关 —— hn_app.c advance_media,
+  2026-10-14 修复前平台真宿主对无视频页空跑 6s 墙钟、逐次漂移; 含视频页面在 AVFoundation
+  真宿主仍走真播墙钟循环, ext_clock 类动画不保证逐字节确定)。
+- **验证**(当日实测): `bash tools/build-cubism-dev.sh` 与 `bash tools/build-pe-dev.sh` 均零 error
+  (冷编译仅有 rt/hn_rt.c 等既有 warning, 无 hn_three 新增); `hn_app --shot` 立方体可见(绿顶/琥珀前/红右,
+  透视收敛正确); `hncore paint` 在 HN_CLOCK=0/1500/3000/6000 下可见面着色与包围盒随角旋转
+  (0°: 红/绿/琥珀 → 90°: 蓝/绿/暗琥珀 → 180°: 青/蓝/绿 → 6000ms ≡ 0, 周期闭合), 同钟重渲染
+  逐字节一致; 另以 include hn_three.c 的独立探针逐角打印 6 面世界法线, 与显示列表 fill 逐面吻合;
+  dashboard/threejs-ui/canvas-lab/live2d-demo 四既有页 --probe 回归通过(两二进制)。
+- **接线清单**(名下三件之外的最小改动, 逐处): `hn_internal.h` +6 行(声明+注释, 紧邻 hn_pe_paint);
+  `hn_paint.c` +7 行(hook, 紧邻 hn-cubism 分支, opacity 折入口径同 lottie); `hn_context.c` 动一行
+  (anim_walk 环境钟条件追加 hn-three); `tools/build-cubism-dev.sh`、`tools/build-pe-dev.sh` 各在
+  编译清单追加 hn_three.c(pe 脚本两条 zig cc 各一处)。
+
+## 下一步(按切片顺序)
+
+1. **泛化场景图**: 现阶段场景硬编码(Scene→Group→单 Mesh)。下一片: 节点池 + 任意层级 + 属性驱动
+   几何(`hn-three-geo="box|plane|…"`), 再往后是 QuickJS 桥的最小 three.js 面(`hnThree.scene()/
+   mesh()/camera()` —— 引擎已有 QuickJS 求值面 rt/hn_rt.c, 账本式协议可循 hnCanvas2D 先例)。
+2. **近平面剖分**: 现为"任一顶点 clip.w ≤ 0 整三角剔除"的诚实边界(demo 相机距离下永不触发);
+   穿近平面的几何需要 1→2 三角剖分。
+3. **材质升级**: 贴图三角(衔接 HN_CMD_TRIS 的既有贴图内核, Cubism 同路)/顶点色; 多光源与
+   Phong 高光仍属"模块 CPU 算色"边界, 引擎光栅不引入光照。
+4. **交互相机**: OrbitControls 类轨道相机 —— 需要把指针事件接到 hn-three 元素上驱动
+   eye/lookAt(引擎事件管道现成, 缺的是元素级拖拽语义)。
+5. **GPU 路径(可选)**: hn_gpu.c 现对 POLYGON 如实整帧回退 hnsoft; 若要 GPU 化需原语表扩
+   三角批绘制, 明确扩, 不做静默切换(ADR 001 口径)。
 
 ## 诚实结论
 

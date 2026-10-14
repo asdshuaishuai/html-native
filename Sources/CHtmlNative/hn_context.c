@@ -1172,7 +1172,8 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inte
            帧节拍可放宽(~30fps)、渲染可走轻路径(免 relayout)。 */
         if (dt_ms > 0 &&
             (hn_node_attr(n, "hn-lottie") || hn_node_attr(n, "hn-mesh") ||
-             hn_node_attr(n, "hn-cubism") || hn_node_attr(n, "hn-live") || n->mesh_verts)) {
+             hn_node_attr(n, "hn-cubism") || hn_node_attr(n, "hn-live") ||
+             hn_node_attr(n, "hn-three") || n->mesh_verts)) {
             n->ext_clock += dt_ms;
             *amb = 1;
             active = 1;

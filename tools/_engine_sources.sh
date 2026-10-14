@@ -6,7 +6,7 @@
 # 16 个探针 .sh 自动跟上(此前清单散在 16 份 python 里, 是漂移温床)。
 #
 # 提供四组能力:
-#   1. 路径常量 + 引擎源清单(核心 17 源为公共子集, 全量 = 核心+wasm+hnsoft)
+#   1. 路径常量 + 引擎源清单(核心 20 源为公共子集, 全量 = 核心+wasm+hnsoft)
 #   2. hn_probe_compile: 统一 cc 编译(打印命令 / 失败透传 stderr 尾部 /
 #      产物缓存: 产物已存在且比全部源新 → 跳过编译)
 #   3. 探针运行/身份校验/临时目录等薄工具
@@ -35,11 +35,16 @@ HN_ENG="$HN_REPO_ROOT/Sources/CHtmlNative"
 HN_RT_DIR="$HN_REPO_ROOT/rt"
 HN_WASM3_DIR="$HN_REPO_ROOT/vendor/wasm3"
 
-# 引擎核心 17 源(直染层公共子集; 各 .py 里顺序互有出入, 单条 cc 命令里
-# 顺序不影响语义, 此处统一为一份口径)
+# 引擎核心 20 源(直染层公共子集; 各 .py 里顺序互有出入, 单条 cc 命令里
+# 顺序不影响语义, 此处统一为一份口径)。hn_pe.c/hn_cubism.c 未定义
+# HN_HAVE_PE/HN_HAVE_CUBISM 时整模块降级(空操作/占位卡), 探针不定义 SDK
+# 宏 → 链入安全; hn_paint.c 的 paint_walk 直接调用 hn_cubism_paint/
+# hn_pe_paint/hn_three_paint, 缺任一源即链接失败(2026-10-14 修复
+# events_probe 链接漂移: pe/cubism 补齐后又漏 hn_three.c, 一并补上)。
 HN_ENGINE_CORE=(hn_arena.c hn_html.c hn_md.c hn_css.c hn_style.c hn_layout.c
                 hn_paint.c hn_context.c hn_theme.c hn_canvas.c hn_json.c
-                hn_lottie.c hn_mesh.c hn_png.c hn_gif.c hn_media.c hn_fmt.c)
+                hn_lottie.c hn_mesh.c hn_png.c hn_gif.c hn_media.c hn_fmt.c
+                hn_pe.c hn_cubism.c hn_three.c)
 HN_ENGINE_SOFT=(hnsoft.c)      # 软渲染宿主(hnsoft 位图后端)
 HN_ENGINE_WASM=(hn_wasm.c)     # WASM 缝(须连 vendor/wasm3 一起链)
 HN_WASM3=(m3_bind.c m3_code.c m3_compile.c m3_core.c m3_env.c m3_exec.c

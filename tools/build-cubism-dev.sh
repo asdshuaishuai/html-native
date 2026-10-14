@@ -16,7 +16,7 @@ zig cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off \
   Sources/CHtmlNative/hn_media.c Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
   Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c Sources/CHtmlNative/hn_mesh.c \
   Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c \
-  Sources/CHtmlNative/hn_gpu.c Sources/CHtmlNative/hn_wasm.c Sources/CHtmlNative/hnsoft.c \
+  Sources/CHtmlNative/hn_gpu.c Sources/CHtmlNative/hn_wasm.c Sources/CHtmlNative/hnsoft.c Sources/CHtmlNative/hn_three.c \
   vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c vendor/wasm3/m3_compile.c vendor/wasm3/m3_core.c \
   vendor/wasm3/m3_env.c vendor/wasm3/m3_exec.c vendor/wasm3/m3_function.c vendor/wasm3/m3_info.c \
   vendor/wasm3/m3_module.c vendor/wasm3/m3_parse.c vendor/wasm3/m3_validate.c \

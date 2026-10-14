@@ -89,6 +89,12 @@ typedef struct {
     int borderless;         /* 无标题栏无边框(styleMask 不含 Titled/Closable/…)。
                               frame/bounds 即内容区, 无标题条可点。
                               Linux: _MOTIF_WM_HINTS decorations=0。 */
+    int draggable;          /* 内容/空白区域拖动窗口的总开关(manifest 的
+                              hn-draggable, 默认 1; 页面显式 "0"/"false"
+                              可关)。生效面 = 无标题栏的窗(borderless 或
+                              transparent) —— 有标题栏的窗仍由标题栏拖,
+                              不受此字段影响。macOS: setMovableByWindow
+                              Background:; Linux: hnp_pump 手动拖拽分支。 */
 
     /* ---- 位置记忆(几何持久化的开窗入参, 见 hnp_window_origin) ----
        左上原点屏幕坐标(与引擎坐标同口径); 双双 = HNP_WINDOW_POS_AUTO 时

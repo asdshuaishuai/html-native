@@ -472,6 +472,20 @@ static void paint_bitmap(cairo_t *cr, const hn_cmd *c) {
             dst[x * 4 + 3] = (unsigned char)a;
         }
     }
+    unsigned char layer_alpha = (unsigned char)(c->fill & 0xFFu);
+    if (layer_alpha != 255) {
+        for (int y = 0; y < ih; y++) {
+            unsigned char *dst = bgra + (size_t)y * iw * 4;
+            for (int x = 0; x < iw; x++) {
+                unsigned a = dst[x * 4 + 3];
+                unsigned la = (a * layer_alpha + 127u) / 255u;
+                dst[x * 4 + 0] = (unsigned char)((dst[x * 4 + 0] * layer_alpha + 127u) / 255u);
+                dst[x * 4 + 1] = (unsigned char)((dst[x * 4 + 1] * layer_alpha + 127u) / 255u);
+                dst[x * 4 + 2] = (unsigned char)((dst[x * 4 + 2] * layer_alpha + 127u) / 255u);
+                dst[x * 4 + 3] = (unsigned char)la;
+            }
+        }
+    }
     cairo_surface_t *img = cairo_image_surface_create_for_data(
         bgra, CAIRO_FORMAT_ARGB32, iw, ih, iw * 4);
     if (!img || cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {

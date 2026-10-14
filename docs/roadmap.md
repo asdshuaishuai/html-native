@@ -77,7 +77,7 @@
 | ~~启动持续动画~~ ✅ | 已完成(v0.2): @keyframes 多段动画 + 时间轴采样 |
 | ~~Lottie 矢量动画~~ ✅ | 已完成(v0.3): JSON 解析 + 关键帧求值 → POLYGON 指令(三后端同源) |
 | ~~网格变形贴图(Live2D 类)~~ ✅ | 已完成(v0.3): MESH 指令 + 三角形仿射纹理映射; rig 由脚本驱动 |
-| Live2D 官方 `.moc3` | ⛔ **不实现**: 专有格式, 需 Cubism SDK 商业授权(见 1.4) |
+| Live2D 官方 `.moc3` | ✅ 已实现(2026-10): **官方 Cubism Core 绑定**(`hn_cubism.c`, `hn-cubism="model3.json"`); Core 闭源二进制不入 git, `tools/fetch-cubism-core.sh` 自取, 授权口径见 README "Live2D (Cubism moc3) 授权说明"; 遮罩/混合观感精修待办(见 1.4 注) |
 | CSS `contain` / `will-change` | 性能提示 |
 | 自定义字体 (`@font-face`) | 品牌字体(当前无实现) |
 | 触摸事件 | 移动端 |
@@ -102,7 +102,7 @@
 | 二进制 | 344 KB(hncore)→ 1.4 MB(hnapp 含 QuickJS+WASM) | ✅ 极小(vs Electron 200MB) |
 | GPU 对照(信息值) | metal 0.076ms/帧 vs hnsoft 0.021ms/帧(120 帧 CPU 时间; GPU 版含 readback 回拷, 真窗直呈是后续) | ⚠️ 当前为离屏 readback 口径 |
 
-### 1.4 明确的边界：为什么不做 Live2D 的 `.moc3`
+### 1.4 明确的边界：Live2D `.moc3` 的口径(2026-10-14 更新)
 
 v0.3 加入了 **Lottie 矢量动画**与**网格变形贴图**，两者都作为**引擎原语**
 （产出平台无关的 POLYGON / MESH 绘制指令），因此三个后端自动同等支持。
@@ -113,15 +113,17 @@ v0.3 加入了 **Lottie 矢量动画**与**网格变形贴图**，两者都作�
 | Lottie (`.json`) | ✅ 已实现 | `bodymovin` 是公开格式；引擎自解析 + 自求值，无第三方依赖; **`.lottie`(dotLottie ZIP 容器)直读**已落地 |
 | 网格变形绘制 | ✅ 已实现 | 三角形仿射纹理映射（hnsoft / cairo / Metal GPU 三后端同语义） |
 | 网格动画声明 | ✅ 已实现 | `hn-mesh` 正弦形变(含 breath/anchor 三带/phase/look/idle) + `hn_node_set_mesh_verts()` 脚本逐帧驱动 |
-| Live2D 公开数据 | ✅ 已实现 | model3/cdi3/physics3/motion3.json 解析 + motion 曲线采样驱动自有 rig(`hn-live2d*`); `.moc3` 网格变形不做 |
+| Live2D 公开数据 | ✅ 已实现 | model3/cdi3/physics3/motion3.json 解析 + motion 曲线采样驱动自有 rig(`hn-live2d*`); `.moc3` 网格变形已由官方 Core 绑定承担(`hn-cubism*`, 见 1.4) |
 | 骨骼 / 物理 / 口型同步 | ⚪ 应用层 | 引擎只做"网格 + 贴图"合成；rig 装配逻辑不属于引擎(phong 物理仅解析计数, v1 不做仿真) |
-| Live2D `.moc3` 解码 | ⛔ 不做 | **专有格式**，解码需 Cubism SDK（商业授权 + 授权协议约束） |
+| Live2D `.moc3` 解码 | ✅ 已实现(2026-10) | **官方 Core 绑定**落地(`hn_cubism.c`: csmReviveMocInPlace/csmUpdateModel, 形变数学不重实现); Core 为闭源运行库, 二进制 `tools/fetch-cubism-core.sh` 自取不入 git, 商业授权与协议约束归使用方(README 授权说明); 待办: 遮罩/混合观感精修(对照官方 Web runtime, 见 `hn_cubism.c` 头注"已知差距") |
 | Live2D `motion3.json` 等 | ✅ 已实现 | 公开数据已接入: 段类型 0/1/2/3 求值器 + Loop 回绕(见 `tools/live2d_probe.sh` 44 断言) |
 
-**结论**：我们交付的是 Live2D 视觉效果背后的**技术原理**（网格变形 + UV 贴图
-+ 逐帧顶点驱动），而不是它的专有资产格式。想要"立绘呼吸/摆动/口型"这类效果，
-用 `hn-mesh` 或脚本驱动顶点即可；想要直接加载市面上的 `.moc3` 模型，
-需要走 Live2D 官方的商业授权路径，这不是本项目要做的事。
+**结论**：自有原语路径交付的是 Live2D 视觉效果背后的**技术原理**（网格变形 + UV 贴图
++ 逐帧顶点驱动），"立绘呼吸/摆动/口型"这类效果用 `hn-mesh` 或脚本驱动顶点即可。
+直接加载市面上的 `.moc3` 模型已由**官方 Cubism Core 绑定**落地(2026-10,
+`hn_cubism.c` + `hn-cubism` 属性): Core 闭源二进制不入 git, 由
+`tools/fetch-cubism-core.sh` 自取, 商业授权走 Live2D 官方口径(README 授权说明);
+遮罩/混合观感仍有精修待办(见上表)。
 
 ---
 
@@ -198,7 +200,9 @@ M1 壳仍走自己的 hover/轮询路径。事件类型表(原规划的 mousedow
 --            scroll / input-change / submit / hover / 生命周期四件
 -- 冒泡路径 + hx-trigger 消费(click/load/every Ns/hover 等)
 ```
-- 后续(可选): JS 侧 `addEventListener` 面在 C99 运行时重新落地(见 Phase 1 候选)
+- ~~后续(可选): JS 侧 `addEventListener` 面在 C99 运行时重新落地~~ ✅ 已完成
+  (2026-10, rt 层 glue: `document/window/element.addEventListener` 注册 →
+  命中链冒泡 → JS 回调 + 标准事件对象; `tools/events_probe.sh` 58 断言全绿)
 
 #### 1e. 网络层（运行时层）⚠️ 曾被标记完成, 现不存在
 
@@ -465,4 +469,4 @@ HTML/CSS → C99 引擎(解析→级联→布局→绘制指令) → 平台层 �
 | **组件生态**(上层, 不进引擎) | README "已知简化与路线图"远期项; 现有 ui-kit 预设是雏形 | 需先把 include/主题之外的组合能力补齐 |
 | 弹窗原生交互(`hn-drag`/`hn-dismiss`) | README 路线图 | 壳层 |
 | `hn dev` CLI 脚手架 | README/greeting 在指路, 未落地(`hn new` 同理) | CLI |
-| JS `addEventListener` 面(C99 重落地) | 现 JS 桥无事件监听; examples/events.html 会 TypeError | 可先做 hx 之外的声明式替代 |
+| ~~JS `addEventListener` 面(C99 重落地)~~ ✅ 已完成(2026-10) | rt 层 glue: 注册 → 命中链冒泡 → JS 回调 + 标准事件对象; `tools/events_probe.sh` 58 断言全绿 | examples/events.html 可用 |

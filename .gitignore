@@ -10,6 +10,8 @@
 # 分发产物
 dist/
 *.hnapp
+# 本地临时渲染产物(AA 等调参前后 --shot 对比截图)
+out/
 
 # 编辑器 / 系统
 .DS_Store

@@ -45,6 +45,7 @@ Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c Sources/CHtmlNati
 Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c Sources/CHtmlNative/hn_json.c
 Sources/CHtmlNative/hn_lottie.c Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c
 Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c Sources/CHtmlNative/hnsoft.c
+Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c
 $WASM3_SRC"
 MEDIA_SRC="$(grep -m1 '^MEDIA_SRC=' tools/build-multiplatform.sh | sed 's/^MEDIA_SRC=//; s/"//g')"
 [ -n "$MEDIA_SRC" ] || MEDIA_SRC="app/hn_media_platform.c app/hn_media_synth.c"
