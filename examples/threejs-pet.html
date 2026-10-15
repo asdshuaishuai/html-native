@@ -1,0 +1,85 @@
+<html><head>
+<!-- threejs-pet — 透明无边框 3D 桌宠窗(hn-transparent/frameless/level/draggable + hn-three)
+     ================================================================================
+     桌宠形态四根基开关(与 examples/pet.html / frameless-demo.html 同一口径):
+       hn-transparent="1"    逐像素 alpha: 页面无底色, 桌面从透明处透出;
+                             引擎会持续剥离 html/body 根底色(hn_context.c
+                             hn_context_strip_root_background, 持续生效开关)
+       hn-frameless="1"      无标题栏无边框: 窗口矩形不可见, 内容即窗口
+       hn-level="floating"   悬浮于普通窗口之上(另一档 desktop = 垫底桌面级)
+       hn-draggable="1"      整窗可拖: **可见像素**即拖动面 —— 按住立方体或
+                             底部标签可拖走; 全透明角落按下穿透到桌面
+                             (逐像素命中口径同 frameless-demo.html 页首注)
+       (hn-spaces="all" / hn-shadow="0" 同 pet.html: 跟随所有空间 + 关投影,
+        投影会勾出不存在的窗口矩形)
+
+     ── 当前渲染来源(CPU/GPU)取决于 NEB3_LIB 是否存在 ──
+       NEB3_LIB 指向同 neb3.h ABI 的 libneb3(如 backend/neb3-wgpu 的
+       libneb3_wgpu.dylib)且 dlopen 加载成功 → GPU 路径: 透明 clear alpha 0 +
+       hn-three-msaa 请求的 MSAA(设备可降档)+ depth24+ 逐像素深度。
+       NEB3_LIB 未设置 / 加载失败 → C99 兜底: hn_three.c CPU 场景图 →
+       既有显示列表 → 既有软件光栅(画家算法面片级深度 + 边法线外扩/解析
+       覆盖抗锯齿, MSAA 属性如实忽略)。两路同一份文档, 渲染语义差异
+       见 docs/threejs-support.md "neb3 backend" 一节。
+
+     内容: hn-three 旋转立方体(自转 + MSAA 请求)= 宠物本体, 底部一枚
+     名牌 + 落地椭圆阴影(透明底上没有阴影, 立方体像在漂浮)。全部动画走
+     ext_clock / CSS keyframes 确定性通道, 离屏取样可复现:
+       (cd examples && /tmp/hnapp-pe threejs-pet.html --shot ../screenshots/threejs-pet.png --advance 1500)
+       (cd examples && HN_CLOCK=1500 <hncore> paint threejs-pet.html …)
+     真窗: dist/hnapp-macos-arm64 examples/threejs-pet.html
+-->
+<meta charset="utf-8">
+<meta name="hn-surface" content="popup">
+<meta name="hn-window" content="340x400">
+<meta name="hn-title" content="hn 3D 桌宠">
+<meta name="hn-transparent" content="1">
+<meta name="hn-frameless" content="1">
+<meta name="hn-level" content="floating">
+<meta name="hn-spaces" content="all">
+<meta name="hn-shadow" content="0">
+<meta name="hn-draggable" content="1">
+<style>
+  /* 无底色: html/body 不设 background —— 画面上只有立方体/名牌/阴影,
+     其余像素 alpha=0, 桌面透出、点击穿透 */
+  html, body { margin: 0; width: 100%; height: 100%; }
+
+  /* ---- 宠物本体: 一个 hn-three 场景元素 = 旋转立方体 ----
+     hn-three-spin="7" 故意与 demo 页的 6s 错开拍; hn-three-msaa="4"
+     = 向 3D backend 请求 4x 多重采样(CPU 软件路径如实忽略, GPU backend
+     可按设备能力降档 —— 实际档位以渲染回报为准) */
+  .pet { position: absolute; left: 30; top: 30; width: 280; height: 280; }
+
+  /* ---- 落地阴影: 透明底上"站在桌面"的锚(与 pet.html 同一手法) ----
+     阴影静止: 立方体呼吸起伏时, 影子钉在地面才像"悬浮在桌上" */
+  .shadow { position: absolute; left: 95; top: 322; width: 150; height: 16;
+            background: rgba(0, 0, 0, 0.30); border-radius: 50%; }
+
+  /* ---- 名牌: 半透明胶囊, 可见像素 = 可点/可拖; 文案注明渲染来源 ----
+     注意(引擎 CSS 分词口径): border/背景里的颜色函数不能带空格,
+     rgba(140, 160, 200, .4) 会碎 token 解析失败 —— 全部写成无空格单 token */
+  .tag { position: absolute; left: 55; top: 348; width: 230; box-sizing: border-box;
+         padding: 7 10; text-align: center; font-size: 10.5; color: #e8eefc;
+         background: rgba(22, 27, 38, 0.82);
+         border: 1 solid rgba(130, 155, 225, 0.38);
+         border-radius: 12;
+         text-shadow: 0 1 6 rgba(0, 0, 0, 0.55);
+         letter-spacing: 1; }
+  .tag .src { color: #6fd6ff; }
+
+  /* 呼吸: 立方体随呼吸轻微起伏(与自转叠加, ext_clock 之外的确定性通道) */
+  @keyframes pet-bob { 0% { translate-y: 0; } 50% { translate-y: -6; } 100% { translate-y: 0; } }
+  .pet { animation: pet-bob 4.2s ease-in-out infinite; }
+</style>
+</head><body>
+  <!-- 宠物本体: hn-three 场景(自转立方体 + MSAA 请求); 可见像素即拖动面 -->
+  <div class="pet" id="pet" hn-three hn-three-spin="7" hn-three-msaa="4"></div>
+
+  <div class="shadow"></div>
+
+  <!-- 名牌: 首行写死 = 静态首帧可读; "渲染来源"一行的口径见页首注 -->
+  <div class="tag" id="tag">
+    <span class="src">立方</span> · hn 3D 桌宠 —— 拖我<br>
+    渲染来源(CPU/GPU)取决于 <span class="src">NEB3_LIB</span> 是否存在
+  </div>
+</body></html>

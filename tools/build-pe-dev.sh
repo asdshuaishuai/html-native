@@ -22,6 +22,7 @@ zig cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off \
   -I "$HN_DIR/platform" -I "$HN_DIR/app" -I "$HN_DIR/vendor/wasm3" \
   -I "$HN_DIR/vendor/canvas_ity" -I "$HN_DIR/vendor/painterengine" -I "$HN_DIR/vendor/painterengine/core" -I/opt/homebrew/include/freetype2 \
   -I"$QJ/include/quickjs" -DHN_HAVE_QUICKJS -DHN_HAVE_PE -DHN_HAVE_CANVAS_ITY \
+  -DHN_HAVE_CANVAS_CG \
   -DHN_MEDIA_PLATFORM_AVFOUNDATION -DHN_VERSION='"pe"' \
   app/hn_app.c app/hn_media_platform.c app/hn_media_synth.c rt/hn_rt.c \
   platform/hnp_macos.c platform/hnp_media_macos.c platform/hnp_gpu_metal.c \

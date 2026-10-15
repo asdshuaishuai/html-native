@@ -21,9 +21,13 @@
  *     系统排版重画 text op; 测量口径分离)
  *   - 平台不可用/创建失败 → 自动回落 ledger(可见而非静默: stderr 一行)
  *
- * 选择规则(v1): 环境变量 HN_CANVAS_BACKEND=ledger|system|auto(缺省 auto:
- *   macOS→system, 其他→ledger); 页面可 <canvas hn-canvas-ledger> 显式
- *   固定账本(离屏确定性/探针口径不受影响)。
+ * 选择规则(v1 实装口径, 2026-10-15 复审对齐): 环境变量
+ *   HN_CANVAS_BACKEND=system(macOS→CG; 别名 cg)|ity|ledger —— 缺省与其
+ *   他值恒为账本重放: 探针/离屏确定性口径不被缺省渲染路径悄悄改写
+ *   (原文"缺省 auto: macOS→system"与实装不符, 以实装为准)。后端经
+ *   hn_paint 接线启用(hn_canvas_paint_cg / hn_canvas_paint_ity, 声明在
+ *   hn_internal.h), 均为编译期宏门 + 运行期环境变量双开关; 失败自动
+ *   回落 ledger(可见而非静默: stderr 一行)。
  */
 #ifndef HN_CANVAS_BACKEND_H
 #define HN_CANVAS_BACKEND_H
@@ -42,6 +46,12 @@ typedef struct hn_canvas_backend_vt {
     int (*resize)(hn_canvas_backend *self, int width, int height);
     /** 消费一条已解析 op(绘制即时生效于后端帧缓冲)。 */
     void (*op)(hn_canvas_backend *self, const hn_canvas_op *o);
+    /** 新帧清面: 整面清成透明底并复位绘制状态(clip/save 栈), 与 canvas
+     *  初始态逐位一致。 paint 接线每帧重放账本前必调 —— 满幅 clearRect
+     *  /满幅不透明 frect 在账本侧是"清账重录"(不记 op), 后端面又按
+     *  canvas id 跨帧缓存, 不清面则已清掉的历史帧内容在持久面上持续
+     *  累积(clearRect+重画动画出现拖影/鬼影; 2026-10-15 复审修复)。 */
+    void (*clear)(hn_canvas_backend *self);
     /** 帧结束: 输出非预乘 RGBA8(行距 = width*4)。返回 0 = 本帧无效。 */
     int (*frame)(hn_canvas_backend *self, const unsigned char **rgba,
                  int *width, int *height, int *stride);

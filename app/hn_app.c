@@ -70,6 +70,13 @@ static float g_render_scale = 1.0f;
    离屏自检不经过这里, 探针确定性口径不破。HN_MEDIA_LAYER=0 退回 CPU。 */
 void hn_media_platform_video_layers(hnp_window *w, hn_rt *rt);
 
+/* neb3(可选 3D GPU backend)装载探测(引擎侧 Sources/CHtmlNative/hn_three.c
+   提供; 原型就地声明 —— 同上款口径)。main 里起跑线调用一次: dlopen/
+   dlsym 的成败与 fallback 原因行在启动日志即见, --shot 与真窗两条路径
+   的首个 hn-three 帧都命中同一份进程级装载结果(装载失败自动回退引擎
+   自带的软件路径, 行为零漂移)。 */
+void hn_three_backend_probe(void);
+
 static void blit_now(hn_rt *rt, hnp_window *w) {
     /* 位图物理尺寸(= 逻辑 × scale; 1x 两者相同): blit 喂的是位图,
        逻辑尺寸由平台侧的 NSImage 点尺寸表达(hnp_macos 的 HiDPI 口径)。 */
@@ -363,6 +370,11 @@ int main(int argc, char **argv) {
         if (gpu && !strcmp(gpu, "metal"))
             hn_rt_set_gpu_host(hnp_gpu_backend());
     }
+
+    /* neb3 3D backend 起跑线装载(NEB3_LIB 指向 libneb3_wgpu.dylib 才
+       尝试 dlopen, 成败在启动日志即见; 未设置 → 不装载, 直接软件路径,
+       无缺省探测 —— 见 hn_three.c 头注)。--shot 与真窗共用此结果。 */
+    hn_three_backend_probe();
 
     size_t hlen = 0;
     char *html = read_all(path, &hlen);

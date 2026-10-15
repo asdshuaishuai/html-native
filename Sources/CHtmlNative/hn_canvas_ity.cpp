@@ -28,8 +28,10 @@ struct ity_backend : hn_canvas_backend {
     canvas_ity::canvas cv;
     unsigned char *frame;
     bool warned[8];
+    int save_depth;             /* cv.save/restore 栈深(canvas_ity 不外露栈深
+                                   查询; clear 复位状态栈要用) */
     explicit ity_backend(int w, int h)
-        : cv(w, h), frame(nullptr) {
+        : cv(w, h), frame(nullptr), save_depth(0) {
         vt = &VT;
         width = w; height = h;
         for (auto &f : warned) f = false;
@@ -49,28 +51,44 @@ void warn_once(bool *warned, int slot, const char *msg) {
 
 hn_color unpack_color(unsigned int v) { return (hn_color)v; }
 
+/* hn_color 字节序 = 引擎统一约定 0xAARRGGBB(高→低 r,g,b,a; 侧证: hn_css.c
+   pack_rgba 的 (r<<24)|(g<<16)|(b<<8)|a 与 hnsoft.c unpack 的 c>>24 取 r)
+   —— 2026-10-15 复审修复: 本文件此前按 (r=>>16, g=>>8, b=&255, a=>>24)
+   读, 红蓝互换且 alpha 取错字节 —— 与同批 cg 侧(hn_canvas_cg.cpp
+   rgba_set 注)修掉的是同一个 bug, ity 漏改。通道提取收敛到这一个
+   取数点, 7 处调用点不再各自散写移位。 */
+void color_rgba(unsigned v, float *r, float *g, float *b, float *a) {
+    *r = (float)((v >> 24) & 255) / 255.0f;
+    *g = (float)((v >> 16) & 255) / 255.0f;
+    *b = (float)((v >> 8) & 255) / 255.0f;
+    *a = (float)(v & 255) / 255.0f;
+}
+
+void set_color_255(canvas_ity::canvas &cv, canvas_ity::brush_type t,
+                   unsigned v) {
+    float r, g, b, a;
+    color_rgba(v, &r, &g, &b, &a);
+    cv.set_color(t, r, g, b, a);
+}
+
+void add_stop_255(canvas_ity::canvas &cv, canvas_ity::brush_type t, float pos,
+                  unsigned v) {
+    float r, g, b, a;
+    color_rgba(v, &r, &g, &b, &a);
+    cv.add_color_stop(t, pos, r, g, b, a);
+}
+
 void fill_brush(canvas_ity::canvas &cv, const hn_canvas_op *o) {
-    hn_color c = o->color;
-    cv.set_color(canvas_ity::fill_style, (float)((c >> 16) & 255) / 255.0f,
-                 (float)((c >> 8) & 255) / 255.0f,
-                 (float)(c & 255) / 255.0f, (float)((c >> 24) & 255) / 255.0f);
+    set_color_255(cv, canvas_ity::fill_style, (unsigned)o->color);
     if (o->n_stops >= 2 && o->stops) {
-        for (int i = 0; i < o->n_stops; i++) {
-            hn_grad_stop st = o->stops[i];
-            unsigned col = (unsigned)st.c;
-            cv.add_color_stop(canvas_ity::fill_style, st.t, (float)((col >> 16) & 255) / 255.0f,
-                              (float)((col >> 8) & 255) / 255.0f,
-                              (float)(col & 255) / 255.0f,
-                              (float)((col >> 24) & 255) / 255.0f);
-        }
+        for (int i = 0; i < o->n_stops; i++)
+            add_stop_255(cv, canvas_ity::fill_style, o->stops[i].t,
+                         (unsigned)o->stops[i].c);
     }
 }
 
 void stroke_brush(canvas_ity::canvas &cv, const hn_canvas_op *o) {
-    hn_color c = o->color;
-    cv.set_color(canvas_ity::stroke_style, (float)((c >> 16) & 255) / 255.0f,
-                 (float)((c >> 8) & 255) / 255.0f,
-                 (float)(c & 255) / 255.0f, (float)((c >> 24) & 255) / 255.0f);
+    set_color_255(cv, canvas_ity::stroke_style, (unsigned)o->color);
     cv.set_line_width(o->stroke_w);
 }
 
@@ -91,28 +109,20 @@ void apply_gradient(canvas_ity::canvas &cv, const hn_canvas_op *o, bool fill) {
         cv.set_linear_gradient(canvas_ity::stroke_style, o->gx0, o->gy0, o->gx1, o->gy1);
     hn_color c0 = o->color, c1 = o->color2;
     if (!(o->n_stops >= 2 && o->stops)) {
-        cv.add_color_stop(t, 0.0f, (float)((c0 >> 16) & 255) / 255.0f,
-                          (float)((c0 >> 8) & 255) / 255.0f,
-                          (float)(c0 & 255) / 255.0f,
-                          (float)((c0 >> 24) & 255) / 255.0f);
-        cv.add_color_stop(t, 1.0f, (float)((c1 >> 16) & 255) / 255.0f,
-                          (float)((c1 >> 8) & 255) / 255.0f,
-                          (float)(c1 & 255) / 255.0f,
-                          (float)((c1 >> 24) & 255) / 255.0f);
+        add_stop_255(cv, t, 0.0f, (unsigned)c0);
+        add_stop_255(cv, t, 1.0f, (unsigned)c1);
     } else {
-        for (int i = 0; i < o->n_stops; i++) {
-            hn_grad_stop st = o->stops[i];
-            unsigned col = (unsigned)st.c;
-            cv.add_color_stop(t, st.t, (float)((col >> 16) & 255) / 255.0f,
-                              (float)((col >> 8) & 255) / 255.0f,
-                              (float)(col & 255) / 255.0f,
-                              (float)((col >> 24) & 255) / 255.0f);
-        }
+        for (int i = 0; i < o->n_stops; i++)
+            add_stop_255(cv, t, o->stops[i].t, (unsigned)o->stops[i].c);
     }
 }
 
 int ity_resize(hn_canvas_backend *self, int w, int h) {
     auto *b = (ity_backend *)self;
+    /* 旧帧缓冲是 malloc 裸指针, 隐式析构不释放 —— placement-new 前
+       显式归还, 否则每次 resize 漏一块 W×H×4(2026-10-15 复审修复)。 */
+    free(b->frame);
+    b->frame = nullptr;
     b->~ity_backend();
     new (b) ity_backend(w, h);
     b->width = w; b->height = h;
@@ -124,16 +134,11 @@ void ity_op(hn_canvas_backend *self, const hn_canvas_op *o) {
     canvas_ity::canvas &cv = b->cv;
     switch (o->kind) {
     case HN_CV_FILL_RECT: {
-        hn_color c = o->color;
-        cv.set_color(canvas_ity::fill_style, (float)((c >> 16) & 255) / 255.0f,
-                     (float)((c >> 8) & 255) / 255.0f,
-                     (float)(c & 255) / 255.0f, (float)((c >> 24) & 255) / 255.0f);
+        set_color_255(cv, canvas_ity::fill_style, (unsigned)o->color);
         if (o->shadow) {
-            hn_color sc = o->sh_color;
-            cv.set_shadow_color((float)((sc >> 16) & 255) / 255.0f,
-                                (float)((sc >> 8) & 255) / 255.0f,
-                                (float)(sc & 255) / 255.0f,
-                                (float)((sc >> 24) & 255) / 255.0f);
+            float sr, sg, sb, sa;
+            color_rgba((unsigned)o->sh_color, &sr, &sg, &sb, &sa);
+            cv.set_shadow_color(sr, sg, sb, sa);
             cv.set_shadow_blur(o->sh_blur);
         } else {
             cv.set_shadow_color(0.f, 0.f, 0.f, 0.f);
@@ -162,11 +167,14 @@ void ity_op(hn_canvas_backend *self, const hn_canvas_op *o) {
         break;
     case HN_CV_CLIP_PUSH:
         cv.save();
+        b->save_depth++;
         cv.begin_path();
         cv.rectangle(o->x, o->y, o->x + o->w, o->y + o->h);
         cv.clip();
         break;
     case HN_CV_CLIP_POP:
+        if (b->save_depth > 0) b->save_depth--;   /* 空栈 restore 是文档化
+                                                     no-op, 配对计数只防欠账 */
         cv.restore();
         break;
     default: {
@@ -185,6 +193,17 @@ void ity_op(hn_canvas_backend *self, const hn_canvas_op *o) {
         break;
     }
     }
+}
+
+void ity_clear(hn_canvas_backend *self) {
+    auto *b = (ity_backend *)self;
+    /* 新帧清面: 复位账本重放欠下的 save/clip 状态栈(良构账本配对进出,
+       此处通常为 0 次; 欠账不补则下一帧在残余裁剪里画), 再整面清成
+       透明底 —— 与 canvas 构造初始态一致。clear_rectangle 受当前 clip/
+       transform 限制(canvas_ity.hpp:851-855), 故必须先复位再清;
+       transform 引擎侧从不设置(坐标由 JS glue 烘干), 无需处理。 */
+    while (b->save_depth > 0) { b->cv.restore(); b->save_depth--; }
+    b->cv.clear_rectangle(0.0f, 0.0f, (float)b->width, (float)b->height);
 }
 
 int ity_frame(hn_canvas_backend *self, const unsigned char **rgba,
@@ -210,7 +229,7 @@ void ity_dispose(hn_canvas_backend *self) {
 }
 
 const hn_canvas_backend_vt ity_backend::VT = {
-    ity_resize, ity_op, ity_frame, ity_dispose,
+    ity_resize, ity_op, ity_clear, ity_frame, ity_dispose,
 };
 
 } // namespace
@@ -241,6 +260,10 @@ static ity_slot g_ity_slots[ITY_IDS];
 int hn_canvas_paint_ity(hn_context *c, const char *id, const hn_canvas_ledger *l,
                         float cw, float ch, float bw, float bh,
                         float sx, float sy, float alpha) {
+    /* 缺省口径: 未显式 HN_CANVAS_BACKEND=ity 一律回落账本重放 ——
+       ity_enabled() 是声明的开关(2026-10-15 复审修复: 此前定义后从未
+       被调用, 任何链入本 TU 的构建都被静默改写缺省渲染语义)。 */
+    if (!ity_enabled()) return 0;
     if (!c || !id || !l || l->n_ops <= 0) return 0;
     int W = (int)cw, H = (int)ch;
     if (W <= 0 || H <= 0) return 0;
@@ -265,24 +288,47 @@ int hn_canvas_paint_ity(hn_context *c, const char *id, const hn_canvas_ledger *l
         snprintf(slot->id, sizeof(slot->id), "%s", id);
     }
 
+    /* 新帧清面(2026-10-15 复审修复): 满幅 clearRect/清账在账本侧是
+       ledger_reset(不记 op), 面却按 id 跨帧缓存 —— 重放前必须清成透明
+       底, 否则历史帧内容在持久面上累积(clearRect+重画动画整条拖影),
+       且与缺省账本路径(每帧透明离屏重放)语义不一致。 */
+    slot->b->vt->clear(slot->b);
     for (int i = 0; i < l->n_ops; i++)
         slot->b->vt->op(slot->b, &l->ops[i]);
 
     const unsigned char *px = NULL;
     int fw = 0, fh = 0, fstride = 0;
     if (!slot->b->vt->frame(slot->b, &px, &fw, &fh, &fstride)) {
-        slot->id[0] = 0;   /* 帧失败: 弃后端, 下次重建 */
+        /* 帧失败: 就地 dispose 后端(只清 id 会悬留 b 并漏掉整条链,
+           2026-10-15 复审修复), 下次重建。 */
+        slot->b->vt->dispose(slot->b);
+        slot->b = NULL;
+        slot->id[0] = 0;
         return 0;
     }
+
+    /* 帧拷进引擎 tmp 区: BITMAP 指针生命周期 = 本次显示列表(与 neb3
+       路径同一契约)。后端自有帧缓冲在下次 frame 时被 free/重 malloc,
+       不得直接压入显示列表悬留(2026-10-15 复审修复: 两套资源纪律
+       收敛为一)。 */
+    size_t need = (size_t)fw * (size_t)fh * 4;
+    hn_arena *tmp = hn_context_tmp(c);
+    if (!tmp) return 0;
+    unsigned char *dst = (unsigned char *)hn_arena_alloc(tmp, need);
+    if (!dst) return 0;
+    memcpy(dst, px, need);
 
     hn_cmd cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.kind = HN_CMD_BITMAP;
-    cmd.bitmap = px;
+    cmd.bitmap = dst;
     cmd.bitmap_stride = fstride;
     cmd.bitmap_w = fw; cmd.bitmap_h = fh;
     cmd.x = sx; cmd.y = sy; cmd.w = bw; cmd.h = bh;
-    cmd.fill = 0xFFFFFF00u | (unsigned)(alpha * 255.0f);
+    /* alpha 字节 0..255 截断(引擎恒供 0..1; 与 hn_three.c 同一纪律,
+       不赌调用方取值范围)。 */
+    float a = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+    cmd.fill = 0xFFFFFF00u | (unsigned)(a * 255.0f + 0.5f);
     hn_paint_push(c, &cmd);
     return 1;
 }

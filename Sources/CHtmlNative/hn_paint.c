@@ -1279,11 +1279,12 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
     /* 线宽/字号等"长度"按两轴均档(非等比缩放时各向误差最小) */
     float ks = (kx + ky) * 0.5f;
 
-    /* canvas_ity 后端(HN_CANVAS_BACKEND=ity): 账本 op 经高质量软光栅
-       出帧 → BITMAP 并入显示列表; 失败回落下方 ledger 重放。 */
-    if (hn_canvas_paint_ity(c, id, l, cw, ch, box_w, box_h, ox, oy, alpha))
-        return;
-
+    /* 圆角裁剪先行入栈(ity/cg 后端与账本重放共用同一对 CLIP):
+       ity/cg 命中时出的是矩形 BITMAP 贴图 —— 后端帧缓冲只认账本 op,
+       不含元素圆角信息, 圆角 canvas 的四角会整块溢出; 这里与下方账本
+       重放同款 eff_radius CLIP_PUSH 收口(渲染端 BITMAP 逐像素过裁剪
+       栈, fb_clip_ok 认半径)。命中后端即 POP 返回; 回落账本重放则同
+       一对 CLIP 原样复用, 指令流与既有口径逐位一致。 */
     hn_cmd cp;
     memset(&cp, 0, sizeof(cp));
     cp.kind = HN_CMD_CLIP_PUSH;
@@ -1294,12 +1295,41 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
     cp.radius = eff_radius(st, box_w, box_h);
     push_cmd(c, &cp);
 
-    canvas_emit_ledger(c, l, st, ox, oy, kx, ky, ks, alpha);
-
-
     hn_cmd cpo;
     memset(&cpo, 0, sizeof(cpo));
     cpo.kind = HN_CMD_CLIP_POP;
+
+    /* CoreGraphics 后端: 编译期 HN_HAVE_CANVAS_CG + 运行期
+       HN_CANVAS_BACKEND=system(别名 cg)双开关, 口径与下方 ity 完全同款
+       (宏门只让链入 hn_canvas_cg.o 的构建可见此调用; 不定义该宏的链
+       (探针/cubism/multiplatform 等)恒走账本重放, 链接不受影响)。
+       接线内经 create_ctx 注入 hn_context —— 图像类 op(IMAGE/PDATA/
+       PATTERN)的源图通道。排在 ity 之前: 两开关互斥(同一环境变量只
+       命中一个), 次序只表达"system 质量优先"语义; 失败自动回落 ity /
+       下方账本重放(沿用上面已入栈的 CLIP), 页面不坏。 */
+#ifdef HN_HAVE_CANVAS_CG
+    if (hn_canvas_paint_cg(c, id, l, cw, ch, box_w, box_h, ox, oy, alpha)) {
+        push_cmd(c, &cpo);
+        return;
+    }
+#endif
+
+    /* canvas_ity 后端: 编译期 HN_HAVE_CANVAS_ITY + 运行期
+       HN_CANVAS_BACKEND=ity 双开关(宏门控与 HN_HAVE_PE/CUBISM 同款——
+       TU 是 C++, 只在补编它的构建链可见; 不定义该宏的链(探针/cubism/
+       multiplatform 等)不含此调用, 链接不受影响, 恒走下方账本重放。
+       2026-10-15 复审修复: 此前无条件调用, 未链 TU 的构建全部链接
+       失败)。失败自动回落下方账本重放(沿用上面已入栈的 CLIP), 页面
+       不坏。 */
+#ifdef HN_HAVE_CANVAS_ITY
+    if (hn_canvas_paint_ity(c, id, l, cw, ch, box_w, box_h, ox, oy, alpha)) {
+        push_cmd(c, &cpo);
+        return;
+    }
+#endif
+
+    canvas_emit_ledger(c, l, st, ox, oy, kx, ky, ks, alpha);
+
     push_cmd(c, &cpo);
 }
 
@@ -1616,7 +1646,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
        未链 Core 落占位卡)。优先于 hn-mesh —— 同节点两者并存时 moc3 赢。 */
     if (n->tag && hn_node_attr(n, "hn-cubism")) {
         hn_cubism_paint(c, n, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
-                        tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by), alpha);
+                        tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by),
+                        alpha * st->opacity);   /* 自身 opacity 折入(同 lottie/three 分支口径) */
         goto clip_done;
     }
 
@@ -1642,7 +1673,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         const char *msrc = hn_node_attr(n, "src");
         if (msrc && *msrc) {
             hn_mesh_emit(c, n, msrc, n->bw * g->scale * g->scale_x, n->bh * g->scale * g->scale_y,
-                         tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by), alpha);
+                         tfx(g, sx, n->bx, n->by), tfy(g, sy, n->bx, n->by),
+                         alpha * st->opacity);   /* 自身 opacity 折入(同 lottie/three 分支口径) */
             goto clip_done;
         }
     }
@@ -1757,9 +1789,11 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         goto clip_done;
     }
 
-    /* <canvas>: 2D 账本重放(替换元素 — 不画子节点, fallback 内容不显示) */
+    /* <canvas>: 2D 账本重放(替换元素 — 不画子节点, fallback 内容不显示)。
+       自身 opacity 折入(同 lottie/cubism/three/pe/mesh 分支口径 ——
+       2026-10-15 复审修复: 此前传裸 alpha, <canvas style="opacity:x"> 被整个忽略)。 */
     if (n->tag && !strcmp(n->tag, "canvas")) {
-        paint_canvas(c, n, st, alpha, sx, sy, g);
+        paint_canvas(c, n, st, alpha * st->opacity, sx, sy, g);
         goto clip_done;
     }
 

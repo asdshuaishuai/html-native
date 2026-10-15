@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="560x680@680,80">
+<meta name="hn-title" content="threejs-sphere · UV 球 32×16 + 轨道相机">
+<style>
+  /* ── hn-three-geo="sphere" + hn-three-camera-orbit 演示 ──
+     · sphere = UV 球 32×16 段(960 三角, 极带退化四边形只出单三角),
+       半径 0.72, 缺省单色(hn-three-color 可覆盖), 逐面 Lambert。
+     · hn-three-camera-orbit = 轨道相机: 指针拖拽驱动方位角/仰角,
+       松手惯性指数衰减(τ=0.6s); 初值(az 28.7°/el 33.0°/dist 4.22)
+       精确反解自固定视点 eye(1.7,2.3,3.1) —— 声明本身不改变缺省观感。
+       hn-three-azimuth/elevation/dist 可显式声明初值。
+     · 无指针事件的离屏 shot(HN_CLOCK / --advance)恒停初值:
+       交互态不进确定性口径, 双 shot 逐字节一致。 */
+  html, body { margin: 0; }
+  body { background:#070a12; color:#e8eefc; padding:14 18;
+         font-family: sans-serif; }
+
+  .ttl { font-size:19; font-weight:700; letter-spacing:2; }
+  .tsub { font-size:10.5; color:#7d8aa5; letter-spacing:1; margin-top:2; }
+
+  .stage { margin-top:12; border:1 solid rgba(95,143,191,.28); border-radius:10;
+           display:flex; align-items:center; justify-content:center; }
+  .vp  { width:440; height:440; }
+
+  .cap { font-size:10.5; color:#5f8fbf; letter-spacing:1.5; margin-top:12;
+         border-top:1 solid rgba(95,143,191,.22); padding-top:8; }
+  .kv  { color:#9fb3d8; }
+  .kbd { color:#6fd6ff; }
+</style>
+</head><body>
+  <div class="ttl">three.js 子集 · UV 球 + 轨道相机</div>
+  <div class="tsub">hn-three-geo="sphere": 32×16 段 UV 球(960 三角)· hn-three-camera-orbit: 指针拖拽轨道(惯性衰减)</div>
+
+  <div class="stage">
+    <div class="vp" id="ball" hn-three hn-three-geo="sphere" hn-three-color="#5B8DEF" hn-three-camera-orbit hn-three-spin="6"></div>
+  </div>
+
+  <div class="cap">
+    <span class="kv">几何</span> SphereGeometry(0.72, 32, 16) 口径: 561 顶点 → 960 三角(极带出单三角), 惰性构建一次<br>
+    <span class="kv">相机</span> hn-three-camera-orbit: 拖拽 = 方位角/仰角随指针(0.35°/px), 松手惯性 exp(−t/0.6s) 衰减;
+    初值反解自固定视点, 仰角钳 ±85°<br>
+    <span class="kv">命中</span> 拖拽"抓住" = hn_context_hit_node(引擎现成命中, 与 hover/click 同一语义) == 本元素<br>
+    <span class="kv">取样</span> <span class="kbd">HN_CLOCK=1500 hncore paint …</span> / <span class="kbd">hn_app … --shot o.png --advance 1500</span>
+    (无指针事件 → 相机停初值, 确定性不变)<br>
+    <span class="kv">光栅</span> 画家排序(960 三角全量发射, 近面覆盖远面 = z-buffer 同像) + 逐面 Lambert(单色覆盖 #5B8DEF)
+  </div>
+</body></html>

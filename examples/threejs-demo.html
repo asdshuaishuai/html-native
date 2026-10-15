@@ -3,19 +3,31 @@
 <meta charset="utf-8">
 <meta name="hn-surface" content="window">
 <meta name="hn-window" content="560x680@80,80">
-<meta name="hn-title" content="threejs-demo · 场景图+相机+软件三角光栅">
+<meta name="hn-title" content="threejs-demo · 透明舞台 + 软件三角光栅">
 <style>
-  /* ── three.js 子集垂直切片演示(hn-three 属性) ──
+  /* ── three.js 子集演示(hn-three 属性) ──
      与 threejs-ui.html(CSS 3D + QUAD 投影口径)互补: 本页走
      hn_three.c 的 CPU 场景图 + PerspectiveCamera + 旋转立方体,
-     三角汤经 HN_CMD_POLYGON 复用引擎既有扫描内核出像素。
-     支持度矩阵与切片边界见 docs/threejs-support.md "已落地/下一步"。
+     三角汤经 HN_CMD_POLYGON 复用引擎既有光栅内核出像素。
+     支持度矩阵与 neb3 backend 口径见 docs/threejs-support.md。
 
      · <div hn-three> = 一个固定场景(Scene → pivot Group → Mesh(BoxGeometry))
      · hn-three-spin="6" = 自转周期 6 秒一圈(0→360°/6s, 取节点 ext_clock,
        HN_CLOCK / --advance 确定性取样)
-     · 逐面颜色 = Lambert 平直着色(本模块 CPU 算好进 fill; 引擎光栅无光照) */
+     · hn-three-msaa="4" = 向 3D backend 请求 4x 多重采样(neb3_desc.msaa_samples,
+       档位 1/2/4/8; 设备能力不足时 backend 可降档, 实际档位以渲染回报
+       neb3_render_info.msaa_samples 为准)。见下方"MSAA/深度语义"。
+     · 逐面颜色 = Lambert 平直着色(本模块 CPU 算好进 fill; 引擎光栅无光照)
+     · 扩展属性(本页未用, 全量口径): hn-three-geo="box|plane|sphere"
+       几何、hn-three-camera-orbit 指针拖拽轨道相机(惯性衰减)、
+       hn-three-tex="path" 纹理贴图(资产后端 → TRIS 贴图三角汤)、
+       hn-three-color="#rrggbb" 单色覆盖 —— 演示页: threejs-sphere.html
+       / threejs-plane.html */
 
+  /* 透明舞台: .stage 不铺底色 —— 舞台盒内除立方体外的像素直接露出
+     窗口底色, 立方体像浮在页面上而非嵌在画框里。这只改**舞台元素**的
+     背景, 窗口本身仍不透明(hn-transparent 是窗口级声明, 本页不用);
+     真正的"透明窗 + 透明 3D 背板"组合见 examples/threejs-pet.html。 */
   html, body { margin: 0; }
   body { background:#070a12; color:#e8eefc; padding:14 18;
          font-family: sans-serif; }
@@ -24,7 +36,6 @@
   .tsub { font-size:10.5; color:#7d8aa5; letter-spacing:1; margin-top:2; }
 
   .stage { margin-top:12; border:1 solid rgba(95,143,191,.28); border-radius:10;
-           background:linear-gradient(180deg,#0c1120,#090d18);
            display:flex; align-items:center; justify-content:center; }
   .vp  { width:440; height:440; }          /* 场景视口 = 本元素盒 */
 
@@ -38,13 +49,19 @@
   <div class="tsub">hn-three: CPU 场景图 + PerspectiveCamera + 旋转立方体 → 既有显示列表(HN_CMD_POLYGON)→ 既有光栅</div>
 
   <div class="stage">
-    <div class="vp" id="cube" hn-three hn-three-spin="6"></div>
+    <div class="vp" id="cube" hn-three hn-three-spin="6" hn-three-msaa="4"></div>
   </div>
 
   <div class="cap">
     <span class="kv">场景图</span> Scene → pivot Group(rotY 动画 / rotX −20°) → Mesh(BoxGeometry 12 三角)<br>
-    <span class="kv">相机</span> PerspectiveCamera fov 50°, eye (1.7, 2.3, 3.1) lookAt 原点(固定视点)<br>
-    <span class="kv">光栅</span> 背面剔除 + 画家排序(远→近) + 逐面 Lambert 着色 → paint_polygon 既有扫描内核<br>
-    <span class="kv">取样</span> <span class="kbd">HN_CLOCK=1500 hncore paint …</span> / <span class="kbd">hn_app … --shot o.png --advance 1500</span>
+    <span class="kv">相机</span> PerspectiveCamera fov 50°, eye (1.7, 2.3, 3.1) lookAt 原点(固定视点; 轨道相机见 hn-three-camera-orbit)<br>
+    <span class="kv">光栅</span> 画家排序(远→近, 凸体全量三角近面覆盖远面) + 逐面 Lambert 着色 → 既有三角/多边形光栅内核<br>
+    <span class="kv">取样</span> <span class="kbd">HN_CLOCK=1500 hncore paint …</span> / <span class="kbd">hn_app … --shot o.png --advance 1500</span><br>
+    <span class="kv">MSAA</span> hn-three-msaa="4" 请求 4x 多重采样(GPU backend 可按设备能力降档); 软件路径无 MSAA,
+    等效抗锯齿 = 三角沿边法线外扩 0.75px(消共享边接缝)+ 边界像素 4x4 子采样/三角重心解析覆盖(斜边无阶梯)<br>
+    <span class="kv">深度</span> 软件路径 = 画家算法(视空间质心 z 远→近, 面片级; 凸体全量发射与 z-buffer 同像);
+    neb3 GPU backend = depth24+ 逐像素深度附件 —— 两路深度语义不同精度, 各自如实<br>
+    <span class="kv">扩展</span> hn-three-geo="plane|sphere" / hn-three-camera-orbit(拖拽轨道) /
+    hn-three-tex="assets/three-checker.png"(TRIS 贴图三角汤)→ 见 threejs-plane / threejs-sphere 页
   </div>
 </body></html>

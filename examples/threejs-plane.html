@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-surface" content="window">
+<meta name="hn-window" content="560x680@1280,80">
+<meta name="hn-title" content="threejs-plane · 双面平面 + 纹理贴图">
+<style>
+  /* ── hn-three-geo="plane" + hn-three-tex 演示 ──
+     · plane = 1.3×1.3 双面 2 三角(PlaneGeometry 口径); 自转让背面
+       转入画框 —— 双面 = 背面法线翻转照常受光(Lambert), 贴图路径
+       背面三角反转绕序发射(TRIS rows=1 的屏幕绕序剔除口径)。
+     · hn-three-tex="assets/three-checker.png" = 纹理贴图: 资产后端取
+       字节 → hn_png_decode 验证可达可解码 → 每三角角点 UV →
+       HN_CMD_TRIS 贴图三角汤(paint_tris 逐像素重心采样, Cubism 同一
+       内核)。贴图路径 = unlit(TRIS 内核无逐顶点色输入, 如实声明);
+       门失败(缺后端/缺文件/非 PNG)→ 回退逐面 Lambert 纯色。
+     · three-checker.png: 8×8 棋盘 + 四角方位标记(左上红/右上绿/
+       左下蓝/右下琥珀)—— shot 里可直接断言 UV 朝向。 */
+  html, body { margin: 0; }
+  body { background:#070a12; color:#e8eefc; padding:14 18;
+         font-family: sans-serif; }
+
+  .ttl { font-size:19; font-weight:700; letter-spacing:2; }
+  .tsub { font-size:10.5; color:#7d8aa5; letter-spacing:1; margin-top:2; }
+
+  .stage { margin-top:12; border:1 solid rgba(95,143,191,.28); border-radius:10;
+           display:flex; align-items:center; justify-content:center; }
+  .vp  { width:440; height:440; }
+
+  .cap { font-size:10.5; color:#5f8fbf; letter-spacing:1.5; margin-top:12;
+         border-top:1 solid rgba(95,143,191,.22); padding-top:8; }
+  .kv  { color:#9fb3d8; }
+  .kbd { color:#6fd6ff; }
+</style>
+</head><body>
+  <div class="ttl">three.js 子集 · 双面平面 + 纹理贴图</div>
+  <div class="tsub">hn-three-geo="plane": 1.3×1.3 双面 2 三角 · hn-three-tex: 资产后端 → UV → HN_CMD_TRIS 贴图三角汤</div>
+
+  <div class="stage">
+    <div class="vp" id="card" hn-three hn-three-geo="plane" hn-three-tex="assets/three-checker.png" hn-three-spin="6"></div>
+  </div>
+
+  <div class="cap">
+    <span class="kv">几何</span> PlaneGeometry 口径: 4 顶点 2 三角, 双面(背面法线翻转/绕序反转), 每角点 UV 0..1<br>
+    <span class="kv">贴图</span> 资产后端(hn_context_assets)取字节 → hn_png_decode 门 → HN_CMD_TRIS(paint_tris
+    逐像素 UV 采样 + 解析 AA); v=0 = 图像顶行 → 平面上边<br>
+    <span class="kv">通道</span> 有贴图 = unlit 三角汤(TRIS 内核无光照输入, 如实声明); 门失败 → 回退逐面 Lambert 纯色(不静默空白)<br>
+    <span class="kv">取样</span> <span class="kbd">HN_CLOCK=1500 hncore paint …</span> / <span class="kbd">hn_app … --shot o.png --advance 1500</span><br>
+    <span class="kv">资产</span> assets/three-checker.png(8×8 棋盘; 左上红/右上绿/左下蓝/右下琥珀 = UV 朝向标记)
+  </div>
+</body></html>

@@ -18,6 +18,8 @@ out/
 *.swp
 .idea/
 .vscode/
+# 会话工作目录(本地协作状态, 不入库)
+.workbuddy/
 
 # 运行时产物(本地状态)
 *.log

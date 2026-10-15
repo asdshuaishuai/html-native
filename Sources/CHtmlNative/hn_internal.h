@@ -715,6 +715,28 @@ const char *hn_cubism_runtime_version(void);
 void hn_pe_paint(hn_context *c, hn_node *n,
                  float bw, float bh, float sx, float sy, float alpha);
 
+/* canvas_ity 后端(hn_canvas_ity.cpp; HN_CANVAS_BACKEND=ity 启用):
+ * 账本 op 经 canvas_ity 软光栅出帧 → BITMAP 并入显示列表; 失败返回 0
+ * 由调用方回落账本重放。 */
+int hn_canvas_paint_ity(hn_context *c, const char *id, const struct hn_canvas_ledger *l,
+                        float cw, float ch, float bw, float bh,
+                        float sx, float sy, float alpha);
+
+/* CoreGraphics 后端带 hn_context 的工厂(hn_canvas_cg.cpp): ctx 注入后端,
+ * 供 IMAGE/PDATA/PATTERN 经资产后端(hn_context_assets)加载源图;
+ * 不带 ctx 的 hn_canvas_backend_cg_create 等价 ctx=NULL(图像类 op 跳过)。 */
+struct hn_canvas_backend *hn_canvas_backend_cg_create_ctx(int width, int height,
+                                                          void *ctx);
+
+/* CoreGraphics 后端 paint 接线(hn_canvas_cg.cpp; HN_CANVAS_BACKEND=
+ * system|cg 启用): 口径与 hn_canvas_paint_ity 一致 —— 账本 op 重放 →
+ * 帧出 BITMAP 并入显示列表; 失败返回 0 由调用方回落。接线内经上面
+ * create_ctx 注入 ctx(图像类 op 的源图通道)。 */
+int hn_canvas_paint_cg(hn_context *c, const char *id,
+                       const struct hn_canvas_ledger *l,
+                       float cw, float ch, float bw, float bh,
+                       float sx, float sy, float alpha);
+
 /* ---------- three.js 子集垂直切片(hn_three.c) ----------
  * hn-three 属性节点: CPU 场景图 + 透视相机 + 旋转立方体, 顶点汤经
  * HN_CMD_POLYGON(3 顶点三角形)复用 paint_polygon 既有扫描内核出像素。
