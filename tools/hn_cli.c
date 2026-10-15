@@ -279,7 +279,17 @@ int main(int argc, char **argv) {
             }
             printf("cmds=%s\n", val);
         } else if (!strcmp(cmd, "shot")) {
-            printf("已输出截图\n");
+            /* ok:false(如 window 应用不支持)时如实透传错误, 不打成功行 */
+            const char *okp = strstr(r, "\"ok\":");
+            int okv = okp && (okp[5] == 't' || okp[6] == 't');
+            if (okv) printf("已输出截图\n");
+            else {
+                char err[256];
+                resp_field(r, "error", err, sizeof(err));
+                printf("截图失败: %s\n", err[0] ? err : "daemon 返回失败");
+                free(r);
+                return 1;
+            }
         } else {
             printf("%s\n", r);
         }

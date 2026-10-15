@@ -24,6 +24,39 @@ hn dump myapp                    # 绘制指令数（管线健康自检）
 `hn event` 三态回包：`"JS 处理器"`=有监听器被调；`"已派发但无人监听"`=target 选错；`"目标未找到"`=id 不存在。
 支持事件：`click dblclick mousedown mouseup mousemove mouseenter mouseleave keydown keyup focus blur input change submit scroll`。
 
+## 窗口模型与定位（核心概念）
+
+**两种开法，分工不同**：
+
+| | headless（缺省） | `--window`（真桌面窗） |
+|---|---|---|
+| 进程 | daemon 内无头槽位 | daemon spawn 平台壳，**每窗一进程** |
+| 用途 | agent 的渲染/截图/取证管线 | 给人看的桌面窗 |
+| `shot/text/dump/event` | ✅ 全支持 | ❌ `unsupported for window apps`（文档在子进程里，daemon 无句柄） |
+| 热更新 | `hn update`（整文档替换） | `hn update`（新内容**原子写回源文件**，子进程 mtime watch ~300ms 自行重载；进程与窗口不动） |
+| 关闭 | `hn close`（销毁槽位） | `hn close`（SIGTERM+waitpid 回收，关窗即退） |
+
+**agent 典型双轨**：同一份 HTML，先 headless 打开（shot 看效果、text 验内容、event 驱动），调好后 `--window` 开给人看。
+
+**窗口定位 = 声明 + 自动记忆**（没有运行时 move 子命令；定位是声明式的）：
+
+```html
+<meta name="hn-window" content="480x700@120,100">   <!-- 宽x高@屏幕x,y（左上原点）; @x,y 可省 -->
+```
+
+- **几何记忆（自动）**：窗口被用户拖动/resize 后，位置(和 window 表面的尺寸)落盘到
+  `~/.html-native/geometry/<文件名去扩展名>.json`；下次同一文件打开**回到原位**。
+  记忆键是文件名不是 app id —— 换 id 开同一页面仍回原处。
+- 优先级：槽位记忆（hn-applet）> 页面声明 `@x,y` > 屏幕居中。
+- 多窗口 = 多次 `hn open` 不同 id（每窗一进程互不干扰）；同 id 重复 open 报 dup。
+
+**直开模式（不经 daemon）**：`dist/hnapp-macos-arm64 app.html` 直接开真窗（开发/桌宠常用），
+`--shot out.png` 离屏渲染落盘、`HN_GPU=metal HN_GPU_PRESENT=1` 启用 GPU 直呈。
+
+**持久化与胶囊（daemon socket op）**：
+- `{"op":"persist","id":"a","path":"x.hnapp"}` 打包当前应用为胶囊（内嵌 HTML + 指令说明），`{"op":"restore","path":"x.hnapp"}` 拆包还原。
+- `{"op":"resident","file":"pet.html","id":"pet","w":360,"h":360}` 登记常驻 —— daemon 重启后自动重开该窗（桌宠"关不掉"的回归方式）。
+
 ## 应用骨架
 
 ```html
@@ -127,10 +160,20 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 ## 调试纪律（界面不对时不靠肉眼猜）
 
 ```bash
-hn shot myapp x.png     # 先看渲染结果
+hn shot myapp x.png     # 先看渲染结果（headless 应用; window 应用会如实报 unsupported）
 hn text myapp --element sel   # 读元素文本验证内容
 hn dump myapp           # 绘制指令数(0 或暴增 = 管线问题)
 hn event myapp click --target btn   # 注入事件验证交互
 ```
 
 判断要点：单行文本 runs 应为 1-3 段（逐字符成段=碎裂 bug）；同一文字不应在指令里出现多次（重影）。
+
+## 速查：环境钮（启动 daemon/hnapp 时设）
+
+| 钮 | 作用 |
+|---|---|
+| `HN_FETCH_ALLOW=host1,host2` | HTTP 主机白名单（子域匹配, 重定向逐跳重校验） |
+| `HN_FETCH_TIMEOUT_MS=N` | HTTP 超时（缺省 20000） |
+| `HN_ANIM_FPS=16\|30\|60` | 环境动画节拍（缺省 30） |
+| `HN_RENDER_SCALE=1\|2` | 渲染缩放覆盖（真窗 Retina 缺省 2） |
+| `HN_GPU=metal HN_GPU_PRESENT=1` | hnapp 真窗 GPU 直呈（不透明窗; 零回读） |
