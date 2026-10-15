@@ -85,12 +85,44 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 
 | 能力 | 声明 |
 |---|---|
-| Markdown/JSON/CSV 直染 | `<div hn-md>…原文…</div>` / `hn-json` / `hn-csv`（源文本装载即变 DOM） |
-| Lottie | `<img src="a.json" hn-lottie hn-lottie-fit="contain">` |
-| 网格变形(Live2D 感) | `<img src="c.png" hn-mesh="12x10" hn-mesh-sway="6">` |
+| Markdown/JSON/CSV 直染 | `<div hn-md>…原文…</div>` / `hn-json` / `hn-csv`（源文本装载即变 DOM；CSV 配 `hn-csv-sep=";"`） |
+| Lottie | `<img src="a.json" hn-lottie hn-lottie-fit="contain">`；倍速 `hn-lottie-speed="1.5"`，多动画 `hn-lottie-index` |
+| GIF 动图 | `<img src="a.gif">` 开箱即动；倍速 `hn-gif-speed="2"` |
+| 网格变形(Live2D 感) | `<img src="c.png" hn-mesh="12x10" hn-mesh-sway="6" hn-mesh-anchor="bottom">`；`hn-mesh-look` 视线跟随指针，`hn-mesh-breath` 呼吸，`hn-mesh-idle` 待机摆动 |
 | Canvas 2D | `<canvas>` + `<script>` JS glue |
-| 3D(three.js 子集) | `<div hn-three hn-three-geo="sphere" hn-three-tex="t.png" hn-three-camera-orbit>` |
+| 3D(three.js 子集) | `<div hn-three hn-three-geo="box\|plane\|sphere" hn-three-tex="t.png" hn-three-spin="6" hn-three-color="#4f7cff" hn-three-camera-orbit>`（orbit = **按住拖拽**转，松手惯性） |
+| Live2D/Cubism | `<img hn-cubism src="model3.json">`；动作组 `hn-cubism-motion="Idle"`、`hn-cubism-index`（需 Cubism SDK 构建的 hnapp） |
+| PainterEngine 呼吸立绘 | `<img hn-live="char.png">`（呼吸/摇摆 rig, hnapp-pe 构建） |
 | 透明桌宠 | `hn-transparent=1` + `hn-click-through` + `hn-level` |
+
+## 特有标签与窗口行为
+
+**`<include>`（零构建组件）**：文件级片段引入，可嵌套 6 层（自动检测循环）。
+```html
+<include src="head.html">        <!-- 引入样式/结构片段 -->
+<include src="parts/row.html">   <!-- 复用 UI 块; 这是组件模型之前的复用层 -->
+```
+
+**窗口形态 meta**（写在 `<head>`）：
+
+| meta | 作用 |
+|---|---|
+| `hn-surface` | `window`（普通窗）/ `popup`（不抢焦点, 消息卡）/ `layer`（浮层） |
+| `hn-presence` | `ghost` 不占系统身份（不进 Dock）; `app` 驻留 Dock —— 桌宠用 ghost |
+| `hn-lifecycle` | `"launch show hide destroy"` 声明关心的生命周期事件 |
+| `hn-transparent` | 逐像素透明窗口（HUD/圆形控件; html/body 不要设不透明底色） |
+| `hn-frameless` | 无边框 |
+| `hn-level` | 悬浮层级（桌宠置顶） |
+| `hn-click-through` | 鼠标穿透 |
+| `hn-shadow` | 窗口投影开关 |
+| `hn-spaces` | 跨桌面空间 |
+| `hn-applet` | `"clock"` 具名轻应用槽位（daemon 可枚举） |
+
+**窗口内交互属性**：
+- `hn-draggable` — 无边框/透明窗的空白区拖动（**默认开**，`=0` 关闭）
+- `hn-stream` + `hn-stream-loop="14"` — 聊天式流式容器：自动贴底跟随 + 环形缓冲只留最近 N 条（agent 轨迹/日志页标配）
+
+**表单控件**：`<input type="text|password|checkbox|radio">`、`<textarea>`（多行+光标）开箱可用；`:focus :disabled :checked` 生效；回车自动提交最近载体。
 
 ## 调试纪律（界面不对时不靠肉眼猜）
 
