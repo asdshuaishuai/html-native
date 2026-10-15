@@ -1,7 +1,7 @@
 /* neb3.h — Neb 3D runtime C ABI
  * =================================
  * Stable POD-only boundary for optional Rust/wgpu backend. The default C99
- * build uses hn_three_soft.c; a Rust cdylib may export the same symbols.
+ * build uses neb3_soft.c; a Rust cdylib may export the same symbols.
  * No Rust/wgpu types cross this header.
  */
 #ifndef NEB3_H

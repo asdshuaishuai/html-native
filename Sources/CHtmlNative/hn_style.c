@@ -753,7 +753,6 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             unsigned char ez = HN_EASE_SMOOTH;
             float ecb[4];
             memset(ecb, 0, sizeof(ecb));
-            int set_ease = 0;
             sv t2;
             while (next_tok(&cur, &t2)) {
                 int sl = tprop_slot(t2);
@@ -764,7 +763,7 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
                     else delay = tms;
                     continue;
                 }
-                if (ease_parse(t2, ecb, &ez)) { set_ease = 1; continue; }
+                if (ease_parse(t2, ecb, &ez)) { continue; }
                 /* 未识别 token 忽略(如 none 出现在段中) */
             }
             if (slot == -2) {

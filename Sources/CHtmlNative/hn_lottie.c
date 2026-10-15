@@ -1,8 +1,8 @@
 /* hn_lottie.c — Lottie(bodymovin)矢量动画求值 → 绘制指令
  *
  * 分层: 引擎负责"矢量图形 + 时间轴", 产物仍是平台无关的绘制指令
- * (POLYGON / IMAGE / RECT / CLIP_PUSH), 因此三个后端(native CoreGraphics、
- * hnsoft、WebKit)同等支持 —— 不需要为每个平台实现一遍播放器。
+ * (POLYGON / IMAGE / RECT / CLIP_PUSH), 因此各渲染后端(hnsoft、cairo、
+ * GPU)同等支持 —— 不需要为每个平台实现一遍播放器。
  * JSON 从哪来由运行时的资产后端注入(引擎自身不做磁盘/网络 I/O)。
  *
  * 支持子集(覆盖图标/loading/表情/插画类动画的绝大多数):

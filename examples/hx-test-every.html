@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!-- examples/hx-test-every.html — hx-trigger="every Ns" 最小验收页(C99 路径)
+     验证: 轮询表到期后自动重发 hx-get(rt/hn_rt.c polls[] + hn_rt_frame)。
+     驱动: dist/hnapp-macos-headless examples/hx-test-every.html
+           --shot out.png --advance 2500
+     预期: 装载时是 "poll:待首次到期"; --advance 2500 推进 2.5s(>1s 间隔)
+           后截图出现 uptime 数字 —— 证明轮询在帧循环里触发并换入了片段。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="360x140">
+<meta name="hn-title" content="hx-trigger every 1s">
+<meta name="hn-theme" content="dark">
+<style>
+  body { margin: 16; display: flex; flex-direction: column; gap: 8; }
+  .hint { font-size: 11; color: #6b7386; }
+  #box { background: #10151f; border: 1 solid #262e3d; border-radius: 8;
+         padding: 10; font-size: 13; color: #7fdbca; }
+</style>
+</head>
+<body>
+  <div class="hint">hx-trigger="every 1s": 每秒轮询 sys://uptime</div>
+  <div id="box" hx-get="sys://uptime" hx-trigger="every 1s">poll:待首次到期</div>
+</body>
+</html>

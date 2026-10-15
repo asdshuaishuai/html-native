@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<!-- examples/hx-test-get.html — hx-get 最小验收页(C99 路径)
+     验证: hx-get(缺省 click 触发)+ hx-target 跨元素换入 + 缺省 innerHTML swap。
+     驱动: hn open → hn event --kind click --target go → hn shot
+     预期: 点击后 #out 内出现 "sys://host 应答片段"(主机名), 原 placeholder 消失。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="360x180">
+<meta name="hn-title" content="hx-get · click">
+<meta name="hn-theme" content="dark">
+<style>
+  body { margin: 16; display: flex; flex-direction: column; gap: 10; }
+  #go { background: var(--accent, #4f7cff); color: #fff; padding: 8 14;
+        border-radius: 6; align-self: flex-start; font-size: 13; }
+  #out { background: #10151f; border: 1 solid #262e3d; border-radius: 8;
+         padding: 10; min-height: 44; font-size: 12; color: #9aa3b5; }
+</style>
+</head>
+<body>
+  <div id="go" hx-get="sys://host" hx-target="out">点我 hx-get sys://host</div>
+  <div id="out">placeholder:等待换入</div>
+</body>
+</html>

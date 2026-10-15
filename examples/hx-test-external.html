@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!-- examples/hx-test-external.html — 外部 URL(非 sys://)口径标注页(C99 路径)
+     契约: C99 引擎零网络(ISSUES.md P1-1: Swift hn.fetch 随 c49cfbd 删除,
+     当前层无任何 fetch/网络实现)。hx-get 指向 http(s):// 或相对路径时,
+     rt/hn_rt.c hx_perform 打印 [hx] 明确 stderr 标注"不支持", 文档保持原样
+     —— 静默吞掉才是 bug, 标注是本次补的断点修复。
+     驱动: dist/hnapp-macos-headless examples/hx-test-external.html --shot out.png
+     预期: stderr 出现 "[hx] fetch 不支持: \"https://example.com/fragment\"
+           — C99 引擎零网络, 仅 sys:// 本地桥; 外部资源走 sys://open 交系统
+           打开" 标注行(rt/hn_rt.c 与 tools/hn_daemon.c hx_perform 同文);
+           截图内容不变(占位仍在)。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="360x140">
+<meta name="hn-title" content="hx 外部 URL: 不支持">
+<meta name="hn-theme" content="dark">
+<style>
+  body { margin: 16; display: flex; flex-direction: column; gap: 8; }
+  .hint { font-size: 11; color: #6b7386; }
+  #box { background: #10151f; border: 1 solid #262e3d; border-radius: 8;
+         padding: 10; font-size: 13; color: #ff8f8f; }
+</style>
+</head>
+<body>
+  <div class="hint">外部 URL 无网络: 引擎明确拒绝(见 stderr [hx] 行)</div>
+  <div id="box" hx-get="https://example.com/fragment" hx-trigger="load">
+    placeholder:外部 URL 不可达, 本行应保持不变
+  </div>
+</body>
+</html>

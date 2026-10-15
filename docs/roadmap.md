@@ -1,7 +1,8 @@
 # html-native 路线图：从玩具到 OS-PWA 级框架
 
-> 版本: 1.1 · 原始日期: 2026-09-17 · **校准: 2026-10-13**(§1 全部数字按当日代码
-> 实测重取, 命令写在各表脚注; §3 起为路线图, 已完成项在原条目上标注) · 状态: 规划中
+> 版本: 1.1 · 原始日期: 2026-09-17 · **校准: 2026-10-15**(§1 行数与计数按当日代码
+> 实测重取, 命令写在各表脚注; 10-13 首校, 两天内即漂移 —— 故行数取约数并标注日期;
+> §3 起为路线图, 已完成项在原条目上标注) · 状态: 规划中
 >
 > 注: 2026-10-09 c49cfbd "全量 C99" 之后渲染只剩自研 C99 一条路径 —— 现为
 > 引擎(Sources/CHtmlNative) + 公共运行时(rt/hn_rt.c) + 平台层(platform/hnp_*.c,
@@ -12,28 +13,30 @@
 
 ---
 
-## 1. 当前状态（诚实审计, 2026-10-13 实测)
+## 1. 当前状态（诚实审计, 2026-10-15 实测)
 
 ### 1.1 有什么（已验证）
 
-> 行数口径(`wc -l`, 2026-10-13 工作树): 引擎 = `Sources/CHtmlNative/*.c *.h
-> include/hn.h`(20,637 行); 平台层 = `platform/*`(3,469 行); 运行时 = `rt/*`
-> (2,581 行); 应用层 = `app/*`(1,351 行); 工具与探针 = `tools/*.c tools/*.sh`
-> (20,145 行)。断言数 = 各探针当日实跑输出计数(明细见 1.1 表"测试"行)。
+> 行数口径(`wc -l`, 2026-10-15 工作树, 活跃开发期按日漂移故取约数):
+> 引擎 = `Sources/CHtmlNative/*.c *.h include/hn.h`(约 2.5 万行); 平台层 =
+> `platform/*`(约 5.2k 行); 运行时 = `rt/*`(约 3.6k 行); 应用层 = `app/*`
+> (约 1.5k 行); 工具与探针 = `tools/*.c *.h *.sh`(约 2.3 万行)。
+> 断言数 = 各探针最近一次实跑输出计数(2026-10-13 轮, 明细见 1.1 表"测试"行;
+> events_probe 58 条来自同轮 §7 记录)。
 
 | 层 | 代码量 | 能力 |
 |---|---|---|
-| C99 引擎 | 20,637 行 | HTML 解析 · CSS 级联(含属性选择器/`:not`/`nth-of-type`/`calc`) · flex/行内/absolute 布局 · 绘制指令(10 类: RECT/TEXT/IMAGE/CLIP±/QUAD/POLYGON/MESH/BITMAP/CLEAR_RECT) · 动画插值(过渡/@keyframes/缓动族) · 3D 变换(4×4 矩阵栈 + preserve-3d + **深度排序**) · Lottie/dotLottie 求值 · Live2D motion3 驱动 rig · 网格变形 · GIF · PNG · Markdown/JSON/CSV **直染** · 媒体元素状态机 · Canvas 2D API · WASM(wasm3) · 结构自检 |
-| 平台层 `platform/` | 3,469 行 | `hn_platform.h` 契约(窗口/媒体/视频图层/**GPU 原语表**) · `hnp_macos.c`(dlopen AppKit/CoreGraphics/QuartzCore + AVPlayerLayer 图层直通) · `hnp_media_macos.c`(AVFoundation) · `hnp_linux.c`(X11 + **Xv 视频图层原语**) · `hnp_headless.c` · `hnp_gpu_metal.c`(**Metal v1**, 682 行) |
-| 公共运行时 `rt/` | 2,581 行 | 文档生命周期/htmx 执行/sys:// 桥/本地 KV/持久化 · QuickJS 求值(HN_HAVE_QUICKJS) · **JS 定时器与 RAF**(帧驱动) · **HiDPI scale** · **GPU 宿主槽**(`hn_rt_set_gpu_host`, 缺省 hnsoft 逐帧回退) |
-| 应用层 `app/` | 1,351 行 | `hn_app.c` 唯一主循环(开窗/mtime 热重载/**几何记忆**/--shot/--probe) · `hn_media_platform.c`(平台媒体宿主装配) · `hn_media_synth.c`(合成宿主单一来源) |
+| C99 引擎 | ~2.5 万行 | HTML 解析 · CSS 级联(含属性选择器/`:not`/`nth-of-type`/`calc`) · flex/行内/absolute 布局 · 绘制指令(14 种: RECT/TEXT/IMAGE/CLIP_PUSH/CLIP_POP/CLIP_PATH_PUSH/QUAD/POLYGON/MESH/BITMAP/CLEAR_RECT/PDATA/PATTERN/TRIS, 见 hn.h 的 HN_CMD_*) · 动画插值(过渡/@keyframes/缓动族) · 3D 变换(4×4 矩阵栈 + preserve-3d + **深度排序**) · Lottie/dotLottie 求值 · Live2D motion3 驱动 rig · 网格变形 · GIF · PNG · Markdown/JSON/CSV **直染** · 媒体元素状态机 · Canvas 2D API · WASM(wasm3) · 结构自检 |
+| 平台层 `platform/` | ~5.2k 行 | `hn_platform.h` 契约(窗口/媒体/视频图层/**GPU 原语表**) · `hnp_macos.c`(dlopen AppKit/CoreGraphics/QuartzCore + AVPlayerLayer 图层直通) · `hnp_media_macos.c`(AVFoundation) · `hnp_linux.c`(X11 + **Xv 视频图层原语**) · `hnp_headless.c` · `hnp_gpu_metal.c`(**Metal v1**, 862 行) |
+| 公共运行时 `rt/` | ~3.6k 行 | 文档生命周期/htmx 执行/sys:// 桥/本地 KV/持久化 · QuickJS 求值(HN_HAVE_QUICKJS) · **JS 定时器与 RAF**(帧驱动) · **JS 事件监听**(addEventListener 命中链冒泡) · **HiDPI scale** · **GPU 宿主槽**(`hn_rt_set_gpu_host`, 缺省 hnsoft 逐帧回退) |
+| 应用层 `app/` | ~1.5k 行 | `hn_app.c` 唯一主循环(开窗/mtime 热重载/**几何记忆**/--shot/--probe) · `hn_media_platform.c`(平台媒体宿主装配) · `hn_media_synth.c`(合成宿主单一来源) |
 | ~~macOS 运行时(Swift)~~ 已删 | — | Swift 全层于 c49cfbd 删除; 现 C99 层接管: `tools/hnweb_macos.c` + `platform/hnp_macos.c`(dlopen AppKit/CoreGraphics, 纯 C99) |
-| Linux 运行时 | `tools/hnweb_linux.c` ~2000 行 | M1 窗口/渲染/expose/resize/点击命中 + M2 **事件派发管道**(点击/键盘/滚轮/hover → 目标解析 → 带 id 冒泡 → hx-trigger 消费)与**动画帧循环**(dt 推进, 空闲零唤醒); 新架构 `hnapp-linux-x86_64`(`platform/hnp_linux.c`, 桌宠字段全对齐 + Xv 视频图层原语)。仍缺: sys:// 桥(壳内 transport 未移植, 点击轨迹照常)、XIM 键入、交叉口径文本 |
-| Windows 运行时 | `tools/hnwin.c` 803 行 | Win32 窗口 + hnsoft + `sysbridge.c`(sys:// 桥); 新架构 `hnp_win32.c` 未写(平台矩阵 Windows 列在路线图) |
-| 软件光栅器 | 1,135 行 + cairo 后端 898 行 | SDF 圆角矩形 · 线性/径向渐变 · 多边形扫描线 · 网格纹理映射 · **PNG 解码(自带 inflate)** · FreeType 文本 · PNG 编码; cairo 后端同签名可换(`hn_cairo.c`, 真模糊阴影/任意路径裁剪/真 zlib) |
-| 宿主与工具 | daemon 1,306 行 + CLI 292 行 | daemon 开窗 spawn(`--window`)/热推送/常驻(`resident`)/胶囊(`persist`/`restore`)/开窗几何记忆; CLI 9 个子命令(ping/open/update/close/list/dump/text/event/shot) |
-| 测试 | 探针 24 个(`tools/*_probe.sh`)+ 门禁 2 个 | **约 1145 项断言/检查**(逐探针实跑计数: render 61 · css 96 · layout 33 · html 37 · canvas 95 · timer 59 · fmt 118 · md 107 · gif 61 · anim 31 · stream 30 · include 23 · wasm 19 · mesh 36 · live2d 44 · lottie 37 · quad3d 33 · gpu 7 · pet 27 · resident 16 · window 25 · media_element 40 · media_window 30 · media 18 · hidpi 8 · sysbridge 17 · hnsoft_alpha 7 · cairo 30; 另有 `linux_parity_check.sh`(编译级对账)与 `perf_probe.sh`(CPU 硬线 1 条)全过) |
-| 示例 | 36 个 HTML(+6 CSS) | 仪表盘 / 网页写法 / 消息卡 / 输入控件 / Lottie / dotLottie / 透明背板 / 桌宠 / live2d-demo / live2d-miku / canvas-demo / image-lab / md-demo / fmt-demo / media-demo / threejs-lab / threejs-ui / ui-kit / anim-lab / agent-chat / agent-stream … |
+| Linux 运行时 | `tools/hnweb_linux.c` ~2000 行 | M1 窗口/渲染/expose/resize/点击命中 + M2 **事件派发管道**(点击/键盘/滚轮/hover → 目标解析 → 带 id 冒泡 → hx-trigger 消费)与**动画帧循环**(dt 推进, 空闲零唤醒); 新架构 `hnapp-linux-x86_64`(`platform/hnp_linux.c`, 桌宠字段全对齐 + Xv 视频图层原语)。仍缺: 旧壳 sys:// 桥 transport(hnweb_linux.c:789 sys_fragment 恒返 NULL, 新架构 hnapp-linux 走 rt/hn_rt.c 真桥)、XIM 键入、交叉口径文本 |
+| Windows 运行时 | `tools/hnwin.c` 816 行 | Win32 窗口 + hnsoft + `sysbridge.c`(sys:// 桥); 新架构 `hnp_win32.c` 未写(平台矩阵 Windows 列在路线图) |
+| 软件光栅器 | hnsoft 1,943 行 + cairo 后端 1,031 行 | SDF 圆角矩形 · 线性/径向渐变 · 多边形扫描线 · 网格纹理映射 · **PNG 解码(自带 inflate)** · FreeType 文本 · PNG 编码; cairo 后端同签名可换(`hn_cairo.c`, 真模糊阴影/任意路径裁剪/真 zlib) |
+| 宿主与工具 | daemon 1,317 行 + CLI 292 行 | daemon 开窗 spawn(`--window`)/热推送/常驻(`resident`)/胶囊(`persist`/`restore`)/开窗几何记忆; CLI 9 个子命令(ping/open/update/close/list/dump/text/event/shot) |
+| 测试 | 探针 26 个(`tools/*_probe.sh`, 含 perf_probe CPU 硬线)+ `linux_parity_check.sh` | **约 1,200 项断言/检查**(逐探针最近实跑计数: render 61 · css 96 · layout 33 · html 37 · canvas 95 · timer 59 · fmt 118 · md 107 · gif 61 · anim 31 · stream 30 · include 23 · wasm 19 · mesh 36 · live2d 44 · lottie 37 · quad3d 33 · gpu 7 · pet 27 · resident 16 · window 25 · media_element 40 · media_window 30 · media 18 · hidpi 8 · sysbridge 17 · hnsoft_alpha 7 · cairo 30 · events 58; 另有 `linux_parity_check.sh`(编译级对账)与 `perf_probe.sh`(CPU 硬线 1 条)全过) |
+| 示例 | 50+ 个 HTML(+6 CSS) | 仪表盘 / 网页写法 / 消息卡 / 输入控件 / Lottie / dotLottie / 透明背板 / 桌宠 / live2d-demo / live2d-miku / canvas-demo / image-lab / md-demo / fmt-demo / media-demo / threejs-lab / threejs-ui / threejs-sphere / threejs-plane / threejs-pet / threejs-demo / ui-kit / anim-lab / agent-chat / agent-stream … |
 | 产物 | 16 个(`dist/`, 除 SHA256SUMS/pdb) | `hncore-*` 6 + `hncore-cairo-*` 1 + `hnweb-*` 4 + `hnwin-*` 1 + `hnapp-*` 3 + daemon/CLI; 实测大小 344 KB(hncore-macos-arm64)→ 1.4 MB(hnapp-macos-arm64, 含 QuickJS + WASM); 一条 `ZIG=zig bash tools/build-multiplatform.sh` 出全套(2026-10-13 实跑全绿) |
 
 ### 1.2 没有什么（差距，按严重度排列）
@@ -145,7 +148,7 @@ v0.3 加入了 **Lottie 矢量动画**与**网格变形贴图**，两者都作�
 > 用 HTML/CSS 写界面（比 Flutter/Dart 学习曲线低），渲染成真正的原生像素
 > （比 Electron/Tauri 轻 100 倍），没有浏览器也没有运行时依赖。
 
-** trade-off：** 功能完整度 vs 体积/性能。目前偏"太少功能"，路线图要
+**Trade-off：** 功能完整度 vs 体积/性能。目前偏"太少功能"，路线图要
 在不放弃体积/性能优势的前提下补齐关键能力。
 
 ---
@@ -184,15 +187,18 @@ border-left-color: #333;
 
 #### 1d. 事件系统（运行时层）✅ 已完成(以现口径重述)
 
-**现状口径(2026-10-13 重核)**: 引擎提供 `hn_event` 数据与冒泡路径
+**现状口径(2026-10-15 重核)**: 引擎提供 `hn_event` 数据与冒泡路径
 (`hn_event_path_at`/`hn_event_path_len`, 只收集带 id 元素), 平台壳(M2 管道:
 `hnweb_macos.c`/`hnweb_linux.c`/`hnwin.c`)做目标解析 → 带 id 冒泡 → `hx-trigger`
 消费; 事件种类见 `hn.h`(mouse 系/keydown-up/focus-blur/scroll/input/change/
 submit/hover + launch/show/hide/destroy 生命周期)。daemon 侧有
 `hn_rt_synthetic`(合成 click 驱动 hx 的执行入口)。
-**如实修正**: ①Swift 版的 JS `addEventListener` 桥与 `preventDefault()` 随
-c49cfbd 全量 C99 删除, 当前 C99 层**没有** JS 事件监听面(examples/events.html
-的 `<script>` 会报 TypeError); ②"M2 全壳同构"的完整度是 Linux 壳口径, macOS
+**历史口径勘误(①已过时)**: ①Swift 版的 JS `addEventListener` 桥随
+c49cfbd 全量 C99 删除后, 曾在 C99 层缺位 —— **现已重新落地**(见下条 ✅,
+rt/hn_rt.c:1907 起: `document/window/element.addEventListener` 注册 → 命中链
+冒泡 → JS 回调 + 标准事件对象含 `preventDefault()/stopPropagation()`), 本条
+早先"当前 C99 层没有 JS 事件监听面/events.html 会报 TypeError"的表述作废;
+②"M2 全壳同构"的完整度是 Linux 壳口径, macOS
 M1 壳仍走自己的 hover/轮询路径。事件类型表(原规划的 mousedown/dblclick 等)
 为当时目标, 现引擎枚举为准。
 ```
@@ -236,6 +242,9 @@ validation(required 等)        ⬜
 ---
 
 ### Phase 2: 真实应用框架（v0.3）—— "能构建多视图、有状态的生产应用"
+
+> 2026-10-15 注: 本阶段 2a/2b/2c 已由 **§8"下一阶段核心"** 收编并给出 A2UI
+> 协议口径(组件 API 形状按受信目录设计); 下文保留原始规划作对照。
 
 **目标：** 小团队能用 html-native 构建有 3-5 个视图、有状态管理、
 调用后端 API 的内部工具/面板类应用。
@@ -453,11 +462,11 @@ HTML/CSS → C99 引擎(解析→级联→布局→绘制指令) → 平台层 �
 | v0.2 ✅ | 可用工具 | 已完成(定位/省略号/逐侧边框/事件/@keyframes/3D; 网络层随 Swift 层删除) | 8 指令渲染 · 事件管道 · 3D 变换 |
 | v0.3 ✅ | 富媒体 | 已完成(Lottie/网格变形/透明背板) | Lottie 矢量动画 · 网格变形贴图 · 逐像素透明窗口 |
 | **v0.3.5** ✅ | **标准格式与形态** | 已完成(2026-10) | GIF / dotLottie(.lottie) / Live2D 运行时包 / JSON-CSV-Markdown 直染 / 桌宠窗口形态 / 媒体元素 + AVPlayerLayer 图层直通 / HiDPI / daemon 开窗与常驻 / WASM(wasm3) / Canvas 2D / GPU 契约 + Metal v1 |
-| **v0.4** | **应用框架** | ~10 周 | 组件 · 状态 · 路由 · 伪元素 · Grid(全部未动) |
+| **v0.4** | **应用框架** | ~10 周 | 组件 · 状态 · 路由(= §8 下一阶段核心: A2UI 协议适配 + 组件系统 + 路由/状态, 全部未动) · 伪元素 · Grid |
 | **v0.5** | **生产可用** | GPU 契约 v1 已完成, 余 ~15 周 | ~~合成层~~(GPU 契约 v1 ✅, 直呈/图层缓存待做) · 虚拟滚动 · DevTools · 无障碍 · 安全 |
 | **v1.0** | **OS-PWA** | 持续 | 后台任务 · 文件 · 传感器 · 多窗口 · 打包分发(胶囊 ✅) |
 
-## 7. 下阶段候选清单（2026-10-13 定序, 全部未启动或有前缀条件)
+## 7. 下阶段候选清单（2026-10-13 定序, 全部未启动或有前缀条件; 核心主线已单列为 §8, 本表是候选池)
 
 | 候选 | 动机 | 前置/口径 |
 |---|---|---|
@@ -470,3 +479,85 @@ HTML/CSS → C99 引擎(解析→级联→布局→绘制指令) → 平台层 �
 | 弹窗原生交互(`hn-drag`/`hn-dismiss`) | README 路线图 | 壳层 |
 | `hn dev` CLI 脚手架 | README/greeting 在指路, 未落地(`hn new` 同理) | CLI |
 | ~~JS `addEventListener` 面(C99 重落地)~~ ✅ 已完成(2026-10) | rt 层 glue: 注册 → 命中链冒泡 → JS 回调 + 标准事件对象; `tools/events_probe.sh` 58 断言全绿 | examples/events.html 可用 |
+
+## 8. 下一阶段核心：完全适配 A2UI 协议 · 组件系统 · 内部路由与状态管理
+
+> 定稿: 2026-10-15。本节把 §3 Phase 2 的 2a(组件)/2b(状态)/2c(路由)收编为一个
+> 有北极星的方向: **Neb 成为 A2UI 协议的一等客户端渲染器**。A2UI(Agent-to-User
+> Interface, Google 发起的开放协议, Apache 2.0; 当前生产版 v0.9.1, v1.0 为候选)
+> 让 agent 发送**声明式 JSON**(surface + 平铺组件列表 + ID 引用 + 数据绑定),
+> 客户端用**本地受信组件目录**渲染 —— 与本仓库"agent 生成 hn 编码 → C99 引擎直
+> 渲、无代码执行"的定位同构, 差别只在进料格式。
+
+### 8.1 目标(可验收口径)
+
+1. **A2UI 消息面**: daemon 新增 `a2ui` socket op(复用 JSON-lines 常驻通道,
+   transport 无关), 接收 A2UI `createSurface` / `surfaceUpdate` 消息流 ——
+   平铺组件列表按邻接表模型组装成组件树, 逐 surface 映射为一个 hn 文档/
+   文档片段; 支持增量更新(按 ID 引用改子树, 走既有 `hn_doc_swap`/热更新
+   路径)与流式渐进渲染(agent 分批推送, 用户实时看到界面生长)。
+2. **组件目录(catalog)**: 建立"受信组件目录"注册表 —— 每个 A2UI 标准组件
+   (Text/Image/Button/Row/Column/TextField/Card…)映射为一个模板 + 参数表,
+   实例化产出普通 DOM 子树; 开放注册模式允许把自定义组件(含 ui-kit 预设与
+   hn-mesh/hn-live2d/hn-three 等"表现型"扩展)注册进目录, 按 A2UI custom
+   catalog 规范暴露。**agent 只能请求目录内组件** —— 未注册组件落占位卡 +
+   stderr 明细(与 `hn-cubism` 未链 Core 的降级同一纪律), 不静默、不执行。
+3. **动作回传**: 用户交互(点击/提交/输入)经现有命中管道(§1d)转成 A2UI
+   action 消息(v1.0 的 actionResponse/action IDs)回传 agent —— 复用
+   `hn event`/daemon socket 上行, 窗口内不引入新的 JS 面。
+4. **内部路由与状态管理**: 视图注册表 + 历史栈(多视图/多 surface 切换,
+   含切换动画挂钩)与响应式 store(显式绑定: `hn.store.define/bind/set`,
+   数据变化 → 绑定 DOM 批量更新)—— 二者是 A2UI `data binding` 与
+   multi-surface 语义的本地承载, 也是纯 hn 编码应用(不经 A2UI)直接可用的
+   框架能力。
+
+### 8.2 边界(明确不做)
+
+- **不成为浏览器**: A2UI 组件目录只按 Neb 已支持的渲染能力注册; 不为对齐
+  Web 组件生态引入 WebView/Shadow DOM/CSS 全量。组件树落到引擎的显示列表,
+  三后端(hnsoft/cairo/Metal)自动同等。
+- **不执行 agent 代码**: A2UI 的安全哲学(声明式数据、目录受信、无 UI 注入)
+  与 Neb"无 web 运行时"承诺天然一致 —— agent 侧永远只发 JSON/数据; QuickJS
+  仍是**本地作者**的可选交互面, 不对 A2UI 消息开放任意求值。
+- **hn 编码不废弃、不降级为次等公民**: A2UI 是**进料方言**(JSON → 组件树 →
+  hn 编码/直接 DOM 装配), 不是替代; 人类手写 `app.html` 与 agent 推 A2UI
+  消息是两条等价入口(对齐 README"两条等价入口"原则)。反向(hn → A2UI
+  导出)不做承诺。
+- **协议版本纪律**: 按 v0.9.1(当前生产版)实现适配层, v1.0 候选期只跟踪不
+  押注; 消息 schema 校验失败 = 显式错误响应, 不做宽容解析(协议演进期
+  静默兼容是伪功能)。
+- **transport 收口在 daemon**: A2A/HTTP/AG-UI 等传输网关属上层(宿主/代理
+  侧), 引擎与运行时只认 socket op; 不在网络层破"无网络"承诺(sys:// 之外
+  依旧零 fetch)。
+
+### 8.3 与现有 hn-* 属性体系的关系
+
+hn-* 体系不动、不改名、不被覆盖 —— A2UI 适配层是**挂在引擎公共 API 之上的
+进料与编目层**, 分工如下:
+
+| A2UI 概念 | Neb 现有对应 | 关系 |
+|---|---|---|
+| surface(createSurface/surfaceId) | daemon `open` 的 id + `<meta name="hn-surface" content="window\|popup\|layer">`/`hn-window` 几何 | surfaceId 即 daemon 应用 id; surface 呈现形态沿用 hn-surface 清单, 一个 surface = 一个已开文档 |
+| 组件目录 + 邻接表组件列表 | 引擎元素 + `hn-*` 声明属性(模板参数直通: `hn-transparent`/`hn-level`/`hn-mesh-*`…) | 每条目录项 = "模板 hn 片段 + 属性映射表"; 标准目录覆盖 A2UI 规范组件, Neb 扩展组件按 custom catalog 注册(hn-* 属性作为模板参数原样透传) |
+| data binding(路径绑定/数据模型) | 规划中的 `hn.store`(§Phase 2b, 显式绑定) + 已有 `sys://store` KV | 绑定表达式在 store 层解析, 变更 → 脏标记 → 批量更新绑定子树; sys://store 保持为应用级持久化 KV, 不与响应式 store 混用 |
+| user action(client→agent) | `hx-get/post/trigger` 载体 + 命中管道(§1d) | A2UI action 挂在既有触发点上: 触发时除 hx 语义外再发一条 action 上行; `hx-*` 行为不变 |
+| 渐进渲染(流式 surfaceUpdate) | daemon `update` 整推 + `hn_doc_swap` 片段交换 + hn-stream 追底 | surfaceUpdate 消息流直接复用这条装载/换入管线, 无新渲染路径 |
+
+一句话: **hn-* 管"这个表面/元素长什么样、怎么表现", A2UI 适配层管"agent 的
+意图怎么变成这些声明"** —— 后者编译到前者, 不并行造第二套描述语言。
+
+### 8.4 优先级与依赖序(全部未启动)
+
+| 序 | 交付 | 动机/依赖 | 估量 |
+|---|---|---|---|
+| P0 | **组件系统最小面**: 注册表 + 模板实例化 + 属性/子槽 + mount/unmount 生命周期(§Phase 2a 收编, 但 API 形状按目录项设计) | 是 A2UI 目录映射与后续一切的地基; 纯 C 模板 + 可选 QuickJS 钩子 | ~3 周 |
+| P1 | **状态管理**(§Phase 2b 收编): define/bind/set 显式绑定 + 批量更新 | A2UI data binding 的承载; 依赖 P0(绑定目标是组件实例) | ~2 周 |
+| P1.5 | **内部路由**(§Phase 2c 收编): 视图注册表 + 历史栈 + 切换动画挂钩 | 多视图/多 surface 切换; 依赖 P0, 与 P1 可并行 | ~1.5 周 |
+| P2 | **A2UI 消息面收口**: `a2ui` socket op + createSurface/surfaceUpdate 解析 + 目录映射 + action 回传; 探针(a2ui_probe)钉住消息级回归 | 依赖 P0/P1/P1.5 全部; 协议对齐 v0.9.1, 用 A2UI Composer 产物做 fixture | ~3 周 |
+
+总计 ~10 周(与 §6 v0.4 估量一致 —— 本章是 v0.4 的具体化, 不是新增一档)。
+验收门禁: 双构建零 error + a2ui_probe(消息解析/目录映射/增量更新/降级占位)
++ 既有探针零回归; A2UI 端到端演示 = 同一份 agent 消息流在 hnapp 真窗与
+headless shot 产出一致渲染。
+
+---

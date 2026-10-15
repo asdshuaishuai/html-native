@@ -137,7 +137,7 @@ macOS/Linux/Windows 产物 —— 除五个 `hncore` 引擎 CLI（验证与集�
 ## 架构与代码地图
 
 ```
-Sources/CHtmlNative/  **Neb 引擎核心**(C99, ~20600 行含 include/hn.h, 零依赖, 不含平台/UI/网络)
+Sources/CHtmlNative/  **Neb 引擎核心**(C99, ~2.5 万行含 include/hn.h, 零依赖, 不含平台/UI/网络)
   hn_html.c    hn 编码解析 → DOM(arena)
   hn_css.c     样式表解析 → 规则(选择器展开/特异性)
   hn_style.c   级联 + 继承 + UA 样式表
@@ -174,7 +174,8 @@ tools/hn_cli.c         C99 命令行客户端(与 daemon 配对)
 tools/build-multiplatform.sh  交叉构建(zig cc, 三平台产物 + 跨架构确定性门禁)
 tools/build-daemon-cli.sh     daemon/CLI 本机构建
 tools/*_probe.c/.sh    探针(render/alpha/cairo/gpu/mesh/sysbridge + 布局/CSS/HTML/Lottie/GIF/
-                       canvas/timer/fmt/md/stream/anim/quad3d/live2d/media/pet/hidpi/resident/window)
+                       canvas/timer/fmt/md/stream/anim/quad3d/live2d/media/pet/hidpi/resident/window
+                       /events)
 docs/                  校准文档: getting-started(上手) · platforms(平台能力矩阵)
                        · media-design(媒体契约) · threejs-support(3D 支持度)
                        · adr-001-renderer(绘制引擎决策) · roadmap(路线图)
@@ -182,9 +183,9 @@ screenshots/           引擎效果截图
 ```
 
 > 代码地图的行数是历史口径(引擎核心约 10.9k 行的旧快照); 当前实测:
-> `Sources/CHtmlNative/*.c *.h`(含 include/hn.h)共 **20,637 行**,
-> `platform/` 3,469 · `rt/` 2,581 · `app/` 1,351 · `tools/` 20,145
-> (`wc -l`, 2026-10-13)。
+> `Sources/CHtmlNative/*.c *.h`(含 include/hn.h)约 **2.5 万行**,
+> `platform/` 约 5.2k · `rt/` 约 3.6k · `app/` 约 1.5k · `tools/` 约 2.3 万(含探针脚本)
+> (`wc -l`, 2026-10-15; 活跃开发期数字按日漂移, 精确值以当日 `wc -l` 为准)。
 
 ## 使用
 
@@ -277,7 +278,7 @@ CI/服务器同样可用; 真窗口由平台壳开(见上"快速开始"的 `hnap
 {"op":"dom","id":"card"} / {"op":"dump","id":"card"} / {"op":"text","id":"card","element":"x"}
 {"op":"event","id":"card","kind":"click","target":"go","x":..,"y":..}
 {"op":"shot","id":"card","path":"out.png"}
-{"op":"applets"} / {"op":"applet-remove","name":"clock"}
+{"op":"applets"}   # 列轻应用槽位(槽位删除暂无 socket op, daemon op 全集无 applet-remove)
 {"op":"persist","id":"card","path":"~/x.hnapp","instructions":"怎么驱动它"}   # 打成胶囊
 {"op":"restore","path":"~/x.hnapp"}                                          # 拆胶囊
 ```
@@ -466,8 +467,10 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   - **agent 操作指令** + **能力图**(元素 id / 触发器 / 轮询 / 生命周期)
     + **操作历史**(open/update/event/lifecycle 的可回放轨迹)
   纯 JSON 文本: 人能直接打开读、能 diff、任何编辑器都能看。实测一个时钟轻应用
-  打出来 5.4 KB。`hn persist <id> <文件>` 写、`hn restore <文件>` 从任意位置拆
-  (数据与几何一并装回), 换个 id 打开同一份页面照常还原。
+  打出来 5.4 KB。写入走 daemon socket op `{"op":"persist","id":…,"path":…}`,
+  拆胶囊走 `{"op":"restore","path":…}`(数据与几何一并装回), 换个 id 打开同一份
+  页面照常还原 —— 这两个 op 尚未包成 `hn` CLI 子命令(CLI 现有 9 个子命令,
+  见上文 usage), 任何 socket 客户端都可直接调用。
   **持久化应用必须带 agent 指令**: 这些应用绝大多数是 agent 造的, 下一个 agent
   拿到文件唯一需要的就是"这是什么、怎么驱动它"。不传 `--instructions` 时运行时
   会按能力图自动导出一段(写成可直接照抄的 `hn event …` 命令形态), 并在响应里标
@@ -485,7 +488,10 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   - 固定尺寸表面(popup/layer)只记位置, 宽高仍以页面声明为准 —— 否则作者改了
     `hn-window` 看不到变化; `window` 表面则连 resize 后的尺寸一起记
   - 存**绝对屏幕坐标**, 与窗口停在哪块屏无关; 副屏位置原样还原
-  - agent: `hn applet list` / `hn applet remove <名>`(`{"op":"applets"}`)
+  - agent 入口: socket op `{"op":"applets"}`(列槽位; 尚未包成 `hn` CLI 子命令)。
+    注: 本节与上文宿主协议曾记载的 `{"op":"applet-remove","name":"clock"}` 在
+    daemon **尚无实现**(daemon 全部 op 逐一枚举无此分支), 已按现状从协议表
+    移除; 槽位本体在 `~/.html-native/applets/<名>.json`, 删除能力待补真实 op。
 - **网格变形(Live2D 类原语)**: `<img src="char.png" hn-mesh="12x10" hn-mesh-sway="8"
   hn-mesh-speed="1.4" hn-mesh-anchor="bottom">` —— 贴图映射到可变形网格, 顶点由
   正弦摆动驱动(**anchor 六模式**: bottom/top/left/right/center-radial, 固定端位移

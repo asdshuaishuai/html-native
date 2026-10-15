@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<!-- examples/hx-test-swap.html — hx-swap 最小验收页(C99 路径)
+     验证: 同一 sys://store/count 片段(<span>1</span>)按三种 hx-swap 语义换入:
+       innerHTML(缺省)  → 目标内容被替换;
+       append(beforeend)→ 追加到目标末尾(点 3 次出现 3 份);
+       prepend(afterbegin)→ 插到目标开头;
+       outerHTML        → 目标元素自身被替换。
+     驱动: hn open → 逐个 event click → shot / text 比对。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="420x320">
+<meta name="hn-title" content="hx-swap 语义">
+<meta name="hn-theme" content="dark">
+<style>
+  body { margin: 16; display: flex; flex-direction: column; gap: 8; }
+  .btn { background: var(--accent, #4f7cff); color: #fff; padding: 7 12;
+         border-radius: 6; align-self: flex-start; font-size: 12; }
+  .box { background: #10151f; border: 1 solid #262e3d; border-radius: 8;
+         padding: 8; min-height: 26; font-size: 12; color: #9aa3b5; }
+  #tgt-outer { background: #3a2f14; border: 1 solid #7a5c1e; border-radius: 8;
+               padding: 8; font-size: 12; color: #ffd479; }
+</style>
+</head>
+<body>
+  <div class="btn" id="b-inner" hx-get="sys://store/count" hx-target="tgt-inner">swap=innerHTML(缺省)</div>
+  <div class="box" id="tgt-inner">inner:占位</div>
+
+  <div class="btn" id="b-append" hx-get="sys://store/count" hx-target="tgt-append" hx-swap="append">swap=append</div>
+  <div class="box" id="tgt-append">append:起点|</div>
+
+  <div class="btn" id="b-prepend" hx-get="sys://store/count" hx-target="tgt-prepend" hx-swap="prepend">swap=prepend</div>
+  <div class="box" id="tgt-prepend">prepend:起点</div>
+
+  <div class="btn" id="b-outer" hx-get="sys://store/count" hx-target="tgt-outer" hx-swap="outerHTML">swap=outerHTML</div>
+  <div id="tgt-outer">outer:整块将被替换</div>
+</body>
+</html>

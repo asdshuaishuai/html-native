@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- examples/hx-test-post.html — hx-post 最小验收页(C99 路径)
+     验证: hx-post 携带表单编码(name=value)走 sys://store/set, 应答换入目标;
+           再点击读取回显 → store 往返闭环。
+     驱动: hn open → event click target=save → text --element out
+           (store 持久化在 ~/.html-native/store/<store_id>.json)
+     预期: out 换入所存值的回显(store/set 应答为 <span id="store-value">
+           值</span>; "copied" 属 sys://clipboard/set 分支, 本页不走);
+           读回 out2 = 所存值。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="380x220">
+<meta name="hn-title" content="hx-post · store">
+<meta name="hn-theme" content="dark">
+<style>
+  body { margin: 16; display: flex; flex-direction: column; gap: 10; }
+  input { background: #10151f; border: 1 solid #262e3d; border-radius: 6;
+          padding: 6 8; color: #e8eaf0; font-size: 13; }
+  #save { background: var(--accent, #4f7cff); color: #fff; padding: 8 14;
+          border-radius: 6; align-self: flex-start; font-size: 13; }
+  #read { background: #1d2432; color: #fff; padding: 8 14; border-radius: 6;
+          align-self: flex-start; font-size: 13; }
+  .out { background: #10151f; border: 1 solid #262e3d; border-radius: 8;
+         padding: 8; min-height: 30; font-size: 12; color: #9aa3b5; }
+</style>
+</head>
+<body>
+  <input id="note" name="value" value="hello-hx">
+  <div id="save" hx-post="sys://store/set?key=note" hx-target="out">保存(store/set)</div>
+  <div class="out" id="out">placeholder:等待换入</div>
+  <div id="read" hx-get="sys://store/get?key=note" hx-target="out2">读回(store/get)</div>
+  <div class="out" id="out2">placeholder:等待换入</div>
+</body>
+</html>

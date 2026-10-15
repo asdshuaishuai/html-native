@@ -57,17 +57,6 @@ static hn_color fill_color(const hn_style *st, hn_color col, float alpha) {
    作者/主题可用 :focus 或 :checked 规则覆盖观感。 */
 #define HN_ACCENT 0x3D74FFFFu
 
-/* 动画 4 分量(rgba 0..1) → 打包色 */
-static hn_color anim_color(const float v[4]) {
-    int r = (int)(v[0] * 255.0f + 0.5f), g = (int)(v[1] * 255.0f + 0.5f);
-    int b = (int)(v[2] * 255.0f + 0.5f), a = (int)(v[3] * 255.0f + 0.5f);
-    if (r < 0) r = 0; if (r > 255) r = 255;
-    if (g < 0) g = 0; if (g > 255) g = 255;
-    if (b < 0) b = 0; if (b > 255) b = 255;
-    if (a < 0) a = 0; if (a > 255) a = 255;
-    return ((hn_color)r << 24) | ((hn_color)g << 16) | ((hn_color)b << 8) | (hn_color)a;
-}
-
 /* 绘制期变换状态: 位移已并入 sx/sy; scale 需要几何换算。
    缩放原点取元素盒中心 —— 与 CSS transform-origin: center 一致。
    ---- 3D 层级(preserve-3d) ----

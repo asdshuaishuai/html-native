@@ -1021,9 +1021,6 @@ static int kf_tick(hn_node *n, const hn_keyframes *kf, float ms, int iter, int d
     return iter < 0 || !*done_io;
 }
 
-/* 关键帧动画的时钟推进(每帧调用; dt 由 anim_tick 传入) */
-static float g_last_dt = 0;
-
 /* ---------- 缓动 ---------- */
 
 /* 三次贝塞尔求值: 先由 x 反解参数 t(牛顿迭代), 再算 y —— 与 CSS 同法 */

@@ -64,8 +64,14 @@ struct hn_rt {
        N 次 layout+raster 合 1(与 blit 合并配套, 内存带宽第二刀)。 */
     int paint_defer;
     int paint_dirty;
-    /* 轮询表(hx-trigger="every Ns") */
-    struct { hn_node *node; double due, sec; } polls[16];
+    /* 轮询表(hx-trigger="every Ns"): 时钟域是**帧步进虚拟钟**(poll_clock_ms,
+       每帧 += dt)而非墙钟 —— 与下方 JS 定时器的 clock_ms 同一口径(探针喂
+       固定 16 ⇒ 轮询语义确定性可断言, --advance 虚拟快进也能到期; 真窗壳
+       喂真实 dt ⇒ 行为与墙钟一致)。此前用 CLOCK_MONOTONIC: --advance 在
+       几个真实毫秒里推进 2500ms 虚拟时间, 墙钟没动 → 轮询永不到期,
+       headless 下列 trigger 无法验收(实测 hx-test-every 占位不动)。 */
+    double poll_clock_ms;      /* 轮询域虚拟单调钟(ms; 随帧步进) */
+    struct { hn_node *node; double due, sec; } polls[16];   /* due/sec 域 = 秒 */
     int poll_n;
     int poll_built;
 #ifdef HN_HAVE_QUICKJS
@@ -446,10 +452,9 @@ extern int sysctlbyname(const char *, void *, size_t *, const void *, size_t);
 #endif
 #include <time.h>
 
-static unsigned long g_boot_hint;   /* uptime 用(进程启动时的 monotonic) */
-
 /* 剪贴板/openURL 的 ObjC 调用: 每次经 dlsym(不依赖链接了哪个 hnp_*.c)。
-   Apple 平台 AppKit 已由 hnp_init 装载; 非 Apple 直接返回 0。
+   Apple 平台 AppKit 由 hn_objc_bind 在消费点按需装载(见其注释 —— 宿主
+   侧 hnp_init 的装载覆盖不到 daemon/--shot 链路); 非 Apple 直接返回 0。
 
    ⚠️ 2026-10 修复(本轮): 这里原写 `dlsym((void *)0, "objc_msgSend")` ——
    **RTLD_DEFAULT 在 macOS 是 (void *)-2 而非 NULL**(dlfcn.h), 传 0 得到
@@ -480,6 +485,19 @@ static unsigned long g_boot_hint;   /* uptime 用(进程启动时的 monotonic) 
 typedef void *(*hn_dlsym_msgSend_t)(void *, void *, ...);
 typedef struct { void *send, *gc, *sl; } hn_objc_rt;
 static int hn_objc_bind(hn_objc_rt *rt) {
+    /* AppKit 不一定已装载进本进程 —— 宿主各有差异: 真窗壳在 hnp_macos.c
+       的 hnp_init 里 dlopen; daemon 不链任何平台层(app 侧 hnp_init 的调用
+       点 app/hn_app.c:429 与它无关); hn_app 的 --shot 分支在 hnp_init 之前
+       就 return(2026-10-15 复审实测: daemon 与 --shot 两条链路 clipboard
+       路由都换入降级占位 "clip unavailable")。在消费点自行装载, sys://
+       clipboard/open 从此不依赖"宿主记得装 AppKit"。重复 dlopen 已装载的
+       framework 是引用计数 no-op, 对真窗壳零代价; 首次失败(异常系统)不
+       重试, 路由落回既有占位, 其余路径零影响。 */
+    static int appkit_tried = 0;
+    if (!appkit_tried) {
+        dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW);
+        appkit_tried = 1;
+    }
     rt->gc = dlsym(RTLD_DEFAULT, "objc_getClass");
     rt->sl = dlsym(RTLD_DEFAULT, "sel_registerName");
     rt->send = dlsym(RTLD_DEFAULT, "objc_msgSend");
@@ -681,12 +699,25 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
     const char *get = hn_node_attr(carrier, "hx-get");
     const char *url = post ? post : get;
     if (!url) return 0;
+    /* 非 sys:// = 外部 fetch。C99 层无任何网络实现(Swift hn.fetch 随
+       c49cfbd 删除; README/ISSUES P1-1 "无网络"是项目定位) —— 必须显式
+       标注而非静默吞掉: 静默失败是排查黑洞, 页面看起来"点了没反应"。 */
+    if (strncmp(url, "sys://", 6)) {
+        fprintf(stderr, "[hx] fetch 不支持: \"%s\" — C99 引擎零网络, 仅 "
+                "sys:// 本地桥; 外部资源走 sys://open 交系统打开\n", url);
+        fflush(stderr);
+        return 0;
+    }
     hn_doc *doc = hn_context_doc(rt->ctx);
     char form[4096];
     form[0] = 0;
     hn_doc_form_encode(doc, form, sizeof(form));
     char *frag = hn_rt_sys_fragment(url, form, rt->id);
-    if (!frag) return 0;
+    if (!frag) {
+        fprintf(stderr, "[hx] 未知 sys:// 路由: %s\n", url);
+        fflush(stderr);
+        return 0;
+    }
     const char *tid = hn_node_attr(carrier, "hx-target");
     if (!tid || !tid[0] || !strcmp(tid, "this")) tid = hn_node_attr(carrier, "id");
     if (!tid || !tid[0]) { free(frag); return 0; }
@@ -991,13 +1022,6 @@ typedef struct { hn_doc *doc; hn_context *ctx; hn_rt *rt; } js_bridge;
 static void js_rt_free(hn_rt *rt) {
     if (rt->js_ctx) { JS_FreeContext((JSContext *)rt->js_ctx); rt->js_ctx = NULL; }
     if (rt->js_rt) { JS_RunGC((JSRuntime *)rt->js_rt); JS_FreeRuntime((JSRuntime *)rt->js_rt); rt->js_rt = NULL; }
-}
-
-static void js_rt_init(hn_rt *rt) {
-    if (rt->js_ctx) return;
-    rt->js_rt = JS_NewRuntime();
-    if (!rt->js_rt) return;
-    rt->js_ctx = JS_NewContext((JSRuntime *)rt->js_rt);
 }
 
 /* hn_set_text(id, text): JS 桥 → 引擎文本更新(与 hn_doc_set_text 同口径) */
@@ -2642,12 +2666,6 @@ float hn_rt_scale(const hn_rt *rt) { return rt_scale(rt); }
 int hn_rt_bitmap_width(const hn_rt *rt) { return rt_bitmap_w(rt); }
 int hn_rt_bitmap_height(const hn_rt *rt) { return rt_bitmap_h(rt); }
 
-static double now_s(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
-
 /* ambient 节拍(纯环境动画页面的帧间隔): 环境钮 HN_ANIM_FPS = 16/30/60
    覆盖(62/33/16ms), 缺省 30 ≈ 33ms。只作用于"仅 ambient 活跃"的帧 ——
    interactive(过渡/关键帧/媒体/滚动)恒 16ms, 不受此钮影响。按值失效的
@@ -2678,6 +2696,10 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     if (!rt) return -1;
     if (repaint) *repaint = 0;
     rt->scroll_armed = 1;   /* scroll 事件节流重臂(每 pump 至多派发一次) */
+    /* hx 轮询域虚拟钟(与 QuickJS 构建里 clock_ms 同一手势, 但**不受**构建
+       开关门控 —— 轮询在无 JS 构建同样存在): 每帧 += dt。真窗壳喂真实间隔
+       ⇒ 与墙钟一致; 探针/--advance 喂虚拟步进 ⇒ 轮询确定性到期。 */
+    rt->poll_clock_ms += dt_ms > 0 ? (double)dt_ms : 0;
 #ifdef HN_HAVE_QUICKJS
     rt->clock_ms += dt_ms > 0 ? (double)dt_ms : 0;   /* 虚拟单调钟: 随帧步进 */
 #endif
@@ -2713,11 +2735,11 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
         }
     }
 
-    /* 轮询表(懒建: 内容变化后重建) */
+    /* 轮询表(懒建: 内容变化后重建)。时钟域 = poll_clock_ms(帧步进), 秒换算 */
     hn_doc *doc = hn_context_doc(rt->ctx);
     if (!rt->poll_built) {
         rt->poll_n = 0;
-        double now = now_s();
+        double now = rt->poll_clock_ms / 1000.0;
         for (int i = 0;; i++) {
             const char *id = NULL;
             int ms = 0;
@@ -2735,7 +2757,7 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
         }
         rt->poll_built = 1;
     }
-    double now = now_s();
+    double now = rt->poll_clock_ms / 1000.0;
     double next = -1;
     for (int i = 0; i < rt->poll_n; i++) {
         if (now >= rt->polls[i].due) {

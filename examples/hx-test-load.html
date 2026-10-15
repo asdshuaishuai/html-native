@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<!-- examples/hx-test-load.html — hx-trigger="load" 最小验收页(C99 路径)
+     验证: 装载即自动发起 hx-get(rt/hn_rt.c run_load_actions), 片段换入自身。
+     驱动: dist/hnapp-macos-headless examples/hx-test-load.html --shot out.png
+     预期: 截图里出现 uptime 数字(如 "123456 s"), 不再是 "loading…" 占位。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="360x140">
+<meta name="hn-title" content="hx-trigger load">
+<meta name="hn-theme" content="dark">
+<style>
+  body { margin: 16; display: flex; flex-direction: column; gap: 8; }
+  .hint { font-size: 11; color: #6b7386; }
+  #box { background: #10151f; border: 1 solid #262e3d; border-radius: 8;
+         padding: 10; font-size: 13; color: #7fdbca; }
+</style>
+</head>
+<body>
+  <div class="hint">hx-trigger="load": 装载即自动请求 sys://uptime</div>
+  <div id="box" hx-get="sys://uptime" hx-trigger="load">loading…</div>
+</body>
+</html>

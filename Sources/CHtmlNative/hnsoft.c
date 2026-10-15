@@ -742,46 +742,6 @@ static float poly_edge_coverage(const float *px, const float *py, int n,
     return (float)hit * 0.0625f;
 }
 
-/* Triangles are the common three.js path. Rasterize them directly with the
-   same barycentric edge coverage used by textured meshes; scanline polygon
-   filling otherwise samples only one horizontal intersection per row and
-   makes shallow edges visibly stair-step. */
-static void paint_polygon_triangle(fb *f, const hn_cmd *c,
-                                   const float *px, const float *py,
-                                   float scale, float alpha) {
-    float x0 = px[0], y0 = py[0], x1 = px[1], y1 = py[1], x2 = px[2], y2 = py[2];
-    float den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
-    if (fabsf(den) < 1e-6f) return;
-    float k0 = 2.0f * fabsf(den) /
-               fmaxf(fabsf(y1 - y2) + fabsf(x2 - x1), 1e-6f);
-    float k1 = 2.0f * fabsf(den) /
-               fmaxf(fabsf(y2 - y0) + fabsf(x0 - x2), 1e-6f);
-    float k2 = 2.0f * fabsf(den) /
-               fmaxf(fabsf(y0 - y1) + fabsf(x1 - x0), 1e-6f);
-    float minx = fminf(x0, fminf(x1, x2)), maxx = fmaxf(x0, fmaxf(x1, x2));
-    float miny = fminf(y0, fminf(y1, y2)), maxy = fmaxf(y0, fmaxf(y1, y2));
-    int ix0 = (int)floorf(minx) - 1, ix1 = (int)ceilf(maxx) + 1;
-    int iy0 = (int)floorf(miny) - 1, iy1 = (int)ceilf(maxy) + 1;
-    fcolor base = unpack(c->fill);
-    base.a *= alpha;
-    for (int yy = iy0; yy <= iy1; yy++) {
-        for (int xx = ix0; xx <= ix1; xx++) {
-            float fx = (float)xx + 0.5f, fy = (float)yy + 0.5f;
-            float w0 = ((y1-y2)*(fx-x2) + (x2-x1)*(fy-y2)) / den;
-            float w1 = ((y2-y0)*(fx-x2) + (x0-x2)*(fy-y2)) / den;
-            float w2 = 1.0f - w0 - w1;
-            float cov = 1.0f;
-            if (w0 < 0) cov = fminf(cov, 1.0f + w0*k0);
-            if (w1 < 0) cov = fminf(cov, 1.0f + w1*k1);
-            if (w2 < 0) cov = fminf(cov, 1.0f + w2*k2);
-            if (cov <= 0) continue;
-            fcolor col = c->grad_kind ? grad_at(c, fx, fy, scale) : base;
-            col.a *= cov;
-            fb_blend(f, xx, yy, col);
-        }
-    }
-}
-
 static void paint_polygon(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     if (!c->poly || c->poly_n < 3) return;
     int n = c->poly_n;
@@ -1888,12 +1848,6 @@ static void crc_init(void) {
         crc_table[n] = c;
     }
     crc_ready = 1;
-}
-static unsigned long crc32_upd(const unsigned char *buf, size_t len) {
-    if (!crc_ready) crc_init();
-    unsigned long c = 0xFFFFFFFFUL;
-    for (size_t n = 0; n < len; n++) c = crc_table[(c ^ buf[n]) & 0xFF] ^ (c >> 8);
-    return c ^ 0xFFFFFFFFUL;
 }
 
 static void be32(unsigned char *p, unsigned long v) {

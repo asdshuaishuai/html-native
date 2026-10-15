@@ -5,7 +5,9 @@ Neb(NO-WEB)的跨平台策略不是"每个平台移植一遍", 而是**契约先
 (app 壳 / daemon / 探针)只认契约。本文是这个格局的**总账**: 一张表把
 "同一契约、各平台实现"逐格钉住 —— 每格都按代码现状逐项核实, 不是意愿清单。
 
-> 校准: 2026-10-13(GPU 契约与视频图层两段按当日代码补入; 断言数为实测)。
+> 校准: 2026-10-13(GPU 契约与视频图层两段按当日代码补入; 断言数为实测);
+> 行号锚 2026-10-15 逐一重对齐(hnp_macos.c/hnp_linux.c 增改后旧锚失效,
+> 功能本身全部在位, 仅锚漂移)。
 
 图例: ✅ 实现(有回归锚) · ⚠️ 近似/条件(注明差距) · ❌ 路线图(契约已留位)
 
@@ -14,21 +16,21 @@ Neb(NO-WEB)的跨平台策略不是"每个平台移植一遍", 而是**契约先
 | 能力契约 | macOS | Linux/X11 | headless | Windows |
 |---|---|---|---|---|
 | **窗口 flags**(契约: `platform/hn_platform.h` `hnp_window_desc`; 声明: 文档 meta, 解析: `hn_context.c` `hn_doc_manifest`; 装配: `app/hn_app.c`) | | | | |
-| · floating(悬浮, `hn-level="floating"`) | ✅ `setLevel:` NSFloatingWindowLevel(`hnp_macos.c:205`) | ✅ `_NET_WM_STATE_ABOVE`(`hnp_linux.c:369`) | ❌ 无物理窗(字段按契约优雅忽略) | ❌ 新架构无 `hnp_win32.c`; 旧壳 hnwin 无层级 |
-| · desktop(桌面级, `hn-level="desktop"`) | ✅ kCGDesktopWindowLevel(`hnp_macos.c:206`) | ✅ `_NET_WM_STATE_BELOW`(同上:370) | ❌ 同上 | ❌ 同上 |
-| · sticky(跨空间, `hn-spaces="all"`) | ✅ `setCollectionBehavior:` CanJoinAllSpaces(`hnp_macos.c:208`) | ✅ `_NET_WM_STATE_STICKY`(`hnp_linux.c:371`) | ❌ 同上 | ❌ 同上 |
-| · borderless(无框, `hn-frameless`) | ✅ styleMask=0(`hnp_macos.c:188`) | ✅ `_MOTIF_WM_HINTS`(`hnp_linux.c:376`) | ❌ 同上 | ⚠️ 旧壳仅 WS_EX_LAYERED(透明), 无独立无框位 |
-| · no_shadow(去投影, `hn-shadow="false"`) | ✅ `setHasShadow:NO`(`hnp_macos.c:209`) | ⚠️ EWMH 无标准对应, 显式优雅忽略(`hnp_linux.c:389`) | ❌ 同上 | ❌ 同上 |
-| · click_through(穿透, `hn-click-through`) | ✅ `setIgnoresMouseEvents:` + 运行期切换(`hnp_macos.c:211,290`) | ✅ XShape 输入形 + 运行期切换, Xext 缺席优雅降级(`hnp_linux.c:412,463`) | ❌ 同上 | ❌ 同上 |
-| · transparent(逐像素透明, `hn-transparent`) | ✅ `setOpaque:NO`+clearColor(`hnp_macos.c:201`) | ⚠️ 24 位窗不可 ARGB, 声明被忽略(`hnp_linux.c:338`); 32 位 visual 是路线图 | ⚠️ 字段记账, 无表面可透 | ⚠️ 旧壳 WS_EX_LAYERED 近似 |
-| · x,y 开窗位(`hn-window WxH@x,y`) | ✅ 非 AUTO 即 `setFrameOrigin`(`hnp_macos.c:232`) | ✅ 非 AUTO 即 XMoveWindow(`hnp_linux.c:400`) | ❌ 无屏幕坐标 | ❌ 同上 |
-| · origin 读回(几何记忆的采样口, `hnp_window_origin`) | ✅(`hnp_macos.c:301`) | ✅ XTranslateCoordinates(`hnp_linux.c:472`) | ❌ 恒返 0, 调用方整段跳过(`hnp_headless.c:73`) | ❌ 同上 |
+| · floating(悬浮, `hn-level="floating"`) | ✅ `setLevel:` NSFloatingWindowLevel(`hnp_macos.c:750`) | ✅ `_NET_WM_STATE_ABOVE`(`hnp_linux.c:463`) | ❌ 无物理窗(字段按契约优雅忽略) | ❌ 新架构无 `hnp_win32.c`; 旧壳 hnwin 无层级 |
+| · desktop(桌面级, `hn-level="desktop"`) | ✅ kCGDesktopWindowLevel(`hnp_macos.c:751`) | ✅ `_NET_WM_STATE_BELOW`(同上:464) | ❌ 同上 | ❌ 同上 |
+| · sticky(跨空间, `hn-spaces="all"`) | ✅ `setCollectionBehavior:` CanJoinAllSpaces(`hnp_macos.c:753`) | ✅ `_NET_WM_STATE_STICKY`(`hnp_linux.c:465`) | ❌ 同上 | ❌ 同上 |
+| · borderless(无框, `hn-frameless`) | ✅ styleMask=0(`hnp_macos.c:720` 起) | ✅ `_MOTIF_WM_HINTS`(`hnp_linux.c:475`) | ❌ 同上 | ⚠️ 旧壳仅 WS_EX_LAYERED(透明), 无独立无框位 |
+| · no_shadow(去投影, `hn-shadow="false"`) | ✅ `setHasShadow:NO`(`hnp_macos.c:754`) | ⚠️ EWMH 无标准对应, 显式优雅忽略(`hnp_linux.c:483`) | ❌ 同上 | ❌ 同上 |
+| · click_through(穿透, `hn-click-through`) | ✅ `setIgnoresMouseEvents:` + 运行期切换(`hnp_macos.c:756,981`) | ✅ XShape 输入形 + 运行期切换, Xext 缺席优雅降级(`hnp_linux.c:515,576`) | ❌ 同上 | ❌ 同上 |
+| · transparent(逐像素透明, `hn-transparent`) | ✅ `setOpaque:NO`+clearColor(`hnp_macos.c:742`) | ⚠️ 24 位窗不可 ARGB, 声明被忽略(`hnp_linux.c:433`); 32 位 visual 是路线图 | ⚠️ 字段记账, 无表面可透 | ⚠️ 旧壳 WS_EX_LAYERED 近似 |
+| · x,y 开窗位(`hn-window WxH@x,y`) | ✅ 非 AUTO 即按 d->x/y 算内容矩形原点(`hnp_macos.c:781`)/`setFrameOrigin:`(`:852`) | ✅ 非 AUTO 即 XMoveWindow(`hnp_linux.c:495`) | ❌ 无屏幕坐标 | ❌ 同上 |
+| · origin 读回(几何记忆的采样口, `hnp_window_origin`) | ✅(`hnp_macos.c:992`) | ✅ XTranslateCoordinates(`hnp_linux.c:589`) | ❌ 恒返 0, 调用方整段跳过(`hnp_headless.c:73`) | ❌ 同上 |
 | **媒体**(契约: `hn.h` `hn_media_host`; 装配: `app/hn_media_platform.c`; 合成替身单一来源: `app/hn_media_synth.c`) | | | | |
 | · 播放(<video>/<audio> 状态机出声/出帧; loop 显式 ABI: 引擎 `set_loop` open 落宿主, 到尾通知直接回绕, 不再推断) | ✅ AVFoundation 运行期 dlopen(`hnp_media_macos.c`, `supported()=1`) | ⚠️ synth 合成替身(梯度帧+假时钟, 确定性可断言; 真解码是路线图) | ⚠️ 同 Linux(synth) | ❌ 旧壳未装配宿主(c->media==NULL → 占位 RECT) |
 | · 抽帧(`host.frame` → HN_CMD_BITMAP) | ✅ AVPlayer NV12→RGBA(`hnp_media_frame`) | ⚠️ synth 64x64 梯度帧 | ⚠️ 同 Linux | ❌ 无帧(占位) |
 | · 音频出声 | ✅ AVPlayer 直出 | ⚠️ synth 不出真声 | ⚠️ 同 Linux | ❌ |
-| **视频图层**(契约: `hn_platform.h` 尾部 `hnp_video_layer_attach/frame/detach`; 装配: 壳/hn_rt 媒体路径) | ✅ **AVPlayerLayer 原生图层直通**(`hnp_macos.c:450` attach/frame/detach): 解码帧由系统合成器直接合成, 像素不过 CPU; `media_window_probe` 实测图层模式 10s CPU 0.30 cores(硬线 <60%), `HN_MEDIA_LAYER=0` 退回 CPU 逐帧 | ✅ **Xv 原语就位**(`hnp_linux.c:889` libXv 运行期 dlopen: grab 端口 + XvImage 图层子窗 + XvPutImage 摆位; libXv 缺席/无端口 attach 返 0 → CPU 逐帧兜底); ⚠️ **行为级待验**(需 Linux+X11+libXv 主机; `linux_parity_check.sh` 到符号级) | ❌ 无表面(离屏路径恒 CPU 拉帧, 确定性口径) | ❌ 路线图 |
-| **GPU**(契约: `hn_platform.h` 尾部 `hnp_gpu_host` 原语表; 画法: `Sources/CHtmlNative/hn_gpu.c`; 宿主注入: `hn_rt_set_gpu_host`, 壳开关 `HN_GPU=metal`) | ✅ **Metal v1**(`hnp_gpu_metal.c`, 682 行): 运行期 dlopen + MSL 运行期编译, 链接期零 framework; `gpu_probe` 7 项断言(与 hnsoft 逐像素色差 ≤1/255, 契约容差 ±40 收紧到 ≤16); 当前为**离屏 readback** 口径(直呈是路线图) | ❌ 路线图(GL/mesa, 同一原语表; `hnp_linux.c` `hnp_gpu_backend()` 返回 NULL → 恒 hnsoft) | ❌ 无(GPU 后端返 NULL, 呼出方回退 hnsoft) | ❌ 路线图(D3D11) |
+| **视频图层**(契约: `hn_platform.h` 尾部 `hnp_video_layer_attach/frame/detach`; 装配: 壳/hn_rt 媒体路径) | ✅ **AVPlayerLayer 原生图层直通**(`hnp_macos.c:1041` attach/frame/detach): 解码帧由系统合成器直接合成, 像素不过 CPU; `media_window_probe` 实测图层模式 10s CPU 0.30 cores(硬线 <60%), `HN_MEDIA_LAYER=0` 退回 CPU 逐帧 | ✅ **Xv 原语就位**(`hnp_linux.c:1080` libXv 运行期 dlopen: grab 端口 + XvImage 图层子窗 + XvPutImage 摆位; libXv 缺席/无端口 attach 返 0 → CPU 逐帧兜底); ⚠️ **行为级待验**(需 Linux+X11+libXv 主机; `linux_parity_check.sh` 到符号级) | ❌ 无表面(离屏路径恒 CPU 拉帧, 确定性口径) | ❌ 路线图 |
+| **GPU**(契约: `hn_platform.h` 尾部 `hnp_gpu_host` 原语表; 画法: `Sources/CHtmlNative/hn_gpu.c`; 宿主注入: `hn_rt_set_gpu_host`, 壳开关 `HN_GPU=metal`) | ✅ **Metal v1**(`hnp_gpu_metal.c`, 862 行): 运行期 dlopen + MSL 运行期编译, 链接期零 framework; `gpu_probe` 7 项断言(与 hnsoft 逐像素色差 ≤1/255, 契约容差 ±40 收紧到 ≤16); 当前为**离屏 readback** 口径(直呈是路线图) | ❌ 路线图(GL/mesa, 同一原语表; `hnp_linux.c` `hnp_gpu_backend()` 返回 NULL → 恒 hnsoft) | ❌ 无(GPU 后端返 NULL, 呼出方回退 hnsoft) | ❌ 路线图(D3D11) |
 | **文本渲染**(FreeType; `hnsoft.c`) | ✅ homebrew FreeType(macOS 产物带 `+文本`; daemon/hncore-macos-arm64 实测) | ⚠️ 引擎同一份, 交叉产物 `-DHN_NO_TEXT`; 部署平台接系统 FreeType 即开启 | ⚠️ 同 Linux(hnapp-headless 本机构建带 FreeType) | ❌ vcpkg 路线(构建脚本注释已留位) |
 | **3D/QUAD**(`hn_mesh.c`, `HN_CMD_QUAD`, `hn-mesh-*`) | ✅ 引擎级 | ✅ 引擎级 | ✅ 引擎级 | ✅ 引擎级 |
 | **canvas / GIF / Lottie**(`hn_canvas/hn_gif/hn_lottie/hn_json.c`) | ✅ 引擎级(全平台同源同份代码, 跨架构确定性由构建自检钉住) | ✅ 引擎级 | ✅ 引擎级 | ✅ 引擎级 |

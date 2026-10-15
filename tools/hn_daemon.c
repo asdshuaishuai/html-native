@@ -54,7 +54,9 @@
  *   - 窗口/事件循环归各平台壳(tools/hnweb_macos.c / hnweb_linux.c / hnwin.c)
  *     —— daemon 只管**无头**应用的文档生命周期; 开窗 = spawn 平台壳子进程
  *     (open window:1), 窗口的事件循环仍在壳里, daemon 只记 pid/生命周期。
- *   - sys:// 桥统一在这一层(原来 Swift/SystemBridge 与 C sysbridge 两份)。
+ *   - sys:// 桥单源在 rt/hn_rt.c 的 hn_rt_sys_fragment(daemon 与 rt 同链
+ *     编译直呼; 原 daemon 本地 4 路由副本已删 —— 副本漂移曾使 hx-test-get
+ *     的 daemon 驱动流静默断裂)。
  *
  * 用法: hn_daemon [--socket PATH]   默认 ~/.html-native/hn-daemon.sock
  */
@@ -454,127 +456,6 @@ static void tb_metrics(void *ctx, const hn_font_desc *font,
     hnsoft_metrics(font, ascent, descent, leading);
 }
 
-/* ---------------- sys:// 桥(统一层, 与 hnweb_macos.c 同一份 KV 格式) ---------------- */
-
-static char *read_file(const char *path, size_t *len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (n < 0) { fclose(f); return NULL; }
-    char *buf = (char *)malloc((size_t)n + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t got = fread(buf, 1, (size_t)n, f);
-    fclose(f);
-    buf[got] = 0;
-    *len = got;
-    return buf;
-}
-
-static char *store_path(const char *store_id) {
-    const char *home = getenv("HOME");
-    if (!home) return NULL;
-    char *p = (char *)malloc(strlen(home) + strlen(store_id) + 64);
-    if (!p) return NULL;
-    sprintf(p, "%s/.html-native/store/%s.json", home, store_id);
-    return p;
-}
-
-static int store_get(const char *file, const char *key, char *out, size_t cap) {
-    size_t n = 0;
-    char *d = read_file(file, &n);
-    if (!d) return 0;
-    char pat[256];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char *p = strstr(d, pat);
-    int found = 0;
-    if (p && (p = strchr(p + strlen(pat), ':')) != NULL) {
-        p++;
-        while (*p == ' ') p++;
-        if (*p == '"') {
-            p++;
-            size_t i = 0;
-            while (*p && *p != '"' && i + 1 < cap) out[i++] = *p++;
-            out[i] = 0;
-            found = 1;
-        }
-    }
-    free(d);
-    return found;
-}
-
-static void store_set(const char *file, const char *key, const char *val) {
-    char *obj = NULL;
-    size_t obj_n = 0, cap = 4096;
-    obj = (char *)malloc(cap);
-    if (!obj) return;
-    obj[0] = 0;
-    int have_key = 0;
-    size_t n = 0;
-    char *d = read_file(file, &n);
-    if (d) {
-        const char *p = d;
-        while (*p) {
-            while (*p && (*p == ' ' || *p == '{' || *p == ',' || *p == '\n')) p++;
-            if (*p != '"') break;
-            const char *ks = ++p;
-            while (*p && *p != '"') p++;
-            size_t kl = (size_t)(p - ks);
-            if (*p) p++;
-            while (*p && *p != ':') p++;
-            if (*p) p++;
-            while (*p == ' ') p++;
-            if (*p != '"') break;
-            const char *vs = ++p;
-            while (*p && *p != '"') p++;
-            size_t vl = (size_t)(p - vs);
-            if (*p) p++;
-            int is_t = (kl == strlen(key) && !strncmp(ks, key, kl));
-            const char *wv = is_t ? val : vs;
-            size_t wl = is_t ? strlen(val) : vl;
-            while (obj_n + kl + wl + 8 >= cap) { cap *= 2; obj = (char *)realloc(obj, cap); }
-            if (!obj) { free(d); return; }
-            if (obj_n) obj[obj_n++] = ',';
-            obj_n += (size_t)snprintf(obj + obj_n, cap - obj_n, "\"%.*s\":\"%.*s\"",
-                                      (int)kl, ks, (int)wl, wv);
-            if (is_t) have_key = 1;
-        }
-        free(d);
-    }
-    if (!have_key) {
-        while (obj_n + strlen(key) + strlen(val) + 8 >= cap) { cap *= 2; obj = (char *)realloc(obj, cap); }
-        if (!obj) return;
-        if (obj_n) obj[obj_n++] = ',';
-        obj_n += (size_t)snprintf(obj + obj_n, cap - obj_n, "\"%s\":\"%s\"", key, val);
-    }
-    char dir[1024];
-    snprintf(dir, sizeof(dir), "%s", file);
-    char *sl = strrchr(dir, '/');
-    if (sl) { *sl = 0; mkdir(dir, 0755); }
-    FILE *f = fopen(file, "wb");
-    if (f) { fprintf(f, "{%s}", obj); fclose(f); }
-    free(obj);
-}
-
-static int qparam(const char *q, const char *key, char *out, size_t cap) {
-    if (!q) return 0;
-    size_t kl = strlen(key);
-    const char *p = q;
-    while (*p) {
-        while (*p == '&' || *p == '?') p++;
-        if (!strncmp(p, key, kl) && p[kl] == '=') {
-            const char *v = p + kl + 1;
-            size_t i = 0;
-            while (*v && *v != '&' && i + 1 < cap) out[i++] = *v++;
-            out[i] = 0;
-            return 1;
-        }
-        while (*p && *p != '&') p++;
-    }
-    return 0;
-}
-
 static void esc_html(const char *s, char *out, size_t cap) {
     size_t i = 0;
     for (; *s && i + 7 < cap; s++) {
@@ -588,51 +469,16 @@ static void esc_html(const char *s, char *out, size_t cap) {
     out[i] = 0;
 }
 
-/* sys:// → HTML 片段。与 hnweb_macos.c / hnwin.c 同一份语义(store KV), 这里是
-   统一层 —— 三个壳的 sys_fragment 可以逐步收敛到这一份。 */
-static char *sys_fragment(const char *url, const char *form_body, const char *store_id) {
-    if (!url || strncmp(url, "sys://", 6)) return NULL;
-    const char *route = url + 6;
-    const char *q = strchr(route, '?');
-    char key[256] = { 0 }, val[1024] = { 0 };
-    char *out = (char *)malloc(4096);
-    if (!out) return NULL;
-    if (!strncmp(route, "store/get", 9)) {
-        if (qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key))) {
-            char *sp = store_path(store_id);
-            char v[1024] = { 0 };
-            int got = sp && store_get(sp, key, v, sizeof(v));
-            if (sp) free(sp);
-            char ev[2200];
-            esc_html(got ? v : "", ev, sizeof(ev));
-            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
-        } else {
-            snprintf(out, 4096, "<span>missing key</span>");
-        }
-    } else if (!strncmp(route, "store/set", 9)) {
-        int hk = qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key));
-        int hv = qparam(q, "value", val, sizeof(val)) || qparam(form_body, "value", val, sizeof(val));
-        if (hk && hv) {
-            char *sp = store_path(store_id);
-            if (sp) { store_set(sp, key, val); free(sp); }
-            char ev[2200];
-            esc_html(val, ev, sizeof(ev));
-            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
-        } else {
-            snprintf(out, 4096, "<span>missing key/value</span>");
-        }
-    } else if (!strncmp(route, "store/count", 11)) {
-        snprintf(out, 4096, "<span>1</span>");
-    } else if (!strncmp(route, "info", 4)) {
-        snprintf(out, 4096,
-                 "<div style=\"font-size:13;color:#e8eaf0\">html-native daemon (C99)</div>"
-                 "<div style=\"font-size:11;color:#6b7386\">no webview, no swift, one engine</div>");
-    } else {
-        free(out);
-        return NULL;
-    }
-    return out;
-}
+/* sys:// → HTML 片段: 单源在 rt/hn_rt.c 的 hn_rt_sys_fragment(daemon 与 rt
+   同链编译, 见 build-daemon-cli.sh, hx_perform 直呼)。原这里养过一份只有
+   store/get、store/set、store/count、info 四条路由的本地副本 —— 副本缺
+   host/uptime/cpu/memory/disk/clipboard/open/notify, 使 hx-test-get 等页的
+   daemon 驱动流静默断裂(副本漂移正是根因), 已删。store KV 文件路径两份
+   实现逐字节一致(~/.html-native/store/<id>.json), 语义无缝切换。
+   clipboard/open 两条路由需要 AppKit 已装载进本进程 —— daemon 不链任何
+   平台层, 没人替我们调 hnp_init; rt/hn_rt.c 的 hn_objc_bind 已改为在
+   消费点自行 dlopen(2026-10-15 复审实测修复), daemon 零额外动作,
+   路由全集在 daemon 链路与 app 链路等效。 */
 
 /* ---------------- hx-* 执行(与三壳同一套 htmx 语义) ---------------- */
 
@@ -649,12 +495,24 @@ static int hx_perform(dapp *a, hn_node *carrier) {
     const char *get = hn_node_attr(carrier, "hx-get");
     const char *url = post ? post : get;
     if (!url) return 0;
+    /* 非 sys:// = 外部 fetch —— 与 rt/hn_rt.c hx_perform 同一纪律: 显式标注
+       而非静默吞掉(C99 层无网络实现; 静默失败是排查黑洞, 页面"点了没反应")。 */
+    if (strncmp(url, "sys://", 6)) {
+        fprintf(stderr, "[hx] fetch 不支持: \"%s\" — C99 引擎零网络, 仅 "
+                "sys:// 本地桥; 外部资源走 sys://open 交系统打开\n", url);
+        fflush(stderr);
+        return 0;
+    }
     hn_doc *doc = hn_context_doc(app_ctx(a));
     char form[4096];
     form[0] = 0;
     hn_doc_form_encode(doc, form, sizeof(form));
-    char *frag = sys_fragment(url, form, g_store_id_default);
-    if (!frag) return 0;
+    char *frag = hn_rt_sys_fragment(url, form, g_store_id_default);
+    if (!frag) {
+        fprintf(stderr, "[hx] 未知 sys:// 路由: %s\n", url);
+        fflush(stderr);
+        return 0;
+    }
     const char *tid = hn_node_attr(carrier, "hx-target");
     if (!tid || !tid[0] || !strcmp(tid, "this")) tid = hn_node_attr(carrier, "id");
     if (!tid || !tid[0]) { free(frag); return 0; }
