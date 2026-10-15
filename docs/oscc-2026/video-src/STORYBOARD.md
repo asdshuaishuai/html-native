@@ -41,7 +41,7 @@ kicker "现状 · 三堵墙"。卡1 "WebView 内核百兆起步 / 内存黑洞"�
 - src: compositions/frames/03-architecture.html
 - rules: stat-bars-and-fills (架构条 scaleX 展开) + sine-wave-loop (标签带匀速漂移)
 
-标题 "Neb 的回答"。三层条：Neb 引擎核心 (20.6k 行纯 C99) → rt 运行时 → platform 平台层 (Metal / cairo / hnsoft 同源)。标签滚动带：纯 C99 · 零依赖 · 零 SDK · 10 类指令 · 三后端同源 · 探针锚定。
+标题 "Neb 的回答"。三层条：Neb 引擎核心 (20.6k 行纯 C99) → rt 运行时 → platform 平台层 (Metal / cairo / hnsoft 同源)。标签滚动带：纯 C99 · 零依赖 · 零 SDK · 14 种指令 · 三后端同源 · 探针锚定。
 
 ## Frame 4 — 实机演示
 
@@ -71,7 +71,7 @@ kicker "现状 · 三堵墙"。卡1 "WebView 内核百兆起步 / 内存黑洞"�
 - src: compositions/frames/05-metrics.html
 - rules: counting-dynamic-scale (数字滚动+scale 生长) + spring-pop-entrance (卡片敲入) + ambient-glow-bloom (落位光晕)
 
-卡：20.6k 行 C99 / 1145+ 探针断言 / 10 类绘制指令 / 0 依赖 0 SDK。底线："跨架构确定性：同一文档，逐位一致"。
+卡：20.6k 行 C99 / 1145+ 探针断言 / 14 种绘制指令 / 0 依赖 0 SDK。底线："跨架构确定性：同一文档，逐位一致"。
 
 ## Frame 6 — 标准格式与边界
 

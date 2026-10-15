@@ -49,7 +49,7 @@ import sys
 n = int(sys.argv[1])
 chunks = {
  1: "<div style='padding:16px'><div style='color:#8b96ad;font-size:13px'>agent 正在回答…</div><div style='margin-top:10px;color:#e8edf5;font-size:16px'><b>构建体检</b>：两条链路都活着。</div></div>",
- 2: "<div style='padding:16px'><div style='color:#e8edf5;font-size:16px'>① 构建：三平台 12 产物，0 warnings。</div><div style='margin-top:10px;color:#9aa7b8;font-size:14px'>② 探针：24 个脚本，1145+ 断言。</div></div>",
+ 2: "<div style='padding:16px'><div style='color:#e8edf5;font-size:16px'>① 构建：三平台 12 产物，0 warnings。</div><div style='margin-top:10px;color:#9aa7b8;font-size:14px'>② 探针：28 个 *_probe.sh（以 find tools -name '*_probe.sh' 为准），1145+ 断言。</div></div>",
  3: "<div style='padding:16px'><div style='color:#e8edf5;font-size:16px'>③ 收尾：回绕空洞 0.12s，分配 churn 0.04/帧。</div><div style='margin-top:10px;color:#3ecf6f;font-size:14px'>✔ 全绿，可以交付。</div></div>",
 }
 open("/tmp/neb-chat-push.html", "w").write(

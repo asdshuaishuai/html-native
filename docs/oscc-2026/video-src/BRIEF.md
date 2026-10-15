@@ -28,12 +28,12 @@ music: none
 
 - 分镜按任务给定的 7 段执行（封面 / 三堵墙 / Neb 的回答 / 实机演示 / 数字指标 / 标准格式与边界 / 结尾），每段时长见 STORYBOARD.md。
 - 演示段每段用大字标签压角（数据大屏 / 桌宠 / 数字人 / 媒体窗 GPU 合成 / 流式会话 / 多窗同屏）。
-- 数字指标段四张大数字卡敲入：20.6k 行 C99 / 1145+ 探针断言 / 10 类绘制指令 / 0 依赖 0 SDK；补一行"跨架构确定性: 同一文档, 逐位一致"。
+- 数字指标段四张大数字卡敲入：20.6k 行 C99 / 1145+ 探针断言 / 14 种绘制指令 / 0 依赖 0 SDK；补一行"跨架构确定性: 同一文档, 逐位一致"。
 - 诚实段必须保留一行注：moc3 专有格式不解析, 以官方 motion 数据驱动自有 rig 替代。
 
 ## Notes
 
-- 技术事实（全部真实，可引用）：引擎核心 20.6k 行纯 C99；显示列表 10 类指令；三后端同源（hnsoft 纯 C 光栅 / cairo / Metal v1）；24 探针 1145+ 项断言锚定渲染口径，跨架构确定性逐位对账；GPU 原语契约 hnp_gpu_host（平台出设备原语，引擎出画法），覆盖不了的指令整帧静默回退；真窗 <video> AVPlayerLayer GPU 合成；静态页真窗 CPU 0.0%；MIT 单仓库 github.com/asdshuaishuai/html-native。
+- 技术事实（全部真实，可引用）：引擎核心 20.6k 行纯 C99；显示列表 14 种指令；三后端同源（hnsoft 纯 C 光栅 / cairo / Metal v1）；28 个 *_probe.sh（以 find tools -name '*_probe.sh' 为准），1145+ 项断言锚定渲染口径，跨架构确定性逐位对账；GPU 原语契约 hnp_gpu_host（平台出设备原语，引擎出画法），覆盖不了的指令整帧静默回退；真窗 <video> AVPlayerLayer GPU 合成；静态页真窗 CPU 0.0%；MIT 单仓库 github.com/asdshuaishuai/html-native。
 - 结尾金句：agent 时代的渲染引擎，价值不在渲染本身，而在"渲染结果可被机器验证"——探针锚定的像素口径，就是 agent 与像素之间的翻译层。
 - 视觉规范：底色 #0e1220 深色系；强调色 #4f7cff（蓝）/ #a7b6ff（浅紫）/ #3ecf6f（绿）；大字号，PingFang SC；动效滑入/敲入/淡入，全程确定性（seek-safe）。
 - 纪律：只在 oscc-neb-video 工程目录与 /tmp 工作；不碰 html-native 仓库任何文件；不 git commit。

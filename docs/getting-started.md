@@ -250,7 +250,9 @@ checkbox/radio 绘制方框对勾/圆点、`:disabled`/`:checked` 伪类)。
 | **媒体元素**(`<video>`/`<audio>`) | `examples/media-demo.html`; 真窗 AVFoundation 解码出声, `video` 可走 AVPlayerLayer 图层直通(`HN_MEDIA_LAYER=0` 退回 CPU) |
 | **直染**(agent 输出零脚本渲染) | `<div hn-md>…markdown…</div>` / `hn-json` / `hn-csv`; 见 `examples/md-demo.html`、`fmt-demo.html` |
 | **HiDPI**(Retina 2x 真窗) | 缺省按平台 backing scale; `HN_RENDER_SCALE=1\|2` 可覆盖(离屏恒 1x) |
-| **GPU 契约 + Metal v1** | `HN_GPU=metal dist/hnapp-macos-arm64 examples/dashboard.html`(缺省关, 全 CPU/hnsoft) |
+| **GPU 契约 + Metal 直呈** | `HN_GPU=metal` 离屏加速; `HN_GPU=metal HN_GPU_PRESENT=1` 不透明窗 **CAMetalLayer 直呈**(drawable 直出, 零 readback/零 CPU 位图; 退出打 `presented/readback` 统计) |
+| **网络层**(2026-10-16) | `hx-get`/`hx-post` 指向 `http(s)://` 走真请求(GET 自动拼 query, POST 带 urlencoded 头); JS `hn.fetch(url,{method,headers,body})` → Promise, 响应 `ok/status/headers/text()/json()`, 4xx/5xx reject 带 `e.status`; 白名单 `HN_FETCH_ALLOW=host1,host2`(重定向逐跳重校验), 超时 `HN_FETCH_TIMEOUT_MS`; 示例 `examples/network.html` |
+| **Canvas 后端** | `HN_CANVAS_BACKEND=ity\|cg\|system` 显式切换(canvas_ity 可移植 / CoreGraphics 系统质量; 缺省账本重放, 能力不足自动整帧回退) |
 | **常驻/几何记忆** | socket op `{"op":"resident",...}` 登记后 daemon 重启自动重开; 开窗位置自动记忆 |
 | **持久化胶囊** | `hn persist <id> x.hnapp` / `restore`(socket op; 胶囊内嵌 agent 指令与能力图) |
 
@@ -282,9 +284,10 @@ bash tools/gpu_probe.sh      # 7     bash tools/timer_probe.sh   # 59
 ## 边界(诚实清单)
 
 - JavaScript 走内嵌 QuickJS(可选): `<script>` 求值 + 桥函数
-  `hnSetText`/`hnSetValue`/`hnGet2D`/`hnCanvas2D`/`hnMeshParam`/`hnMedia*`/
-  `hnWasm*`; 定时器与 RAF 已落地。**没有** `addEventListener`/DOM 全量 API/
-  `fetch`(Swift 时代的 `hn.fetch` 已随全量 C99 删除) —— 交互主体仍是声明式 hx-*。
+  `hnSetText`/`hnSetValue`/`hnCanvas2D`/`hnMeshParam`/`hnMedia*`/`hnWasm*`;
+  **`addEventListener` 已落地**(命中链冒泡, 事件对象含 key/clientX/preventDefault 等);
+  **`hn.fetch` 已落地**(异步 Promise, 系统网络栈 transport; 见上表网络层)。
+  没有的是 DOM 全量 API / `require` / `localStorage`(用 `hn.get/set`)。
 - CSS 是实用子集,不是全量(无 grid/svg/伪元素/`@font-face`/`word-break`;
   `nth-child` 已支持,其余在路线图上)。
 - 图片支持 `<img>`(含 GIF 动图、`object-fit`);字体走 FreeType + 系统字体栈。

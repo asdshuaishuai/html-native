@@ -35,7 +35,7 @@
 | Windows 运行时 | `tools/hnwin.c` 816 行 | Win32 窗口 + hnsoft + `sysbridge.c`(sys:// 桥); 新架构 `hnp_win32.c` 未写(平台矩阵 Windows 列在路线图) |
 | 软件光栅器 | hnsoft 1,943 行 + cairo 后端 1,031 行 | SDF 圆角矩形 · 线性/径向渐变 · 多边形扫描线 · 网格纹理映射 · **PNG 解码(自带 inflate)** · FreeType 文本 · PNG 编码; cairo 后端同签名可换(`hn_cairo.c`, 真模糊阴影/任意路径裁剪/真 zlib) |
 | 宿主与工具 | daemon 1,317 行 + CLI 292 行 | daemon 开窗 spawn(`--window`)/热推送/常驻(`resident`)/胶囊(`persist`/`restore`)/开窗几何记忆; CLI 9 个子命令(ping/open/update/close/list/dump/text/event/shot) |
-| 测试 | 探针 26 个(`tools/*_probe.sh`, 含 perf_probe CPU 硬线)+ `linux_parity_check.sh` | **约 1,200 项断言/检查**(逐探针最近实跑计数: render 61 · css 96 · layout 33 · html 37 · canvas 95 · timer 59 · fmt 118 · md 107 · gif 61 · anim 31 · stream 30 · include 23 · wasm 19 · mesh 36 · live2d 44 · lottie 37 · quad3d 33 · gpu 7 · pet 27 · resident 16 · window 25 · media_element 40 · media_window 30 · media 18 · hidpi 8 · sysbridge 17 · hnsoft_alpha 7 · cairo 30 · events 58; 另有 `linux_parity_check.sh`(编译级对账)与 `perf_probe.sh`(CPU 硬线 1 条)全过) |
+| 测试 | 探针 28 个(`tools/*_probe.sh`, 以 `find tools -name '*_probe.sh'` 为准，含 perf_probe CPU 硬线)+ `linux_parity_check.sh` | **约 1,200 项断言/检查**(逐探针最近实跑计数: render 61 · css 96 · layout 33 · html 37 · canvas 95 · timer 59 · fmt 118 · md 107 · gif 61 · anim 31 · stream 30 · include 23 · wasm 19 · mesh 36 · live2d 44 · lottie 37 · quad3d 33 · gpu 7 · pet 27 · resident 16 · window 25 · media_element 40 · media_window 30 · media 18 · hidpi 8 · sysbridge 17 · hnsoft_alpha 7 · cairo 30 · events 58; 另有 `linux_parity_check.sh`(编译级对账)与 `perf_probe.sh`(CPU 硬线 1 条)全过) |
 | 示例 | 50+ 个 HTML(+6 CSS) | 仪表盘 / 网页写法 / 消息卡 / 输入控件 / Lottie / dotLottie / 透明背板 / 桌宠 / live2d-demo / live2d-miku / canvas-demo / image-lab / md-demo / fmt-demo / media-demo / threejs-lab / threejs-ui / threejs-sphere / threejs-plane / threejs-pet / threejs-demo / ui-kit / anim-lab / agent-chat / agent-stream … |
 | 产物 | 16 个(`dist/`, 除 SHA256SUMS/pdb) | `hncore-*` 6 + `hncore-cairo-*` 1 + `hnweb-*` 4 + `hnwin-*` 1 + `hnapp-*` 3 + daemon/CLI; 实测大小 344 KB(hncore-macos-arm64)→ 1.4 MB(hnapp-macos-arm64, 含 QuickJS + WASM); 一条 `ZIG=zig bash tools/build-multiplatform.sh` 出全套(2026-10-13 实跑全绿) |
 
@@ -51,7 +51,7 @@
 | **增量渲染 / 惰性布局** | 每次变化触发全量重排(2000 卡片文档全量 layout 实测约 0.6ms/次, 见 1.3; 大文档仍全量) | 引擎(C) |
 | ~~**真实事件系统**~~ ✅ | 已完成(v0.2): 统一派发管道 + 冒泡 + 键盘/焦点/输入(见 3d 的完成注) | — |
 | **组件模型** | 无可复用/可组合的组件、无生命周期钩子 | 引擎(C) + JS |
-| ~~**网络层**~~ ⚠️ | Swift 版 `hn.fetch`(Promise + 主机白名单)随 c49cfbd 全量 C99 删除, 当前 C99 层**没有**网络实现(examples/network.html 用 hn.fetch 会报 TypeError); 重新落地是候选 | 运行时 |
+| ~~**网络层**~~ ✅ | 运行时直接绑定系统 HTTP transport：hx-get/hx-post 支持 http(s)，QuickJS 提供 `hn.fetch` Promise、主机白名单与错误状态；引擎核心仍保持零网络 | 运行时 |
 | **表单** | 表单编码 + 回车提交已实现；仍无 form 元素 / validation | 引擎(C) + 运行时 |
 | ~~`text-overflow: ellipsis`~~ ✅ | 已实现(含 `line-clamp` 多行截断) | — |
 | ~~**逐侧边框** (border-top/left/...)~~ ✅ | 已实现: border_w4/border_c4 逐侧解析 + 绘制 | — |
@@ -210,15 +210,12 @@ M1 壳仍走自己的 hover/轮询路径。事件类型表(原规划的 mousedow
   (2026-10, rt 层 glue: `document/window/element.addEventListener` 注册 →
   命中链冒泡 → JS 回调 + 标准事件对象; `tools/events_probe.sh` 58 断言全绿)
 
-#### 1e. 网络层（运行时层）⚠️ 曾被标记完成, 现不存在
+#### 1e. 网络层（运行时层）✅
 
-**校准**: Swift 时代(V0.2)确实做过 `hn.fetch`(URLSession + 主机白名单 +
-Promise 包装, 165 断言)。**c49cfbd 全量 C99 时随 Swift 全层删除**, 当前
-`Sources/rt/tools/app/platform` 全部 C 文件里 grep 不到任何 fetch/网络实现;
-README 与 platforms.md 的网络口径是"无网络: hx-* transport 可注入(sys:// 本地)"。
-examples/network.html 仍在, 但 `hn.fetch` 调用会抛 TypeError(daemon 日志可见)。
-- 若要恢复: C99 侧需自实现 HTTP 客户端 + 白名单(或明确保持"无网络"承诺, 走
-  `sys://open` 桥外置) —— 这是候选而非完成项。
+运行时通过系统网络 transport 提供 `hx-get`/`hx-post` 的 HTTP(S) 请求，并在 QuickJS 中提供 `hn.fetch(url, options)` Promise API。请求支持超时、重定向上限、响应体上限与 `HN_FETCH_ALLOW` 主机白名单；4xx/5xx 以带状态码的错误 reject。引擎核心仍不直接做网络 I/O，`sys://` 保持本地系统桥语义。
+
+- macOS/Linux：运行期绑定 libcurl；Windows：运行期绑定 WinHTTP，编译期不依赖 SDK 网络库。
+- 回归：`tools/http_probe.sh` 覆盖 hx 换入、404 保持目标不动、白名单拒绝、`hn.fetch` JSON resolve/reject。
 
 #### 1f. 表单处理 ⚠️ 部分
 ```
@@ -405,7 +402,8 @@ HTML/CSS → C99 引擎(解析→级联→布局→绘制指令) → 平台层 �
 
 ### 已实现的三平台路径(替代原 v0.2 图)
 ```
-显示列表(10 类指令) → 后端选择:
+显示列表(14 种指令，依据 `Sources/CHtmlNative/include/hn.h` 的 `HN_CMD_*` 枚举；
+CLIP_PUSH/POP/CLIP_PATH_PUSH 分立计数) → 后端选择:
   ├ hnsoft 软件光栅(全平台默认)
   ├ cairo(可选编译 -DHN_USE_CAIRO, 一份实现喂所有平台)
   └ hnp_gpu_host 原语表 → Metal(macOS, HN_GPU=metal) / GL(路线图) / D3D11(路线图)
@@ -458,11 +456,11 @@ HTML/CSS → C99 引擎(解析→级联→布局→绘制指令) → 平台层 �
 
 | 版本 | 主题 | 周期 | 交付 |
 |---|---|---|---|
-| v0.1 ✅ | 引擎原型 | 已完成 | 5 指令渲染 · hx-* · sys:// · 流式 · 动画 · JS · 三平台 |
-| v0.2 ✅ | 可用工具 | 已完成(定位/省略号/逐侧边框/事件/@keyframes/3D; 网络层随 Swift 层删除) | 8 指令渲染 · 事件管道 · 3D 变换 |
+| v0.1 ✅ | 引擎原型 | 已完成 | 14 种指令渲染 · hx-* · sys:// · 流式 · 动画 · JS · 三平台 |
+| v0.2 ✅ | 可用工具 | 已完成(定位/省略号/逐侧边框/事件/@keyframes/3D; 网络层随 Swift 层删除) | 14 种指令渲染 · 事件管道 · 3D 变换 |
 | v0.3 ✅ | 富媒体 | 已完成(Lottie/网格变形/透明背板) | Lottie 矢量动画 · 网格变形贴图 · 逐像素透明窗口 |
 | **v0.3.5** ✅ | **标准格式与形态** | 已完成(2026-10) | GIF / dotLottie(.lottie) / Live2D 运行时包 / JSON-CSV-Markdown 直染 / 桌宠窗口形态 / 媒体元素 + AVPlayerLayer 图层直通 / HiDPI / daemon 开窗与常驻 / WASM(wasm3) / Canvas 2D / GPU 契约 + Metal v1 |
-| **v0.4** | **应用框架** | ~10 周 | 组件 · 状态 · 路由(= §8 下一阶段核心: A2UI 协议适配 + 组件系统 + 路由/状态, 全部未动) · 伪元素 · Grid |
+| **v0.4** | **应用框架 + Smart-UX** | ~12 周 | §9 需求路线: 组件 · 状态 · 路由 · 伪元素 · Grid(五件套, 门槛) · A2UI 收口(§8) · 原生绘制动效语言(ChatGPT 级流畅感) · CSS 模块化(原子化 utility, 先评审) |
 | **v0.5** | **生产可用** | GPU 契约 v1 已完成, 余 ~15 周 | ~~合成层~~(GPU 契约 v1 ✅, 直呈/图层缓存待做) · 虚拟滚动 · DevTools · 无障碍 · 安全 |
 | **v1.0** | **OS-PWA** | 持续 | 后台任务 · 文件 · 传感器 · 多窗口 · 打包分发(胶囊 ✅) |
 
@@ -559,5 +557,69 @@ hn-* 体系不动、不改名、不被覆盖 —— A2UI 适配层是**挂在引
 验收门禁: 双构建零 error + a2ui_probe(消息解析/目录映射/增量更新/降级占位)
 + 既有探针零回归; A2UI 端到端演示 = 同一份 agent 消息流在 hnapp 真窗与
 headless shot 产出一致渲染。
+
+---
+
+## 9. v0.4 需求路线(2026-10-16 定稿): 从"能渲染"到"能构建应用"
+
+> 北极星: **生态复用, 而不是引擎强度**。引擎再强, agent 每次都得从零写完整
+> HTML, 形成不了复用与生态 —— **生态才是"现象级"的定义**。
+> `examples/ui-kit.html` 的"include 一次写类名即可"是对的方向, 说明这层
+> 已经被看到了; 但它是 CSS 预设, 不是组件模型。v0.4 要把它变成真的。
+
+### 9.1 应用框架五件套(阻断级, 此前全部未动)
+
+组件 / 状态 / 路由 / 伪元素 / Grid —— 这是从"能渲染"跨到"能构建应用"的
+门槛, 五项一个都不能少:
+
+| # | 需求 | 验收口径(需求级描述) |
+|---|---|---|
+| F1 | **组件模型** | `<define-element>`/受信目录: 定义一次, agent 与人类**写一个标签+属性**即得整块 UI; 属性/插槽/生命周期可组合; 与 ui-kit 的差别 = 组件承载**结构+行为+默认样式**, 不是散的 CSS 类 |
+| F2 | **状态管理** | 声明式绑定(数据变 → 绑定的 UI 自动更新, 批量不抖动); 与 sys://store 持久化不混用 |
+| F3 | **内部路由** | 多视图注册 + 切换(含过渡动画挂钩); 桌宠/面板类应用的"页面"概念 |
+| F4 | **伪元素** `::before/::after` | 装饰性 UI 的标配(content/定位/继承父样式); 组件内部实现装饰不再需要额外节点 |
+| F5 | **CSS Grid 基础** | `grid-template-columns` 等分/固定/比例 + gap; 与 flex 互补, agent 生成布局的面大幅拓宽 |
+
+组件/状态/路由的 API 形状沿用 §8(A2UI 一等客户端方向)—— §9 是 §8 的
+**需求侧定稿与扩展**(补 F4/F5 与下述两线)。
+
+### 9.2 CSS 模块化: 不能让 AI 重复写 CSS
+
+方向: **引入原子化 CSS(utility-first, 对 —— 就是 Tailwind 那个思路)**,
+但要**先考虑清楚再动**:
+
+- 问题: agent 每次生成应用都在重写 `.card{...}` 这类重复 CSS; 没有复用层,
+  生成的样式质量不稳定、体积虚胖。
+- 候选口径(需先做设计评审再实施):
+  1. **引擎内置原子类**: 把 `hn-theme` 令牌体系扩为受信 utility 集
+     (`flex-1`/`gap-2`/`text-sm` 风格), 引擎级解析, 零运行时成本;
+  2. **hn-theme 主题 + utility 双层**: 主题管令牌/组件皮肤, utility 管
+     布局微调 —— 与 F1 组件的"默认样式可被 utility 覆盖"衔接;
+  3. 纯构建期方案(把原子 CSS 当预处理)不采: 违反"无构建步骤"定位。
+- 评审要回答: 类名集多大、与组件默认样式谁赢、对现有探针断言的冲击面。
+
+### 9.3 Smart-UX: 桌面上的原生绘制动画感
+
+现状的诚实问题: **呈现总是"忽然出现、忽然消失"** —— 元素进出没有过渡,
+帧率有余而动效语言缺位。v0.4 的体验目标是 **ChatGPT 智能 UI 那种流畅感**:
+每个状态变化都有物理感的过渡, UI 是"真的画出来的", 不是 DOM 翻页。
+
+三条线:
+
+| 线 | 需求 |
+|---|---|
+| **进场/退场动效语言** | 元素挂载/卸载默认带 fade/up/scale 过渡(可关); 列表增删有交错动画; 对话流(agent-stream)逐条滑入 —— 覆盖"忽然出现/消失"的全部高频场景 |
+| **高帧率设计** | 交互类动画全路径 60fps 已有底子(帧合并/ambient 分级/双 paint 合并 2026-10-16 落地); 补: GPU 直呈帧下的动画管线(HN_GPU_PRESENT 模式不丢帧)、`prefers-reduced-motion` 尊重、掉帧可观测(帧耗时分位) |
+| **Canvas/Three 精度与精美感** | Canvas: ity/CG 后端能力面收齐(文字/渐变/混合不再回退错画); Three: 贴图采样质量(双线性/透明边缘)、光照一致性(GPU/软件同观感)、hn-three 与 CSS 动画同一时钟的编排 |
+
+验收口径(需求级): 同一份组件化 demo 页, 在 hnapp 真窗连续操作 30s,
+肉眼无"闪现/跳变", 帧率采样 p95 ≤ 20ms(60fps 档), 录屏与 ChatGPT 桌面端
+动效语言同级(渐入渐出、有惯性、无硬切)。
+
+### 9.4 交付顺序(需求定稿, 估量沿 §8 并入 F4/F5)
+
+P0 组件 → P1 状态 + P1.5 路由(并行) → **P1.7 伪元素/Grid(新增, 与 P1 并行)** →
+P2 A2UI 收口 → **P3 Smart-UX 动效语言(贯穿, 组件默认样式即带)** →
+P4 CSS 模块化设计评审(先评审后实施)。
 
 ---

@@ -13,9 +13,9 @@ AVFoundation/CoreMedia), `<video>` 在 DOM 侧只是一个状态机 + 合成器�
 - **引擎侧**: 媒体元素状态机(仿 HTMLMediaElement 的六态) + 布局盒 +
   "当前帧位图"绘制指令。引擎不认识解码器。
 - **平台侧**: 运行期 `dlopen` AVFoundation, 全部经 `objc_msgSend` 调用 ——
-  与 `platform/hnp_macos.c` 的既有手法逐字一致(dlopen AppKit + dlsym
-  objc_getClass/sel_registerName/objc_msgSend, 见 hnp_macos.c:137-145;
-  零 ObjC 头文件/零 .m/链接期不依赖 framework, hnp_macos.c:1-9 头注释)。
+  与 `platform/hnp_macos.c` 的既有手法逐字一致（dlopen AppKit + dlsym
+  objc_getClass/sel_registerName/objc_msgSend；见 `hnp_init` 的 Objective-C 运行时绑定路径；
+  零 ObjC 头文件/零 .m/链接期不依赖 framework）。
 - 音频不另起炉灶: 音轨由 AVPlayer 直接出声, 与视频同一入口(纯音频文件
   也走 `hnp_media_open`, 只是没有帧)。
 
@@ -39,8 +39,7 @@ AVFoundation/CoreMedia), `<video>` 在 DOM 侧只是一个状态机 + 合成器�
 `rt/hn_rt.c` 的剪贴板/openURL 曾用 `dlsym((void *)0, "objc_getClass")` ——
 macOS 上 `RTLD_DEFAULT` 是 `((void *)-2)` 而非 NULL(实测 dlsym(NULL,…)
 对所有符号返回 NULL), 这几个函数在 macOS 上曾恒失败。**现已全部改为
-`RTLD_DEFAULT` 宏并在 `-std=c99` 下自定义兜底定义**(修复见 rt/hn_rt.c:455-505
-的注释块)。同日复审补了第二段: 这些路由还依赖 AppKit 已装载进**本进程**,
+`RTLD_DEFAULT` 宏并在 `-std=c99` 下自定义兜底定义（修复见 `rt/hn_sys.c` 的 `hn_objc_bind` 与 `hn_sys_clip_set`/`hn_sys_clip_get`/`hn_sys_open_url` 路径）。同日复审补了第二段: 这些路由还依赖 AppKit 已装载进**本进程**,
 而该前提只被真窗壳的 `hnp_init` 覆盖 —— daemon 不链任何平台层、`hn_app`
 的 `--shot` 分支在 `hnp_init` 调用点之前就返回, 两条链路曾换入降级占位
 "clip unavailable"。现 `hn_objc_bind` 在消费点自行 `dlopen` AppKit
@@ -74,8 +73,8 @@ JS(QuickJS)──hnMedia*/hnWasm*──┐
 要点:
 
 - **引擎零平台依赖**: hn_media.c 只认 `hn_media_host` 函数指针表, 不知道
-  AVFoundation 的存在(与 hn.h:193-196 图片后端、hn.h:199-207 资产后端
-  同一依赖倒置模式)。
+  AVFoundation 的存在（与 `Sources/CHtmlNative/include/hn.h` 的 `hn_image_backend` /
+  `hn_asset_backend` 定义同一依赖倒置模式）。
 - **平台零引擎依赖**: hnp_media_macos.c 只实现 hn_platform.h 追加段,
   被 rt 层包装成 hn_media_host 注入(包装点在 app/hn_app.c 与各壳)。
 - **同一入口**: `<video>` 与 `<audio>` 走同一会话表、同一宿主回调;
@@ -168,7 +167,7 @@ headless(hnp_headless.c)/linux(hnp_linux.c) 不新增实现文件:
 
 ## 3. 引擎侧 hn_media_host 回调表 + 引擎 API
 
-### 回调表(注入点: `hn_context_set_media`(hn.h:263), 与 assets 后端同模式 hn.h:199-207)
+### 回调表(注入点: `hn_context_set_media` 与 `hn_media_host` 定义，见 `Sources/CHtmlNative/include/hn.h`; 资产注入同文件的 `hn_context_set_assets`)
 
 ```c
 /* —— 写进 include/hn.h(公共), 实现在 Sources/CHtmlNative/hn_media.c —— */
@@ -210,7 +209,7 @@ void hn_context_set_media(hn_context *c, const hn_media_host *host); /* 宿主�
 引擎**不用 dt 自累计**(避免与真解码漂移); 引擎每帧把 dt 转交
 `tick()` 供无钟宿主累计, 随后读 `position()` 写回会话的 `cur_time`。
 合成宿主的确定性 = 探针用固定 16ms 步进喂 tick(hncore 已有同一手法:
-HN_CLOCK 分步推进, hncore.c:322-332)。
+HN_CLOCK 分步推进，见 `tools/hncore.c` 的 `HN_CLOCK` 处理与 `hn_context_anim_tick` 调用)。
 
 ### 引擎公开 API(hn.h 追加; 元素寻址, JS 桥与探针共用)
 
@@ -238,7 +237,7 @@ int    hn_media_state(hn_context *c, hn_node *n);    /* HN_MEDIA_* */
 | PLAYING | position≥duration 且 loop | PLAYING | host.seek(0) |
 | ENDED | play() | PLAYING | host.seek(0)+host.play |
 | PAUSED | play() | PLAYING | host.play |
-| 任意 | 文档替换/compact/destroy | (会话销毁) | host.close 全部(hn_media_sessions_clear 三处调用: hn_context.c:37/55/2469) |
+| 任意 | 文档替换/compact/destroy | (会话销毁) | host.close 全部（由 `hn_media_sessions_clear` 在 `hn_context_destroy`、`hn_context_set_doc`、`hn_context_compact` 路径调用） |
 
 属性读取(声明即语义, 与 lottie/mesh 属性风格一致):
 `src`(路径, 相对文档目录)、`loop`(布尔)、`muted`(布尔)、
@@ -246,8 +245,7 @@ int    hn_media_state(hn_context *c, hn_node *n);    /* HN_MEDIA_* */
 
 ### 数据结构(hn_internal.h)
 
-`hn_context` 追加(实现落位: `hn_media_session` 结构 hn_internal.h:385-401,
-media 字段与会话表 hn_internal.h:641-642):
+`hn_context` 追加(实现落位: `hn_media_session` 类型与 `hn_context` 的 `media`/`med_sessions` 字段，见 `Sources/CHtmlNative/hn_internal.h`):
 
 ```c
 const hn_media_host *media;              /* 运行时持有; NULL = 媒体禁用 */
@@ -265,7 +263,7 @@ struct hn_media_session {
 会话生命周期: 首次 layout/paint 触达该元素时建; 文档替换(compact/set_doc/
 destroy)时全部 close+free(帧缓冲 free)。帧缓存用**双缓冲**: 写入另一块再
 交换指针 —— 保证显示列表持有的指针在下次 repaint 前有效(引擎单线程,
-paint→raster 顺序固定, hn_internal.h:590 的 tmp 区生命周期同理)。
+paint→raster 顺序固定, `hn_internal.h` 的临时 arena 生命周期同理)。
 
 ---
 
@@ -276,19 +274,19 @@ paint→raster 顺序固定, hn_internal.h:590 的 tmp 区生命周期同理)。
 | Sources/CHtmlNative/hn_media.c | **引擎-媒体** | **新**。状态机/会话表/宿主调用/帧缓存 |
 | Sources/CHtmlNative/include/hn.h | **引擎-公共头** | 追加: HN_CMD_BITMAP、hn_cmd 位图字段、hn_media_host、hn_media_state、hn_media_* API、hn_wasm_* API |
 | Sources/CHtmlNative/hn_internal.h | **引擎-内部头** | 追加: hn_context 的 media 字段与会话表; hn_media_tick/会话清理的内部声明 |
-| Sources/CHtmlNative/hn_layout.c | **引擎-布局** | 替换元素尺寸链扩展(video/audio 分支, 现 hn_layout.c:1492-1496): video = 样式 > width/height 属性 > (READY 时宿主 meta) > 300x150; audio = 高 0(不可见, 盒仍在可命中) |
-| Sources/CHtmlNative/hn_paint.c | **引擎-绘制** | `<video>/<audio>` 分支(img 分支旁, 现 hn_paint.c:1671-1675): 轮询新帧→更新缓存→发 HN_CMD_BITMAP; 无帧(LOADING/纯音频)画占位 RECT(深底+边框, 探针可见非静默空白) |
+| Sources/CHtmlNative/hn_layout.c | **引擎-布局** | 替换元素尺寸链扩展(video/audio 分支, 见 `hn_layout` 的 video/audio 尺寸处理函数): video = 样式 > width/height 属性 > (READY 时宿主 meta) > 300x150; audio = 高 0(不可见, 盒仍在可命中) |
+| Sources/CHtmlNative/hn_paint.c | **引擎-绘制** | `<video>/<audio>` 分支(见 `hn_paint` 的媒体绘制路径): 轮询新帧→更新缓存→发 HN_CMD_BITMAP; 无帧(LOADING/纯音频)画占位 RECT(深底+边框, 探针可见非静默空白) |
 | Sources/CHtmlNative/hn_html.c | **引擎-解析** | **零改动**(video/audio 是普通元素, src 属性已可解析; void 表不动 —— 不做 `<source>` 子元素) |
-| Sources/CHtmlNative/hnsoft.c | **引擎-软光栅** | 指令分派 switch 加 HN_CMD_BITMAP(现 hnsoft.c:1743): RGBA 拉伸混合到 BGRA 画布, 圆角走既有裁剪路径 |
-| Sources/CHtmlNative/hn_context.c | **引擎-上下文** | anim_tick 内调 hn_media_tick; 会话表随文档销毁三处清理点销毁(hn_context.c:37/55/2469) |
+| Sources/CHtmlNative/hnsoft.c | **引擎-软光栅** | 指令分派 switch 加 HN_CMD_BITMAP(见 `hnsoft` 的显示列表分派): RGBA 拉伸混合到 BGRA 画布, 圆角走既有裁剪路径 |
+| Sources/CHtmlNative/hn_context.c | **引擎-上下文** | `hn_context_anim_tick_ex` 内调媒体 tick; 会话表随 `hn_context_destroy`、`hn_context_set_doc`、`hn_context_compact` 清理 |
 | Sources/CHtmlNative/hn_wasm.c | **引擎-WASM** | **新**。wasm3 封装(见 §7) |
-| rt/hn_rt.c | **桥** | QuickJS 桥函数注册(hnMedia*/hnWasm*, 现 hn_rt.c:2406-2418); hn_rt 全局媒体宿主槽位(仿 g_assets_be, 现 hn_rt.c:147-151 的 g_media_be/hn_rt_set_media)注入到每个 context(hn_rt.c:952); opaque 扩为 {doc, ctx} |
+| rt/hn_rt.c | **桥** | QuickJS 桥函数在 `hn_rt_eval` 中注册(`js_hn_media_*`/`js_hn_wasm_*`); 全局媒体宿主槽由 `hn_rt_set_media` 设置，`hn_rt_open` 创建 context 时注入 `hn_context_set_media`; opaque 为 `{doc, ctx}` |
 | rt/hn_rt.h | **桥-头** | 追加 `void hn_rt_set_media(const hn_media_host *host);` |
 | platform/hn_platform.h | **平台-头** | 追加 §2 声明段 |
 | platform/hnp_media_macos.c | **平台-macOS** | **新**。§2 全部实现(仅 `__APPLE__` 编入) |
 | platform/hnp_headless.c / hnp_linux.c | **平台-其余** | 仅 supported()=0 缺省(见 §2 末尾的两种落法之一) |
 | app/hn_app.c | **壳-主循环** | hnp_init 后装配 hn_media_host(hnp_media_* 直包)→ hn_rt_set_media; 帧循环把 hnp_now_ms 差值喂 hn_rt_frame(既有) |
-| tools/hncore.c | **壳-CLI/合成宿主** | 合成宿主(§8.1): 梯度帧+假时钟 —— **实现已收敛到 app/hn_media_synth.c 单一来源**(hncore 经 hn_media_synth_bind_doc 链接共用, hncore.c:35 头注); paint 输出追加 BITMAP 行与 MEDIA 状态行; HN_MEDIA_AUTOPLAY/HN_MEDIA_DURATION 环境钮 |
+| tools/hncore.c | **壳-CLI/合成宿主** | 合成宿主(§8.1): 梯度帧+假时钟 —— **实现已收敛到 app/hn_media_synth.c 单一来源**(hncore 经 hn_media_synth_bind_doc 链接共用); paint 输出追加 BITMAP 行与 MEDIA 状态行; HN_MEDIA_AUTOPLAY/HN_MEDIA_DURATION 环境钮 |
 | tools/media_probe.c | **探针-真机** | **新**。§8.2 |
 | tools/media_probe.sh | **探针-封装** | **新**(探针封装层已从 .py 全量转 .sh, tools/ 现无任何 .py)。§8.2 |
 | tools/build-multiplatform.sh | **构建** | vendor/wasm3 11 文件 + hn_media.c + hn_wasm.c 入列全部 SRC/ENGINE_SRC 数组; -Ivendor/wasm3; media_probe 的本机构建自检项 |
@@ -303,7 +301,7 @@ paint→raster 顺序固定, hn_internal.h:590 的 tmp 区生命周期同理)。
 
 ## 5. 布局与绘制契约(带现状锚点)
 
-- **布局**: 沿用 img 的回退链(现落位 hn_layout.c:1492-1496):
+- **布局**: 沿用 img 的回退链（见 `hn_layout` 的 video/audio 尺寸处理函数）:
   样式 > width/height 属性 > 固有尺寸。video 的固有尺寸在 READY 前未知
   → 兜底 300x150(HTML 默认); audio 兜底高 0。READY 到手后如未显式定尺寸
   → 下一次 layout 用宿主 meta 尺寸(触发一次重排)。
@@ -320,8 +318,7 @@ paint→raster 顺序固定, hn_internal.h:590 的 tmp 区生命周期同理)。
   int bitmap_stride, bitmap_w, bitmap_h;
   ```
 
-- **hncore paint 打印**(供 python 探针断言, 对齐既有打印格式
-  hncore.c:365-367 的 IMAGE 行):
+- **hncore paint 打印**（供 `.sh` 探针断言，对齐 `tools/hncore.c` 的 IMAGE 行打印路径）:
 
   ```
   BITMAP  x=... y=... w=... h=... src=64x64 pts=0.400
@@ -332,7 +329,7 @@ paint→raster 顺序固定, hn_internal.h:590 的 tmp 区生命周期同理)。
 
 ## 6. JS 桥(QuickJS, rt/hn_rt.c)
 
-注册在 `hn_rt_eval` 的既有桥旁(现 hn_rt.c:2406-2418, hnSetText/hnSetValue 同批),
+注册在 `hn_rt_eval` 的既有桥旁（`js_hn_media_*`/`js_hn_wasm_*` 注册函数与 `hnSetText`/`hnSetValue` 同一注册路径），
 `JS_SetContextOpaque` 从 `hn_doc*` 扩为 `{hn_doc *doc; hn_context *ctx;}`(桥内
 取用; hnSetText 改读 `.doc`)。宿主未注入或目标 id 不存在 → 全部静默 no-op
 或返回缺省值(不抛异常, 与 hnSetText 一致):
@@ -410,8 +407,7 @@ paint→raster 顺序固定, hn_internal.h:590 的 tmp 区生命周期同理)。
 tools/hncore.c 内置一份 `hn_media_host`:
 
 - **假时钟**: 宿主内 `t += dt`(play 时), `position()` 返回 t; `tick(dt)` 是
-  唯一时间来源。dt 由 HN_CLOCK 的既有分步推进喂入(hncore.c:322-332, 每步
-  16ms)→ 探针可精确断言 `t≈HN_CLOCK 设定值`(容差 = 一个步长 0.016s)。
+  唯一时间来源。dt 由 `tools/hncore.c` 的 `HN_CLOCK` 处理循环分步推进（每步 16ms）→ 探针可精确断言 `t≈HN_CLOCK 设定值`(容差 = 一个步长 0.016s)。
 - **梯度帧**: `frame()` 生成确定性 RGBA:
   `R=x*255/w, G=y*255/h, B=((int)(pts*10)*37)%256` —— 像素既验证几何又验证
   pts 前进, 逐字节可断言。
@@ -485,7 +481,7 @@ HN_CMD_BITMAP 几何与元素盒一致。**全平台可跑**(hncore 是零依赖
 ## 10. 实现者备忘(全部实测过, 别再踩)
 
 1. macOS dlsym 用 `RTLD_DEFAULT`(= `(void*)-2`), 不是 NULL
-   (曾有的 `dlsym((void*)0, …)` 写法已全部清除, 修复记录见 rt/hn_rt.c:455-505)。
+   (曾有的 `dlsym((void*)0, …)` 写法已全部清除，修复记录见 `rt/hn_sys.c` 的 `hn_objc_bind`)。
 2. NSApplication finishLaunching 必须先于 AVPlayer 异步加载, 否则
    duration 永远 NaN(hnp_init 已装过则幂等)。
 3. runloop 泵必须有界日期; distantFuture 在 pause 态永久阻塞(实测挂死)。
@@ -521,13 +517,12 @@ HN_CMD_BITMAP 几何与元素盒一致。**全平台可跑**(hncore 是零依赖
 - **§2**: `hnp_media_*` ABI + `platform/hnp_media_macos.c`(AVFoundation
   运行期 dlopen)。
 - **§3**: 六态状态机/会话表/`hn_media_host`/`hn_media_*` 元素寻址 API
-  (`include/hn.h:185-195`; 状态枚举实名 `hn_media_state_t`, 让位给同名
-  API 函数)。
+  (`Sources/CHtmlNative/include/hn.h` 中的 `hn_media_host`/`hn_media_state_t` 定义与 `hn_context_set_media` API；状态枚举实名 `hn_media_state_t`，让位给同名 API 函数)。
 - **§5**: 绘制 `HN_CMD_BITMAP=9`, **hnsoft 与 hn_cairo 双后端**(cairo 是
-  §4 契约表之外的追加); 布局回退链(现 hn_layout.c:1492-1496) —— video 缺省
+  §4 契约表之外的追加); 布局回退链（见 `hn_layout` 的 video/audio 尺寸处理函数）—— video 缺省
   **300×16:9**(契约写 300x150, 实现取 HTML 宽约定 + 16:9 高), audio 高 0。
 - **§6**: JS 桥全量 `hnMediaPlay/Pause/Seek/Time/Duration/Volume` +
-  `hnWasmLoad/hnWasmCall`(现 rt/hn_rt.c:2406-2418), 经 daemon `eval` op 可用。
+  `hnWasmLoad/hnWasmCall`(见 `hn_rt_eval` 的 `js_hn_media_*`/`js_hn_wasm_*` 注册路径)，经 daemon `eval` op 可用。
 - **§7**: wasm3 vendor 恰 11 源 + LICENSE; `hn_wasm.c` 封装。**两处超出
   契约**: `hn_wasm_call` 按导出签名转换 i32/f32/f64(契约 v1 仅 i32);
   `examples/wasm/add.wasm` 产物入库(契约只要 add.c)。
@@ -543,10 +538,9 @@ HN_CMD_BITMAP 几何与元素盒一致。**全平台可跑**(hncore 是零依赖
 
 1. ~~**§4 `app/hn_app.c` 宿主装配未落地**~~ ✅ **已落地**(2026-10 收口):
    `app/hn_media_platform.c` 把 `hnp_media_*` 适配成 `hn_media_host` 交
-   `hn_rt_set_media`(槽位 hn_rt.c:147-151, open 注入 hn_rt.c:952)——
+   `hn_rt_set_media`（媒体宿主槽由 `g_media_be` 持有，context 创建时调用 `hn_context_set_media`）——
    hnapp-macos = AVFoundation 真解码/真出声; headless/Linux 目标与 hncore
-   探针 = 合成替身(**单一来源 app/hn_media_synth.c**, 原先 hncore 里的
-   第二份实现已删)。合成宿主此前由 hncore.c:405/555 内联提供, 现收敛。
+   探针 = 合成替身（**单一来源 `app/hn_media_synth.c`**，原先 hncore 内联实现已删）。合成宿主装配与 `tools/hncore.c` 的 `hn_media_synth_host` 调用保持一致。
 2. **§8.2 fixture 目录 `tools/fixtures/media/` 未入库**: `media_probe.c`
    改为运行期合成 1s 440Hz WAV + 从 `/System/Library` 系统样例 .mov 抽
    真视频帧(Tier 2 覆盖面不减, 见上 18/0/0)。
@@ -557,4 +551,4 @@ HN_CMD_BITMAP 几何与元素盒一致。**全平台可跑**(hncore 是零依赖
    如实记录): 窗口壳 `<script>` 自动求值与"窗口内点击→JS"未接线 ——
    JS 桥入口目前是 daemon `eval` op, 窗口里点控制条暂为 no-op。
 5. Linux/Windows 真媒体后端 = §9 明确"不做", 非缺口; `supported()=0`
-   缺省已落地(`hnp_headless.c:142` / `hnp_linux.c:790`)。
+   缺省已落地（见 `hnp_headless.c`/`hnp_linux.c` 的 `hnp_media_supported` 实现）。

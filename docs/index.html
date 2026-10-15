@@ -243,7 +243,7 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         <div class="ico">○</div>
         <h3>可逐层取证</h3>
         <p><code>hncore parse|layout|boxes|paint|verify</code> 逐层看 DOM/盒模型/绘制指令，
-           加 <code>hn dump/text</code> 与 24 个探针（约 1145 项断言）钉住每一层。</p>
+           加 <code>hn dump/text</code> 与 28 个 <code>*_probe.sh</code>（约 1145 项断言）钉住每一层。</p>
       </div>
       <div class="card">
         <div class="ico">▣</div>
@@ -303,11 +303,12 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
 
     <div style="margin-top: 26px" class="grid2">
       <div class="card">
-        <h3>绘制指令共 10 种</h3>
+        <h3>绘制指令共 14 种</h3>
         <pre><span class="c">// 引擎产出的是纯数据，不是绘图调用</span>
 <span class="k">typedef struct</span> hn_cmd {
-  hn_cmd_kind kind;   <span class="c">// RECT / TEXT / IMAGE / CLIP± / QUAD /</span>
-                      <span class="c">// POLYGON / MESH / BITMAP / CLEAR_RECT</span>
+  hn_cmd_kind kind;   <span class="c">// RECT / TEXT / IMAGE / CLIP_PUSH / CLIP_POP /</span>
+                      <span class="c">// CLIP_PATH_PUSH / QUAD / POLYGON / MESH / BITMAP /</span>
+                      <span class="c">// CLEAR_RECT / PDATA / PATTERN / TRIS</span>
   <span class="k">float</span> x, y, w, h, radius;
   hn_color fill, stroke;     <span class="c">// 含渐变/阴影</span>
   <span class="k">const char</span> *text;          <span class="c">// 文本或图片路径</span>
@@ -384,11 +385,12 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         </p>
       </div>
       <div class="card">
-        <h3>系统集成</h3>
+        <h3>系统集成 + 网络</h3>
         <p>
           <code>sys://cpu|memory|disk|uptime|host</code> 系统数据、
           <code>sys://store</code> 本地 KV 持久化、剪贴板、系统通知、
-          打开 URL —— 全部本地应答，零网络。
+          打开 URL —— 全部本地应答；需要外部数据时 <code>hx-get</code>/<code>hn.fetch</code>
+          走运行时网络层（见下），<code>sys://</code> 依旧零网络。
         </p>
       </div>
       <div class="card">
@@ -411,13 +413,25 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         </p>
       </div>
       <div class="card">
-        <h3>单一渲染路径 + GPU 契约</h3>
+        <h3>单一渲染路径 + GPU 契约与直呈</h3>
         <p>
           渲染只有自研 C99 引擎这一条路径 —— 没有 WebKit 兜底、没有 Swift。
           后端接缝上是 hnsoft 软件光栅（默认）+ 可选 cairo（同签名换链接）+
           <strong>GPU 原语契约 <code>hnp_gpu_host</code></strong>（平台出原语、引擎出画法；
-          Metal v1 已落地，<code>HN_GPU=metal</code> 显式开启，覆盖不了的指令整帧回退 hnsoft）。
+          Metal 已落地，<code>HN_GPU=metal</code> 显式开启，覆盖不了的指令整帧回退 hnsoft）。
+          <strong>macOS 窗口直呈</strong>：<code>HN_GPU_PRESENT=1</code> 时画面直接画进
+          CAMetalLayer 的 drawable 呈现 —— 零 CPU 位图、零回读（实测 presented 帧回读数为 0）。
           <code>grid</code>/<code>svg</code> 等边界如实写在 README。
+        </p>
+      </div>
+      <div class="card">
+        <h3>网络层（2026-10 新增）</h3>
+        <p>
+          <code>hx-get</code>/<code>hx-post</code> 指向 <code>http(s)://</code> 走真实请求（GET 自动拼 query、
+          POST 带 urlencoded 头）；JS 侧 <code>hn.fetch(url, options)</code> 返回 Promise，
+          响应支持 <code>text()/json()</code>，4xx/5xx reject 带 <code>e.status</code>。
+          主机白名单 <code>HN_FETCH_ALLOW</code> 逐跳校验（含重定向），超时可配 ——
+          引擎核心依旧零网络，transport 全在运行时层。
         </p>
       </div>
     </div>
@@ -561,15 +575,15 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
     <div class="grid3">
       <div class="card">
         <div class="metric">~1145</div>
-        <p>探针断言/检查（24 个 <code>tools/*_probe.sh</code>，2026-10-13 实测合计；覆盖解析/级联/布局/绘制/交互/直染/媒体/3D/双后端）</p>
+        <p>探针断言/检查（28 个 <code>tools/*_probe.sh</code>，以 <code>find tools -name '*_probe.sh'</code> 为准；覆盖解析/级联/布局/绘制/交互/直染/媒体/3D/双后端）</p>
       </div>
       <div class="card">
         <div class="metric">5</div>
         <p>文档跨架构逐字节一致（构建门禁：同 HN_NO_TEXT 口径比对布局输出）</p>
       </div>
       <div class="card">
-        <div class="metric">10</div>
-        <p>显示列表指令类（RECT/TEXT/IMAGE/CLIP±/QUAD/POLYGON/MESH/BITMAP/CLEAR_RECT），每类有探针锚</p>
+        <div class="metric">14</div>
+        <p>显示列表指令类（RECT/TEXT/IMAGE/CLIP_PUSH/CLIP_POP/CLIP_PATH_PUSH/QUAD/POLYGON/MESH/BITMAP/CLEAR_RECT/PDATA/PATTERN/TRIS），每类有探针锚</p>
       </div>
     </div>
     <div class="card" style="margin-top: 16px">
