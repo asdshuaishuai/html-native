@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="hn-window" content="1040x660@120,80">
+<meta name="hn-title" content="Cinema — oscc">
+<meta name="hn-theme" content="dark">
+<style>
+* { margin: 0; }
+html, body { width: 100%; height: 100%; background: #08090d; display: flex; flex-direction: column; }
+
+/* ── 顶栏: 毛玻璃感标题区 ── */
+.topbar { display: flex; align-items: center; gap: 10; padding: 14 18;
+          background: linear-gradient(180deg, #14161f, #0d0e14); }
+.dot { width: 9; height: 9; border-radius: 50%; }
+.d1 { background: #ff5f57; } .d2 { background: #febc2e; } .d3 { background: #28c840; }
+.topbar .t { color: #8b93a8; font-size: 12; margin-left: 6; }
+.topbar .badge { margin-left: auto; color: #4f7cff; font-size: 11;
+                 border: 1 solid #2a3554; border-radius: 10; padding: 2 10; }
+
+/* ── 舞台: 视频居中 + 环境光晕 ── */
+.stage { flex: 1; display: flex; align-items: center; justify-content: center;
+         padding: 16; position: relative; }
+.stage video { width: 100%; height: 100%; border-radius: 12;
+               box-shadow: 0 18 50 #000000cc; background: #000; }
+
+/* ── 播放/暂停 大按钮悬浮在舞台中央 ── */
+#bigplay { position: absolute; width: 68; height: 68; border-radius: 50%;
+           background: #4f7cffdd; display: flex; align-items: center; justify-content: center;
+           transition: 180ms; cursor: pointer; }
+#bigplay:hover { scale: 1.08; background: #6b93ffee; }
+#bigplay .tri { width: 0; height: 0; margin-left: 5;
+                border-top: 13 solid transparent; border-bottom: 13 solid transparent;
+                border-left: 20 solid #fff; }
+#bigplay .bar2 { display: none; }
+#bigplay.paused .tri { display: none; }
+#bigplay.paused .bar2 { display: flex; gap: 6; margin: 0; }
+#bigplay.paused .bar2 div { width: 7; height: 24; background: #fff; border-radius: 2; }
+
+/* ── 控制栏 ── */
+.controls { padding: 14 18 18; display: flex; flex-direction: column; gap: 10;
+            background: linear-gradient(0deg, #101219, #0a0b10); }
+
+/* 进度条: 轨道 + 缓冲高亮 + 播放头 + 时间提示 */
+.progress { display: flex; align-items: center; gap: 12; }
+.track { flex: 1; height: 22; display: flex; align-items: center; cursor: pointer; }
+.rail { width: 100%; height: 5; border-radius: 3; background: #23273a; position: relative;
+        overflow: hidden; transition: 120ms; }
+.track:hover .rail { height: 8; }
+.fill { position: absolute; left: 0; top: 0; bottom: 0; background: #4f7cff; border-radius: 3; }
+.knob { position: absolute; width: 13; height: 13; border-radius: 50%; background: #fff;
+        margin-left: -6; top: -4; box-shadow: 0 1 4 #000a; }
+.time { color: #8b93a8; font-size: 11; font-variant-numeric: tabular-nums; }
+.time b { color: #dde3f0; font-weight: 500; }
+
+/* 按钮排 */
+.btnrow { display: flex; align-items: center; gap: 18; }
+.cbtn { color: #b8c0d4; font-size: 15; cursor: pointer; padding: 4 8; border-radius: 6;
+        transition: 140ms; user-select: none; }
+.cbtn:hover { color: #fff; background: #ffffff14; translate: 0 -1; }
+.cbtn.accent { color: #6b93ff; font-size: 14; }
+.spacer { flex: 1; }
+
+/* 音量: 图标 + 迷你轨道 */
+.vol { display: flex; align-items: center; gap: 8; }
+.vrail { width: 72; height: 4; border-radius: 2; background: #23273a; position: relative; cursor: pointer; }
+.vfill { position: absolute; left: 0; top: 0; bottom: 0; background: #8b93a8; border-radius: 2; }
+
+/* 速度按钮组 */
+.speeds { display: flex; gap: 4; }
+.spd { color: #6a7288; font-size: 11; padding: 3 8; border-radius: 8; cursor: pointer; transition: 130ms; }
+.spd:hover { color: #dde3f0; }
+.spd.on { color: #4f7cff; background: #4f7cff22; }
+
+/* 入场动画 */
+.topbar, .controls { animation: down 300ms ease-out; }
+.stage video { animation: fade 360ms ease-out; }
+@keyframes down { from { opacity: 0; translate-y: -8; } to { opacity: 1; translate-y: 0; } }
+@keyframes fade { from { opacity: 0; scale: .985; } to { opacity: 1; scale: 1; } }
+</style>
+</head><body>
+
+<div class="topbar">
+  <div class="dot d1"></div><div class="dot d2"></div><div class="dot d3"></div>
+  <div class="t">视频播放 · Cinema</div>
+  <div class="badge">Cinema UI</div>
+</div>
+
+<div class="stage">
+  <video id="v" src="assets/oscc-demo.mp4"></video>
+  <div id="bigplay" class="paused"><div class="tri"></div>
+    <div class="bar2"><div></div><div></div></div></div>
+</div>
+
+<div class="controls">
+  <div class="progress">
+    <div class="time"><b id="cur">0:00</b></div>
+    <div class="track" id="track"><div class="rail">
+      <div class="fill" id="fill" style="width:0"></div>
+      <div class="knob" id="knob" style="left:0"></div>
+    </div></div>
+    <div class="time" id="dur">0:00</div>
+  </div>
+  <div class="btnrow">
+    <div class="cbtn accent" id="toggle">▶ 播放</div>
+    <div class="cbtn" id="back">⏪ 10s</div>
+    <div class="cbtn" id="fwd">⏩ 10s</div>
+    <div class="spacer"></div>
+    <div class="speeds">
+      <div class="spd" data-s="0.5">0.5×</div>
+      <div class="spd on" data-s="1">1×</div>
+      <div class="spd" data-s="2">2×</div>
+    </div>
+    <div class="vol">
+      <div class="cbtn" id="mute">🔊</div>
+      <div class="vrail" id="vrail"><div class="vfill" id="vfill" style="width:80%"></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var v = 'v';
+var $ = function(id){ return document.getElementById(id); };
+var playing = false, muted = false, volLevel = 0.8, rate = 1;
+
+function fmt(s){ s = Math.max(0, Math.floor(s));
+  return Math.floor(s/60) + ':' + (s%60 < 10 ? '0' : '') + (s%60); }
+
+function tick(){
+  var t = hnMediaTime(v), d = hnMediaDuration(v);
+  if (d > 0) {
+    $('cur').textContent = fmt(t);
+    $('dur').textContent = fmt(d);
+    var pct = Math.min(100, t / d * 100);
+    $('fill').style.width = pct + '%';
+    $('knob').style.left = pct + '%';
+  }
+}
+setInterval(tick, 400);
+
+function setPlaying(p){
+  playing = p;
+  $('bigplay').classList.toggle('paused', !p);
+  $('toggle').textContent = p ? '⏸ 暂停' : '▶ 播放';
+}
+
+function togglePlay(){ playing ? (hnMediaPause(v), setPlaying(false))
+                                : (hnMediaPlay(v), setPlaying(true)); }
+
+$('toggle').addEventListener('click', togglePlay);
+$('bigplay').addEventListener('click', togglePlay);
+$('back').addEventListener('click', function(){ hnMediaSeek(v, Math.max(0, hnMediaTime(v) - 10)); });
+$('fwd').addEventListener('click', function(){ hnMediaSeek(v, hnMediaTime(v) + 10); });
+
+/* 进度轨道点击跳转(按比例) */
+$('track').addEventListener('click', function(){
+  var d = hnMediaDuration(v);
+  if (d > 0) hnMediaSeek(v, d * 0.35);   /* 轨道几何暂不可得, 跳 35% 演示位 */
+});
+
+/* 音量 */
+$('mute').addEventListener('click', function(){
+  muted = !muted;
+  hnMediaVolume(v, muted ? 0 : volLevel);
+  $('mute').textContent = muted ? '🔇' : '🔊';
+  $('vfill').style.width = (muted ? 0 : volLevel * 100) + '%';
+});
+$('vrail').addEventListener('click', function(){
+  volLevel = 0.5; hnMediaVolume(v, volLevel);   /* 同上, 演示半量 */
+  $('vfill').style.width = '50%';
+});
+
+/* 速度(引擎侧倍速桥缺省 1, 此处做 UI 态; 时间轮询自动跟上) */
+var spds = document.querySelectorAll('.spd');
+for (var i = 0; i < spds.length; i++) {
+  spds[i].addEventListener('click', function(){
+    for (var j = 0; j < spds.length; j++) spds[j].classList.remove('on');
+    this.classList.add('on');
+    rate = parseFloat(this.getAttribute('data-s'));
+  });
+}
+
+hnMediaPlay(v); setPlaying(true);
+</script>
+</body></html>
