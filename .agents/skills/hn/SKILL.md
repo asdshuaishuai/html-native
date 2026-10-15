@@ -127,6 +127,16 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 | Live2D/Cubism | `<img hn-cubism src="model3.json">`；动作组 `hn-cubism-motion="Idle"`、`hn-cubism-index`（需 Cubism SDK 构建的 hnapp） |
 | PainterEngine 呼吸立绘 | `<img hn-live="char.png">`（呼吸/摇摆 rig, hnapp-pe 构建） |
 | 透明桌宠 | `hn-transparent=1` + `hn-click-through` + `hn-level` |
+| **视频/音频播放** | `<video id="v" src="x.mp4">` 真窗 AVFoundation 解码出声；JS 控制桥见下 |
+
+**视频/音频 JS 控制桥**（自定义播放器 UI 的完整 API, 均按元素 id）：
+
+```js
+hnMediaPlay('v');   hnMediaPause('v');   hnMediaSeek('v', 10);   // 跳到 10s
+hnMediaTime('v');       // 当前播放位置(秒, -1 = 不可用)
+hnMediaDuration('v');   // 总时长(秒)
+hnMediaVolume('v', .5); // 音量(v<=0 同时静音)
+```
 
 ## 特有标签与窗口行为
 
