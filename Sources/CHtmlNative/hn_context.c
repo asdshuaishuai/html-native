@@ -137,6 +137,12 @@ void hn_context_repaint(hn_context *c) {
     gif_grave_flush(c);
 }
 
+void hn_context_publish_display_list(hn_context *c) {
+    if (!c || !c->doc) return;
+    c->dl.cmds = c->cmds;
+    c->dl.count = c->n_cmds;
+}
+
 /* 轻重画(ambient 帧): 不动级联/布局 —— 环境动画(纯 ext_clock 类)不改
    样式字段, 重建显示列表即可, 省掉整遍 relayout(30fps 帧循环下渲染
    成本减半; 静态立绘桌宠的 CPU 大头)。tmp 区与显示列表同生命周期

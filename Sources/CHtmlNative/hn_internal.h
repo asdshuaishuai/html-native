@@ -741,6 +741,14 @@ void hn_mesh_emit(hn_context *c, hn_node *n, const char *src,
 void hn_cubism_paint(hn_context *c, hn_node *n,
                      float bw, float bh, float sx, float sy, float alpha);
 const char *hn_cubism_runtime_version(void);
+/* 探针/诊断读口(drawable 级; Core 未链接恒 0)。
+   cb 指针经 hn_cubism_acquire(context, m3_path) 获得(与 paint 同一缓存)。 */
+struct hn_cubism;
+struct hn_cubism *hn_cubism_acquire(hn_context *c, const char *m3_path);
+int hn_cubism_drawable_count(const struct hn_cubism *cb);
+int hn_cubism_inverted(const struct hn_cubism *cb, int i);    /* csmIsInvertedMask */
+int hn_cubism_mask_count(const struct hn_cubism *cb, int i);  /* mask drawable 数 */
+/* drawable 总数既有读口 hn_cubism_drawable_count(const) 同参可用 */
 
 /* ---------- PainterEngine 软渲染集成(hn_pe.c; BSD-3 开源) ----------
  * hn-live="<image>": 贴图经 PE 的 px_surface + PX_TextureRenderEx_sincos

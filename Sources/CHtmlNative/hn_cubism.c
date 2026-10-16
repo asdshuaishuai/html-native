@@ -17,7 +17,8 @@
  * deformer 树/部件透明度传播都是 Core 的十年沉淀)。
  *
  * 遮罩(mask): mask drawable 三角汤 → CLIP_PATH_PUSH 多子路径裁剪 →
- * 画本 drawable → CLIP_POP; 反转 mask(csmIsInvertedMask) 暂按普通。
+ * 画本 drawable → CLIP_POP; 反转 mask(csmIsInvertedMask) = 反向绕行
+ * 矩形 + mask 三角反绕归一的纯数据合成(非零环绕取反, hnsoft/GPU 同规)。
  * 已知差距: 部件拼装观感仍有散乱(疑似逐 drawable Multiply/Screen
  * 颜色与离屏掩码口径), 精修方法: Playwright + 官方 Web runtime
  * (live2dcubismcore.min.js + pixi-live2d-display)渲染同模型出对照图,
@@ -341,6 +342,16 @@ int hn_cubism_blend(struct hn_cubism *cb, int i) {
     return 0;                                  /* HN_BLEND_SRC_OVER */
 }
 
+int hn_cubism_inverted(const struct hn_cubism *cb, int i) {
+    if (!cb || i < 0 || i >= cb->n_draw) return 0;
+    return (csmGetDrawableConstantFlags(cb->model)[i] & csmIsInvertedMask) ? 1 : 0;
+}
+
+int hn_cubism_mask_count(const struct hn_cubism *cb, int i) {
+    if (!cb || i < 0 || i >= cb->n_draw) return 0;
+    return csmGetDrawableMaskCounts(cb->model)[i];
+}
+
 int hn_cubism_texture_index(struct hn_cubism *cb, int i) {
     if (!cb || i < 0 || i >= cb->n_draw) return 0;
     return csmGetDrawableTextureIndices(cb->model)[i];
@@ -373,6 +384,8 @@ const float *hn_cubism_uvs(struct hn_cubism *cb, int i) { (void)cb; (void)i; ret
 int hn_cubism_index_count(struct hn_cubism *cb, int i) { (void)cb; (void)i; return 0; }
 const unsigned short *hn_cubism_indices(struct hn_cubism *cb, int i) { (void)cb; (void)i; return NULL; }
 int hn_cubism_blend(struct hn_cubism *cb, int i) { (void)cb; (void)i; return 0; }
+int hn_cubism_inverted(const struct hn_cubism *cb, int i) { (void)cb; (void)i; return 0; }
+int hn_cubism_mask_count(const struct hn_cubism *cb, int i) { (void)cb; (void)i; return 0; }
 int hn_cubism_texture_index(struct hn_cubism *cb, int i) { (void)cb; (void)i; return 0; }
 const char *hn_cubism_version(void) { return NULL; }
 
@@ -474,9 +487,17 @@ void hn_cubism_paint(hn_context *c, hn_node *n,
         /* ---- 遮罩(mask): 被 mask 的 drawable 以 mask 形状裁剪后再画。
             mask 形状 = 各 mask drawable 的三角汤(屏幕坐标), 每三角独立
             子路径(segs=3)做非零环绕并集 —— 与官方"离屏掩码"的可见效果
-            一致; 反转 mask(csmIsInvertedMask) v1 暂按普通 mask 处理。 *\/ */
+            一致。
+            反转 mask(csmIsInvertedMask, 常量标志): 可见区 = mask **之外**
+            (官方 = 离屏缓冲 alpha 取反)。引擎裁剪是非零环绕, 取反走纯
+            数据合成: 贴一张盖住 mask 包围盒的**反向绕行**矩形子路径 +
+            mask 三角全部归一为与矩形相反的绕向 —— 矩形内·mask 外 = 环绕
+            ±1(画), mask 内 = 0(不画)。hnsoft(pip_poly)与 GPU
+            (path_mask_raster)同为非零规则, 两端语义自动一致; 裁剪盒本就
+            按 poly 包围盒收口(两端一致), 与官方"mask 包围盒内的反转"对齐。 */
         int nm = csmGetDrawableMaskCounts(cb->model)[i];
         const int *mlist = csmGetDrawableMasks(cb->model)[i];
+        int inverted = (csmGetDrawableConstantFlags(cb->model)[i] & csmIsInvertedMask) ? 1 : 0;
         int pushed_clip = 0;
         if (nm > 0 && mlist) {
             int total = 0, nseg = 0;
@@ -486,11 +507,49 @@ void hn_cubism_paint(hn_context *c, hn_node *n,
                 total += hn_cubism_index_count(cb, mi);
                 nseg += hn_cubism_index_count(cb, mi) / 3;
             }
+            /* 反转: 追加矩形子路径(4 点 1 段), 盒 = mask 三角屏坐标包围盒 */
+            float mbx0 = 0, mby0 = 0, mbx1 = 0, mby1 = 0;
+            int have_mb = 0;
+            if (inverted) {
+                for (int m = 0; m < nm; m++) {
+                    int mi = mlist[m];
+                    if (mi < 0 || mi >= cb->n_draw) continue;
+                    int cnt = hn_cubism_index_count(cb, mi);
+                    const unsigned short *mix = hn_cubism_indices(cb, mi);
+                    const float *mv = hn_cubism_verts(cb, mi);
+                    if (cnt <= 0 || !mix || !mv) continue;
+                    for (int j = 0; j < cnt; j++) {
+                        int vi = mix[j];
+                        float x = ox + (orgx + mv[vi * 2] * ppu) * s;
+                        float y = oy + (orgy - mv[vi * 2 + 1] * ppu) * s;
+                        if (!have_mb) { mbx0 = mbx1 = x; mby0 = mby1 = y; have_mb = 1; }
+                        if (x < mbx0) mbx0 = x;
+                        if (x > mbx1) mbx1 = x;
+                        if (y < mby0) mby0 = y;
+                        if (y > mby1) mby1 = y;
+                    }
+                }
+                if (have_mb && mbx1 - mbx0 > 0.5f && mby1 - mby0 > 0.5f) {
+                    total += 4;
+                    nseg += 1;
+                } else {
+                    inverted = 0;   /* 退化包围盒: 反转无定义, 按普通 mask */
+                }
+            }
             if (total > 0 && nseg > 0) {
                 float *soup = (float *)hn_arena_alloc(a, sizeof(float) * (size_t)total * 2);
                 int *segs = (int *)hn_arena_alloc(a, sizeof(int) * (size_t)nseg);
                 if (soup && segs) {
                     int p = 0, sg = 0;
+                    if (inverted) {
+                        /* 矩形子路径: 顶点序使鞋带面积为正(y-down 顺时针)
+                           —— 与归一为负绕的 mask 三角互为反绕 */
+                        soup[p * 2] = mbx0; soup[p * 2 + 1] = mby0; p++;
+                        soup[p * 2] = mbx1; soup[p * 2 + 1] = mby0; p++;
+                        soup[p * 2] = mbx1; soup[p * 2 + 1] = mby1; p++;
+                        soup[p * 2] = mbx0; soup[p * 2 + 1] = mby1; p++;
+                        segs[sg++] = 4;
+                    }
                     for (int m = 0; m < nm; m++) {
                         int mi = mlist[m];
                         if (mi < 0 || mi >= cb->n_draw) continue;
@@ -503,7 +562,21 @@ void hn_cubism_paint(hn_context *c, hn_node *n,
                             soup[p * 2]     = ox + (orgx + mv[vi * 2] * ppu) * s;
                             soup[p * 2 + 1] = oy + (orgy - mv[vi * 2 + 1] * ppu) * s;
                             p++;
-                            if (j % 3 == 2) segs[sg++] = 3;
+                            if (j % 3 == 2) {
+                                if (inverted) {
+                                    /* 归一绕向: 鞋带面积为正的三角交换后两
+                                       点 → 全部负绕(与矩形相反)。 */
+                                    float *tp3 = soup + (p - 3) * 2;
+                                    float ar = (tp3[2] - tp3[0]) * (tp3[5] - tp3[1])
+                                             - (tp3[4] - tp3[0]) * (tp3[3] - tp3[1]);
+                                    if (ar > 0) {
+                                        float tx = tp3[2], ty = tp3[3];
+                                        tp3[2] = tp3[4]; tp3[3] = tp3[5];
+                                        tp3[4] = tx;     tp3[5] = ty;
+                                    }
+                                }
+                                segs[sg++] = 3;
+                            }
                         }
                     }
                     if (p == total && sg == nseg) {

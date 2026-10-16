@@ -486,6 +486,9 @@ void hn_context_layout_nopaint(hn_context *c, float width, float height,
 /* 仅重跑绘制(滚动等不改变布局的更新) */
 void hn_context_repaint(hn_context *c);
 const hn_display_list *hn_context_display_list(const hn_context *c);
+/* 外部经 hn_paint_push 追加指令后, 把追加纳入显示列表视图(与 paint 尾部
+ * 同一同步; 不重建任何内容)。探针/诊断用。 */
+void hn_context_publish_display_list(hn_context *c);
 
 /* 图片后端(尺寸查询); 运行时持有 backend 内存 */
 void hn_context_set_images(hn_context *c, const hn_image_backend *backend);
