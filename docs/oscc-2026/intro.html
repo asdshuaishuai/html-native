@@ -14,7 +14,7 @@
   .ft { position: absolute; bottom: 8mm; left: 15mm; right: 15mm; display: flex; justify-content: space-between; color: #b7bdc9; font-size: 7.5pt; }
   .tag { color: var(--blue); font-size: 10pt; font-weight: 600; letter-spacing: 3px; margin-bottom: 5mm; }
   .tag::after { content: ""; display: inline-block; width: 22mm; height: 1.5px; background: linear-gradient(90deg, var(--blue), transparent); vertical-align: middle; margin-left: 4mm; }
-  h2.big { font-size: 22pt; margin-bottom: 7mm; }
+  h2.big { font-size: 21pt; margin-bottom: 7mm; line-height: 1.35; }
   h2.big .hl { color: var(--purple); border-bottom: 2px solid var(--purple); padding-bottom: 1mm; }
   p.body { font-size: 10pt; line-height: 1.85; color: #3a3f4b; margin-bottom: 5mm; }
   p.body b { color: var(--ink); }
@@ -39,14 +39,15 @@
   .chip { border: 1px solid var(--line); border-radius: 2mm; padding: 2.5mm 4mm; font-size: 9pt; background: #f7f8fc; }
   .chip.hlgood { border-color: var(--purple); background: #f3efff; font-weight: 600; }
   .arrow { color: #b7bdc9; }
-  .shot { width: 100%; border: 1px solid var(--line); border-radius: 2mm; margin: 3mm 0; }
+  .note { font-size: 8.5pt; color: #8a92a3; line-height: 1.7; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 8.5pt; background: #f2f4f9; padding: 0.5mm 1.5mm; border-radius: 1mm; }
   /* 封面 */
   .cover { background: #0e1220; color: #fff; padding: 20mm 18mm; }
   .cover .hd { border-color: #3a4152; }
   .cover .hd .brand { color: #fff; } .cover .hd .sec { color: #6b7386; }
-  .cover .hero { margin-top: 58mm; }
-  .cover .hero h1 { font-size: 34pt; line-height: 1.3; font-weight: 800; }
-  .cover .hero h1 .p1 { color: #fff; border-bottom: 2mm solid #3a4152; }
+  .cover .hero { margin-top: 52mm; }
+  .cover .hero h1 { font-size: 32pt; line-height: 1.32; font-weight: 800; }
+  .cover .hero h1 .p1 { color: #fff; }
   .cover .hero h1 .p2 { color: #a7b6ff; }
   .cover .hero p.sub { margin-top: 8mm; font-size: 11pt; line-height: 1.9; color: #c7cede; }
   .cover .hero p.sub b { color: #fff; }
@@ -59,14 +60,16 @@
 <div class="page cover">
   <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">2 0 2 6 上 海 开 源 软 件 应 用 创 新 大 赛 · 作 品 介 绍 文 档</span></div>
   <div class="hero">
-    <h1><span class="p1">agent 写下的</span><br><span class="p2">HTML，就是原生窗</span></h1>
-    <p class="sub">html-native（引擎核心 <b>Neb = NO-WEB</b>）—— 为 AI agent 定制的 HTML 原生渲染引擎。<br>一条 hn 编码直接渲染成<b>桌面级原生窗</b>：桌宠、数字人、数据大屏、流式会话——<br>无 WebView、无浏览器内核、无 Node，20.6k 行纯 C99 从解析到像素。</p>
+    <h1><span class="p1">用 HTML 写桌面 UI</span><br><span class="p2">为 AI agent 定制的 HTML 原生渲染引擎</span></h1>
+    <p class="sub">html-native（引擎核心 <b>Neb = NO-WEB</b>）—— 一个不含浏览器内核（NO-WEB）的 HTML 原生渲染引擎框架。<br>
+    HTML 是 AI 最会写的 UI 语言；Neb 让它<b>直接渲染成桌面原生窗</b>，<br>
+    不借 WebView、不打包浏览器内核，也不需要重新编译。</p>
   </div>
   <div class="minis">
-    <div class="mini"><div class="k">项 目 背 景</div><div class="v">AI 生成 UI 不可验证 · WebView 内核百兆起步 · 桌面形态缺位</div></div>
-    <div class="mini"><div class="k">技 术 架 构</div><div class="v">Neb C99 引擎 · hnsoft/cairo/Metal 三后端 · QuickJS · 探针锚定</div></div>
-    <div class="mini"><div class="k">应 用 场 景</div><div class="v">桌宠与数字人 · agent 数据大屏 · 流式会话窗 · 常驻小组件</div></div>
-    <div class="mini"><div class="k">创 新 点</div><div class="v">探针锚定渲染 · GPU 契约+静默回退 · 桌宠原语 · 零依赖零 SDK</div></div>
+    <div class="mini"><div class="k">项 目 背 景</div><div class="v">HTML 困在浏览器里 · WebView 百兆起步 · 原生框架太重无法热更</div></div>
+    <div class="mini"><div class="k">技 术 架 构</div><div class="v">C99 引擎核心 · 14 种指令显示列表 · hnsoft/cairo/Metal 三后端同源</div></div>
+    <div class="mini"><div class="k">引 擎 内 建</div><div class="v">设计令牌基底（hn-theme）· 交互容错层（hx-auto）· 无头渲染可取证</div></div>
+    <div class="mini"><div class="k">形 态 与 场 景</div><div class="v">桌宠 · 数据大屏 · 数字人 · 流式会话 · 常驻小组件</div></div>
   </div>
   <div class="ft"><span>html-native · 作品介绍文档</span><span class="r">2026 · 开源向实</span></div>
 </div>
@@ -75,21 +78,21 @@
 <div class="page">
   <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">一 · 项 目 背 景</span></div>
   <div class="tag">01 — 项 目 背 景</div>
-  <h2 class="big">AI 交互 UI 的第一公里：<span class="hl">agent 画得出来，住不进桌面</span></h2>
-  <p class="body">今天 agent 生成 UI 的事实标准是"吐一张网页"：渲染结果取决于用户装了什么浏览器、内核百兆起步、内存黑洞；而且网页只能是网页——agent 会画界面，却<b>不会让界面"住"在桌面上</b>。对 agent 而言还多一堵墙：生成的东西<b>无法被机器验证</b>——渲染对不对全靠人眼，回归全靠重 roll。</p>
+  <h2 class="big">HTML 是 AI 最会写的 UI 语言，<span class="hl">但它只活在浏览器里</span></h2>
+  <p class="body">今天 agent 生成 UI 的事实标准是"吐一张网页"。<b>HTML 本身没有问题</b>——它是模型训练语料里最密集、AI 表达最流畅的界面语言；问题在于，想让它落到桌面上，现有三条路都走不通。</p>
   <div class="cards">
-    <div class="card"><h4>WebView 内核百兆起步</h4><p>Electron/Tauri 系每应用捆绑一份浏览器内核；内存与启动成本与"agent 高频生成、用完即弃"的形态天然冲突。</p></div>
-    <div class="card"><h4>AI 生成 UI 不可验证</h4><p>渲染像素没有机器口径，改一版全靠人眼对照；没有"探针断言"这种可进 CI 的验证层。</p></div>
-    <div class="card"><h4>桌面形态缺位</h4><p>网页不会悬浮、不会穿透点击、关掉就忘、重启不回——桌宠/数字人/常驻小组件这些"桌面原生形态"没有原语。</p></div>
+    <div class="card"><h4>浏览器标签</h4><p>HTML 的原生归宿只有标签页，没有窗口语义：悬浮层级、点击穿透、秒开秒毁、位置记忆，全都无从谈起。</p></div>
+    <div class="card"><h4>WebView / Electron</h4><p>想搬进桌面就得背一份浏览器内核，数千万行、运行时百兆起步；与"agent 高频生成、用完即弃"的形态天然冲突。</p></div>
+    <div class="card"><h4>原生 UI 框架</h4><p>SwiftUI、Flutter 都做得了桌面 UI，但编译链重、产物大，改一行就要重新构建——做不到增量与秒级热更新。</p></div>
   </div>
-  <p class="body"><b>html-native 的回答：</b>自研 C99 渲染引擎 <b>Neb（NO-WEB）</b>——agent 写 hn 编码（HTML 语法），引擎直接渲染成桌面级原生窗；渲染口径由 <b>28 个 *_probe.sh（以 find tools -name '*_probe.sh' 为准）、1145+ 项断言</b>钉死，每轮回归逐值对账；桌宠/常驻/位置记忆等桌面形态做成了<b>窗口原语</b>（一条 meta 声明即得）。全程无 WebView、无 Node、无 Python，构建与验证链只有 C99 + bash。</p>
+  <p class="body"><b>html-native 的回答：</b>自研 C99 渲染引擎 <b>Neb（NO-WEB）</b>——agent 写 HTML/CSS，引擎直接渲染成<b>桌面级原生窗</b>。不借浏览器内核，不需要编译，<b>轻量、秒开、可增量热更新</b>：推一份新 HTML，窗口还在原处，内容已经换过一轮。渲染口径由 <b>30 个探针、1145+ 项断言</b>钉死，每轮回归逐值对账——agent 的产物第一次有了机器可验证的桌面出口。</p>
   <div class="flow">
-    <span class="chip">agent 生成 hn 编码</span><span class="arrow">→</span>
-    <span class="chip">Neb 引擎解析·级联·布局</span><span class="arrow">→</span>
-    <span class="chip hlgood">探针锚定的像素口径</span><span class="arrow">→</span>
-    <span class="chip">桌面原生窗（桌宠 / 大屏 / 会话窗）</span>
+    <span class="chip">agent 生成 HTML/CSS</span><span class="arrow">→</span>
+    <span class="chip">Neb 解析 · 级联 · 布局</span><span class="arrow">→</span>
+    <span class="chip">显示列表（14 种指令）</span><span class="arrow">→</span>
+    <span class="chip hlgood">桌面原生窗</span>
   </div>
-  <p class="body" style="color:#8a92a3">agent 的产物首次获得"机器可验证"的桌面渲染出口：错了探针当场报，而不是用户眼前闪退。</p>
+  <p class="note">上一代方案比的是"能不能画出来"，Neb 比的是"画完之后能不能被机器验证、能不能随时改"。这是 agent 场景真正的门槛。</p>
   <div class="ft"><span>html-native · 作品介绍文档</span><span>02 / 07</span></div>
 </div>
 
@@ -97,99 +100,99 @@
 <div class="page">
   <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">二 · 技 术 架 构</span></div>
   <div class="tag">02 — 技 术 架 构</div>
-  <h2 class="big">一个引擎核心，<span class="hl">三后端 · 双路径 · 全抽象</span></h2>
-  <p class="body" style="margin-bottom:6mm">三层架构全部 C99：<b>Neb 引擎核心</b>（解析/级联/布局/绘制指令，20.6k 行零依赖）→ <b>rt 运行时</b>（QuickJS · 媒体宿主 · GPU 宿主 · 定时器/事件）→ <b>platform 平台胶水</b>（每平台一个 hnp_*.c，运行期 dlopen，编译期零 SDK）。平台只出实现，契约全在 hn_platform.h。</p>
+  <h2 class="big">一个引擎核心，<span class="hl">三后端 · 全抽象 · 零 SDK</span></h2>
+  <p class="body" style="margin-bottom:5mm">三层架构：<b>Neb 引擎核心</b>（解析 / 级联 / 布局 / 绘制指令）→ <b>rt 运行时</b>（QuickJS · 媒体宿主 · GPU 宿主 · 定时器与事件）→ <b>platform 平台胶水</b>（每平台一个 hnp_*.c，运行期 dlopen 系统 API，编译期零 SDK 依赖）。平台只出实现，契约全在 <code>hn_platform.h</code>。</p>
   <table>
-    <tr><th style="width:32%">关键机制</th><th>说明</th></tr>
-    <tr><td><b>三后端同源</b></td><td>同一份显示列表，hnsoft（纯 C 软件光栅）/ cairo / Metal v1（GPU 原语表）三执行器；简单页 CPU 反而更快，回退逐帧静默</td></tr>
-    <tr><td><b>探针锚定渲染</b></td><td>28 个 *_probe.sh（以 find tools -name '*_probe.sh' 为准）、1145+ 项断言把渲染口径钉死（颜色/几何/像素采样/跨架构确定性）；每轮回归逐值对账，性能优化不许改变任何像素</td></tr>
-    <tr><td><b>GPU 契约</b></td><td>hnp_gpu_host 原语表（设备/纹理/四边形/裁剪/读回）：平台出设备原语，引擎出画法；覆盖不了的指令整帧静默回退 hnsoft</td></tr>
-    <tr><td><b>零依赖 · 零 SDK</b></td><td>引擎与全部工具纯 C99；AppKit/X11/Metal/AVFoundation 全部运行期 dlopen；构建与验证链只有 C99 + bash</td></tr>
-    <tr><td><b>媒体 GPU 合成</b></td><td>真窗 &lt;video&gt; 走 AVPlayerLayer 原生图层（GPU 合成，解码拷贝链停用）；循环回绕走到尾通知，空洞 0.12s</td></tr>
+    <tr><th style="width:30%">关键机制</th><th>说明</th></tr>
+    <tr><td><b>三后端同源</b></td><td>同一份显示列表，hnsoft（纯 C 软件光栅）/ cairo / Metal v1（GPU 原语表）三个执行器；覆盖不了的指令整帧静默回退，像素永远正确</td></tr>
+    <tr><td><b>探针锚定渲染</b></td><td>30 个探针、1145+ 项断言把渲染口径钉成机器可验证契约（颜色 / 几何 / 像素采样 / 跨架构确定性）；性能优化不许改变任何像素</td></tr>
+    <tr><td><b>跨架构确定性</b></td><td><code>-ffp-contract=off</code> 关掉 FMA 融合，构建脚本带跨架构逐字节比对门禁；同一文档在不同架构上布局输出逐位一致</td></tr>
+    <tr><td><b>零依赖 · 零 SDK</b></td><td>引擎与工具纯 C99；AppKit / X11 / Metal / AVFoundation 全部运行期 dlopen；构建与验证链只有 C99 + bash</td></tr>
+    <tr><td><b>显示列表</b></td><td>14 种绘制指令（<code>HN_CMD_*</code> 枚举，RECT 至 TRIS）：3D 投影四边形、矢量多边形、网格变形、媒体位图、局部清空等，后端可互换</td></tr>
+    <tr><td><b>可控网络层</b></td><td><code>hx-get</code>/<code>hx-post</code> 与 QuickJS <code>hn.fetch</code> 走运行期绑定的系统 transport（macOS / Linux 用 libcurl，Windows 用 WinHTTP）；<b>默认拒绝</b>，需 <code>HN_FETCH_ALLOW</code> 白名单放行，重定向逐跳重校验，带超时与响应体上限</td></tr>
+    <tr><td><b>本地系统桥</b></td><td><code>sys://</code> 路由（cpu / memory / disk / battery / clipboard / notify / open / 本地 KV）单点实现，daemon 与 runtime 各自命名空间——不联网即可完成大部分桌面信息展示</td></tr>
   </table>
-  <p class="body">真窗呈现链：agent 事件/定时器/动画 → 单一显示列表（14 种指令，依据 <code>Sources/CHtmlNative/include/hn.h</code> 的 <code>HN_CMD_*</code> 枚举；CLIP_PUSH/POP/CLIP_PATH_PUSH 分立计数）→ hnsoft 或 Metal → 位图 → 图层直呈；HiDPI 按 backing scale 2x FreeType 光栅。离屏与探针恒 1x 确定性口径。</p>
+  <p class="body" style="margin-top:4mm"><b>依赖边界（如实说明）</b>：渲染与布局为 C99 自研；两处引入外部库而非自研——canvas 2D 的可移植绘制用 <b>canvas_ity</b>（ISC，C++ 单头，vendored），3D 可选后端用 <b>wgpu</b>（Rust, MIT）。二者均为可裁剪的可选依赖，不参与默认构建路径。</p>
   <div class="ft"><span>html-native · 作品介绍文档</span><span>03 / 07</span></div>
 </div>
 
-<!-- ========== P4 应用场景 ========== -->
+<!-- ========== P4 引擎内建的观感与容错 ========== -->
 <div class="page">
-  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">三 · 应 用 场 景</span></div>
-  <div class="tag">03 — 应 用 场 景</div>
-  <h2 class="big">桌面形态，<span class="hl">一条 meta 声明即得</span></h2>
-  <p class="body">html-native 改变的是 <b>agent 产出到用户桌面</b>的最后一跳——不装应用、不开浏览器，窗口即 UI：</p>
-  <table>
-    <tr><th style="width:26%">形态</th><th>场景与收益</th></tr>
-    <tr><td><b>桌宠 / 数字人</b></td><td>悬浮+无边框+点击穿透+位置记忆+常驻自启；Live2D 官方 motion 数据驱动 rig（视角跟随/呼吸/口型），moc3 专有边界以自有 rig 替代</td></tr>
-    <tr><td><b>agent 数据大屏</b></td><td>一条指令弹原生窗；markdown/JSON/CSV 直染 + canvas 2D 图表 + sys:// 本地系统桥；流式 update 逐帧热推送</td></tr>
-    <tr><td><b>流式会话窗</b></td><td>markdown 直染 + IME 中文输入 + hn-stream 自动跟随——agent 会话的原生窗形态，回绕空洞 0.12s</td></tr>
-    <tr><td><b>媒体窗</b></td><td>&lt;video&gt;/&lt;audio&gt; 走 AVPlayerLayer GPU 合成（CPU 解码拷贝链停用）；GIF/Lottie/dotLottie 直读</td></tr>
-    <tr><td><b>常驻小组件</b></td><td>几何记忆（拖到哪回哪）+ resident 常驻自启 + 点击穿透"幽灵模式"</td></tr>
-  </table>
-  <p class="body"><b>实测工作流</b>（media-demo 真窗 60 秒）：RSS 平稳 125.6→128.1MB、循环回绕 12 次空洞 0.12s、CPU ~34% 单核；<b>canvas-demo</b>：JS 定时器驱动实时折线，账本稳态 56 op 有界；<b>events</b>：addEventListener 点击/键盘全链路。全部探针脚本随仓库可复跑。</p>
+  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">三 · 引 擎 内 建 约 定</span></div>
+  <div class="tag">03 — 引 擎 内 建 约 定</div>
+  <h2 class="big">一行 hn-theme：<span class="hl">只写结构，观感由引擎保证</span></h2>
+  <p class="body">这里解决的是一个 agent 特有的矛盾：<b>模型擅长写结构，不擅长写样式细节</b>。让它每次都从零写一套 CSS，既不稳定也不经济。Neb 的做法是把与渲染强相关的两类决策下沉到引擎层。</p>
+  <div class="cards">
+    <div class="card"><h4>设计令牌基底（hn-theme）</h4><p>一行 <code>hn-theme="dark"</code> 即得完整设计系统：色彩令牌、字阶与行距、卡片 / 按钮 / 输入 / 骨架、投影与 hover 反馈。<b>AI 不写一行 CSS 也能产出精致界面</b>，作者 CSS 排在其后可任意覆盖。</p></div>
+    <div class="card"><h4>交互容错层（hx-auto）</h4><p>携带 <code>hx-*</code> 却漏写 id 的元素，装载时由引擎自动补 <code>hx-auto-N</code>——点击、轮询、加载的目标定位不会因生成疏漏而静默失效。这是 agent 生成代码的容错层。</p></div>
+    <div class="card"><h4>可覆盖，不锁死</h4><p>引擎给的只是<b>默认值</b>：作者样式排在其后、可任意覆盖；改写 <code>hn-theme</code> 声明即重装令牌基座，窗口与状态不动。<i>组件预设（ui-kit）是 <code>examples/</code> 层的雏形，按引擎"不含上层 UI/UX"的边界，不在引擎内。</i></p></div>
+  </div>
+  <p class="body" style="margin-top:2mm"><b>效果</b>：agent 只需产出"要展示什么"，不必产出"该怎么好看"。同一份裸 HTML（无 CSS）在引擎里直接得到配色统一、层级清晰、反馈完整的界面。</p>
+  <div class="flow">
+    <span class="chip">裸 HTML（仅结构 + 一行主题声明）</span><span class="arrow">→</span>
+    <span class="chip hlgood">引擎内建主题基座</span><span class="arrow">→</span>
+    <span class="chip">精致且一致的桌面界面</span>
+  </div>
   <div class="ft"><span>html-native · 作品介绍文档</span><span>04 / 07</span></div>
 </div>
 
-<!-- ========== P5 创新点 ========== -->
+<!-- ========== P5 形态与场景 ========== -->
 <div class="page">
-  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">四 · 创 新 点</span></div>
-  <div class="tag">04 — 创 新 点</div>
-  <h2 class="big">四个结构性创新</h2>
-  <div class="cards">
-    <div class="card"><h4>① 纯 C99 零依赖单文件引擎</h4><p>解析到像素一条自有管线（Neb = NO-WEB）：无 WebView、无 Node、无 Skia；AppKit/X11/Metal 全部运行期 dlopen，编译期零 SDK——交叉产物即拷即用。</p></div>
-    <div class="card"><h4>② 探针锚定渲染</h4><p>28 个 *_probe.sh（以 find tools -name '*_probe.sh' 为准）、1145+ 断言把渲染口径钉成机器可验证的契约：颜色/几何/像素采样/跨架构确定性逐位对账；性能优化零像素漂移。</p></div>
-    <div class="card"><h4>③ GPU 契约 + 静默回退</h4><p>hnp_gpu_host 原语表（平台出设备原语，引擎出画法）：Metal v1 混合页快 2.4×；覆盖不了的指令整帧静默回退 hnsoft——像素永远正确。</p></div>
-    <div class="card"><h4>④ 桌宠/常驻原语</h4><p>悬浮层级、点击穿透、位置记忆、常驻自启做成窗口原语与 meta 声明；视频走 AVPlayerLayer GPU 合成，回绕空洞 0.12s。</p></div>
-  </div>
-  <div class="metrics">
-    <div class="metric"><div class="num">20.6k</div><div class="lab">行 C99 引擎核心<br>零依赖 · 零 SDK</div></div>
-    <div class="metric"><div class="num">28</div><div class="lab">探针断言全绿<br>以 find 命令复核 · 像素级对账</div></div>
-    <div class="metric"><div class="num">14</div><div class="lab">种绘制指令<br>三后端同源等价</div></div>
-    <div class="metric"><div class="num">0.0%</div><div class="lab">静态页真窗 CPU<br>空闲零空转</div></div>
-  </div>
-  <p class="body" style="color:#8a92a3">以上均为仓库可复跑实测：28 个 *_probe.sh（以 find tools -name '*_probe.sh' 为准）随仓库公开，bash 一条命令即可全量回归。</p>
+  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">四 · 形 态 与 场 景</span></div>
+  <div class="tag">04 — 形 态 与 场 景</div>
+  <h2 class="big">同一套引擎，<span class="hl">长出多种桌面形态</span></h2>
+  <p class="body">桌宠、数字人、数据大屏、流式会话不是四个独立产品，而是<b>同一套引擎能力在不同声明下的形态</b>：换一组 meta 声明，同一个渲染管线就换一种存在方式。</p>
+  <table>
+    <tr><th style="width:24%">形态</th><th>说明</th></tr>
+    <tr><td><b>桌宠</b></td><td>无边框 + 逐像素透明 + 鼠标穿透 + 悬浮层级 + 位置记忆；画面之外就是真实桌面，观感是"桌面住着一个小东西"而非"开了一个窗口"</td></tr>
+    <tr><td><b>数据大屏</b></td><td>markdown / JSON / CSV 直染 + Canvas 2D 图表 + <code>sys://</code> 本地系统桥（CPU / 内存 / 磁盘等信息卡）；一条命令开窗，流式 update 持续推送</td></tr>
+    <tr><td><b>数字人</b></td><td>网格变形原语（Live2D 同源技术）；官方 moc3 模型由 Cubism Core 绑定承担，motion 数据可驱动自有 rig（呼吸 / 摆动 / 口型 / 视线跟随）</td></tr>
+    <tr><td><b>流式会话</b></td><td>agent 逐句推送，<code>hn-stream</code> 自动跟随底部（上翻即让出跟随，回到底部自动恢复）；环形缓冲让无限追加的内容在内存与视觉上都收敛</td></tr>
+    <tr><td><b>常驻小组件</b></td><td>轻应用槽位 + 几何记忆（拖到哪回哪）+ 常驻自启 + 点击穿透"幽灵模式"</td></tr>
+  </table>
+  <p class="body" style="margin-top:3mm"><b>交互闭环</b>：输入事件 → 命中链冒泡 → <code>hx-*</code> 触发 → 局部更新 → 重绘上屏；另有宿主协议（Unix socket，JSON-lines）让任意语言的客户端都能 open / update / event / shot / dump，无头模式下不触 GUI 即可完成渲染与取证。</p>
   <div class="ft"><span>html-native · 作品介绍文档</span><span>05 / 07</span></div>
 </div>
 
-<!-- ========== P6 开源基础 ========== -->
+<!-- ========== P6 创新点与指标 ========== -->
 <div class="page">
-  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">五 · 开 源 基 础</span></div>
-  <div class="tag">05 — 开 源 基 础</div>
-  <h2 class="big">生而开源：<span class="hl">单仓库 · 全探针 · 全链路可复跑</span></h2>
-  <p class="body">项目以 MIT 协议在 GitHub 公开迭代，引擎、运行时、平台壳、构建与验证链同仓同源；每轮能力落地都以探针断言收口，回归全绿才合入。</p>
-  <table>
-    <tr><th style="width:34%">内容</th><th>说明</th></tr>
-    <tr><td><b>Neb 引擎核心</b>（Sources/CHtmlNative）</td><td>解析 → 级联 → 布局 → 显示列表（14 种指令）→ 三后端光栅；纯 C99 零依赖</td></tr>
-    <tr><td><b>rt 运行时</b>（rt/hn_rt.c）</td><td>QuickJS · JS 事件层 · 定时器/RAF · 媒体/GPU 宿主注入 · sys:// 本地桥</td></tr>
-    <tr><td><b>platform 平台层</b>（platform/hnp_*.c）</td><td>macOS（AppKit/AVFoundation/Metal）/ Linux（X11/Xv）/ headless —— 契约在 hn_platform.h，实现各归各位</td></tr>
-    <tr><td><b>验证链</b>（tools/*.sh，28 个 *_probe.sh，以 find tools -name '*_probe.sh' 为准）</td><td>1145+ 断言：像素采样/账本/事件/媒体生命周期/GPU 等价/跨架构确定性——bash 一条命令全量回归</td></tr>
-  </table>
-  <p class="body"><b>可复现与可验证</b>：克隆仓库后 <b>bash tools/build-multiplatform.sh</b> 一条命令产出三平台全部产物（含跨架构确定性自检）；<b>bash tools/*_probe.sh</b> 全量回归。平台能力矩阵以 docs/platforms.md 为跟踪账——契约在头文件，平台只有实现差异，降级也写进契约。</p>
-  <div class="metrics">
-    <div class="metric"><div class="num">1145+</div><div class="lab">探针断言全绿<br>28 个 *_probe.sh · 像素级对账</div></div>
-    <div class="metric"><div class="num">3</div><div class="lab">光栅后端同源<br>hnsoft / cairo / Metal</div></div>
-    <div class="metric"><div class="num">100%</div><div class="lab">功能本地可用<br>无云端依赖</div></div>
-    <div class="metric"><div class="num">MIT</div><div class="lab">开源协议<br>无闭源组件依赖</div></div>
+  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">五 · 创 新 点</span></div>
+  <div class="tag">05 — 创 新 点</div>
+  <h2 class="big">四个结构性创新</h2>
+  <div class="cards">
+    <div class="card"><h4>① 无内核的桌面渲染管线</h4><p>解析到像素一条自有 C99 管线（Neb = NO-WEB）：无 WebView、无浏览器内核、无 Skia；系统 API 全部运行期 dlopen，编译期零 SDK，交叉产物即拷即用。</p></div>
+    <div class="card"><h4>② 渲染结果可被机器验证</h4><p>30 个探针、1145+ 断言把渲染口径钉成契约，跨架构逐位对账；无头渲染出 PNG，CI 可做视觉回归。对 agent 而言，这是"生成物可自检"的翻译层。</p></div>
+    <div class="card"><h4>③ 为 agent 兜底的引擎内建约定</h4><p>一行 <code>hn-theme</code> 即得整套设计令牌，漏写 id 的 <code>hx-*</code> 元素由引擎自动补位：模型只需产出结构与意图，观感与容错由引擎兜底——把"AI 写 UI"从能用推向可靠。</p></div>
+    <div class="card"><h4>④ 轻量与热更新</h4><p>单二进制约 1.4MB，秒开秒毁；推新 HTML 即热更新，窗口与状态不动。相较需重新编译的原生方案，这是 agent 高频迭代场景的关键差异。</p></div>
   </div>
+  <div class="metrics">
+    <div class="metric"><div class="num">23.0k</div><div class="lab">行 C99 引擎核心<br>实测 23,032 行 · 零依赖</div></div>
+    <div class="metric"><div class="num">30</div><div class="lab">个探针<br>1145+ 项断言全绿</div></div>
+    <div class="metric"><div class="num">14</div><div class="lab">种绘制指令<br>三后端同源等价</div></div>
+    <div class="metric"><div class="num">0.0%</div><div class="lab">静态页真窗 CPU<br>空闲零空转</div></div>
+  </div>
+  <p class="note">以上均为仓库可复跑实测：<code>bash tools/build-multiplatform.sh</code> 一条命令产出全部产物（含跨架构确定性自检）；<code>bash tools/*_probe.sh</code> 全量回归。</p>
   <div class="ft"><span>html-native · 作品介绍文档</span><span>06 / 07</span></div>
 </div>
 
-<!-- ========== P7 发展路线 ========== -->
+<!-- ========== P7 开源治理与长期发展 ========== -->
 <div class="page">
-  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">六 · 发 展 路 线</span></div>
-  <div class="tag">06 — 发 展 路 线</div>
-  <h2 class="big">两条线：<span class="hl">渲染更深，桌面更活</span></h2>
-  <p class="body">html-native 是"引擎 + 形态"双线项目：<b>渲染线</b>回答"agent 生成的 UI 能不能渲染得更准、更快、更高清"，<b>形态线</b>回答"agent 的 UI 能不能更像桌面原住民"。</p>
+  <div class="hd"><span class="brand">html-native · Neb</span><span class="sec">六 · 开 源 治 理 与 长 期 发 展</span></div>
+  <div class="tag">06 — 开 源 治 理 与 长 期 发 展</div>
+  <h2 class="big">生而开源：<span class="hl">单仓库 · 全探针 · 依赖清晰</span></h2>
+  <p class="body">项目以 <b>MIT</b> 协议在 GitHub 公开迭代，引擎、运行时、平台层、构建与验证链同仓同源；每轮能力落地都以探针断言收口，回归全绿才合入。</p>
   <table>
-    <tr><th style="width:26%">线</th><th>已走过的路（全部公开可查）</th></tr>
-    <tr><td><b>渲染线</b></td><td>C99 引擎 → 14 种指令三后端 → preserve-3d 矩阵栈与深度排序 → canvas 2D 178 断言 → GPU 原语契约与 Metal v1 → HiDPI 2x 光栅</td></tr>
-    <tr><td><b>形态线</b></td><td>透明窗 → 悬浮/穿透/跨空间 → 桌宠 → 位置记忆与常驻自启 → 媒体图层 GPU 合成 → Live2D motion 驱动数字人</td></tr>
+    <tr><th style="width:32%">依赖 / 组件</th><th>许可与处理方式</th></tr>
+    <tr><td><b>引擎核心 / 运行时 / 平台层</b></td><td>自研，MIT，纯 C99（可选后端含少量 C++ 与 Rust）</td></tr>
+    <tr><td><b>canvas_ity</b>（canvas 2D 可移植绘制）</td><td>ISC · C++ 单头 · vendored 于 <code>vendor/canvas_ity</code></td></tr>
+    <tr><td><b>wgpu</b>（<code>neb3-wgpu</code> 3D 可选后端）</td><td>MIT · Rust · 依赖 wgpu 30 + glam，可选、可裁剪</td></tr>
+    <tr><td><b>wasm3</b>（纯计算 WASM）</td><td>MIT · vendored</td></tr>
+    <tr><td><b>PainterEngine</b>（软件渲染实验）</td><td>MIT · vendored</td></tr>
+    <tr><td><b>Live2D Cubism Core</b>（moc3 专有格式）</td><td>Live2D Proprietary · <b>二进制与头文件不入仓</b>，由 <code>tools/fetch-cubism-core.sh</code> 由使用方自行获取；未启用时该能力落占位卡，不影响其余功能</td></tr>
   </table>
-  <div class="cards" style="margin-top:6mm">
-    <div class="card"><h4>① 渲染线 → 直呈与全 GPU</h4><p>Metal 直呈（去 readback）；Linux GL 后端插上同一张原语表；POLYGON 三角化；增量布局。</p></div>
-    <div class="card"><h4>② 形态线 → 数字人完善</h4><p>IME 候选窗定位与预编辑高亮；Live2D physics3 仿真；多窗多数字人；Linux 行为级验证。</p></div>
-    <div class="card"><h4>③ 生态线 → agent 基建</h4><p>JS 事件层完备化（capture 两相/修饰键管道）；hn dev 热重载 CLI；组件生态与模板市场。</p></div>
-  </div>
-  <p class="body" style="margin-top:6mm"><b>一点思考</b>：agent 时代的渲染引擎，价值不在渲染本身，而在<b>"渲染结果可被机器验证"</b>——探针锚定的像素口径，就是 agent 与像素之间的翻译层。html-native 是这条路上第一个把"验证"做进渲染循环的引擎。</p>
+  <p class="body" style="margin-top:3mm"><b>长期发展</b>：当前专注 macOS（行为级验证完整），Linux 与 Windows 已完成编译级与符号级对账，待真机验证后推进；路线为三条线——<b>渲染线</b>（GPU 直呈、增量布局）、<b>形态线</b>（数字人完善、多窗协调）、<b>生态线</b>（组件模型、状态与路由、<code>hn dev</code> 脚手架）。</p>
+  <p class="body" style="margin-top:2mm"><b>最终目标 —— Smart UX（智能交互）</b>：让 agent 与桌面的交互本身变得智能，而不只是"把界面画出来"。届时每个状态变化都有物理感的过渡、列表增删有交错、对话流逐条滑入；UI 是"真的画出来的"，不是 DOM 翻页。<i>这是方向而非现状：引擎目前的呈现仍缺少成体系的动效语言，该目标登记在仓库 <code>docs/roadmap.md</code> §9.3，属 v0.4 规划（约 12 周），当前尚未达成。</i></p>
+  <p class="note" style="margin-top:3mm">一点思考：agent 时代的 UI 引擎，价值不只在于"渲染得出来"，而在于<b>渲染结果可被机器验证</b>，以及<b>改起来足够轻</b>。前者让 agent 能自检，后者让 agent 敢高频迭代。</p>
   <div class="ft"><span>html-native · 作品介绍文档</span><span>07 / 07</span></div>
 </div>
 

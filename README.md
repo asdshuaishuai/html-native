@@ -98,7 +98,9 @@ dist/hn list / dump card / event card --kind click --target btn / shot card out.
 任何语言的 socket 客户端都能直接说这套 JSON-lines 协议, 不依赖 hn CLI。
 
 **绘制后端：一个跨平台框架，不是每个平台各写一份**。引擎产出的是纯数据的显示
-列表(8 类指令)，绘制层把它翻译成像素。这个接缝上有两个可互换实现，**签名完全
+列表(14 种指令)，绘制层把它翻译成像素。数量依据
+`Sources/CHtmlNative/include/hn.h` 的 `HN_CMD_*` 枚举；其中
+`CLIP_PUSH`、`CLIP_POP`、`CLIP_PATH_PUSH` 分立计数。这个接缝上有两个可互换实现，**签名完全
 相同**(`hnsoft_render` / `hncairo_render`)，换后端只需换链接目标，调用方一行不改：
 
 | 后端 | 用于 | 特点 |
@@ -111,7 +113,7 @@ dist/hn list / dump card / event card --kind click --target btn / shot card out.
 圆角裁剪被简化为轴对齐矩形、PNG 用存储型 deflate(无压缩)。cairo 把这三件事换成
 生产级实现，同时给 macOS/Linux/Windows/iOS/Android 同一份代码。
 
-对照显示列表 8 类指令逐项实测过(`tools/hncairo_probe.c`, 35 条断言全通过)：
+对照显示列表 14 种指令逐项实测过(`tools/hncairo_probe.c`, 35 条断言全通过)：
 圆角矩形+实色/渐变填充、**任意路径裁剪(含圆角)**、even-odd/非零环绕多边形、
 四边形、UV 贴图、真实覆盖率抗锯齿、**真模糊阴影**、逐像素透明背板。
 

@@ -1,7 +1,7 @@
 <!--
-  ⚠️ 状态(2026-10): 本页演示的 hn.fetch(系统 URLSession)属于**路线图**
-  能力 —— 随 Swift 层删除, C99 桥当前无网络层。本地数据用 sys:// 桥
-  (零网络); 本页保留为路线图目标形态, 直接渲染时脚本会报 TypeError。
+  Runtime network demo: hn.fetch uses the system HTTP transport. The three
+  buttons cover a fragment GET, JSON response, and deterministic 404 reject.
+  If QuickJS/network is unavailable the page keeps a local capability message.
 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="hn-surface" content="window">
 <meta name="hn-window" content="520x420@200,180">
-<meta name="hn-title" content="网络层 · hn.fetch">
+<meta name="hn-title" content="网络层 · 能力预览">
 <meta name="hn-theme" content="dark">
 <style>
 .panel { padding: 16; display: flex; flex-direction: column; gap: 10; height: 100%; box-sizing: border-box; }
@@ -25,8 +25,8 @@
 <body>
 <div class="panel">
   <div>
-    <div style="font-size:15;font-weight:700">网络层演示</div>
-    <div class="status">hn.fetch(url, options) → Promise（走系统 URLSession）</div>
+    <div style="font-size:15;font-weight:700">网络层能力预览</div>
+    <div class="status">GET、JSON 与 404 都走系统 HTTP；若运行时未编入 QuickJS 或系统网络库，将显示能力降级提示。</div>
   </div>
   <div class="row">
     <div class="btn" id="get-live">请求公开 API</div>
@@ -34,13 +34,22 @@
     <div class="btn" id="get-404">触发 404</div>
     <span class="status" id="lat">—</span>
   </div>
-  <div id="out">点击上方按钮发起真实 HTTP 请求…</div>
+  <div id="out">C99 运行时当前无网络层。本地数据请使用 sys://；此页保留网络 API 的目标形态。</div>
 </div>
 <script>
   var out = document.getElementById('out');
   var lat = document.getElementById('lat');
 
   function show(text) { out.textContent = text; }
+
+  function hasNetwork() {
+    return typeof hn !== 'undefined' && typeof hn.fetch === 'function';
+  }
+
+  function networkUnavailable() {
+    lat.textContent = '网络能力未提供';
+    show('当前运行时未提供 hn.fetch，无法发起 HTTP 请求。\n\n本地数据请使用 sys:// 桥。');
+  }
 
   function timedFetch(url, opts, label) {
     var t0 = Date.now();
@@ -55,6 +64,7 @@
   }
 
   document.getElementById('get-live').addEventListener('click', function () {
+    if (!hasNetwork()) { networkUnavailable(); return; }
     // 公开测试 API: 回显请求信息
     timedFetch('https://httpbin.org/get', {}, 'GET').then(function (r) {
       var j = r.json();
@@ -68,6 +78,7 @@
   });
 
   document.getElementById('get-json').addEventListener('click', function () {
+    if (!hasNetwork()) { networkUnavailable(); return; }
     timedFetch('https://httpbin.org/json', {}, 'JSON').then(function (r) {
       var j = r.json();
       show('status=' + r.status + '\n\n' + (j ? JSON.stringify(j, null, 2).slice(0, 400) : '(解析失败)'));
@@ -75,6 +86,7 @@
   });
 
   document.getElementById('get-404').addEventListener('click', function () {
+    if (!hasNetwork()) { networkUnavailable(); return; }
     timedFetch('https://httpbin.org/status/404', {}, '404').then(function () {
       show('不该到这里');
     }).catch(function (e) {

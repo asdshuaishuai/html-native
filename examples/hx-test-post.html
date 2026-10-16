@@ -5,7 +5,7 @@
      驱动: hn open → event click target=save → text --element out
            (store 持久化在 ~/.html-native/store/<store_id>.json)
      预期: out 换入所存值的回显(store/set 应答为 <span id="store-value">
-           值</span>; "copied" 属 sys://clipboard/set 分支, 本页不走);
+           值</span>; 本页验证 `sys://store/set` 的回显，不是 `sys://clipboard/set` 的 `copied` 应答);
            读回 out2 = 所存值。 -->
 <html lang="zh-CN">
 <head>
