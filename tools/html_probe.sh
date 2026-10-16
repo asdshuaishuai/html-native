@@ -390,5 +390,25 @@ printf '<html><head><style>html,body{margin:0}.tt{text-transform:uppercase}</sty
 if "$HN" paint "$D/tt.html" 200 100 | grep '^TEXT' | grep -q 'ABC'; then NPASS=$((NPASS+1));
 else hn_fail "text-transform uppercase 落文本" "ABC" "未命中大写"; fi
 
+# ============ H5 第二轮(命名实体 / progress / visibility) ============
+# 命名实体解码(本轮扩到 ~70 个): 文本出口应含解码后的 UTF-8
+printf '<html><head><style>html,body{margin:0}</style></head><body><div id="e">&laquo;A&mdash;B&raquo;&nbsp;&copy;&times;</div></body></html>' > "$D/ent.html"
+if "$HN" text "$D/ent.html" 200 100 2>/dev/null | grep -q '«A—B»'; then NPASS=$((NPASS+1));
+else hn_fail "命名实体解码(laquo/mdash/nbsp/copy/times)" "«A—B»" "未命中"; fi
+# 数字实体路径不回归
+printf '<html><head><style>html,body{margin:0}</style></head><body><div id="e">&#x2603;&#9829;</div></body></html>' > "$D/ent2.html"
+if "$HN" text "$D/ent2.html" 200 100 2>/dev/null | grep -q '☃'; then NPASS=$((NPASS+1));
+else hn_fail "数字实体(十六进制)" "☃" "未命中"; fi
+# <progress>: UA 缺省 200x14, 轨道+填充两条 RECT
+r="$(boxes '<html><head><style>html,body{margin:0}</style></head><body><progress id="p" value="30" max="100"></progress></body></html>')"
+ck "progress UA 缺省盒(200x14, 行内基线对齐有 y 偏移)" "$(hn_box_of "$r" p first)" "0 4.6 200 14" 2
+printf '<html><head><style>html,body{margin:0}</style></head><body><progress value="30" max="100" style="position:absolute;left:0;top:0;width:100;height:14"></progress></body></html>' > "$D/pg.html"
+if "$HN" paint "$D/pg.html" 100 100 | grep -c '^RECT' | grep -qE '^2$'; then NPASS=$((NPASS+1));
+else hn_fail "progress 绘制=轨道+填充(2 RECT)" "2" "非 2"; fi
+# visibility:hidden: 文本不出现在绘制指令(保布局但不出像素)
+printf '<html><head><style>html,body{margin:0}.h{visibility:hidden}</style></head><body><div class="h">ghost</div></body></html>' > "$D/vh.html"
+if "$HN" paint "$D/vh.html" 200 100 | grep '^TEXT' | grep -q 'ghost'; then hn_fail "visibility:hidden 不出文本" "无 TEXT" "有";
+else NPASS=$((NPASS+1)); fi
+
 # ============ 报告 ============
 hn_harness_report "HTML 探针: "

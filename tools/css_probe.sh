@@ -631,5 +631,26 @@ r="$(box1 '<html><head><style>html,body{margin:0}
 </style></head><body><div><div class="oc" id="a"></div></div></body></html>' a)"
 ck ":only-child 样式生效" "$r" "0 0 88 10"
 
+# ============ H5 第二轮(min/max/clamp / visibility 保布局) ============
+r="$(box1 '<html><head><style>html,body{margin:0}
+.a{width:min(80vw,300px);height:max(40px,10vh)}
+</style></head><body><div class="a" id="a"></div></body></html>' a)"
+ck "min(80vw,300px)/max(40px,10vh)" "$r" "0 0 300 40"
+r="$(box1 '<html><head><style>html,body{margin:0}
+.b{width:clamp(100px,50vw,260px);height:20px}
+</style></head><body><div class="b" id="b"></div></body></html>' b)"
+ck "clamp(100px,50vw,260px) → 200" "$r" "0 0 200 20"
+# clamp(MIN,VAL,MAX) ≡ max(MIN,min(VAL,MAX)): MAX<MIN 时 MIN 赢(CSS 规范)
+r="$(box1 '<html><head><style>html,body{margin:0}
+.b{width:clamp(300px,10vw,260px);height:10px}
+</style></head><body><div class="b" id="b"></div></body></html>' b)"
+ck "clamp MAX<MIN → MIN 赢(规范语义)" "$r" "0 0 300 10"
+# visibility:hidden 保布局(盒还在, display:none 才摘)
+r="$(box1 '<html><head><style>html,body{margin:0}
+.hid{visibility:hidden;width:120;height:40}
+.nx{width:90;height:30}
+</style></head><body><div class="hid"></div><div class="nx" id="nx"></div></body></html>' nx)"
+ck "visibility:hidden 保布局(兄弟位置不被上提)" "$r" "0 40 90 30"
+
 # ============ 报告 ============
 hn_harness_report

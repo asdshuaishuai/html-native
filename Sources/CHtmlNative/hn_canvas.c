@@ -79,6 +79,29 @@ hn_canvas_ledger *hn_canvas_ledger_find(hn_context *c, const char *id) {
     return NULL;
 }
 
+static void ledger_reset(hn_canvas_ledger *l);
+
+/* 元素 width/height 属性尺寸同步(H5 标准: JS 重设 canvas.width/height
+   = 位图尺寸变化 + **清空画布**)。账本记上次见到的属性尺寸, 变了即清账。
+   三个消费口都要调: record(落新 op 前)/get_image_data/paint 重放 ——
+   否则"改尺寸后不画只读"的老 ops 会按新尺寸重放(画错)。 */
+void hn_canvas_sync_element_size(hn_context *c, hn_canvas_ledger *l,
+                                 const char *cv_id) {
+    hn_node *n = c->doc ? hn_doc_find_by_id(c->doc, cv_id) : NULL;
+    float cw = 300.0f, ch = 150.0f;
+    if (n) {
+        const char *aw = hn_node_attr(n, "width");
+        const char *ah = hn_node_attr(n, "height");
+        if (aw && *aw) cw = (float)atof(aw);
+        if (ah && *ah) ch = (float)atof(ah);
+    }
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+    if (l->ew > 0 && (l->ew != cw || l->eh != ch)) ledger_reset(l);
+    l->ew = cw;
+    l->eh = ch;
+}
+
 hn_canvas_ledger *hn_canvas_ledger_get(hn_context *c, const char *id) {
     hn_canvas_ledger *l = hn_canvas_ledger_find(c, id);
     if (l) return l;
@@ -349,6 +372,7 @@ int hn_canvas_record(hn_context *c, const char *op_json, size_t len) {
     const char *cv_id = hn_json_str(hn_json_obj_get(root, "cv"), "");
     hn_canvas_ledger *l = hn_canvas_ledger_get(c, cv_id);
     if (!l) { hn_json_free(arena); free(buf); return -1; }
+    hn_canvas_sync_element_size(c, l, cv_id);
 
     const char *kind = hn_json_str(hn_json_obj_get(root, "op"), "");
     hn_canvas_op o;
@@ -541,6 +565,7 @@ int hn_canvas_record(hn_context *c, const char *op_json, size_t len) {
         o.x = (float)hn_json_num(hn_json_obj_get(root, "x"), 0);
         o.y = (float)hn_json_num(hn_json_obj_get(root, "y"), 0);
         o.font_px = (float)hn_json_num(hn_json_obj_get(root, "px"), 14);
+        o.letter_sp = (float)hn_json_num(hn_json_obj_get(root, "lsp"), 0);
         o.color = json_color(root, "col");
         o.blend = parse_blend(root);
         ok = o.str != NULL;
@@ -653,6 +678,7 @@ int hn_canvas_get_image_data(hn_context *c, const char *canvas_id,
     if (w > 8192 || h > 8192) return 0;
     hn_canvas_ledger *l = hn_canvas_ledger_find(c, canvas_id);
     if (!l) return 0;
+    hn_canvas_sync_element_size(c, l, canvas_id);   /* 改尺寸后不画只读也清账 */
     /* 画布属性尺寸(与账本坐标/重放/新帧判定同一口径; 缺省 300x150) */
     float cw = 300.0f, ch = 150.0f;
     hn_node *n = c->doc ? hn_doc_find_by_id(c->doc, canvas_id) : NULL;

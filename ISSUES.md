@@ -128,6 +128,29 @@
   2. flex pass1 度量时交叉轴未知 → `height:100%` 的 item 按 0 度量、居中偏移 (H-0)/2 整体下移半视口。修复: pass2 定位前对百分比高子项按行交叉可用高重解析。
   3. rem 基准随 1 联动修正: g_root_font 改取真实 html(父=包裹根)的字号。layout 38/0 + css 96/0。
 
+### 2026-10-15 H5 标准第二轮(交互/量测/动态画布, 已修+探针锚定)
+
+- **Canvas 动态改尺寸**(H5 标准): JS 重设 canvas.width/height = 位图变化 +
+  **清空画布**。`hn_canvas_sync_element_size` 在 record/get_image_data/paint
+  重放三消费口统一同步; 顺带修既有 bug: 空账本 getImageData 返回 null
+  (标准应给透明像素 —— 重设尺寸后读像素曾拿 null)。
+- **Canvas 标准 API 补充**: ctx.letterSpacing/wordSpacing(字距进度量与绘制,
+  op 带 lsp 字段) / ctx.reset()(清画布+状态归缺省)。
+- **DOM 量测与交互**: getBoundingClientRect/offset 四件套(新桥 __hnGetRect)、
+  scrollTop/scrollLeft 读写 + scrollIntoView、insertBefore/replaceChild
+  (引擎 `hn_node_insert_before`, 移动语义)、dispatchEvent + el.click()
+  (走平台同一派发入口 rt_js_dispatch, 冒泡链全程)、addEventListener
+  {once}、window.innerWidth/innerHeight/devicePixelRatio。
+- **CSS**: visibility:hidden(保布局不画; 子级 visible 复显未做——如实声明)、
+  pointer-events:none(命中跳过子树)、min()/max()/clamp()(绝对单位; clamp
+  按 CSS 规范 MAX<MIN 时 MIN 赢; 含 % 实参不支持——如实声明)。
+- **HTML**: 命名实体扩到 ~70 个(数字实体本就全量); `<progress>` 控件绘制
+  (UA 200x14 + 轨道/填充, 无 value = 不定态往复动画)。
+- 探针: dom_probe 51 断言(+13: rect/offset/viewport/scroll/insert/
+  replace/dispatch/once/click/resize 清空/letterSpacing/reset);
+  css_probe 96→106(min/max/clamp/visibility 保布局);
+  html_probe 43→48(实体解码/数字实体/progress 盒+绘制/visibility 不出文本)。
+
 ### 已知问题(仍开放)
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。

@@ -22,6 +22,7 @@ static const char *UA_CSS =
     "abbr, cite, q, dfn, var, samp, bdi, bdo, ins, mark, time, output, big, "
     "data, nobr { display: inline; }\n"
     "input, button, textarea, img, video, audio, select, canvas, meter, progress { display: inline-block; }\n"
+    "progress { width: 200; height: 14; }\n"
     "b, strong { font-weight: 700; } i, em, var, dfn, cite { font-style: italic; }\n"
     /* 语义块级观感(浏览器惯例, 主题/作者 CSS 可覆盖) */
     "blockquote { margin: 12 0; padding: 2 0 2 12; border-left: 3 solid rgba(127,127,127,0.4); }\n"
@@ -193,14 +194,85 @@ static int sv_calc(sv t, float font_px, float *out, int *unit, float *off) {
     return 1;
 }
 
+/* min()/max()/clamp() 求值(2026-10-15 H5 第二轮)。
+   逗号分隔实参, 每个实参 = 绝对长度(px/pt/em/rem/vw/vh/免单位 px)。
+   v1 诚实边界: 含 % 的实参不支持(%)要展开需包含块尺寸, 而 min/max 的
+   逐支比较无法像 calc 那样折成"单 % + 绝对偏移" —— 含 % 返回 0 让声明
+   被忽略(既有"解析失败跳过"口径)。clamp(min, val, max) 三参。 */
+static int sv_parse_abs(const char **pp, float font_px, float *out) {
+    const char *p = *pp;
+    while (*p == ' ') p++;
+    char *e = NULL;
+    float v = strtof(p, &e);
+    if (e == p) return 0;
+    p = e;
+    if (!strncmp(p, "px", 2)) p += 2;
+    else if (!strncmp(p, "pt", 2)) { v = v * 96.0f / 72.0f; p += 2; }
+    else if (!strncmp(p, "rem", 3)) { v = v * g_root_font; p += 3; }
+    else if (!strncmp(p, "em", 2)) { v = v * font_px; p += 2; }
+    else if (!strncmp(p, "vw", 2)) { v = v * g_vw / 100.0f; p += 2; }
+    else if (!strncmp(p, "vh", 2)) { v = v * g_vh / 100.0f; p += 2; }
+    *out = v;
+    *pp = p;
+    return 1;
+}
+
+static int sv_minmax(sv t, float font_px, float *out, int *unit) {
+    char buf[128];
+    if (t.n < 7 || t.n >= sizeof(buf)) return 0;
+    memcpy(buf, t.s, t.n); buf[t.n] = 0;
+    int kind;                                  /* 1=min 2=max 3=clamp */
+    const char *p;
+    if (!strncasecmp(buf, "min(", 4)) { kind = 1; p = buf + 4; }
+    else if (!strncasecmp(buf, "max(", 4)) { kind = 2; p = buf + 4; }
+    else if (!strncasecmp(buf, "clamp(", 6)) { kind = 3; p = buf + 6; }
+    else return 0;
+    float vals[3];
+    int n = 0;
+    for (;;) {
+        while (*p == ' ') p++;
+        if (!*p || *p == ')') break;
+        float v;
+        if (!sv_parse_abs(&p, font_px, &v)) return 0;
+        if (n < 3) vals[n] = v;
+        n++;
+        while (*p == ' ') p++;
+        if (*p == ',') { p++; continue; }
+        break;
+    }
+    if (*p != ')') return 0;
+    if (kind == 3 && n != 3) return 0;
+    if (n < (kind == 3 ? 3 : 1)) return 0;
+    float r;
+    if (kind == 1) {
+        r = vals[0];
+        for (int i = 1; i < n && i < 3; i++) if (vals[i] < r) r = vals[i];
+    } else if (kind == 2) {
+        r = vals[0];
+        for (int i = 1; i < n && i < 3; i++) if (vals[i] > r) r = vals[i];
+    } else {
+        /* CSS 规范: clamp(MIN, VAL, MAX) ≡ max(MIN, min(VAL, MAX)) ——
+           MAX < MIN 时 MIN 赢(不是无效声明) */
+        float lo = vals[1] < vals[2] ? vals[1] : vals[2];
+        r = vals[0] > lo ? vals[0] : lo;
+    }
+    *out = r;
+    *unit = HN_U_PX;
+    return 1;
+}
+
 /* 数值 + 可选单位后缀; 无后缀视为 px */
 static int sv_len(sv t, float font_px, float *out, int *unit) {
     char buf[40];
-    if (t.n == 0 || t.n >= sizeof(buf)) return 0;
+    if (t.n == 0) return 0;
     g_calc_off = 0;
-    if (t.n > 5 && t.s[4] == '(' && (t.s[0]=='c'||t.s[0]=='C')
-        && (t.s[1]=='a'||t.s[1]=='A') && (t.s[2]=='l'||t.s[2]=='L'))
-        return sv_calc(t, font_px, out, unit, &g_calc_off);
+    /* 函数式长度(calc/min/max/clamp)先于定长缓冲判长 —— 自带大缓冲。
+       首字母 c 粗筛后 calc/clamp 都可能(clamp 首字母也是 c), 依次尝试。 */
+    if (t.n > 5 && ((t.s[0]|32) == 'c' || (t.s[0]|32) == 'm')) {
+        if (sv_calc(t, font_px, out, unit, &g_calc_off)) return 1;
+        return sv_minmax(t, font_px, out, unit);
+    }
+    if (t.n >= sizeof(buf)) return 0;
     memcpy(buf, t.s, t.n);
     buf[t.n] = 0;
     char *e = NULL;
@@ -752,6 +824,13 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
            是 overflow 的别名 —— 诚实口径, 不假装支持独立双轴。 */
         if (!next_tok(&v, &t)) return;
         st->overflow = sv_eq(t, "visible") ? 0 : 1;
+    } else if (!strcmp(name, "visibility")) {
+        if (!next_tok(&v, &t)) return;
+        /* collapse 按 hidden(引擎无表格折叠语义); 子级 visible 复显未做 */
+        st->visibility = sv_eq(t, "hidden") || sv_eq(t, "collapse") ? 1 : 0;
+    } else if (!strcmp(name, "pointer-events")) {
+        if (!next_tok(&v, &t)) return;
+        st->pointer_events = sv_eq(t, "none") ? 1 : 0;
     } else if (!strcmp(name, "text-transform")) {
         if (!next_tok(&v, &t)) return;
         if (sv_eq(t, "uppercase")) st->text_transform = 1;

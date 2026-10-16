@@ -104,8 +104,10 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 `:first-child :last-child :only-child :first-of-type :last-of-type :root` / `:not(简单选择器, 可链式)` /
 属性选择器 `[attr] [attr=v] [attr^=v] [attr$=v] [attr*=v] [attr~=v]` / `@media (min|max-width)`。
 `text-transform: uppercase|lowercase|capitalize`（ASCII 范围, 度量绘制同源）；
-`aspect-ratio: 16/9`（一维定另一维 auto 时补齐）；`border-top|right|bottom|left` 分侧边框。
-**没有**：grid / float / 伪元素 / @font-face / calc()（边界如实声明, 路线图上）。
+`aspect-ratio: 16/9`（一维定另一维 auto 时补齐）；`border-top|right|bottom|left` 分侧边框；
+`min() / max() / clamp()`（绝对单位; 含 % 实参不支持, 如实声明）；
+`visibility: hidden`（保布局不画）/ `pointer-events: none`（子树不参与命中）。
+**没有**：grid / float / 伪元素 / @font-face / calc 里两个以上 % 项 / min·max 含 %（边界如实声明, 路线图上）。
 
 ## 动画（声明式, 引擎插值）
 
@@ -184,7 +186,9 @@ hnMediaVolume('v', .5); // 音量(v<=0 同时静音)
 - `hn-draggable` — 无边框/透明窗的空白区拖动（**默认开**，`=0` 关闭）
 - `hn-stream` + `hn-stream-loop="14"` — 聊天式流式容器：自动贴底跟随 + 环形缓冲只留最近 N 条（agent 轨迹/日志页标配）
 
-**表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset">`、`<textarea>`（多行+光标）、`<button>` 开箱可用；`:focus :disabled :checked :placeholder` 生效；按钮按标签内容收缩（shrink-to-fit）、标签水平居中；回车自动提交最近载体。
+**表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset">`、`<textarea>`（多行+光标）、`<button>`、`<progress value max>`（轨道+填充, 无 value = 不定态往复动画）开箱可用；`:focus :disabled :checked :placeholder` 生效；按钮按标签内容收缩（shrink-to-fit）、标签水平居中；回车自动提交最近载体。
+
+**命名实体**：常见 70 个（nbsp/amp/copy/mdash/laquo/中国标点/希腊字母等）+ 数字实体 `&#NN; &#xHH;` 全量。
 
 ## JS DOM 与 Canvas（标准 API 面, 页面 `<script>` 直接用）
 
@@ -204,6 +208,15 @@ var n = document.createElement('div'); n.id='x'  // id 直接赋值可用
 document.body.appendChild(n); n.remove()         // 移动语义: append 会从旧父摘除
 document.body / document.documentElement
 document.addEventListener / window.addEventListener  // 冒泡链尾
+el.getBoundingClientRect()                            // {left,top,right,bottom,width,height,x,y}
+el.offsetWidth / offsetHeight / offsetLeft / offsetTop
+el.scrollTop / scrollLeft (读写) / el.scrollIntoView()
+el.insertBefore(n, ref) / el.replaceChild(n, old)      // 移动语义
+el.dispatchEvent({type:'custom', detail: 7})           // 合成事件(冒泡链全程)
+el.click()                                             // 合成 click
+addEventListener(type, fn, {once: true})               // once/capture 支持
+window.innerWidth / innerHeight / devicePixelRatio
+canvas.width = 300                                     // 属性写 → 位图变化 + 画布清空
 ```
 事件对象含 `type/target/currentTarget/clientX/Y/key/code/detail/shift...` +
 `preventDefault/stopPropagation`（与浏览器同签名）。
@@ -218,6 +231,7 @@ c.createPattern / setLineDash / save / restore / translate / scale / rotate / se
 c.getTransform() / createImageData / getImageData / putImageData / isPointInPath / toDataURL()
 c.fillStyle / strokeStyle / lineWidth / lineCap / lineJoin / miterLimit / font / textAlign /
 c.textBaseline / globalAlpha / globalCompositeOperation(lighter/multiply/screen) / shadow*
+c.letterSpacing / wordSpacing（字距进度量与绘制） / c.reset()（清画布+状态归缺省）
 ```
 边界如实声明：`isPointInPath` 按已渲染像素 alpha 判定（抗锯齿边缘 1px 级差异）；
 `toDataURL` 恒出 PNG；stroke 遇 pattern 回落纯色。

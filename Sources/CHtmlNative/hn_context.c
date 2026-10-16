@@ -664,6 +664,31 @@ void hn_node_debug_background(hn_node *n, hn_color *out) {
 
 /* 移除属性(removeAttribute 语义)。attrs 数组本体在 arena 上, 就地前压,
    旧槽不回收(arena 语义, 无需回收)。命中返回 1。 */
+/* 把 child 插到 parent 子列表中 ref 之前(ref NULL = 追加到尾部)。
+   child 必须已在文档树某处(arena 归属); 在旧父下则先摘除 —— 与
+   appendChild 的移动语义同口径(浏览器 insertBefore 同款)。 */
+void hn_node_insert_before(hn_node *parent, hn_node *child, hn_node *ref) {
+    if (!parent || !child || child == parent || !parent->arena || child->arena != parent->arena)
+        return;
+    if (ref && ref->parent != parent) ref = NULL;   /* ref 不是 parent 的孩子 → 追加 */
+    if (child->parent) hn_node_remove_child(child->parent, child);
+    child->parent = parent;
+    child->prev = NULL;
+    child->next = ref;
+    if (ref) {
+        child->prev = ref->prev;
+        if (ref->prev) ref->prev->next = child;
+        else parent->first = child;
+        ref->prev = child;
+    } else {
+        child->prev = parent->last;
+        if (parent->last) parent->last->next = child;
+        else parent->first = child;
+        parent->last = child;
+    }
+    child->anim.fresh = 1;   /* 新位置播入场动画(同 append 口径) */
+}
+
 int hn_node_remove_attr(hn_node *n, const char *name) {
     if (!n || n->kind != HN_ELEM || !name) return 0;
     int found = 0;
@@ -901,6 +926,8 @@ const hn_display_list *hn_context_display_list(const hn_context *c) {
 
 static hn_node *hit_walk(hn_node *n, float x, float y) {
     if (n->kind == HN_ELEM && n->style.display == HN_DISP_NONE) return NULL;
+    /* pointer-events:none: 子树不参与命中(点击落到下层) —— CSS 标准语义 */
+    if (n->kind == HN_ELEM && n->style.pointer_events) return NULL;
     if (x < n->bx || y < n->by || x >= n->bx + n->bw || y >= n->by + n->bh) return NULL;
     for (hn_node *ch = n->last; ch; ch = ch->prev) {
         hn_node *r = hit_walk(ch, x + n->scroll_x, y + n->scroll_y);

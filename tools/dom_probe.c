@@ -160,6 +160,59 @@ static void test_dom(hn_rt *rt) {
     check(engine_attr_is(rt, "t", "class", "box a b"), "树操作后属性稳定(回归)");
 }
 
+static void test_dom2(hn_rt *rt) {
+    printf("== DOM 第二轮(rect/scroll/insert/dispatch/viewport) ==\n");
+    char *s;
+    s = eval_str(rt, SCOPE,
+        "var b=document.getElementById('rect-box').getBoundingClientRect();"
+        "(r_ok=true, (Math.abs(b.width-120)<0.6&&Math.abs(b.height-60)<0.6&&b.left>=0) ? 'ok':'bad:'+b.width+','+b.height)");
+    check_str(s, "ok", "getBoundingClientRect(宽高/绝对位)");
+    free(s);
+    check_int(eval_int(rt, SCOPE,
+        "var b=document.getElementById('rect-box');"
+        "(b.offsetWidth===120&&b.offsetHeight===60)?1:0"), 1, "offsetWidth/Height");
+    check_int(eval_int(rt, SCOPE,
+        "(window.innerWidth>0&&window.innerHeight>0&&window.devicePixelRatio>0)?1:0"), 1,
+        "innerWidth/innerHeight/devicePixelRatio");
+    /* 滚动: overflow 容器置位/读回 */
+    check_int(eval_int(rt, SCOPE,
+        "var sv=document.getElementById('scroll-view'); sv.scrollTop=90;"
+        "sv.scrollTop>50?1:0"), 1, "scrollTop 置位/读回");
+    check_int(eval_int(rt, SCOPE,
+        "var sv=document.getElementById('scroll-view');"
+        "sv.scrollIntoView&&typeof sv.scrollIntoView==='function'?1:0"), 1,
+        "scrollIntoView 存在");
+    /* insertBefore/replaceChild */
+    check_int(eval_int(rt, SCOPE,
+        "var sl=document.getElementById('slot');"
+        "var n1=document.createElement('u'); n1.id='ins1';"
+        "var ref=document.getElementById('slot-ref');"
+        "sl.insertBefore(n1, ref);"
+        "sl.children[0].id==='ins1'?1:0"), 1, "insertBefore(位置语义)");
+    check_int(eval_int(rt, SCOPE,
+        "var sl=document.getElementById('slot');"
+        "var n2=document.createElement('s'); n2.id='rep1';"
+        "sl.replaceChild(n2, document.getElementById('ins1'));"
+        "(sl.children[0].id==='rep1'&&document.getElementById('ins1')===null)?1:0"), 1,
+        "replaceChild(换入+摘除)");
+    /* dispatchEvent + once + click */
+    check_int(eval_int(rt, SCOPE,
+        "var sl=document.getElementById('slot'); var got=0;"
+        "sl.addEventListener('pings',function(ev){got+=ev.detail||1;});"
+        "sl.dispatchEvent({type:'pings',detail:7}); got===7?1:0"), 1,
+        "dispatchEvent(detail 透传)");
+    check_int(eval_int(rt, SCOPE,
+        "var sl=document.getElementById('slot'); var n=0;"
+        "sl.addEventListener('one-shot',function(){n++;},{once:true});"
+        "sl.dispatchEvent({type:'one-shot'});sl.dispatchEvent({type:'one-shot'});"
+        "n===1?1:0"), 1, "addEventListener {once:true}");
+    check_int(eval_int(rt, SCOPE,
+        "var sl=document.getElementById('slot'); var c=0;"
+        "sl.addEventListener('click',function(){c++;});"
+        "sl.click(); c===1?1:0"), 1, "el.click()");
+    free(eval_str(rt, SCOPE, "0"));
+}
+
 static void test_canvas(hn_rt *rt) {
     printf("== Canvas 标准扩展 ==\n");
     char *s;
@@ -224,6 +277,28 @@ static void test_canvas(hn_rt *rt) {
         "var u=c.toDataURL(); (u&&u.slice(0,22)==='data:image/png;base64,'&&u.length>100) ? 'png' : 'bad'");
     check_str(s, "png", "toDataURL PNG data URL");
     free(s);
+    /* 动态改尺寸(H5 标准: 重设 width/height = 清空画布) */
+    check_int(eval_int(rt, SCOPE,
+        "var cv2=document.getElementById('cv');"
+        "c.fillStyle='#ffffff'; c.fillRect(0,0,cv2.width,cv2.height);"
+        "var before=c.getImageData(30,30,1,1).data[0];"
+        "cv2.width=300; cv2.height=200;"
+        "var cw=cv2.width, ch=cv2.height, cleared=c.getImageData(30,30,1,1).data[3];"
+        "(cw===300&&ch===200&&before>200&&cleared===0)?1:0"), 1,
+        "canvas.width/height 重设 = 尺寸变化 + 画布清空");
+    /* letterSpacing(字距落像素: 两字间距 vs 0 字距的文本宽差) */
+    check_int(eval_int(rt, SCOPE,
+        "c.clearRect(0,0,300,200); c.font='20px sans-serif';"
+        "var w0=c.measureText('ii').width;"
+        "c.letterSpacing='6px'; var w1=c.measureText('ii').width;"
+        "c.letterSpacing='0px'; (w1-w0>10)?1:0"), 1,
+        "letterSpacing 进 measureText");
+    /* reset() */
+    check_int(eval_int(rt, SCOPE,
+        "c.globalAlpha=0.3; c.lineWidth=9; c.beginPath();"
+        "c.rect(1,1,10,10); c.reset();"
+        "(c.globalAlpha===1&&c.lineWidth===1)?1:0"), 1,
+        "ctx.reset() 状态归缺省");
 }
 
 int main(void) {
@@ -236,12 +311,17 @@ int main(void) {
         "<div id=\"only\"></div>"
         "<input type=\"checkbox\" id=\"ck\" checked>"
         "<canvas id=\"cv\" width=\"200\" height=\"120\"></canvas>"
+        "<div id=\"rect-box\" style=\"width:120px;height:60px\"></div>"
+        "<div id=\"scroll-view\" style=\"width:100px;height:60px;overflow:auto\">"
+        "<div style=\"height:300px\">tall</div></div>"
+        "<div id=\"slot\"><p id=\"slot-ref\">r</p></div>"
         "</body></html>";
     hn_rt_desc d = { "dom-probe", html, strlen(html), NULL, 0, 480, 400 };
     hn_rt *rt = hn_rt_open(&d);
     if (!rt) { fprintf(stderr, "dom_probe: rt open failed\n"); return 1; }
 
     test_dom(rt);
+    test_dom2(rt);
     test_canvas(rt);
 
     hn_rt_close(rt);

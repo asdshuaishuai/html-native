@@ -687,6 +687,9 @@ typedef enum {
 int  hn_node_set_attr(hn_node *n, const char *name, const char *value);
 /* 移除属性(removeAttribute 语义); 命中返回 1 */
 int  hn_node_remove_attr(hn_node *n, const char *name);
+/* 插到 parent 子列表中 ref 之前(ref NULL = 尾部; ref 非孩子 → 尾部)。
+   child 已在树中则先摘除(移动语义, 浏览器 insertBefore 同款)。 */
+void hn_node_insert_before(hn_node *parent, hn_node *child, hn_node *ref);
 /* querySelector: 选择器语法与样式表同(组合器/属性选择器/伪类/:not)。
  * 文档序返回命中数(截断到 max), 语法错返回 -1。c 可为 NULL(状态伪类按未激活)。 */
 int  hn_doc_query_selector(hn_doc *doc, const char *sel, hn_context *c,

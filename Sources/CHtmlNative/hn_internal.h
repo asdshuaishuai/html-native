@@ -175,6 +175,11 @@ typedef struct hn_style {
     hn_color      text_shadow_color;
     float         text_shadow_blur, text_shadow_ox, text_shadow_oy;
     unsigned char white_space;    /* 0=normal 1=nowrap 2=pre 3=pre-wrap */
+    /* visibility: 0=visible 1=hidden(保布局不画; display:none 才是摘布局)。
+       v1 口径: 子树整体不画(标准允许子级 visibility:visible 复显 —— 未做)。
+       pointer-events: 0=auto 1=none(命中测试跳过子树, 点击落到下层)。 */
+    unsigned char visibility;
+    unsigned char pointer_events;
     /* text-transform: 0=none 1=uppercase 2=lowercase 3=capitalize。
        应用在文本本体上(hn_style.c compute_rec 尾部) —— 度量与绘制消费
        同一份字节, 宽度天然一致。只变换 ASCII 字节; 多字节 UTF-8 原样
@@ -583,6 +588,7 @@ typedef struct hn_canvas_op {
     int n_segs;
     char  *str;            /* text 文本 / image·pattern 源路径(malloc 副本) */
     float font_px;
+    float letter_sp;       /* text 字距(canvas ctx.letterSpacing; 标准 = '0px') */
     /* pattern 的平铺模式(HN_PAT_*; prect/ppath 消费) */
     unsigned char prep;
 } hn_canvas_op;
@@ -592,6 +598,9 @@ typedef struct hn_canvas_ledger {
     hn_canvas_op *ops;
     int n_ops, cap_ops;
     int overflow;          /* 1 = 曾达上限, 之后的 op 被丢弃 */
+    float ew, eh;          /* 上次见到的元素 width/height 属性(H5 标准:
+                              JS 重设 canvas.width/height 会**清空画布**
+                              并改位图尺寸 —— 变了即清账重开, 见 hn_canvas.c) */
 } hn_canvas_ledger;
 
 /* 每块画布账本的 op 上限(给足; 满则丢弃并置溢出标志) */
@@ -600,6 +609,10 @@ typedef struct hn_canvas_ledger {
 /* 查找(不创建)/查找或创建 账本 */
 hn_canvas_ledger *hn_canvas_ledger_find(hn_context *c, const char *id);
 hn_canvas_ledger *hn_canvas_ledger_get(hn_context *c, const char *id);
+/* 元素 width/height 属性尺寸同步(H5: JS 重设尺寸 = 清空画布)。
+   record/get_image_data/paint 重放三个消费口统一调用。 */
+void hn_canvas_sync_element_size(hn_context *c, hn_canvas_ledger *l,
+                                 const char *cv_id);
 /* 释放全部账本(文档替换 = 元素销毁 / context 销毁时调) */
 void hn_canvas_dispose(hn_context *c);
 

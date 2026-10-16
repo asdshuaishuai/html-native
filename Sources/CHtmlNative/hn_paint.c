@@ -1170,7 +1170,7 @@ static void canvas_emit_ledger(hn_context *c, const hn_canvas_ledger *l,
             cmd.font.size_px = o->font_px * ky;
             cmd.font.weight = st->font_weight;
             cmd.font.italic = st->font_italic;
-            cmd.font.letter_spacing = st->letter_spacing;
+            cmd.font.letter_spacing = o->letter_sp * ky;   /* canvas ctx.letterSpacing(标准缺省 0) */
             cmd.font.family = st->font_family;
             cmd.fill = mul_alpha(o->color, alpha);
             cmd.blend = o->blend;
@@ -1301,7 +1301,9 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
 
     const char *id = hn_node_attr(n, "id");
     hn_canvas_ledger *l = id ? hn_canvas_ledger_find(c, id) : NULL;
-    if (!l || l->n_ops == 0) return;   /* 无账本 = 空白画布(与浏览器一致) */
+    if (!l) return;
+    if (id) hn_canvas_sync_element_size(c, l, id);   /* 属性尺寸变了 → 清账(标准) */
+    if (l->n_ops == 0) return;   /* 无账本 = 空白画布(与浏览器一致) */
 
     /* 画布属性坐标 → 元素盒: 属性 width/height 定义坐标空间, 缺省 300x150 */
     const char *aw = hn_node_attr(n, "width");
@@ -1389,7 +1391,10 @@ void hn_paint_set_ledger_raster(hn_paint_render_fn fn) {
 
 unsigned char *hn_paint_raster_ledger(hn_context *c, hn_canvas_ledger *l,
                                       float cw, float ch) {
-    if (!c || !l || l->n_ops <= 0 || !g_ledger_render) return NULL;
+    /* 空账本也出图(全透明) —— 与"画布初态 = 透明黑"一致; 否则 JS 重设
+       canvas.width/height(清账)后的 getImageData 会拿 null(标准应给
+       透明像素)。 */
+    if (!c || !l || !g_ledger_render) return NULL;
     if (!(cw >= 1.0f) || !(ch >= 1.0f)) return NULL;     /* NaN/0/负: 拒绝 */
     int w = (int)cw, h = (int)ch;
     if ((float)w < cw) w++;
@@ -1533,6 +1538,9 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     }
 
     if (n->style.display == HN_DISP_NONE) return;
+    /* visibility:hidden: 保布局不画(display:none 才摘布局)。v1 口径: 子树
+       整体跳过(标准允许子级 visible 复显 —— 如实声明未做)。 */
+    if (n->style.visibility) return;
     const hn_style *st = &n->style;
 
     /* 动画变换: 位移平移整棵子树(精确); 缩放换以元素盒中心为原点(几何换算)。
@@ -1691,6 +1699,57 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             }
             /* 解析失败: 落到常规 img 分支(显示占位), 让问题可见而非静默空白 */
         }
+    }
+
+    /* <progress>: value/max 属性 → 轨道 + 填充条(H5 表单标准件;
+       无 value = 不定态: 填充条以 1/3 宽度往复动画——ext_clock 驱动) */
+    if (n->tag && !strcmp(n->tag, "progress") && n->bw > 2 && n->bh > 2) {
+        float val = -1.0f, mx = 1.0f;
+        const char *vs = hn_node_attr(n, "value");
+        const char *ms = hn_node_attr(n, "max");
+        if (vs && *vs) val = (float)atof(vs);
+        if (ms && *ms) mx = (float)atof(ms);
+        if (mx <= 0) mx = 1.0f;
+        float x0 = tfx(g, sx, n->bx, n->by), y0 = tfy(g, sy, n->bx, n->by);
+        float w0 = n->bw * g->scale * g->scale_x, h0 = n->bh * g->scale * g->scale_y;
+        float rad = h0 * 0.5f;
+        hn_cmd cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.kind = HN_CMD_RECT;
+        cmd.x = x0; cmd.y = y0; cmd.w = w0; cmd.h = h0;
+        cmd.radius = rad;
+        cmd.fill = fill_color(st, 0x7F7F7F33u, alpha);   /* 轨道: 中性灰 */
+        push_cmd(c, &cmd);
+        float frac;
+        if (val < 0) {
+            /* 不定态: 1/3 宽滑块随钟往复 */
+            float ph = (float)fmod(n->ext_clock / 1200.0, 2.0);
+            if (ph > 1.0f) ph = 2.0f - ph;
+            float bw2 = w0 / 3.0f;
+            hn_cmd ind;
+            memset(&ind, 0, sizeof(ind));
+            ind.kind = HN_CMD_RECT;
+            ind.x = x0 + ph * (w0 - bw2); ind.y = y0;
+            ind.w = bw2; ind.h = h0;
+            ind.radius = rad;
+            ind.fill = fill_color(st, 0x2F7BFFu, alpha);
+            push_cmd(c, &ind);
+        } else {
+            frac = val / mx;
+            if (frac < 0) frac = 0;
+            if (frac > 1) frac = 1;
+            if (frac > 0.001f) {
+                hn_cmd pf;
+                memset(&pf, 0, sizeof(pf));
+                pf.kind = HN_CMD_RECT;
+                pf.x = x0; pf.y = y0;
+                pf.w = w0 * frac; pf.h = h0;
+                pf.radius = frac > 0.999f ? rad : rad * 0.5f;
+                pf.fill = fill_color(st, 0x2F7BFFu, alpha);
+                push_cmd(c, &pf);
+            }
+        }
+        goto clip_done;
     }
 
     /* Cubism(moc3) 真引擎: hn-cubism="model3.json"(官方 Core 绑定;

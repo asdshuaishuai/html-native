@@ -1389,11 +1389,13 @@ static const char *CANVAS_GLUE_JS =
 "      /* pattern 作描边色: 回落纯色黑(描边平铺带不在本轮范围, 见头注) */"
 "      return parseColor(style);"
 "    }"
-"    var st={fill:[0,0,0,255],stroke:[0,0,0,255],fillSrc:'#000000',strokeSrc:'#000000',"
-"            lw:1,cap:'butt',fontPx:10,fontSrc:'10px sans-serif',m:[1,0,0,1,0,0],clips:0,"
-"            dash:[],dashOff:0,align:'left',base:'alphabetic',gco:'source-over',"
-"            shSrc:'rgba(0,0,0,0)',shC:[0,0,0,0],shX:0,shY:0,shB:0,"
-"            ga:1,join:'miter',ml:10};"
+"    function defaultState(){return {fill:[0,0,0,255],stroke:[0,0,0,255],"
+"      fillSrc:'#000000',strokeSrc:'#000000',lw:1,cap:'butt',fontPx:10,"
+"      fontSrc:'10px sans-serif',m:[1,0,0,1,0,0],clips:0,dash:[],dashOff:0,"
+"      align:'left',base:'alphabetic',gco:'source-over',"
+"      shSrc:'rgba(0,0,0,0)',shC:[0,0,0,0],shX:0,shY:0,shB:0,"
+"      ga:1,join:'miter',ml:10,lsp:0,wsp:0};}"
+"    var st=defaultState();"
 "    var stack=[],subs=[],cur=null;"
 "    /* globalAlpha 统一乘点: make2D 内所有下送颜色都过这里(影子/渐变 stop 同乘)。 */"
 "    function rgbaGA(c){"
@@ -1439,7 +1441,12 @@ static const char *CANVAS_GLUE_JS =
 "    function measureW(s){"
 "      var w=0;"
 "      try{w=__hnMeasureText(st.fontPx*detScale(),s);}catch(e){}"
-"      return (typeof w==='number'&&isFinite(w)&&w>0)?w:String(s).length*st.fontPx*0.55;"
+"      w=(typeof w==='number'&&isFinite(w)&&w>0)?w:String(s).length*st.fontPx*0.55;"
+"      /* letterSpacing 计入度量(canvas 标准: 每字符后加字距) */"
+"      if (st.lsp>0){var cps=0;"
+"        for(var i=0;i<s.length;i++){if((s.charCodeAt(i)&0xC0)!==0x80)cps++;}"
+"        w+=st.lsp*cps;}"
+"      return w;"
 "    }"
 "    function textOp(s,x,y,style){"
 "      var q=xf(x,y);"
@@ -1448,7 +1455,7 @@ static const char *CANVAS_GLUE_JS =
 "      else if (st.align==='right') q[0]-=measureW(String(s));"
 "      if (st.base==='top') q[1]+=px*0.8;"
 "      else if (st.base==='middle') q[1]+=px*0.3;"
-"      send({op:'text',s:String(s),x:q[0],y:q[1],px:px,col:rgbaGA(solidOf(style))});"
+"      send({op:'text',s:String(s),x:q[0],y:q[1],px:px,lsp:st.lsp+st.wsp*0,col:rgbaGA(solidOf(style))});"
 "    }"
 "    function rectPts(x,y,w,h){return [x,y, x+w,y, x+w,y+h, x,y+h];}"
 "    function shadowOn(o){"
@@ -1821,6 +1828,17 @@ static const char *CANVAS_GLUE_JS =
 "    Object.defineProperty(api,'miterLimit',{"
 "      get:function(){return st.ml;},"
 "      set:function(v){var n=+v;if(n>=1)st.ml=n;}});"
+"    Object.defineProperty(api,'letterSpacing',{"
+"      get:function(){return st.lsp+'px';},"
+"      set:function(v){var n=parseFloat(String(v));st.lsp=isFinite(n)?n:0;}});"
+"    Object.defineProperty(api,'wordSpacing',{"
+"      get:function(){return st.wsp+'px';},"
+"      set:function(v){var n=parseFloat(String(v));st.wsp=isFinite(n)?n:0;}});"
+"    api.reset=function(){"
+"      /* 标准 reset(): 清画布 + 全部状态(含路径/栈)归缺省 */"
+"      send({op:'clear'});"
+"      st=defaultState();stack=[];subs=[];cur=null;"
+"    };"
 "    return api;"
 "  }"
 "})(globalThis);";
@@ -2279,6 +2297,86 @@ static JSValue js_hn_detach(JSContext *ctx, JSValueConst _, int argc, JSValueCon
     return hn_node_remove_child(n->parent, n) ? JS_TRUE : JS_FALSE;
 }
 
+/* __hnGetRect(id) → "{x,y,w,h}"(border-box 绝对坐标, CSS px)
+ * getBoundingClientRect/offset* 的原生数据出口。缺节点 → null。 */
+static JSValue js_hn_get_rect(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n) return JS_NULL;
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"x\":%.1f,\"y\":%.1f,\"width\":%.1f,\"height\":%.1f}",
+             (double)n->bx, (double)n->by, (double)n->bw, (double)n->bh);
+    return JS_NewString(ctx, buf);
+}
+
+/* __hnScrollInfo(id) → [x, y, maxX, maxY]; __hnScrollTo(id, x, y) 置位。
+ * 引擎口是 scroll_by(增量), 置位 = 差量换算(当前值 + 钳制范围内)。 */
+static JSValue js_hn_scroll_info(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    JSValue arr = JS_NewArray(ctx);
+    if (!n) return arr;
+    float sx = 0, sy = 0, mx = 0, my = 0;
+    hn_node_scroll_get(n, &sx, &sy);
+    hn_node_scroll_range(n, &mx, &my);
+    JSValue vs[4] = { JS_NewFloat64(ctx, sx), JS_NewFloat64(ctx, sy),
+                      JS_NewFloat64(ctx, mx), JS_NewFloat64(ctx, my) };
+    for (int i = 0; i < 4; i++) JS_SetPropertyUint32(ctx, arr, (uint32_t)i, vs[i]);
+    return arr;
+}
+
+static JSValue js_hn_scroll_to(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n || argc < 3) return JS_FALSE;
+    double tx = 0, ty = 0;
+    JS_ToFloat64(ctx, &tx, argv[1]);
+    JS_ToFloat64(ctx, &ty, argv[2]);
+    float sx = 0, sy = 0;
+    hn_node_scroll_get(n, &sx, &sy);
+    hn_node_scroll_by(n, (float)tx - sx, (float)ty - sy);
+    return JS_TRUE;
+}
+
+/* __hnInsertBefore(parentId, childId, refId|null): 移动语义(与 append 同)。 */
+static JSValue js_hn_insert_before(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *parent = bridge_node(ctx, argc, argv, 0);
+    hn_node *child = bridge_node(ctx, argc, argv, 1);
+    hn_node *ref = argc >= 3 ? bridge_node(ctx, argc, argv, 2) : NULL;
+    if (!parent || !child || child == parent) return JS_FALSE;
+    if (ref == child) return JS_TRUE;                       /* 幂等 */
+    hn_node_insert_before(parent, child, ref);
+    return JS_TRUE;
+}
+
+/* __hnDispatch(id, type, detail): 合成事件派发(与平台输入同一入口
+   rt_js_dispatch → 冒泡链 → JS 监听器)。返回是否有监听器消费。 */
+static JSValue js_hn_dispatch(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!b || !b->rt || !n || argc < 2 || !JS_IsString(argv[1])) return JS_FALSE;
+    const char *type = JS_ToCString(ctx, argv[1]);
+    if (!type || !type[0]) { if (type) JS_FreeCString(ctx, type); return JS_FALSE; }
+    double detail = 0;
+    if (argc >= 3) JS_ToFloat64(ctx, &detail, argv[2]);
+    int handled = rt_js_dispatch(b->rt, type, n, 0, 0, NULL, 0, (int)detail);
+    JS_FreeCString(ctx, type);
+    return handled ? JS_TRUE : JS_FALSE;
+}
+
+/* __hnViewport() → [w, h, scale](innerWidth/innerHeight/devicePixelRatio) */
+static JSValue js_hn_viewport(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    JSValue arr = JS_NewArray(ctx);
+    float w = 0, h = 0, sc = 1;
+    if (b && b->rt) {
+        w = (float)b->rt->w;
+        h = (float)b->rt->h;
+        sc = rt_scale(b->rt);
+    }
+    JSValue vs[3] = { JS_NewFloat64(ctx, w), JS_NewFloat64(ctx, h), JS_NewFloat64(ctx, sc) };
+    for (int i = 0; i < 3; i++) JS_SetPropertyUint32(ctx, arr, (uint32_t)i, vs[i]);
+    return arr;
+}
+
 static JSValue js_hn_exists(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     if (!b || !b->doc || argc < 1) return JS_FALSE;
@@ -2700,6 +2798,10 @@ static const char *EVENT_GLUE_JS =
 "    z={id:id,__bid:id};"   /* __bid = 桥接 id 槽(id 访问器内部用它, 防自递归) */
 "    z.addEventListener=function(type,fn,opts){"
 "      if (typeof fn!=='function') return 0;"
+"      if (opts && opts.once){"
+"        var w=function(ev){try{__hnRemoveListener(String(z.id),String(type),w);}catch(e){} return fn(ev);};"
+"        return __hnAddListener(String(z.id),String(type),w,capOf(opts));"
+"      }"
 "      return __hnAddListener(String(z.id),String(type),fn,capOf(opts));};"
 "    z.removeEventListener=function(type,fn){"
 "      if (typeof fn!=='function') return;"
@@ -2711,6 +2813,60 @@ static const char *EVENT_GLUE_JS =
 "      return !!__hnSetAttr(String(z.id),String(name),String(value));};"
 "    z.removeAttribute=function(name){return !!__hnRemoveAttr(String(z.id),String(name));};"
 "    z.hasAttribute=function(name){return !!__hnHasAttr(String(z.id),String(name));};"
+"    z.getBoundingClientRect=function(){"
+"      var r=__hnGetRect(String(z.id));"
+"      if(!r)return {left:0,top:0,right:0,bottom:0,width:0,height:0,x:0,y:0};"
+"      r=JSON.parse(r);"
+"      return {left:r.x,top:r.y,right:r.x+r.width,bottom:r.y+r.height,"
+"              width:r.width,height:r.height,x:r.x,y:r.y};};"
+"    Object.defineProperty(z,'offsetWidth',{get:function(){"
+"      var r=__hnGetRect(String(z.id));return r?JSON.parse(r).width:0;}});"
+"    Object.defineProperty(z,'offsetHeight',{get:function(){"
+"      var r=__hnGetRect(String(z.id));return r?JSON.parse(r).height:0;}});"
+"    Object.defineProperty(z,'offsetLeft',{get:function(){"
+"      var r=__hnGetRect(String(z.id));return r?JSON.parse(r).x:0;}});"
+"    Object.defineProperty(z,'offsetTop',{get:function(){"
+"      var r=__hnGetRect(String(z.id));return r?JSON.parse(r).y:0;}});"
+"    Object.defineProperty(z,'scrollTop',{"
+"      set:function(v){__hnScrollTo(String(z.id),z.scrollLeft,+v||0);},"
+"      get:function(){var i=__hnScrollInfo(String(z.id));return i?i[1]:0;}});"
+"    Object.defineProperty(z,'scrollLeft',{"
+"      set:function(v){__hnScrollTo(String(z.id),+v||0,z.scrollTop);},"
+"      get:function(){var i=__hnScrollInfo(String(z.id));return i?i[0]:0;}});"
+"    z.scrollIntoView=function(arg){"
+"      /* v1: 就近可滚祖先, 块向置中(arg==='center')或贴口 */"
+"      var r=z.getBoundingClientRect(); if(!r)return;"
+"      var pid=String(z.id);"
+"      for(var hop=0;hop<8;hop++){"
+"        pid=__hnParent(pid); if(pid===null)break;"
+"        var i=__hnScrollInfo(pid); if(!i)continue;"
+"        if(i[2]<=0&&i[3]<=0)continue;"
+"        var pr=hnEl(pid).getBoundingClientRect(); if(!pr)continue;"
+"        var dx=r.left-pr.left, dy=r.top-pr.top;"
+"        var cx=arg==='center'?-(pr.height-r.height)/2:0;"
+"        __hnScrollTo(pid,i[0]+0,i[1]+dy+cx);"
+"        return;"
+"      }"
+"    };"
+"    z.insertBefore=function(ch,ref){"
+"      if(!ch||typeof ch.id!=='string')return ch;"
+"      __hnInsertBefore(String(z.id),String(ch.id),ref?String(ref.id):null);"
+"      return ch;};"
+"    z.replaceChild=function(nch,och){"
+"      if(!nch||!och||typeof nch.id!=='string'||typeof och.id!=='string')return nch;"
+"      __hnInsertBefore(String(z.id),String(nch.id),String(och.id));"
+"      __hnDetach(String(och.id));return nch;};"
+"    z.dispatchEvent=function(ev){"
+"      if(!ev||typeof ev.type!=='string')return false;"
+"      return !!__hnDispatch(String(z.id),ev.type,ev&&ev.detail?+ev.detail:0);};"
+"    z.click=function(){__hnDispatch(String(z.id),'click',0);};"
+"    /* width/height 属性语义(canvas/img: 位图/固有尺寸属性, 非 style) */"
+"    Object.defineProperty(z,'width',{"
+"      set:function(v){__hnSetAttr(String(z.id),'width',String(+v||0));},"
+"      get:function(){var v=__hnGetAttr(String(z.id),'width');return v===null?0:+v;}});"
+"    Object.defineProperty(z,'height',{"
+"      set:function(v){__hnSetAttr(String(z.id),'height',String(+v||0));},"
+"      get:function(){var v=__hnGetAttr(String(z.id),'height');return v===null?0:+v;}});"
 "    z.querySelector=function(sel){"
 "      var hit=__hnQueryOne('#'+escSel(z.id)+' '+String(sel));"
 "      return hit===null?null:hnEl(hit);};"
@@ -2806,6 +2962,9 @@ static const char *EVENT_GLUE_JS =
 "      var hit=__hnQueryOne('html');return hit===null?null:hnEl(hit);}});"
 "  }"
 "  g.window=g;"
+"  Object.defineProperty(g,'innerWidth',{get:function(){return __hnViewport()[0];}});"
+"  Object.defineProperty(g,'innerHeight',{get:function(){return __hnViewport()[1];}});"
+"  Object.defineProperty(g,'devicePixelRatio',{get:function(){return __hnViewport()[2];}});"
 "  g.addEventListener=function(type,fn,opts){"
 "    if (typeof fn!=='function') return 0;"
 "    return __hnAddListener('window',String(type),fn,capOf(opts));};"
@@ -2922,6 +3081,19 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_focus, "__hnFocus", 1));
     JS_SetPropertyStr(ctx, global, "__hnExists",
         JS_NewCFunction(ctx, js_hn_exists, "__hnExists", 1));
+    /* DOM 第二轮桥(rect/scroll/insert/dispatch/viewport) */
+    JS_SetPropertyStr(ctx, global, "__hnGetRect",
+        JS_NewCFunction(ctx, js_hn_get_rect, "__hnGetRect", 1));
+    JS_SetPropertyStr(ctx, global, "__hnScrollInfo",
+        JS_NewCFunction(ctx, js_hn_scroll_info, "__hnScrollInfo", 1));
+    JS_SetPropertyStr(ctx, global, "__hnScrollTo",
+        JS_NewCFunction(ctx, js_hn_scroll_to, "__hnScrollTo", 3));
+    JS_SetPropertyStr(ctx, global, "__hnInsertBefore",
+        JS_NewCFunction(ctx, js_hn_insert_before, "__hnInsertBefore", 3));
+    JS_SetPropertyStr(ctx, global, "__hnDispatch",
+        JS_NewCFunction(ctx, js_hn_dispatch, "__hnDispatch", 3));
+    JS_SetPropertyStr(ctx, global, "__hnViewport",
+        JS_NewCFunction(ctx, js_hn_viewport, "__hnViewport", 0));
     JS_FreeValue(ctx, global);
 
     /* 事件 glue(元素包装 + document/window addEventListener + 事件对象
