@@ -94,6 +94,10 @@ struct hn_rt {
     struct { int id; JSValue cb; } raf_q[64];
     int raf_n;
     int raf_seq;
+    /* input[type=range] 拖拽态 + <select> 弹层外状态(输入路径用,
+       不依赖 QuickJS —— pointer/button 函数在守卫之外) */
+    int range_drag;
+    char range_id[64];
     /* JS 事件监听器表(addEventListener; 上限 256, 与定时器表同款管理):
        target = 元素 id 串或 "document"/"window" —— 只存 id 串不存节点指针,
        派发时按 id 现查命中链, 文档换装天然无悬挂。capture 记录但 v1 派发
@@ -110,8 +114,6 @@ struct hn_rt {
     int listen_seq;
     /* input[type=range] 拖拽态(按住期间 pointer move 持续设值):
        记元素 id 而非节点指针 —— 文档替换/arena 压缩会让指针悬空。 */
-    int range_drag;
-    char range_id[64];
     /* HTTP async scope + pending fetch map: hn.fetch() returns Promise immediately,
        request submitted to scope, completed in hn_rt_frame via drain callback */
     void *http_scope;          /* hn_http_scope * (lazy init on first fetch) */
@@ -3590,6 +3592,17 @@ static void rt_range_set_from_x(hn_rt *rt, hn_node *inp, float x) {
    (el.click()), range 不动滑块。 */
 static int rt_native_click(hn_rt *rt, hn_node *n, float click_x) {
     if (!rt || !n) return 0;
+    /* <select>: 点击开/合弹层(node 标记; 绘制/命中两处消费) */
+    {
+        hn_node *it = n;
+        for (int hop = 0; it && hop < 8; hop++, it = it->parent) {
+            const char *t = hn_node_tag(it);
+            if (t && !strcmp(t, "select")) {
+                it->select_open = !it->select_open;
+                return 1;
+            }
+        }
+    }
     hn_node *inp = n;
     for (int hop = 0; inp && hop < 4; hop++, inp = inp->parent) {
         if (!hn_node_is_input(inp)) continue;
@@ -3678,6 +3691,63 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
        器时在注册表扫描处零成本早退 —— 无 JS 页面行为逐位不变(hx 页零回归
        锚)。preventDefault → 跳过 hx 载体与链接激活(默认行为被取消),
        监听器可能已改文档, 重渲染后返回。 */
+    /* <select> 弹层开合(先于一般命中 —— 弹层盖在一切之上):
+       命中行 = 选中该 option(selected 属性迁移)并关闭; 其余点击 = 仅关闭。
+       (行几何与 paint_select_popups 同一套: 行高 = 字号×1.6, 盒下缘,
+        视口装不下上翻。) */
+    {
+        hn_node *opened = NULL;
+        hn_node *stack[256];
+        int sp2 = 0, guard2 = 0;
+        stack[sp2++] = hn_context_doc(rt->ctx)->root;
+        while (sp2 > 0 && guard2++ < 100000) {
+            hn_node *it = stack[--sp2];
+            if (it->select_open && it->tag && !strcmp(it->tag, "select")) { opened = it; break; }
+            for (hn_node *ch = it->first; ch; ch = ch->next)
+                if (ch->kind == HN_ELEM && sp2 < 256) stack[sp2++] = ch;
+        }
+        if (opened) {
+            float fs = opened->style.font_size > 8 ? opened->style.font_size : 12;
+            float row_h = fs * 1.6f;
+            /* 收 option + 几何(与 paint 同式) */
+            hn_node *opts[64];
+            int n_opt = 0;
+            for (hn_node *ch = opened->first; ch; ch = ch->next) {
+                if (ch->kind == HN_ELEM && ch->tag && !strcmp(ch->tag, "option") &&
+                    n_opt < 64)
+                    opts[n_opt++] = ch;
+            }
+            float x0 = opened->bx, y0 = opened->by + opened->bh;
+            int visible = n_opt;
+            if (y0 + row_h * visible > hn_context_viewport_h(rt->ctx) - 4) {
+                visible = (int)((hn_context_viewport_h(rt->ctx) - 4 - y0) / row_h);
+                if (visible < 1) {
+                    y0 = opened->by;
+                    visible = (int)(y0 / row_h);
+                    if (visible > n_opt) visible = n_opt;
+                    y0 = opened->by - row_h * visible;
+                } else if (visible > n_opt) visible = n_opt;
+            }
+            float lw = opened->bw > 120 ? opened->bw : 120;
+            int in_list = (x >= x0 && x <= x0 + lw && y >= y0 && y < y0 + row_h * visible);
+            int in_box = (x >= opened->bx && x <= opened->bx + opened->bw &&
+                          y >= opened->by && y <= opened->by + opened->bh);
+            if (in_list) {
+                int pick = (int)((y - y0) / row_h);
+                if (pick >= 0 && pick < visible && pick < n_opt) {
+                    for (int i = 0; i < n_opt; i++)
+                        hn_node_remove_attr(opts[i], "selected");
+                    hn_node_set_attr(opts[pick], "selected", "");
+                }
+                opened->select_open = 0;
+                return rt_render(rt);
+            }
+            if (!in_box) { opened->select_open = 0; return rt_render(rt); }
+            /* 点在盒上 = 收起(切换) */
+            opened->select_open = 0;
+            return rt_render(rt);
+        }
+    }
     /* 点击派发(监听器 → _pd → 原生默认动作, 全在 dispatch 内完成):
        返回非 0 = 有 JS 消费或原生动作已执行 —— 重渲染, hx/链接跳过。 */
     if (rt_js_dispatch(rt, "click", n, x, y, NULL, 0, 1))
@@ -3913,6 +3983,34 @@ static hn_node *rt_focus_next(hn_rt *rt, int back) {
 int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8) {
     if (!rt) return 0;
     hn_node *target = rt->focus ? rt->focus : hn_doc_root(hn_context_doc(rt->ctx));
+    if (!down) {
+        /* 松开方向键: 无动作(与既有口径一致, 按下才处理) */
+    }
+    if (down && rt->focus &&
+        hn_node_input_kind(rt->focus) == HN_IN_RANGE &&
+        (key == HN_KEY_LEFT || key == HN_KEY_RIGHT ||
+         key == HN_KEY_UP || key == HN_KEY_DOWN)) {
+        /* range 方向键调值(H5 标准): Left/Down = -step, Right/Up = +step
+           (step 属性, 缺省 1; Shift = 10 倍) */
+        float vmin = 0, vmax = 100, val = 0, step = 1;
+        const char *as = hn_node_attr(rt->focus, "min");
+        const char *ax = hn_node_attr(rt->focus, "max");
+        const char *av = hn_node_attr(rt->focus, "value");
+        const char *ast = hn_node_attr(rt->focus, "step");
+        if (as && *as) vmin = (float)atof(as);
+        if (ax && *ax) vmax = (float)atof(ax);
+        if (av && *av) val = (float)atof(av);
+        if (ast && *ast) step = (float)atof(ast);
+        if (step <= 0) step = 1;
+        if (key == HN_KEY_RIGHT || key == HN_KEY_UP) val += step;
+        else val -= step;
+        if (val < vmin) val = vmin;
+        if (val > vmax) val = vmax;
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%g", (double)val);
+        hn_node_set_attr(rt->focus, "value", vbuf);
+        return rt_render(rt);
+    }
     if (!down) {
         /* keyup: 派发后无内建键语义(引擎只处理按下) */
         rt_js_dispatch(rt, "keyup", target, 0, 0, utf8, key, 0);

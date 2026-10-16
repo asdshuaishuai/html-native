@@ -509,6 +509,8 @@ void hn_context_set_pointer(hn_context *c, float x, float y);
 /* 主按钮按下态(运行时在 button down/up 事件处喂入): 轨道相机拖拽等
    "按住才生效"的交互语义用。 */
 void hn_context_set_pointer_button(hn_context *c, int down);
+/* 视口高(CSS px; select 弹层翻边等布局判定用) */
+float hn_context_viewport_h(hn_context *c);
 /* 焦点元素(:focus 伪类)与插入符可见性。
    set_focus 在已有布局时会**立即重渲染**(样式重算 + 重布局 + 重绘),
    使 :focus 规则与引擎默认焦点环即刻生效; 禁用的控件拒绝聚焦。 */

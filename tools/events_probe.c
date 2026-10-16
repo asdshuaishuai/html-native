@@ -32,6 +32,7 @@
 #include <string.h>
 #include "hn.h"
 #include "hn_rt.h"
+#include "hn_internal.h"
 
 static int g_pass = 0, g_fail = 0;
 
@@ -509,6 +510,48 @@ int main(void) {
             check(!hn_node_is_checked(hn_doc_find_by_id(hn_rt_doc(crt), "cb")),
                   "preventDefault → checkbox 不切换(浏览器同序)");
             hn_rt_close(crt);
+        }
+    }
+
+    /* == 13. <select> 弹层开合(H5 第三轮) ==
+       真输入通路: 点击 select → select_open 置位(弹层绘制入口); 再点
+       弹层行 → selected 属性迁移到所点 option 并收起。 */
+    printf("== select 弹层开合 ==\n");
+    {
+        const char *sel_html =
+            "<html><head><style>html,body{margin:0}</style></head><body>"
+            "<select id='sel' style='position:absolute;left:0;top:0;width:160px;height:26px'>"
+            "<option id='o1'>一</option><option id='o2' selected>二</option>"
+            "<option id='o3'>三</option></select>"
+            "</body></html>";
+        hn_rt_desc sd = { "events-sel", sel_html, strlen(sel_html), NULL, 0, 400, 300 };
+        hn_rt *srt = hn_rt_open(&sd);
+        check(srt != NULL, "select 页 hn_rt_open");
+        if (srt) {
+            float cx, cy;
+            hn_node *sel = hn_doc_find_by_id(hn_rt_doc(srt), "sel");
+            /* 点击 select 盒中心 → 弹层开(select_open 置位) */
+            box_center(srt, "sel", &cx, &cy);
+            hn_rt_button(srt, 1, cx, cy, 0);
+            check(sel->select_open == 1, "select 点击 → 弹层开(select_open)");
+            /* 弹层第一行中心(x=盒中, y=盒下缘 + 行高/2; 行高 = 14*1.6≈22.4) */
+            float bx, by, bw, bh;
+            hn_node_box(sel, &bx, &by, &bw, &bh);
+            float rowh = 14.0f * 1.6f;
+            hn_rt_button(srt, 1, bx + bw / 2, by + bh + rowh / 2, 0);
+            check(sel->select_open == 0, "弹层行点击 → 收起");
+            hn_node *o1 = hn_doc_find_by_id(hn_rt_doc(srt), "o1");
+            hn_node *o2 = hn_doc_find_by_id(hn_rt_doc(srt), "o2");
+            check(hn_node_attr(o1, "selected") && !hn_node_attr(o2, "selected"),
+                  "selected 属性迁移到所点 option");
+            /* 再开 → 点弹层外(x=390) → 仅关闭, 选择不变 */
+            box_center(srt, "sel", &cx, &cy);
+            hn_rt_button(srt, 1, cx, cy, 0);
+            hn_rt_button(srt, 1, 390, 290, 0);
+            check(sel->select_open == 0, "弹层外点击 → 仅关闭");
+            check(hn_node_attr(o1, "selected") && !hn_node_attr(o2, "selected"),
+                  "关闭不改选择");
+            hn_rt_close(srt);
         }
     }
 

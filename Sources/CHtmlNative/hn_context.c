@@ -469,6 +469,10 @@ void hn_context_set_pointer_button(hn_context *c, int down) {
     c->pointer_down = down ? 1 : 0;
 }
 
+float hn_context_viewport_h(hn_context *c) {
+    return c ? c->vh : 0.0f;
+}
+
 
 void hn_context_set_focus(hn_context *c, hn_node *n) {
     /* 禁用的控件不可聚焦(与浏览器一致): 运行时点击命中也不改变焦点 */
@@ -970,8 +974,29 @@ static hn_node *hit_walk(hn_node *n, float x, float y) {
     if (n->kind == HN_ELEM && n->style.display == HN_DISP_NONE) return NULL;
     /* pointer-events:none: 子树不参与命中(点击落到下层) —— CSS 标准语义 */
     if (n->kind == HN_ELEM && n->style.pointer_events) return NULL;
-    if (x < n->bx || y < n->by || x >= n->bx + n->bw || y >= n->by + n->bh) return NULL;
+    /* 脱流子级(position:absolute/fixed)不受祖先盒包含约束 —— absolute
+       脱离流, 祖先(常见 html/body)零高时也必须命中(浏览器同语义;
+       实测: abs-positioned select 在无内容页里曾永远命不中)。 */
     for (hn_node *ch = n->last; ch; ch = ch->prev) {
+        if (ch->kind == HN_ELEM &&
+            (ch->style.position == HN_POS_ABSOLUTE || ch->style.position == HN_POS_FIXED)) {
+            hn_node *r = hit_walk(ch, x + n->scroll_x, y + n->scroll_y);
+            if (r) return r;
+        }
+    }
+    /* 根链(html/body)按浏览器语义覆盖整块画布: 脱流内容(absolute 弹层/
+       桌宠浮窗)常使 html/body 无流内容而盒高为 0 —— 若按盒剪枝, 脱流
+       元素永远命不中(实测 select 弹层页 hit 全落 wrapper)。 */
+    int root_chain = (n->parent == NULL || n->parent->is_doc_wrapper ||
+                      (n->parent->tag && !strcmp(n->parent->tag, "html") &&
+                       n->tag && !strcmp(n->tag, "body")));
+    if (!root_chain &&
+        (x < n->bx || y < n->by || x >= n->bx + n->bw || y >= n->by + n->bh))
+        return NULL;
+    for (hn_node *ch = n->last; ch; ch = ch->prev) {
+        if (ch->kind == HN_ELEM &&
+            (ch->style.position == HN_POS_ABSOLUTE || ch->style.position == HN_POS_FIXED))
+            continue;   /* 已在上面优先试过 */
         hn_node *r = hit_walk(ch, x + n->scroll_x, y + n->scroll_y);
         if (r) return r;
     }
@@ -1888,10 +1913,9 @@ int hn_event_path_len(hn_node *target) {
 
 hn_node *hn_node_ancestor_input(hn_node *n) {
     for (; n; n = n->parent)
-        /* 按钮/滑条: 命中落在其上时不能成为键盘输入目标(不可编辑) */
+        /* 按钮: 不能成为键盘输入目标; range 可以(方向键调值) */
         if (hn_node_is_input(n)) {
-            int k = hn_node_input_kind(n);
-            if (k != HN_IN_BUTTON && k != HN_IN_RANGE) return n;
+            if (hn_node_input_kind(n) != HN_IN_BUTTON) return n;
         }
     return NULL;
 }

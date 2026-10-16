@@ -651,6 +651,12 @@ r="$(box1 '<html><head><style>html,body{margin:0}
 .nx{width:90;height:30}
 </style></head><body><div class="hid"></div><div class="nx" id="nx"></div></body></html>' nx)"
 ck "visibility:hidden 保布局(兄弟位置不被上提)" "$r" "0 40 90 30"
+# 子级复显: hidden 父下 visible 子级的文本照画(标准继承语义)
+printf '<html><head><style>html,body{margin:0;background:#000;color:#fff}.h{visibility:hidden}.h .show{visibility:visible}</style></head><body><div class="h">ghost<div class="show">复显</div></div></body></html>' > "$D/vo.html"
+if "$HN" paint "$D/vo.html" 200 100 | grep '^TEXT' | grep -q '复显'; then NPASS=$((NPASS+1));
+else hn_fail "子级 visible 复显(文本绘制)" "复显" "未命中"; fi
+if "$HN" paint "$D/vo.html" 200 100 | grep '^TEXT' | grep -q 'ghost'; then hn_fail "hidden 文本不画" "无 ghost" "有";
+else NPASS=$((NPASS+1)); fi
 
 # ============ 报告 ============
 hn_harness_report

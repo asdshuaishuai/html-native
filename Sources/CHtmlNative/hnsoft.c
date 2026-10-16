@@ -426,9 +426,33 @@ static fcolor grad_color_at(const hn_cmd *c, float t) {
     return r;
 }
 
-/* 单点取渐变色: 参数 t → 颜色(RECT/POLYGON 逐像素路径共用) */
+/* 单点取渐变色: 参数 t → 颜色(RECT/POLYGON 逐像素路径共用)。
+   去色带(高清): 8×8 有序抖动(经典 bayer 矩阵)对最终 8bit 量化加半档
+   抖动 —— 平滑渐变的相邻像素落在同一 8bit 桶里形成可见色带(8bit/通道
+   量化误差), 抖动把量化误差打散成不可见的细颗粒噪声。t 先按抖动矩阵
+   偏移 ±0.5/256 再量化, 观感等价于提升 ~3bit 色深。 */
+static float grad_dither(int px, int py) {
+    static const unsigned char bayer[8][8] = {
+        {  0, 32,  8, 40,  2, 34, 10, 42 },
+        { 48, 16, 56, 24, 50, 18, 58, 26 },
+        { 12, 44,  4, 36, 14, 46,  6, 38 },
+        { 60, 28, 52, 20, 62, 30, 54, 22 },
+        {  3, 35, 11, 43,  1, 33,  9, 41 },
+        { 51, 19, 59, 27, 49, 17, 57, 25 },
+        { 15, 47,  7, 39, 13, 45,  5, 37 },
+        { 63, 31, 55, 23, 61, 29, 53, 21 },
+    };
+    return ((float)bayer[py & 7][px & 7] + 0.5f) / 64.0f - 0.5f;   /* -0.5..+0.5 */
+}
+
 static fcolor grad_at(const hn_cmd *c, float px, float py, float scale) {
-    return grad_color_at(c, grad_t_eval(c, px, py, scale));
+    fcolor r = grad_color_at(c, grad_t_eval(c, px, py, scale));
+    /* 抖动作用在 8bit 量化步长上(每通道 ±半档): 只影响量化, 不改渐变走向 */
+    float d = grad_dither((int)floorf(px), (int)floorf(py)) / 255.0f;
+    r.r += d;
+    r.g += d;
+    r.b += d;
+    return r;
 }
 
 /* 面片渐变: 渐变画在**投影前的元素平面**上(cmd 的 x/y/w/h 装的正是投影前

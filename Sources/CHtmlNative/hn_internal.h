@@ -348,6 +348,9 @@ struct hn_node {
        附近自动恢复)。存节点上: 文档替换(节点重建)即回默认跟随 —— 与
        流式推送"新内容优先贴底"的直觉一致。 */
     int stream_yield;
+    /* <select> 弹层开合(仅 open 的 select 会有此标记; 文档替换即消亡)。
+       点击命中: 弹层行 → 选中并关闭; 弹层外 → 仅关闭。 */
+    int select_open;
     /* hn-stream 平滑追上: 1 = 跟随动画在途(布局期武装, hn_context_anim_tick
        逐帧向底部指数逼近; gap < 1px 落位即清)。用户让出立即清 —— 动画
        中断, 让出状态机只有 stream_yield 一套。 */

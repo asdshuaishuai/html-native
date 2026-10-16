@@ -171,6 +171,31 @@
 - 探针: events_probe 58→66(+8: 真输入通路的 details/checkbox/radio/
   range/preventDefault); html_probe 48→53(details 折叠显隐/select·range 盒)。
 
+### 2026-10-15 H5 标准第四轮(弹层/复显/键盘/绘制高清, 已修+探针锚定)
+
+- **`<select>` 弹层**: 点击开(▾ 翻 ▴) → 选项行列表(紧贴盒下缘, 视口装不下
+  整体上翻; 选中行高亮) → 点行 selected 迁移并收起 / 点外仅关闭。绘制 =
+  paint_select_popups(paint_root 尾部统一补画, 盖在一切之上); 命中 =
+  hn_rt_button 弹层块(行几何与绘制同式)。弹层暂无滚动(超视口截断)——如实声明。
+- **脱流元素命中修复**(副产品, 深层): position:absolute 元素在无流内容页
+  (html/body 盒高 0)曾永远命不中 —— hit_walk 按祖先盒包含剪枝, html(高 0)
+  直接剪掉 body/弹层。修复: 根链(html/body)按浏览器语义覆盖整块画布 +
+  脱流子级在祖先盒检查**之前**优先试命中。
+- **visibility 子级复显**: visibility 入继承集 + paint 逐节点自绘门
+  (hidden 节点跳自身盒/文本但照常递归子级 —— 子级 visible 按标准复显)。
+  **顺带修深层 bug**: 子级跳转用 `goto children_only` 越过了 csx/child_alpha
+  的初始化 —— 不确定值让子级在 alpha 守卫处全灭(实测复现: 子级背景/文本
+  全部消失)。声明挪到跳转之前。
+- **文本 visibility 门**: 文本节点不吃级联 —— 用父级计算样式判
+  hidden 父下文本不画(ghost), visible 链上照画(复显)。
+- **range 键盘调节**: 聚焦后 Left/Down = -step, Right/Up = +step(HN_IN_RANGE
+  可成为键盘目标; BUTTON 仍排除)。
+- **渐变去色带**(高清绘制): hnsoft 渐变采样加 8×8 bayer 有序抖动(±半档
+  量化噪声) —— 平滑渐变的相邻像素同桶色带被打散成不可见细颗粒(实测
+  256px 低反差渐变行边界翻转 6 → 122, 色带消失; 色域分布不变)。
+- 探针: events_probe 66→72(+6: select 开/行选/外点关闭); css_probe 106
+  (+复显断言); html_probe 53(visibility 语义断言更新)。
+
 ### 已知问题(仍开放)
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。

@@ -1533,16 +1533,28 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     int cp_clip = 0;   /* clip-path 裁剪是否已入栈(所有提前 return 都要补 POP) */
 
     if (n->kind == HN_TEXT) {
+        /* 文本节点不吃级联(compute 只走元素) —— 继承的 visibility 用
+           父级计算样式判(文本在 hidden 父下不画; visible 链上照画) */
+        if (pst->visibility) return;
         paint_runs(c, n, pst, alpha, sx, sy, g);
         return;
     }
 
     if (n->style.display == HN_DISP_NONE) return;
     /* visibility:hidden: 保布局不画(display:none 才摘布局)。visibility 已
-       入继承集(子级继承 hidden)。v1 口径: 子树整体跳过 —— 标准允许
-       hidden 父下显式 visible 的子级复显, 未做(边界如实声明)。 */
-    if (n->style.visibility) return;
+       入继承集 —— hidden 父下显式 visibility:visible 的子级计算值=0,
+       走正常复显(标准语义)。vis_hidden 只跳**自身**盒/文本, 子级照常
+       递归(children_only 标签)。 */
+    int vis_hidden = 0;
     const hn_style *st = &n->style;
+    if (getenv("HN_VIS_TRACE"))
+        fprintf(stderr, "[vis] walk kind=%d <%s> vis=%d alpha=%.3f depth=%d nodes=%d\n",
+                (int)n->kind, n->tag ? n->tag : "#text",
+                n->kind == HN_ELEM ? st->visibility : -1,
+                (double)alpha, (int)g->depth, (int)g->nodes);
+    if (n->kind == HN_ELEM) {
+        vis_hidden = st->visibility;
+    }
 
     /* 动画变换: 位移平移整棵子树(精确); 缩放换以元素盒中心为原点(几何换算)。
        两者都由动画插值写入样式字段, 这里只读消费。 */
@@ -1888,10 +1900,11 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         ar.kind = HN_CMD_POLYGON;
         float *tri = (float *)hn_arena_alloc(c->tmp, sizeof(float) * 8);
         if (tri) {
-            tri[0] = ax;      tri[1] = ay - 3;
-            tri[2] = ax + 10; tri[3] = ay - 3;
-            tri[4] = ax + 5;  tri[5] = ay + 3;
-            tri[6] = ax;      tri[7] = ay - 3;
+            float dir = n->select_open ? -1.0f : 1.0f;   /* 开 = ▴ */
+            tri[0] = ax;      tri[1] = ay - 3 * dir;
+            tri[2] = ax + 10; tri[3] = ay - 3 * dir;
+            tri[4] = ax + 5;  tri[5] = ay + 3 * dir;
+            tri[6] = ax;      tri[7] = ay - 3 * dir;
             ar.poly = tri; ar.poly_n = 4;
             ar.fill = fill_color(st, st->color, alpha);
             push_cmd(c, &ar);
@@ -1990,6 +2003,18 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     if (n->tag && !strcmp(n->tag, "canvas")) {
         paint_canvas(c, n, st, alpha * st->opacity, sx, sy, g);
         goto clip_done;
+    }
+
+    /* visibility:hidden: 自身盒/文本不出指令, 但变换/滚动/裁剪的子级
+       状态照常 —— 跳到子级递归(children_only), 子级按各自继承值定。
+       csx/child_alpha 的声明已挪到本跳转之前: goto 越过初始化会让它们
+       成为不确定值 —— 子级在 alpha 守卫处全被杀(实测复现)。 */
+    float csx = sx + n->scroll_x, csy = sy + n->scroll_y;
+    float child_alpha = alpha * st->opacity;
+    if (vis_hidden) {
+        if (getenv("HN_VIS_TRACE")) fprintf(stderr, "[vis] %s hidden -> children_only\n", n->tag ? n->tag : "?");
+        clipped = 0;
+        goto children_only;
     }
 
     /* 输入控件: 盒(背景/边框/圆角) + 值文本 + 插入符 */
@@ -2320,6 +2345,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         if (has_border || per_side)
             push_quad_border(c, st, qx, qy, alpha);   /* 四条梯形(逐侧宽/色) */
     } else if (has_fill || has_border) {
+        if (getenv("HN_VIS_TRACE") && n->tag)
+            fprintf(stderr, "[vis] box push <%s> fill=%08x\n", n->tag, (unsigned)st->background);
         hn_cmd cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.kind = HN_CMD_RECT;
@@ -2390,9 +2417,9 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         cmd.radius = eff_radius(st, cmd.w, cmd.h);
         push_cmd(c, &cmd);
     }
-    float csx = sx + n->scroll_x, csy = sy + n->scroll_y;
-
-    float child_alpha = alpha * st->opacity;
+children_only:
+    if (getenv("HN_VIS_TRACE")) fprintf(stderr, "[vis] %s children_only (n_children=%d)\n", n->tag ? n->tag : "?", n->first ? 1 : 0);
+    /* visibility:hidden 的节点从这里继续: 只有子级递归(无自身指令) */
     /* 子节点绘制顺序: preserve-3d 容器的子级按深度序(3D 渲染上下文内
        遮挡由深度决定, CSS 同款语义 —— z-index 在 3D 上下文里让位);
        其余按 z-index 非零的定位元素排后(覆盖常规流内容)。
@@ -2411,7 +2438,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     }
     /* 容器自身的行内片段(目前仅 text-overflow 的省略号):
        在子节点之后绘制, 使其覆盖在被截断的文本之上 */
-    if (n->n_runs > 0 && st->display != HN_DISP_INLINE && !hn_node_is_input(n)) {
+    if (!vis_hidden && n->n_runs > 0 && st->display != HN_DISP_INLINE && !hn_node_is_input(n)) {
         paint_runs(c, n, st, alpha, sx, sy, g);
     }
 
@@ -2463,9 +2490,99 @@ clip_done:
     }
 }
 
+static void paint_select_popups(hn_context *c);
+
 void hn_paint_root(hn_context *c) {
     c->n_cmds = 0;
     if (c->doc) paint_walk(c, c->doc->root, NULL, 1.0f, 0, 0);
+    paint_select_popups(c);
+}
+
+/* ---------------- <select> 弹层(文档序尾部统一补画) ----------------
+ * select_open 的 select: 全屏半透明遮罩 + 选项行列表(紧贴盒下缘, 视口
+ * 装不下则整体上翻; 行高 = 字号×1.6; 选中行高亮)。绘于一切之上 ——
+ * 在 paint_walk 之后追加, 不参与层叠上下文(弹层语义)。
+ * 命中测试与这里是同一套几何(hn_select_popup_hit, hn_context.c)。 */
+static void paint_select_popups(hn_context *c) {
+    if (!c || !c->doc) return;
+    hn_node *stack[256];
+    int sp = 0;
+    stack[sp++] = c->doc->root;
+    int guard = 0;
+    while (sp > 0 && guard++ < 100000) {
+        hn_node *n = stack[--sp];
+        if (n->kind == HN_ELEM && n->select_open && n->tag &&
+            !strcmp(n->tag, "select")) {
+            /* 收集 option(文本) */
+            hn_node *opts[64];
+            int n_opt = 0, sel_i = -1;
+            for (hn_node *ch = n->first; ch; ch = ch->next) {
+                if (ch->kind != HN_ELEM || !ch->tag || strcmp(ch->tag, "option")) continue;
+                if (n_opt < 64) opts[n_opt++] = ch;
+                if (hn_node_attr(ch, "selected")) sel_i = n_opt - 1;
+            }
+            if (n_opt <= 0) continue;
+            if (sel_i < 0) sel_i = 0;
+            float fs = n->style.font_size > 8 ? n->style.font_size : 12;
+            float row_h = fs * 1.6f;
+            float x0 = n->bx, y0 = n->by + n->bh;
+            int visible = n_opt;
+            if (y0 + row_h * visible > c->vh - 4) {
+                visible = (int)((c->vh - 4 - y0) / row_h);
+                if (visible < 1) {                       /* 下缘放不下 → 上翻 */
+                    y0 = n->by;
+                    visible = (int)(y0 / row_h);
+                    if (visible > n_opt) visible = n_opt;
+                    y0 = n->by - row_h * visible;
+                } else if (visible > n_opt) visible = n_opt;
+            }
+            float lw = n->bw > 120 ? n->bw : 120;
+            hn_cmd cmd;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = 0; cmd.y = 0; cmd.w = c->vw; cmd.h = c->vh;
+            cmd.fill = 0x00000001u;                      /* 全屏近透明遮罩: 点外关闭 */
+            push_cmd(c, &cmd);
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = x0; cmd.y = y0; cmd.w = lw; cmd.h = row_h * visible;
+            cmd.radius = 6;
+            cmd.fill = 0xFF1C2330u;                      /* 深底(直渲 BGRA) */
+            cmd.stroke = 0xFF7F7F7Fu;
+            cmd.stroke_w = 1;
+            push_cmd(c, &cmd);
+            for (int i = 0; i < visible; i++) {
+                float ry = y0 + row_h * i;
+                if (i == sel_i) {
+                    hn_cmd hl;
+                    memset(&hl, 0, sizeof(hl));
+                    hl.kind = HN_CMD_RECT;
+                    hl.x = x0 + 2; hl.y = ry + 1;
+                    hl.w = lw - 4; hl.h = row_h - 2;
+                    hl.radius = 4;
+                    hl.fill = 0xFFFF7B2Fu;                   /* 高亮(BGRA: 蓝) */
+                    push_cmd(c, &hl);
+                }
+                static char row_txt[64][96];   /* 弹层行文本(同帧消费; 槽位按行) */
+                char *tb = row_txt[i];
+                hn_node_text_content(opts[i], tb, sizeof(row_txt[0]) - 1);
+                hn_cmd tc;
+                memset(&tc, 0, sizeof(tc));
+                tc.kind = HN_CMD_TEXT;
+                tc.text = tb;
+                tc.text_len = strlen(tb);
+                tc.tx = x0 + 10;
+                tc.baseline = ry + row_h * 0.5f + fs * 0.35f;
+                tc.font.size_px = fs;
+                tc.font.weight = 400;
+                tc.fill = (i == sel_i) ? 0xFFFFFFFFu : 0xFFF2E6DFu;
+                push_cmd(c, &tc);
+            }
+            continue;   /* 弹层内部不再下钻 */
+        }
+        for (hn_node *ch = n->last; ch; ch = ch->prev)
+            if (ch->kind == HN_ELEM && sp < 256) stack[sp++] = ch;
+    }
 }
 
 /* 立即清除根链底色(不打开开关)。见 hn_context_strip_root_background。
