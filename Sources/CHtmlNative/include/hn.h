@@ -527,8 +527,10 @@ enum {
     HN_IN_PASSWORD,       /* <input type=password>(绘制时掩码, 值保持原文) */
     HN_IN_CHECKBOX,       /* <input type=checkbox>(checked 属性表达状态) */
     HN_IN_RADIO,          /* <input type=radio>(checked 属性表达状态) */
-    HN_IN_BUTTON          /* <input type=button|submit|reset>: 盒 + 居中标签
+    HN_IN_BUTTON,         /* <input type=button|submit|reset>: 盒 + 居中标签
                              (标签 = value 属性; 不可编辑、无插入符、不聚焦) */
+    HN_IN_RANGE           /* <input type=range>: 滑条(轨道+填充+滑块;
+                             点击/拖拽设值 → value 属性; 不可编辑文本) */
 };
 /* 输入控件的 type 语义(HN_IN_*); 非 input/textarea 返回 HN_IN_NONE */
 int  hn_node_input_kind(hn_node *n);

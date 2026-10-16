@@ -186,7 +186,12 @@ hnMediaVolume('v', .5); // 音量(v<=0 同时静音)
 - `hn-draggable` — 无边框/透明窗的空白区拖动（**默认开**，`=0` 关闭）
 - `hn-stream` + `hn-stream-loop="14"` — 聊天式流式容器：自动贴底跟随 + 环形缓冲只留最近 N 条（agent 轨迹/日志页标配）
 
-**表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset">`、`<textarea>`（多行+光标）、`<button>`、`<progress value max>`（轨道+填充, 无 value = 不定态往复动画）开箱可用；`:focus :disabled :checked :placeholder` 生效；按钮按标签内容收缩（shrink-to-fit）、标签水平居中；回车自动提交最近载体。
+**表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset|range">`、`<textarea>`（多行+光标）、`<button>`、`<progress value max>`（轨道+填充, 无 value = 不定态往复动画）、`<select>`（关闭态: 盒+选中项+▾; 弹层未做——如实声明）开箱可用。
+**原生默认动作**（浏览器同序: JS click 派发后、无 preventDefault 才执行）：
+checkbox 点击切换、radio 同名组互斥、range 点击/拖拽设值（写回 value 属性）、
+`<summary>` 点击切换 `<details>` 折叠（`details[open]` 属性选择器可用）。
+`:focus :disabled :checked :placeholder` 生效；按钮按标签内容收缩；表单控件
+UA 盒按 border-box（range 160x20 / select 160x26 / progress 200x14）；回车自动提交最近载体。
 
 **命名实体**：常见 70 个（nbsp/amp/copy/mdash/laquo/中国标点/希腊字母等）+ 数字实体 `&#NN; &#xHH;` 全量。
 
@@ -213,7 +218,7 @@ el.offsetWidth / offsetHeight / offsetLeft / offsetTop
 el.scrollTop / scrollLeft (读写) / el.scrollIntoView()
 el.insertBefore(n, ref) / el.replaceChild(n, old)      // 移动语义
 el.dispatchEvent({type:'custom', detail: 7})           // 合成事件(冒泡链全程)
-el.click()                                             // 合成 click
+el.click()                                             // 合成 click(含原生默认动作)
 addEventListener(type, fn, {once: true})               // once/capture 支持
 window.innerWidth / innerHeight / devicePixelRatio
 canvas.width = 300                                     // 属性写 → 位图变化 + 画布清空

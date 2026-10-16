@@ -446,6 +446,72 @@ int main(void) {
         hn_rt_close(drt);
     }
 
+    /* == 12. 原生控件激活(HTML5 默认动作; 2026-10-15 H5 第三轮) ==
+       真输入通路(hn_rt_button @ 盒中心) → 原生默认动作:
+       checkbox 切换 / radio 同名组互斥 / range 线性设值 / details 折叠。
+       preventDefault 语义: click 监听器 pd → 原生动作不执行。 */
+    printf("== 原生控件激活(默认动作) ==\n");
+    {
+        const char *ctl_html =
+            "<html><head><style>html,body{margin:0}</style></head><body>"
+            "<details id='det'><summary id='sum'>标题</summary>"
+            "<div id='dbody'>内容</div></details>"
+            "<input type='checkbox' id='cb'>"
+            "<input type='radio' name='g' id='r1'>"
+            "<input type='radio' name='g' id='r2'>"
+            "<input type='range' id='rg' min='0' max='100' value='10'"
+            " style='position:absolute;left:0;top:0;width:100px;height:20px'>"
+            "</body></html>";
+        hn_rt_desc cd = { "events-ctl", ctl_html, strlen(ctl_html), NULL, 0, 400, 300 };
+        hn_rt *crt = hn_rt_open(&cd);
+        check(crt != NULL, "控件页 hn_rt_open");
+        if (crt) {
+            float cx, cy;
+            /* details: summary 点击 → open 属性; 正文点击不动 */
+            box_center(crt, "sum", &cx, &cy);
+            hn_rt_button(crt, 1, cx, cy, 0);
+            hn_node *det = hn_doc_find_by_id(hn_rt_doc(crt), "det");
+            const char *op = hn_node_attr(det, "open");
+            check(op && strcmp(op, "false") != 0 && strcmp(op, "0") != 0,
+                  "summary 点击 → details open");
+            box_center(crt, "sum", &cx, &cy);
+            hn_rt_button(crt, 1, cx, cy, 0);
+            op = hn_node_attr(det, "open");
+            check(!op || !strcmp(op, "false") || !strcmp(op, "0"),
+                  "再点 → 收起(移除 open)");
+            /* checkbox: 切换两向 */
+            box_center(crt, "cb", &cx, &cy);
+            hn_rt_button(crt, 1, cx, cy, 0);
+            hn_node *cb = hn_doc_find_by_id(hn_rt_doc(crt), "cb");
+            check(hn_node_is_checked(cb), "checkbox 点击 → 选中");
+            box_center(crt, "cb", &cx, &cy);
+            hn_rt_button(crt, 1, cx, cy, 0);
+            check(!hn_node_is_checked(cb), "再点 → 取消");
+            /* radio: 选中 + 同名组互斥 */
+            box_center(crt, "r2", &cx, &cy);
+            hn_rt_button(crt, 1, cx, cy, 0);
+            hn_node *r1 = hn_doc_find_by_id(hn_rt_doc(crt), "r1");
+            hn_node *r2 = hn_doc_find_by_id(hn_rt_doc(crt), "r2");
+            check(hn_node_is_checked(r2) && !hn_node_is_checked(r1),
+                  "radio 点击 → 选中且同名组互斥");
+            /* range: 点击位置 → 线性 value(100px 盒, 点 x=50 → ~50) */
+            hn_rt_button(crt, 1, 50.0f, 10.0f, 0);
+            hn_node *rg = hn_doc_find_by_id(hn_rt_doc(crt), "rg");
+            const char *val = hn_node_attr(rg, "value");
+            float fv = val ? (float)atof(val) : -1.0f;
+            check(fv > 40.0f && fv < 60.0f, "range 点击 → value 线性设值");
+            /* preventDefault → 原生动作被阻止 */
+            eval_str(crt, "events-ctl",
+                "document.getElementById('cb').addEventListener('click',"
+                "function(ev){ev.preventDefault();}); 1");
+            box_center(crt, "cb", &cx, &cy);
+            hn_rt_button(crt, 1, cx, cy, 0);
+            check(!hn_node_is_checked(hn_doc_find_by_id(hn_rt_doc(crt), "cb")),
+                  "preventDefault → checkbox 不切换(浏览器同序)");
+            hn_rt_close(crt);
+        }
+    }
+
     printf("\n结果: %d 通过, %d 失败\n", g_pass, g_fail);
     if (g_fail == 0) printf("全绿 — JS 事件层链路健康\n");
     return g_fail ? 1 : 0;

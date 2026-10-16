@@ -405,6 +405,24 @@ ck "progress UA 缺省盒(200x14, 行内基线对齐有 y 偏移)" "$(hn_box_of 
 printf '<html><head><style>html,body{margin:0}</style></head><body><progress value="30" max="100" style="position:absolute;left:0;top:0;width:100;height:14"></progress></body></html>' > "$D/pg.html"
 if "$HN" paint "$D/pg.html" 100 100 | grep -c '^RECT' | grep -qE '^2$'; then NPASS=$((NPASS+1));
 else hn_fail "progress 绘制=轨道+填充(2 RECT)" "2" "非 2"; fi
+# ============ H5 第三轮(details 折叠 / select·range 盒) ============
+# <details> 无 open: 仅 summary 保留(内容不进布局); open: 全部在
+r="$(boxes '<html><head><style>html,body{margin:0}</style></head><body><details id="d"><summary id="s">标题</summary><div id="bd">内容</div></details></body></html>')"
+hidden_box() { local b="$1"; [ "$b" = "MISSING" ] && return 0;
+  printf '%s' "$b" | awk '{exit !(($3+0)==0 && ($4+0)==0)}'; }
+if hidden_box "$(hn_box_of "$r" bd first)"; then NPASS=$((NPASS+1));
+else hn_fail "details 折叠: 内容不渲染" "零尺寸" "$(hn_box_of "$r" bd first)"; fi
+if [ "$(hn_box_of "$r" s first)" != "MISSING" ]; then NPASS=$((NPASS+1));
+else hn_fail "折叠态 summary 保留" "存在" "MISSING"; fi
+r="$(boxes '<html><head><style>html,body{margin:0}</style></head><body><details id="d" open><summary id="s">标题</summary><div id="bd">内容</div></details></body></html>')"
+if [ "$(hn_box_of "$r" bd first)" != "MISSING" ]; then NPASS=$((NPASS+1));
+else hn_fail "open 态内容进布局" "存在" "MISSING"; fi
+# select/range UA 盒(border-box: width 含 padding)
+r="$(boxes '<html><head><style>html,body{margin:0}</style></head><body><select id="sel"><option>一</option><option selected>二</option></select></body></html>')"
+ck "select UA 盒(border-box 160x26)" "$(hn_box_of "$r" sel first)" "0 0 160 26"
+r="$(boxes '<html><head><style>html,body{margin:0}</style></head><body><input type="range" id="rg"></body></html>')"
+ck "range UA 盒(border-box 160x20)" "$(hn_box_of "$r" rg first)" "0 1.6 160 20" 2
+
 # visibility:hidden: 文本不出现在绘制指令(保布局但不出像素)
 printf '<html><head><style>html,body{margin:0}.h{visibility:hidden}</style></head><body><div class="h">ghost</div></body></html>' > "$D/vh.html"
 if "$HN" paint "$D/vh.html" 200 100 | grep '^TEXT' | grep -q 'ghost'; then hn_fail "visibility:hidden 不出文本" "无 TEXT" "有";

@@ -1564,7 +1564,15 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
     /* 输入控件: 默认尺寸 */
     if (hn_node_is_input(n)) {
         int ik = hn_node_input_kind(n);
-        if (ik == HN_IN_CHECKBOX || ik == HN_IN_RADIO) {
+        if (ik == HN_IN_RANGE) {
+            /* 滑条: UA 缺省盒(UA css 160x20), 零 padding —— 不吃文本框
+               的 180 缺省与内边距(那是文本框观感) */
+            if (st->width_u == HN_U_AUTO) { st->width = 160; st->width_u = HN_U_PX; }
+            if (st->height_u == HN_U_AUTO) { st->height = 20; st->height_u = HN_U_PX; }
+            st->padding[0] = st->padding[1] = st->padding[2] = st->padding[3] = 0;
+            pt = st->padding[0] + bt; pr = st->padding[1] + br;
+            pb = st->padding[2] + bb; pl = st->padding[3] + bl;
+        } else if (ik == HN_IN_CHECKBOX || ik == HN_IN_RADIO) {
             /* 复选/单选: 固定方寸(随字号), 无文本内边距 —— 之前套用文本框
                的默认(180 宽 + padding), 视觉上是一块可输入区域而非控件 */
             float s = st->font_size * 0.9f;

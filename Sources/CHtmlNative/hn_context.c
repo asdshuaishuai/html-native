@@ -82,6 +82,35 @@ void hn_context_add_sheet(hn_context *c, hn_sheet *sheet) {
 /* 一遍布局: 临时区/显示列表重建 → 级联 → 布局根。
    hn-stream-loop 摘除后要走第二遍 —— 摘除改变子项栈叠, 保留子项的
    坐标与容器 content_h 必须重新计算(见 hn_context_layout)。 */
+/* <details> 折叠态(HTML5): 无 open 属性 → 仅 <summary> 保留, 其余子级
+   display:none(标准: 内容不渲染; open 属性由 <summary> 点击/JS 切换)。
+   在级联之后、布局之前跑 —— 直接改写计算样式的 display, 布局/绘制/命中
+   三条管线自动一致; 每次布局重跑(级联会覆盖回来)。 */
+static void details_apply_state(hn_context *c) {
+    if (!c->doc || !c->doc->root) return;
+    hn_node *stack[256];
+    int sp = 0;
+    stack[sp++] = c->doc->root;
+    int guard = 0;
+    while (sp > 0 && guard++ < 100000) {
+        hn_node *n = stack[--sp];
+        int closed_details = 0;
+        if (n->kind == HN_ELEM && n->tag && !strcmp(n->tag, "details")) {
+            const char *open = hn_node_attr(n, "open");
+            closed_details = !(open && strcmp(open, "false") != 0 && strcmp(open, "0") != 0);
+        }
+        for (hn_node *ch = n->first; ch; ch = ch->next) {
+            if (ch->kind != HN_ELEM) continue;
+            if (closed_details) {
+                const char *tag = ch->tag;
+                if (!tag || strcmp(tag, "summary") != 0)
+                    ch->style.display = HN_DISP_NONE;   /* 折叠: 非 summary 隐 */
+            }
+            if (sp < 256) stack[sp++] = ch;
+        }
+    }
+}
+
 static void layout_pass(hn_context *c) {
     hn_arena_destroy(c->tmp);
     c->tmp = hn_arena_create();
@@ -90,6 +119,7 @@ static void layout_pass(hn_context *c) {
     /* 透明背板: 样式重算会把底色从级联装回来, 必须在这之后重新剥离。
        这是"持久开关"语义的关键一步(见 hn_context_strip_root_background)。 */
     if (c->transparent) hn_strip_root_background_now(c);
+    details_apply_state(c);   /* <details> 折叠态(级联后改写 display) */
     hn_layout_root(c);
 }
 
@@ -480,6 +510,7 @@ int hn_node_input_kind(hn_node *n) {
             if (!strcmp(t, "password")) return HN_IN_PASSWORD;
             if (!strcmp(t, "button") || !strcmp(t, "submit") || !strcmp(t, "reset"))
                 return HN_IN_BUTTON;
+            if (!strcmp(t, "range")) return HN_IN_RANGE;
         }
         return HN_IN_TEXT;
     }
@@ -527,9 +558,19 @@ static void value_ensure(hn_node *n, size_t need) {
 
 int hn_node_set_value(hn_node *n, const char *utf8, size_t len) {
     if (!hn_node_is_input(n) || !n->arena) return 0;
+    int k = hn_node_input_kind(n);
+    /* range: JS el.value = N 写 value 属性(滑条位 = f(value)); 键盘不入 */
+    if (k == HN_IN_RANGE) {
+        if (!utf8) { hn_node_remove_attr(n, "value"); return 1; }
+        char vbuf[48];
+        size_t take = len < sizeof(vbuf) - 1 ? len : sizeof(vbuf) - 1;
+        memcpy(vbuf, utf8, take);
+        vbuf[take] = 0;
+        hn_node_set_attr(n, "value", vbuf);
+        return 1;
+    }
     /* checkbox/radio/button 没有可编辑文本: 值语义是 checked/value 属性,
        键盘输入不应写进 value 缓冲 */
-    int k = hn_node_input_kind(n);
     if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO || k == HN_IN_BUTTON) return 0;
     value_ensure(n, len);
     if (len) memcpy(n->value, utf8, len);
@@ -546,7 +587,8 @@ int hn_node_caret(hn_node *n) {
 void hn_node_set_caret(hn_node *n, int byte_off) {
     if (!hn_node_is_input(n)) return;
     int k = hn_node_input_kind(n);
-    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO || k == HN_IN_BUTTON) return;
+    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO || k == HN_IN_BUTTON ||
+        k == HN_IN_RANGE) return;
     if (byte_off < 0) byte_off = 0;
     if ((size_t)byte_off > n->value_len) byte_off = (int)n->value_len;
     n->caret = byte_off;
@@ -1846,8 +1888,11 @@ int hn_event_path_len(hn_node *target) {
 
 hn_node *hn_node_ancestor_input(hn_node *n) {
     for (; n; n = n->parent)
-        /* 按钮: 命中落在按钮上时不能成为键盘输入目标(不可编辑) */
-        if (hn_node_is_input(n) && hn_node_input_kind(n) != HN_IN_BUTTON) return n;
+        /* 按钮/滑条: 命中落在其上时不能成为键盘输入目标(不可编辑) */
+        if (hn_node_is_input(n)) {
+            int k = hn_node_input_kind(n);
+            if (k != HN_IN_BUTTON && k != HN_IN_RANGE) return n;
+        }
     return NULL;
 }
 

@@ -108,6 +108,10 @@ struct hn_rt {
     } listeners[HN_LISTENERS_MAX];
     int listen_n;
     int listen_seq;
+    /* input[type=range] 拖拽态(按住期间 pointer move 持续设值):
+       记元素 id 而非节点指针 —— 文档替换/arena 压缩会让指针悬空。 */
+    int range_drag;
+    char range_id[64];
     /* HTTP async scope + pending fetch map: hn.fetch() returns Promise immediately,
        request submitted to scope, completed in hn_rt_frame via drain callback */
     void *http_scope;          /* hn_http_scope * (lazy init on first fetch) */
@@ -329,6 +333,8 @@ static void js_listeners_clear(hn_rt *rt);
 static int rt_js_has_listener(hn_rt *rt, const char *type);
 static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
                           float x, float y, const char *utf8, int key, int detail);
+static void rt_range_set_from_x(hn_rt *rt, hn_node *inp, float x);
+static int rt_native_click(hn_rt *rt, hn_node *n, float click_x);
 
 static int rt_sys_store_get(void *ctx, const char *key, char *out, size_t cap) {
     return hn_rt_store_get((const char *)ctx, key, out, cap);
@@ -2519,7 +2525,13 @@ static int rt_ev_flag(JSContext *ctx, JSValue ev, const char *name) {
 static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
                           float x, float y, const char *utf8, int key, int detail) {
     if (!rt || !type) return 0;
-    if (!rt_js_has_listener(rt, type)) return 0;
+    int is_click = strcmp(type, "click") == 0;
+    if (!rt_js_has_listener(rt, type)) {
+        /* 零监听器: 无 preventDefault 来源, 原生默认行为直接执行
+           (纯声明式页面 —— details/checkbox/radio 无 JS 也工作) */
+        if (is_click && target) return rt_native_click(rt, target, x);
+        return 0;
+    }
     JSContext *ctx = js_scope_find(rt->id);
     if (!ctx) return 0;
     /* 桥环境对准当前文档(hot reload 语义, 与 js_timers_drain 同一份) */
@@ -2599,6 +2611,9 @@ static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
     }
     JS_FreeValue(ctx, mk);
     JS_FreeValue(ctx, global);
+    /* preventDefault → 原生默认动作不执行; 否则执行(浏览器同序) */
+    if (!pd && is_click && target)
+        pd = rt_native_click(rt, target, x);
     return pd;
 }
 
@@ -3475,6 +3490,18 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
 
 int hn_rt_pointer_move(hn_rt *rt, float x, float y) {
     if (!rt) return 0;
+    /* input[type=range] 拖拽: 按住期间持续按 x 设值(松手/命中漂移出
+       元素则结束 —— id 重查不到也算结束, 文档替换安全)。 */
+    if (rt->range_drag) {
+        hn_node *inp = hn_doc_find_by_id(hn_context_doc(rt->ctx), rt->range_id);
+        if (!inp || hn_node_input_kind(inp) != HN_IN_RANGE) {
+            rt->range_drag = 0;
+            rt->range_id[0] = 0;
+        } else {
+            rt_range_set_from_x(rt, inp, x);
+            return rt_render(rt);
+        }
+    }
     /* 喂坐标(在 hover 无变化的早退之前 —— 指针在同一元素内滑动时
        hover 不变, 但网格 hn-mesh-look 的指向每一步都要跟上)。 */
     hn_context_set_pointer(rt->ctx, x, y);
@@ -3536,12 +3563,111 @@ int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {
     return 0;
 }
 
+/* range 点击/拖拽的设值: x 在元素盒内的水平占比 → [min,max] 线性映射
+   → 写回 value 属性(H5 标准)。 */
+static void rt_range_set_from_x(hn_rt *rt, hn_node *inp, float x) {
+    float bx = 0, by = 0, bw = 0, bh = 0;
+    hn_node_box(inp, &bx, &by, &bw, &bh);
+    if (bw <= 0) return;
+    float vmin = 0, vmax = 100;
+    const char *as = hn_node_attr(inp, "min");
+    const char *ax = hn_node_attr(inp, "max");
+    if (as && *as) vmin = (float)atof(as);
+    if (ax && *ax) vmax = (float)atof(ax);
+    if (vmax <= vmin) vmax = vmin + 100.0f;
+    float frac = (x - bx) / bw;
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    char vbuf[32];
+    snprintf(vbuf, sizeof(vbuf), "%g", (double)(vmin + frac * (vmax - vmin)));
+    hn_node_set_attr(inp, "value", vbuf);
+}
+
+/* 原生激活行为(HTML5 默认动作; 浏览器语义 = 事件派发后、无 preventDefault
+   才执行): checkbox 切换 / radio 同名组互斥 / range 点击设值(拖拽在
+   pointer move 里续) / <summary> 切换祖先 <details> 的 open。
+   返回 1 = 采取了默认动作(调用方需重渲染)。click_x < 0 = 无坐标来源
+   (el.click()), range 不动滑块。 */
+static int rt_native_click(hn_rt *rt, hn_node *n, float click_x) {
+    if (!rt || !n) return 0;
+    hn_node *inp = n;
+    for (int hop = 0; inp && hop < 4; hop++, inp = inp->parent) {
+        if (!hn_node_is_input(inp)) continue;
+        int k = hn_node_input_kind(inp);
+        if (k == HN_IN_CHECKBOX) {
+            const char *cv = hn_node_attr(inp, "checked");
+            int on = cv && strcmp(cv, "false") != 0 && strcmp(cv, "0") != 0;
+            if (on) hn_node_remove_attr(inp, "checked");
+            else hn_node_set_attr(inp, "checked", "");
+            return 1;
+        }
+        if (k == HN_IN_RADIO) {
+            const char *name = hn_node_attr(inp, "name");
+            hn_node *scope = hn_context_doc(rt->ctx)->root;
+            for (hn_node *a = inp->parent; a; a = a->parent) {
+                const char *t = hn_node_tag(a);
+                if (t && !strcmp(t, "form")) { scope = a; break; }
+            }
+            hn_node *stack[256];
+            int sp = 0, guard = 0;
+            stack[sp++] = scope;
+            while (sp > 0 && guard++ < 100000) {
+                hn_node *it = stack[--sp];
+                if (hn_node_is_input(it) && it != inp &&
+                    hn_node_input_kind(it) == HN_IN_RADIO && name) {
+                    const char *nm = hn_node_attr(it, "name");
+                    if (nm && !strcmp(nm, name))
+                        hn_node_remove_attr(it, "checked");
+                }
+                for (hn_node *ch = it->first; ch; ch = ch->next)
+                    if (ch->kind == HN_ELEM && sp < 256) stack[sp++] = ch;
+            }
+            hn_node_set_attr(inp, "checked", "");
+            return 1;
+        }
+        if (k == HN_IN_RANGE) {
+            const char *id = hn_node_attr(inp, "id");
+            if (id && *id && click_x >= 0) {
+                rt_range_set_from_x(rt, inp, click_x);
+                snprintf(rt->range_id, sizeof(rt->range_id), "%s", id);
+                rt->range_drag = 1;
+            }
+            return 1;
+        }
+        break;   /* 其它 input 类型不吞点击 */
+    }
+    {
+        hn_node *it = n;
+        hn_node *summary = NULL;
+        for (int hop = 0; it && hop < 16; hop++, it = it->parent) {
+            const char *tag = hn_node_tag(it);
+            if (tag && !strcmp(tag, "summary")) { summary = it; break; }
+            if (tag && !strcmp(tag, "details")) break;   /* 先见 details = 点在正文 */
+        }
+        if (summary && summary->parent) {
+            const char *ptag = hn_node_tag(summary->parent);
+            if (ptag && !strcmp(ptag, "details")) {
+                const char *open = hn_node_attr(summary->parent, "open");
+                if (open && strcmp(open, "false") != 0 && strcmp(open, "0") != 0)
+                    hn_node_remove_attr(summary->parent, "open");
+                else
+                    hn_node_set_attr(summary->parent, "open", "");
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
     if (!rt) return 0;
     /* 按下态先于早退喂入: up 事件也要清 pointer_down(轨道相机松手进惯性),
        但 click 管线仍只在 down 跑(原语义, 不双发)。 */
     hn_context_set_pointer_button(rt->ctx, down && button == 0);
-    if (!down || button != 0) return 0;
+    if (!down || button != 0) {
+        rt->range_drag = 0;   /* 松手结束 range 拖拽 */
+        return 0;
+    }
     const char *id = hn_context_hit_test(rt->ctx, x, y);
     hn_node *n = hn_context_hit_node(rt->ctx, x, y);
     printf("[click] (%.0f,%.0f) -> <%s id=%s>\n", x, y,
@@ -3552,6 +3678,8 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
        器时在注册表扫描处零成本早退 —— 无 JS 页面行为逐位不变(hx 页零回归
        锚)。preventDefault → 跳过 hx 载体与链接激活(默认行为被取消),
        监听器可能已改文档, 重渲染后返回。 */
+    /* 点击派发(监听器 → _pd → 原生默认动作, 全在 dispatch 内完成):
+       返回非 0 = 有 JS 消费或原生动作已执行 —— 重渲染, hx/链接跳过。 */
     if (rt_js_dispatch(rt, "click", n, x, y, NULL, 0, 1))
         return rt_render(rt);
     hn_node *carrier = hx_carrier(n);

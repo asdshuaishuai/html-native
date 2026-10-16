@@ -22,7 +22,14 @@ static const char *UA_CSS =
     "abbr, cite, q, dfn, var, samp, bdi, bdo, ins, mark, time, output, big, "
     "data, nobr { display: inline; }\n"
     "input, button, textarea, img, video, audio, select, canvas, meter, progress { display: inline-block; }\n"
-    "progress { width: 200; height: 14; }\n"
+    /* 表单控件 UA 缺省盒按 border-box(浏览器惯例: width 含 padding/border) */
+    "progress { width: 200; height: 14; box-sizing: border-box; }\n"
+    /* input[type=range]: 滑条控件(H5 表单; 绘制=轨道+填充+滑块,
+       点击/拖拽写回 value 属性) */
+    "input[type=range] { width: 160; height: 20; box-sizing: border-box; }\n"
+    /* <select> 关闭态(下拉弹层边界如实声明): 盒 + 选中项文本 + ▾ */
+    "select { width: 160; height: 26; padding: 3 6; border-radius: 5; cursor: pointer;\n"
+    "  box-sizing: border-box; }\n"
     "b, strong { font-weight: 700; } i, em, var, dfn, cite { font-style: italic; }\n"
     /* 语义块级观感(浏览器惯例, 主题/作者 CSS 可覆盖) */
     "blockquote { margin: 12 0; padding: 2 0 2 12; border-left: 3 solid rgba(127,127,127,0.4); }\n"
@@ -105,6 +112,8 @@ void hn_style_default(hn_style *st) {
 
 void hn_style_inherit(hn_style *dst, const hn_style *p) {
     dst->color = p->color;
+    dst->visibility = p->visibility;   /* 标准继承属性: hidden 父下子级
+                                          visible 可复显(本轮启用) */
     dst->list_style = p->list_style;
     dst->font_family = p->font_family;
     dst->font_size = p->font_size;

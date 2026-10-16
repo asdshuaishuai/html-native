@@ -1538,8 +1538,9 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     }
 
     if (n->style.display == HN_DISP_NONE) return;
-    /* visibility:hidden: 保布局不画(display:none 才摘布局)。v1 口径: 子树
-       整体跳过(标准允许子级 visible 复显 —— 如实声明未做)。 */
+    /* visibility:hidden: 保布局不画(display:none 才摘布局)。visibility 已
+       入继承集(子级继承 hidden)。v1 口径: 子树整体跳过 —— 标准允许
+       hidden 父下显式 visible 的子级复显, 未做(边界如实声明)。 */
     if (n->style.visibility) return;
     const hn_style *st = &n->style;
 
@@ -1829,6 +1830,77 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         goto clip_done;
     }
 
+    /* <select> 关闭态(下拉弹层边界如实声明未做): 盒 + 选中项文本 + ▾。
+       选中项 = 带 selected 属性的 option, 否则第一个 option。 */
+    if (n->tag && !strcmp(n->tag, "select") && n->bw > 2 && n->bh > 2) {
+        float x0 = tfx(g, sx, n->bx, n->by), y0 = tfy(g, sy, n->bx, n->by);
+        float w0 = n->bw * g->scale * g->scale_x, h0 = n->bh * g->scale * g->scale_y;
+        hn_cmd cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.kind = HN_CMD_RECT;
+        cmd.x = x0; cmd.y = y0; cmd.w = w0; cmd.h = h0;
+        cmd.radius = eff_radius(st, w0, h0);
+        cmd.fill = (st->background & 0xFFu) ? fill_color(st, st->background, alpha)
+                                            : fill_color(st, 0x7F7F7F26u, alpha);
+        cmd.stroke = fill_color(st, (st->border_color & 0xFFu) ? st->border_color
+                                                               : 0x7F7F7F66u, alpha);
+        cmd.stroke_w = st->border_w > 0 ? st->border_w : 1;
+        push_cmd(c, &cmd);
+        /* 选中项文本(option[selected] 优先, 否则第一个 option) */
+        const char *sel_text = NULL;
+        size_t sel_len = 0;
+        hn_node *first_opt = NULL;
+        for (hn_node *ch = n->first; ch; ch = ch->next) {
+            if (ch->kind != HN_ELEM || !ch->tag || strcmp(ch->tag, "option")) continue;
+            if (!first_opt) first_opt = ch;
+            if (hn_node_attr(ch, "selected")) { first_opt = ch; break; }
+        }
+        if (first_opt) {
+            char *sel_buf = (char *)hn_arena_alloc(c->tmp, 256);
+            if (sel_buf) {
+                sel_len = hn_node_text_content(first_opt, sel_buf, 255);
+                if (sel_len > 0) sel_text = sel_buf;
+            }
+        }
+        int f = 0;
+        if (sel_text) {
+            hn_cmd tc;
+            memset(&tc, 0, sizeof(tc));
+            tc.kind = HN_CMD_TEXT;
+            tc.text = sel_text; tc.text_len = sel_len;
+            float bl = y0 + h0 * 0.5f + st->font_size * 0.35f;
+            tc.tx = x0 + st->padding[3] + 4;
+            tc.baseline = tfy(g, sx, tc.tx, bl) ; tc.tx = tfx(g, sx, tc.tx, bl);
+            tc.baseline = tfy(g, sy, tc.tx, bl);
+            tc.font.size_px = st->font_size;
+            tc.font.weight = st->font_weight;
+            tc.font.italic = st->font_italic;
+            tc.font.letter_spacing = st->letter_spacing;
+            tc.fill = fill_color(st, st->color, alpha);
+            push_cmd(c, &tc);
+            f = 1;
+        }
+        (void)f;
+        /* ▾ 箭头(右缘) */
+        float ax = x0 + w0 - 18, ay = y0 + h0 * 0.5f;
+        hn_cmd ar;
+        memset(&ar, 0, sizeof(ar));
+        ar.kind = HN_CMD_POLYGON;
+        float *tri = (float *)hn_arena_alloc(c->tmp, sizeof(float) * 8);
+        if (tri) {
+            tri[0] = ax;      tri[1] = ay - 3;
+            tri[2] = ax + 10; tri[3] = ay - 3;
+            tri[4] = ax + 5;  tri[5] = ay + 3;
+            tri[6] = ax;      tri[7] = ay - 3;
+            ar.poly = tri; ar.poly_n = 4;
+            ar.fill = fill_color(st, st->color, alpha);
+            push_cmd(c, &ar);
+        }
+        if (c->focus_node == n)
+            paint_focus_ring(c, n, st, alpha, sx, sy, g);
+        goto clip_done;
+    }
+
     /* 图片元素。
        GIF 动图(GIF87a/89a; 显式 hn-gif 或 src 以 .gif 结尾, 见 hn_gif.c):
        解码为帧序列, 当前帧按 ext_clock 取 —— 发 BITMAP 指令, 像素源是
@@ -1926,6 +1998,58 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
         if (ik == HN_IN_CHECKBOX || ik == HN_IN_RADIO) {
             /* 复选/单选: 控件本体绘制(方框/圆圈 + 选中标记) */
             paint_check(c, n, st, alpha, sx, sy, g);
+            if (c->focus_node == n)
+                paint_focus_ring(c, n, st, alpha, sx, sy, g);
+            goto clip_done;
+        }
+        if (ik == HN_IN_RANGE) {
+            /* 滑条: 轨道(全宽圆角) + 填充段 + 圆形滑块。value 由点击/拖拽
+               写回 value 属性(H5 标准), 绘制只读。 */
+            float x0 = tfx(g, sx, n->bx, n->by), y0 = tfy(g, sy, n->bx, n->by);
+            float w0 = n->bw * g->scale * g->scale_x, h0 = n->bh * g->scale * g->scale_y;
+            float vmin = 0, vmax = 100, val = 0;
+            const char *as = hn_node_attr(n, "min");
+            const char *ax = hn_node_attr(n, "max");
+            const char *av = hn_node_attr(n, "value");
+            if (as && *as) vmin = (float)atof(as);
+            if (ax && *ax) vmax = (float)atof(ax);
+            if (av && *av) val = (float)atof(av);
+            if (vmax <= vmin) vmax = vmin + 100.0f;
+            float frac = (val - vmin) / (vmax - vmin);
+            if (frac < 0) frac = 0;
+            if (frac > 1) frac = 1;
+            float track_h = h0 * 0.3f;
+            if (track_h < 4) track_h = 4;
+            hn_cmd cmd;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = x0; cmd.y = y0 + (h0 - track_h) / 2;
+            cmd.w = w0; cmd.h = track_h;
+            cmd.radius = track_h / 2;
+            cmd.fill = fill_color(st, 0x7F7F7F4Du, alpha);       /* 轨道灰 */
+            push_cmd(c, &cmd);
+            float thumb_r = h0 * 0.5f;
+            if (thumb_r > 10) thumb_r = 10;
+            if (thumb_r < 6) thumb_r = 6;
+            float thx = x0 + frac * (w0 - thumb_r * 2) + thumb_r;
+            if (frac > 0.001f) {
+                memset(&cmd, 0, sizeof(cmd));
+                cmd.kind = HN_CMD_RECT;
+                cmd.x = x0; cmd.y = y0 + (h0 - track_h) / 2;
+                cmd.w = (thx - x0); cmd.h = track_h;
+                cmd.radius = track_h / 2;
+                cmd.fill = fill_color(st, 0x2F7BFFu, alpha);     /* 填充段 */
+                push_cmd(c, &cmd);
+            }
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.kind = HN_CMD_RECT;
+            cmd.x = thx - thumb_r; cmd.y = y0 + (h0 - thumb_r * 2) / 2;
+            cmd.w = thumb_r * 2; cmd.h = thumb_r * 2;
+            cmd.radius = thumb_r;
+            cmd.fill = fill_color(st, 0xFFFFFFu, alpha);         /* 滑块白 */
+            cmd.stroke = fill_color(st, 0x7F7F7Fu, alpha);
+            cmd.stroke_w = 1;
+            push_cmd(c, &cmd);
             if (c->focus_node == n)
                 paint_focus_ring(c, n, st, alpha, sx, sy, g);
             goto clip_done;

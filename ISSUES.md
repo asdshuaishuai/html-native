@@ -151,6 +151,26 @@
   css_probe 96→106(min/max/clamp/visibility 保布局);
   html_probe 43→48(实体解码/数字实体/progress 盒+绘制/visibility 不出文本)。
 
+### 2026-10-15 H5 标准第三轮(交互控件与原生默认动作, 已修+探针锚定)
+
+- **`<details>/<summary>` 折叠**: 点击 summary 切换祖先 details 的 open
+  (正文点击不触发; preventDefault 阻止); 无 open → 非 summary 子级
+  display:none(级联后布局前的文档遍历, 布局/绘制/命中三管线一致)。
+- **checkbox/radio 原生切换**: 点击切换/同名组互斥(组 = 最近 form 祖先,
+  无则文档根)—— 此前点击无任何反应(状态只由 JS/属性驱动)。
+- **`<input type=range>` 滑条**: HN_IN_RANGE 控件(轨道+填充+滑块绘制,
+  UA 160x20 border-box 零 padding); 点击/拖拽线性设值写回 value 属性;
+  不可编辑文本/不进焦点链。
+- **`<select>` 关闭态渲染**: 盒 + 选中项(option[selected] 优先)文本 + ▾;
+  UA border-box 160x26。下拉弹层未做 —— 如实声明。
+- **原生默认动作架构**: 激活行为统一收口 `rt_native_click`(rt_js_dispatch
+  内, 事件派发后、无 preventDefault 才执行 —— 浏览器同序); 零监听器
+  纯声明式页面同样工作; el.click() 合成点击同样触发。
+- **visibility 入继承集**: hidden 父下子级继承 hidden(子级显式复显的
+  完整语义未做 —— 子树整体跳过, 如实声明)。
+- 探针: events_probe 58→66(+8: 真输入通路的 details/checkbox/radio/
+  range/preventDefault); html_probe 48→53(details 折叠显隐/select·range 盒)。
+
 ### 已知问题(仍开放)
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。
