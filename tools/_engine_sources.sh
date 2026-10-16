@@ -372,8 +372,29 @@ hn_rpc() {
 # hn_find_hn <参数1或空> <缺省路径> — 解析 hncore 路径到 HN。
 # 口径: 先按调用方 cwd 解析; 不存在且参数非绝对 → 再以仓库根为基准解析一次;
 # 都不存在 → 打印提示(先构建)并 exit 1。
+#
+# C1 裁决(ISSUES-1): 不传参时**不再盲信调用方缺省路径**(历史上是 /tmp/hncore,
+# 极易是陈旧副本 —— "改完引擎跑探针"会拿到旧二进制的结果, 看起来像修复没生效)。
+# 顺序: dist 里的本机架构产物 → 调用方缺省路径。最终落在 /tmp 下时打醒目告警
+# (带 mtime), 提示显式传 ./dist/hncore-<os>-<arch>。
 hn_find_hn() {
-  local raw="${1:-$2}"
+  local raw
+  if [ "${1:-}" = "" ]; then
+    # 本机架构的 dist 产物(Darwin→macos; linux arm64 口径是 aarch64)
+    local _os _arch _cand
+    _os="$(uname -s 2>/dev/null || echo Darwin)"
+    _arch="$(uname -m 2>/dev/null || echo arm64)"
+    case "$_os" in Darwin) _os="macos" ;; Linux) _os="linux" ;; esac
+    [ "$_arch" = "arm64" ] && [ "$_os" = "linux" ] && _arch="aarch64"
+    _cand="$HN_REPO_ROOT/dist/hncore-${_os}-${_arch}"
+    if [ -e "$_cand" ]; then
+      raw="$_cand"
+    else
+      raw="$2"                                   # dist 缺席 → 沿用调用方缺省
+    fi
+  else
+    raw="$1"
+  fi
   HN="$(cd "$(dirname "$raw")" 2>/dev/null && printf '%s/%s' "$(pwd)" "$(basename "$raw")")"
   if [ ! -e "$HN" ] && [ "${1:-}" != "" ] && [ "${1#/}" = "$1" ]; then
     local alt="$HN_REPO_ROOT/$1"
@@ -384,6 +405,12 @@ hn_find_hn() {
     echo "先构建: bash tools/build-multiplatform.sh"
     exit 1
   fi
+  case "$HN" in
+    /tmp/*)
+      echo "⚠️  用的是 /tmp 副本: $HN (mtime: $(stat -f '%Sm' "$HN" 2>/dev/null || stat -c '%y' "$HN" 2>/dev/null))" >&2
+      echo "    可能是陈旧构建; 建议显式传 ./dist/hncore-<os>-<arch>" >&2
+      ;;
+  esac
 }
 
 # hn_boxes_lines <boxes 原始输出> — 解析成 "id x y w h" 行(文档序, 全保留;

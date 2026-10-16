@@ -596,5 +596,40 @@ else
   ck_bool "普通文档仍完全不透明(0% 透明)" 0
 fi
 
+# ============ H5 标准扩展(aspect-ratio / :root / :only-child) ============
+# aspect-ratio: 一维定、另一维 auto → 按 w/h 补齐(布局近似盒尺寸口径)。
+r="$(box1 '<html><head><style>html,body{margin:0}
+.a{aspect-ratio:16/9;width:320}
+</style></head><body><div class="a" id="a"></div></body></html>' a)"
+ck "aspect-ratio 16/9 → 高=宽*9/16" "$r" "0 0 320 180"
+r="$(box1 '<html><head><style>html,body{margin:0}
+.b{aspect-ratio:2;height:60}
+</style></head><body><div class="b" id="b"></div></body></html>' b)"
+ck "aspect-ratio 反向(高定宽补)" "$r" "0 0 120 60"
+# 显式两维都在 → ratio 不插手
+r="$(box1 '<html><head><style>html,body{margin:0}
+.b{aspect-ratio:2;width:120;height:60}
+</style></head><body><div class="b" id="b"></div></body></html>' b)"
+ck "aspect-ratio 两维显式不覆盖" "$r" "0 0 120 60"
+
+# :root 命中真实 html(包裹根不算); 作者变量随根生效
+r="$(run_boxes '<html><head><style>:root{font-size:20px}
+.a{width:5rem;height:10}
+</style></head><body><div class="a" id="a"></div></body></html>')"
+ck ":root 字号 → rem 基准 20px" "$(hn_box_of "$r" a first)" "8 8 100 10"
+
+# :only-child / :first-child / :last-child 协同
+r="$(run_boxes '<html><head><style>html,body{margin:0}
+div{height:10}
+.oc:only-child{background:#00ff00}
+</style></head><body><div><div class="oc" id="a"></div></div>
+<div><p></p><div id="b"></div></div></body></html>')"
+got="$(hn_box_of "$r" a first)"
+if [ "$got" != "MISSING" ]; then NPASS=$((NPASS+1)); else hn_fail ":only-child 命中(唯一子)" "存在" "MISSING"; fi
+r="$(box1 '<html><head><style>html,body{margin:0}
+.oc:only-child{width:88;height:10}
+</style></head><body><div><div class="oc" id="a"></div></div></body></html>' a)"
+ck ":only-child 样式生效" "$r" "0 0 88 10"
+
 # ============ 报告 ============
 hn_harness_report

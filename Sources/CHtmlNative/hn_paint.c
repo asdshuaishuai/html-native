@@ -1871,17 +1871,28 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 paint_focus_ring(c, n, st, alpha, sx, sy, g);
             goto clip_done;
         }
+        int is_btn = (ik == HN_IN_BUTTON);
         int f = (st->background & 0xFFu) || st->has_gradient;
         int b = st->border_w > 0 && (st->border_color & 0xFFu);
+        /* 按钮缺省皮肤(作者未声明 background/border 时): 中性灰盒,
+           与 UA <button> 元素皮肤同族; 作者规则照常覆盖。 */
+        hn_color box_fill = st->background, box_stroke = st->border_color;
+        float box_bw = st->border_w;
+        if (is_btn && !f && !b) {
+            f = 1; b = 1;
+            box_fill = 0x7F7F7F24u;   /* rgba(127,127,127,0.14) */
+            box_stroke = 0x7F7F7F66u; /* rgba(127,127,127,0.40) */
+            box_bw = 1.0f;
+        }
         if (f || b) {
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
             cmd.kind = HN_CMD_RECT;
             cmd.x = tfx(g, sx, n->bx, n->by); cmd.y = tfy(g, sy, n->bx, n->by); cmd.w = n->bw * g->scale * g->scale_x; cmd.h = n->bh * g->scale * g->scale_y;
             cmd.radius = eff_radius(st, cmd.w, cmd.h);
-            cmd.fill = fill_color(st, st->background, alpha);
-            cmd.stroke = fill_color(st, st->border_color, alpha);
-            cmd.stroke_w = st->border_w;
+            cmd.fill = fill_color(st, box_fill, alpha);
+            cmd.stroke = fill_color(st, box_stroke, alpha);
+            cmd.stroke_w = box_bw;
             if (st->has_shadow) {
                 cmd.shadow = 1;
                 cmd.shadow_color = fill_color(st, st->sh_color, alpha);
@@ -1891,7 +1902,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             }
             push_cmd(c, &cmd);
         }
-        /* :focus 缺省焦点环(主题/作者 :focus 规则叠加其上) */
+        /* :focus 缺省焦点环(主题/作者 :focus 规则叠加其上); 按钮不进
+           焦点链, 焦点环画不到它 */
         if (c->focus_node == n)
             paint_focus_ring(c, n, st, alpha, sx, sy, g);
         size_t vlen = 0;
@@ -2304,4 +2316,26 @@ void hn_context_strip_root_background(hn_context *c) {
     if (!c) return;
     c->transparent = 1;
     hn_strip_root_background_now(c);
+}
+
+hn_color hn_doc_canvas_background(hn_doc *doc) {
+    if (!doc || !doc->root) return 0;
+    /* 浏览器标准: html(无则 body)的背景向画布传播 —— 引擎按盒绘制背景,
+       盒只有内容高, 画布余下区域露清屏色; 宿主用本访问器把清屏色换成
+       根背景。返回 0 = 未声明(宿主用各自缺省)。 */
+    hn_color bg = 0;
+    hn_node *stack[8];
+    int sp = 0;
+    stack[sp++] = doc->root;
+    int guard = 0;
+    while (sp > 0 && guard++ < 64) {
+        hn_node *n = stack[--sp];
+        if (n->kind == HN_ELEM && n->tag &&
+            (!strcmp(n->tag, "html") || !strcmp(n->tag, "body"))) {
+            if (n->style.background & 0xFFu) { bg = n->style.background; break; }
+        }
+        for (hn_node *ch = n->first; ch && sp < 8; ch = ch->next)
+            if (ch->kind == HN_ELEM) stack[sp++] = ch;
+    }
+    return bg;
 }

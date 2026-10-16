@@ -563,13 +563,19 @@ int main(int argc, char **argv) {
         else {
             /* 声明 hn-transparent 的文档画布必须是全透明的 —— 否则引擎把
                html/body 底色剥掉了, 光栅器却又铺了一层不透明底, 透明背板
-               直接失效(表现为"声明了透明却渲染出一块实色")。 */
+               直接失效(表现为"声明了透明却渲染出一块实色")。
+               非透明文档: html/body 背景向画布传播(浏览器标准, 与
+               rt_raster 同一口径)。 */
             hn_color rbg = 0x0B0E13FFu;
             {
                 hn_manifest mm;
                 memset(&mm, 0, sizeof(mm));
                 hn_doc_manifest(doc, &mm);
                 if (mm.transparent == 1) rbg = 0x00000000u;
+                else {
+                    hn_color rb = hn_doc_canvas_background(doc);
+                    if (rb) rbg = rb;
+                }
             }
             unsigned char *px = hnsoft_render(dl, (int)W, (int)H, rbg);
             if (!px) { fprintf(stderr, "hncore: 渲染失败\n"); rc = 1; }

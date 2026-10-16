@@ -132,7 +132,20 @@
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。
 - neb3 原生纹理直入合成器(免 CPU 回读)为下一阶段: 需要 wgpu↔Metal 设备互操作与跨队列同步设计, 计划独立推进。
-- hn_find_hn 回退 `/tmp/hncore` 可能选中陈旧二进制(本轮 layout 探针一次假红由此产生)—— 探针改打时间戳或先构建。
+- ~~hn_find_hn 回退 `/tmp/hncore` 可能选中陈旧二进制~~ **已修**(2026-10-15): 缺省优先 `dist/hncore-<os>-<arch>`, 落 `/tmp` 时打带 mtime 的醒目告警(详见 ISSUES-1.md C1)。
+- text-transform 仅 ASCII 范围(多字节 UTF-8 原样保留); aspect-ratio 按盒尺寸近似(未做 padding/border 参与的替换尺寸模型); overflow-x/-y 与 overflow 同轴(引擎单轴裁剪模型)—— 均为如实声明的能力边界, 非缺陷。
+
+### 2026-10-15 H5 标准扩展轮(已修, 探针锚定)
+
+- **arcTo 弧向判定**(glue): 叉积→ccw 判据在 y-down 屏幕坐标不成立, 直角画出 270° 长弧(roundRect 全坏)。改为"短弧 + 中点朝顶点"几何判据。此前无探针覆盖 arcTo。
+- **globalAlpha 负 int32 下送**(glue): 位运算产生负数经 JSON 到引擎丢失 → alpha 混合完全不落像素。`>>>0` 归正。
+- **glue 正则被 C 转义吃掉**(glue): `\s`/`\w` 在 C 字符串中退化为字面量(classList 全套静默失效)。glue 装载失败现打 `[canvas-glue]` stderr。
+- **HTML5**: `<template>` 不渲染; `<button>`/`<input type=button|submit|reset>` 按钮控件(收缩+居中+缺省皮肤); 语义标签 UA 皮肤补全。
+- **CSS**: text-transform / aspect-ratio / overflow-x / :root / :only-child。
+- **JS DOM**: textContent get、属性四件套、classList、dataset、style 代理、checked/disabled/hidden、querySelector(All)(引擎 `hn_doc_query_selector`)、createElement/appendChild/remove、树关系、document.body/documentElement、getElementById null 语义。
+- **Canvas**: rect/roundRect/getTransform/createImageData/isPointInPath/toDataURL/globalAlpha/lineJoin/miterLimit。
+- **根背景画布传播**(浏览器标准): `hn_doc_canvas_background`; rt_raster/daemon shot/hncore render 三口同源; 透明窗不传播。
+- 探针: 新增 `dom_probe` 38 断言; layout 40→43 / css 96→102 / html 37→43。
 
 ---
 

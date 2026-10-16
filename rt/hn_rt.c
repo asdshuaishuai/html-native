@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>   /* tolower(createElement 的标签归一) */
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -557,6 +558,12 @@ static int rt_raster(hn_rt *rt) {
     float scale = rt_scale(rt);
     int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);
     hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
+    /* html/body 背景向画布传播(浏览器标准): 根链声明了实色背景时清屏随它。
+       透明窗不传播 —— 逐像素 alpha 契约优先。 */
+    if (!rt->transparent) {
+        hn_color rb = hn_doc_canvas_background(hn_context_doc(rt->ctx));
+        if (rb) bg = rb;
+    }
     /* 直呈分流: 平台层注入 CAMetalLayer 且本帧行可 GPU → 直接 present
        (成功 = 0 次 readback / 0 次 CPU 位图, rt->presented 置位供
        shot/blit 分流); 失败落回既有 readback/CPU 路径。 */
@@ -1188,6 +1195,76 @@ static JSValue js_hn_canvas_pixels(JSContext *ctx, JSValueConst _, int argc, JSV
     return ab;
 }
 
+/* __hnCanvasPng(cvId) → "data:image/png;base64,..."(toDataURL 的原生缝):
+ * 画布账本离屏栅格化(元素 width/height 属性口径) → hnsoft_encode_png →
+ * base64。失败返回 null(桥纪律)。 */
+static void b64_enc(const unsigned char *in, size_t n, char *out) {
+    static const char *T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t i, o = 0;
+    for (i = 0; i + 2 < n; i += 3) {
+        unsigned v = ((unsigned)in[i] << 16) | ((unsigned)in[i + 1] << 8) | in[i + 2];
+        out[o++] = T[(v >> 18) & 63]; out[o++] = T[(v >> 12) & 63];
+        out[o++] = T[(v >> 6) & 63];  out[o++] = T[v & 63];
+    }
+    size_t rem = n - i;
+    if (rem == 1) {
+        unsigned v = (unsigned)in[i] << 16;
+        out[o++] = T[(v >> 18) & 63]; out[o++] = T[(v >> 12) & 63];
+        out[o++] = '='; out[o++] = '=';
+    } else if (rem == 2) {
+        unsigned v = ((unsigned)in[i] << 16) | ((unsigned)in[i + 1] << 8);
+        out[o++] = T[(v >> 18) & 63]; out[o++] = T[(v >> 12) & 63];
+        out[o++] = T[(v >> 6) & 63];  out[o++] = '=';
+    }
+    out[o] = 0;
+}
+
+static JSValue js_hn_canvas_png(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_context *c = b ? (b->ctx ? b->ctx : doc_ctx_find(b->doc)) : NULL;
+    if (!c || argc < 1) return JS_NULL;
+    const char *id = JS_ToCString(ctx, argv[0]);
+    if (!id) return JS_NULL;
+    /* 画布属性尺寸(与 hn_canvas_get_image_data 内部同口径) */
+    float cw = 300, ch = 150;
+    hn_node *n = b->doc ? hn_doc_find_by_id(b->doc, id) : NULL;
+    if (n) {
+        const char *aw = hn_node_attr(n, "width");
+        const char *ah = hn_node_attr(n, "height");
+        if (aw && *aw) cw = (float)atof(aw);
+        if (ah && *ah) ch = (float)atof(ah);
+    }
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+    int w = (int)cw, h = (int)ch;
+    if ((float)w < cw) w++;
+    if ((float)h < ch) h++;
+    unsigned char *px = NULL;
+    int ow = 0, oh = 0;
+    int ok = hn_canvas_get_image_data(c, id, 0, 0, w, h, &px, &ow, &oh);
+    JS_FreeCString(ctx, id);
+    if (!ok || !px) return JS_NULL;
+    size_t pn = 0;
+    unsigned char *png = hnsoft_encode_png(px, ow, oh, &pn);
+    free(px);
+    if (!png) return JS_NULL;
+    size_t b64n = ((pn + 2) / 3) * 4;
+    char *b64 = (char *)malloc(b64n + 1);
+    if (!b64) { free(png); return JS_NULL; }
+    b64_enc(png, pn, b64);
+    free(png);
+    char head[] = "data:image/png;base64,";
+    size_t hn_ = sizeof(head) - 1;
+    char *url = (char *)malloc(hn_ + b64n + 1);
+    if (!url) { free(b64); return JS_NULL; }
+    memcpy(url, head, hn_);
+    memcpy(url + hn_, b64, b64n + 1);
+    free(b64);
+    JSValue r = JS_NewString(ctx, url);
+    free(url);
+    return r;
+}
+
 /* ---------------- <canvas> 2D glue(JS 层状态机) ----------------
  * 标准 2D context 的方法面全部在此实现, 汇到 hnCanvas2D:
  *   fillRect/strokeRect/beginPath/moveTo/lineTo/arc/ellipse/quadraticCurveTo/
@@ -1315,8 +1392,17 @@ static const char *CANVAS_GLUE_JS =
 "    var st={fill:[0,0,0,255],stroke:[0,0,0,255],fillSrc:'#000000',strokeSrc:'#000000',"
 "            lw:1,cap:'butt',fontPx:10,fontSrc:'10px sans-serif',m:[1,0,0,1,0,0],clips:0,"
 "            dash:[],dashOff:0,align:'left',base:'alphabetic',gco:'source-over',"
-"            shSrc:'rgba(0,0,0,0)',shC:[0,0,0,0],shX:0,shY:0,shB:0};"
+"            shSrc:'rgba(0,0,0,0)',shC:[0,0,0,0],shX:0,shY:0,shB:0,"
+"            ga:1,join:'miter',ml:10};"
 "    var stack=[],subs=[],cur=null;"
+"    /* globalAlpha 统一乘点: make2D 内所有下送颜色都过这里(影子/渐变 stop 同乘)。 */"
+"    function rgbaGA(c){"
+"      var r=rgba(c);"
+"      if (st.ga>=1) return r;"
+"      if (st.ga<=0) return (r & 0xFFFFFF00) >>> 0;"
+"      /* >>>0 归正: 位运算产生的是 int32(负数), JSON 负数到引擎侧会丢 */"
+"      return ((r & 0xFFFFFF00) | (((r & 255) * st.ga) | 0)) >>> 0;"
+"    }"
 "    function xf(x,y){var m=st.m;return [m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];}"
 "    function mul(n){var m=st.m;"
 "      st.m=[m[0]*n[0]+m[2]*n[1], m[1]*n[0]+m[3]*n[1],"
@@ -1328,7 +1414,8 @@ static const char *CANVAS_GLUE_JS =
 "      fillSrc:s.fillSrc,strokeSrc:s.strokeSrc,lw:s.lw,cap:s.cap,fontPx:s.fontPx,"
 "      fontSrc:s.fontSrc,m:s.m.slice(),clips:s.clips,dash:s.dash.slice(),dashOff:s.dashOff,"
 "      align:s.align,base:s.base,gco:s.gco,"
-"      shSrc:s.shSrc,shC:s.shC.slice(),shX:s.shX,shY:s.shY,shB:s.shB};}"
+"      shSrc:s.shSrc,shC:s.shC.slice(),shX:s.shX,shY:s.shY,shB:s.shB,"
+"      ga:s.ga,join:s.join,ml:s.ml};}"
 "    /* 渐变 op 公共字段: 轴/圆坐标经 CTM 变换(渐变坐标属 user space),"
 "       全部 stop 按 [t,rgba,...] 扁平数组下送(引擎分段线性插值)。 */"
 "    function gradOp(gd){"
@@ -1361,11 +1448,11 @@ static const char *CANVAS_GLUE_JS =
 "      else if (st.align==='right') q[0]-=measureW(String(s));"
 "      if (st.base==='top') q[1]+=px*0.8;"
 "      else if (st.base==='middle') q[1]+=px*0.3;"
-"      send({op:'text',s:String(s),x:q[0],y:q[1],px:px,col:rgba(solidOf(style))});"
+"      send({op:'text',s:String(s),x:q[0],y:q[1],px:px,col:rgbaGA(solidOf(style))});"
 "    }"
 "    function rectPts(x,y,w,h){return [x,y, x+w,y, x+w,y+h, x,y+h];}"
 "    function shadowOn(o){"
-"      if (st.shC[3]>0&&st.shB>0){o.shc=rgba(st.shC);o.shx=st.shX;o.shy=st.shY;o.shb=st.shB;}"
+"      if (st.shC[3]>0&&st.shB>0){o.shc=rgbaGA(st.shC);o.shx=st.shX;o.shy=st.shY;o.shb=st.shB;}"
 "      return o;"
 "    }"
 "    function isPat(v){return v && v.__hnpat;}"
@@ -1393,7 +1480,7 @@ static const char *CANVAS_GLUE_JS =
 "        for (var i=0;i<8;i+=2){var q=xf(p[i],p[i+1]);t.push(q[0],q[1]);}"
 "        if (grad){o={op:'gpath',pts:t};gg=gradOp(st.fillSrc);"
 "          for (var k in gg)o[k]=gg[k];}"
-"        else o={op:'fpath',pts:t,col:rgba(solidOf(st.fillSrc))};"
+"        else o={op:'fpath',pts:t,col:rgbaGA(solidOf(st.fillSrc))};"
 "        send(shadowOn(o));"
 "        return;"
 "      }"
@@ -1402,7 +1489,7 @@ static const char *CANVAS_GLUE_JS =
 "      if (th<0){q0[1]+=th;th=-th;}"
 "      if (grad){o={op:'grect',x:q0[0],y:q0[1],w:tw,h:th};"
 "        gg=gradOp(st.fillSrc);for (var k2 in gg)o[k2]=gg[k2];}"
-"      else o={op:'frect',x:q0[0],y:q0[1],w:tw,h:th,col:rgba(st.fill)};"
+"      else o={op:'frect',x:q0[0],y:q0[1],w:tw,h:th,col:rgbaGA(st.fill)};"
 "      send(shadowOn(o));"
 "    }"
 "    var api={};"
@@ -1512,7 +1599,18 @@ static const char *CANVAS_GLUE_JS =
 "      var cd=r/Math.sqrt((1-cosA)/2);"
 "      var cx=x1+bx/bl*cd,cy=y1+by/bl*cd;"
 "      var a0=Math.atan2(t1y-cy,t1x-cx),a1=Math.atan2(t2y-cy,t2x-cx);"
-"      arcPts(cx,cy,r,r,0,a0,a1,(v1x*v2y-v1y*v2x)<0);"
+"      /* 弧向判据: 先取短弧, 再验证中点方向朝向顶点 x1(弧向顶点鼓出)。"
+"         旧判据(v1×v2 叉积 → ccw)在 y-down 屏幕坐标下不成立 ——"
+"         '向右走向上转'与'向左走向下转'叉积同号但短弧方向相反,"
+"         实测直角会画出 270° 长弧(roundRect 全坏)。 */"
+"      var sweep=a1-a0;"
+"      while(sweep>Math.PI)sweep-=2*Math.PI;"
+"      while(sweep<-Math.PI)sweep+=2*Math.PI;"
+"      var mid=a0+sweep/2;"
+"      var vx=x1-cx,vy=y1-cy;"
+"      if (Math.cos(mid)*vx+Math.sin(mid)*vy<0)"
+"        sweep=sweep>0?sweep-2*Math.PI:sweep+2*Math.PI;"
+"      arcPts(cx,cy,r,r,0,a0,a0+sweep,sweep<0);"
 "    };"
 "    api.fill=function(){"
 "      var fs=st.fillSrc,grad=isGrad(fs),pat=isPat(fs);"
@@ -1520,7 +1618,7 @@ static const char *CANVAS_GLUE_JS =
 "        var p=subs[i].p;"
 "        if (p.length<6) continue;"
 "        if (pat) send(patOp('ppath',fs,0,0,0,0,p.slice()));"
-"        else if (!grad) send({op:'fpath',pts:p.slice(),col:rgba(st.fill)});"
+"        else if (!grad) send({op:'fpath',pts:p.slice(),col:rgbaGA(st.fill)});"
 "        else{var o={op:'gpath',pts:p.slice()};"
 "          var gg=gradOp(st.fillSrc);for (var k in gg)o[k]=gg[k];send(o);}"
 "      }"
@@ -1560,7 +1658,7 @@ static const char *CANVAS_GLUE_JS =
 "    }"
 "    api.stroke=function(){"
 "      var grad=isGrad(st.strokeSrc);"
-"      var col=grad?0:rgba(solidOf(st.strokeSrc));"
+"      var col=grad?0:rgbaGA(solidOf(st.strokeSrc));"
 "      var w=st.lw*detScale(),cap=(st.cap==='round');"
 "      for (var i=0;i<subs.length;i++){"
 "        var p=subs[i].p;"
@@ -1597,7 +1695,7 @@ static const char *CANVAS_GLUE_JS =
 "      var p=rectPts(x,y,w,h),t=[];"
 "      for (var i=0;i<8;i+=2){var q=xf(p[i],p[i+1]);t.push(q[0],q[1]);}"
 "      t.push(t[0],t[1]);"
-"      send({op:'spath',pts:t,col:rgba(solidOf(st.strokeSrc)),w:st.lw*detScale(),"
+"      send({op:'spath',pts:t,col:rgbaGA(solidOf(st.strokeSrc)),w:st.lw*detScale(),"
 "           cap:(st.cap==='round')});"
 "    };"
 "    api.fillText=function(s,x,y){textOp(s,x,y,st.fillSrc);};"
@@ -1676,6 +1774,53 @@ static const char *CANVAS_GLUE_JS =
 "      }"
 "      send(o);"
 "    };"
+"    api.rect=function(x,y,w,h){"
+"      var p=rectPts(x,y,w,h),t=[];"
+"      for (var i=0;i<8;i+=2){var q=xf(p[i],p[i+1]);t.push(q[0],q[1]);}"
+"      t.push(t[0],t[1]);"
+"      subs.push({p:t,closed:true});   /* 闭子路径进当前路径(fill/stroke/clip 消费) */"
+"    };"
+"    api.roundRect=function(x,y,w,h,r){"
+"      var rr=(typeof r==='number')?[r]:Array.isArray(r)?r:[0];"
+"      function cl(v){var m=Math.min(w,h)/2;return Math.max(0,Math.min(+v||0,m));}"
+"      var r0=cl(rr[0]),r1=cl(rr[1]!==undefined?rr[1]:rr[0]),"
+"          r2=cl(rr[2]!==undefined?rr[2]:rr[0]),r3=cl(rr[3]!==undefined?rr[3]:rr[1]!==undefined?rr[1]:rr[0]);"
+"      api.moveTo(x+r0,y);"
+"      api.lineTo(x+w-r1,y); api.arcTo(x+w,y,x+w,y+r1,r1);"
+"      api.lineTo(x+w,y+h-r2); api.arcTo(x+w,y+h,x+w-r2,y+h,r2);"
+"      api.lineTo(x+r3,y+h); api.arcTo(x,y+h,x,y+h-r3,r3);"
+"      api.lineTo(x,y+r0); api.arcTo(x,y,x+r0,y,r0);"
+"      api.closePath();"
+"    };"
+"    api.getTransform=function(){"
+"      var m=st.m;return {a:m[0],b:m[1],c:m[2],d:m[3],e:m[4],f:m[5]};"
+"    };"
+"    api.createImageData=function(a,b){"
+"      var w2,h2;"
+"      if (typeof a==='object'&&a){w2=a.width;h2=a.height;}"
+"      else {w2=+a||0;h2=+b||0;}"
+"      if (w2<1||h2<1)return null;"
+"      return {width:w2,height:h2,data:new Uint8ClampedArray(w2*h2*4)};"
+"    };"
+"    api.isPointInPath=function(px,py){"
+"      /* 诚实近似: 取该点已渲染像素的 alpha>0(离屏栅格化账本; 命中按像素,"
+"         与路径数学命中在抗锯齿边缘可有 1px 级差异 —— 注释即契约)。 */"
+"      var im=api.getImageData(+px|0,+py|0,1,1);"
+"      return !!(im&&im.data&&im.data[3]>0);"
+"    };"
+"    api.toDataURL=function(type){"
+"      /* 口径: 引擎统一出 PNG(type 参数收下不区分, 注释即契约)。 */"
+"      try{return __hnCanvasPng(cvId)||null;}catch(e){return null;}"
+"    };"
+"    Object.defineProperty(api,'globalAlpha',{"
+"      get:function(){return st.ga;},"
+"      set:function(v){v=+v;if(!(v>=0))v=0;if(v>1)v=1;st.ga=v;}});"
+"    Object.defineProperty(api,'lineJoin',{"
+"      get:function(){return st.join;},"
+"      set:function(v){if(v)st.join=String(v);}});"
+"    Object.defineProperty(api,'miterLimit',{"
+"      get:function(){return st.ml;},"
+"      set:function(v){var n=+v;if(n>=1)st.ml=n;}});"
 "    return api;"
 "  }"
 "})(globalThis);";
@@ -1931,6 +2076,224 @@ static JSValue js_hn_get_value(JSContext *ctx, JSValueConst _, int argc, JSValue
     JSValue r = JS_NewStringLen(ctx, v && vl ? v : "", v ? vl : 0);
     if (id) JS_FreeCString(ctx, id);
     return r;
+}
+
+/* ---------------- DOM 标准面桥(getAttribute/querySelector/树操作) ----------------
+ * 全部按 id 寻址(与 hnSetText 同一寻址纪律); 失败返回 null/false/空,
+ * 不抛异常 —— 语法错(querySelector)由 glue 侧映射为异常。 */
+
+/* 节点 id 读口: find_by_id 走 "id" 属性(find_by_id_rec), 这里同源读取 */
+static const char *node_id_of(hn_node *n) {
+    return n ? hn_node_attr(n, "id") : NULL;
+}
+
+static hn_node *bridge_node(JSContext *ctx, int argc, JSValueConst *argv, int idx) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    if (!b || !b->doc || argc <= idx) return NULL;
+    const char *id = JS_ToCString(ctx, argv[idx]);
+    hn_node *n = id ? hn_doc_find_by_id(b->doc, id) : NULL;
+    if (id) JS_FreeCString(ctx, id);
+    return n;
+}
+
+static JSValue js_hn_get_attr(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n || argc < 2 || !JS_IsString(argv[1])) return JS_NULL;
+    const char *name = JS_ToCString(ctx, argv[1]);
+    const char *v = name ? hn_node_attr(n, name) : NULL;
+    JSValue r = v ? JS_NewString(ctx, v) : JS_NULL;
+    if (name) JS_FreeCString(ctx, name);
+    return r;
+}
+
+static JSValue js_hn_set_attr(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n || argc < 3 || !JS_IsString(argv[1])) return JS_FALSE;
+    const char *name = JS_ToCString(ctx, argv[1]);
+    const char *val = argc >= 3 && JS_IsString(argv[2]) ? JS_ToCString(ctx, argv[2]) : "";
+    int ok = (name && hn_node_set_attr(n, name, val ? val : ""));
+    if (name) JS_FreeCString(ctx, name);
+    if (val) JS_FreeCString(ctx, val);
+    return ok ? JS_TRUE : JS_FALSE;
+}
+
+static JSValue js_hn_remove_attr(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n || argc < 2 || !JS_IsString(argv[1])) return JS_FALSE;
+    const char *name = JS_ToCString(ctx, argv[1]);
+    int ok = (name && hn_node_remove_attr(n, name));
+    if (name) JS_FreeCString(ctx, name);
+    return ok ? JS_TRUE : JS_FALSE;
+}
+
+static JSValue js_hn_has_attr(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n || argc < 2 || !JS_IsString(argv[1])) return JS_FALSE;
+    const char *name = JS_ToCString(ctx, argv[1]);
+    const char *v = name ? hn_node_attr(n, name) : NULL;
+    if (name) JS_FreeCString(ctx, name);
+    return v ? JS_TRUE : JS_FALSE;
+}
+
+/* 属性名枚举(dataset 的 data-* 前缀扫描要用) */
+static JSValue js_hn_attr_names(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    JSValue arr = JS_NewArray(ctx);
+    if (!n) return arr;
+    int k = 0;
+    for (int i = 0; i < n->n_attrs; i++) {
+        JSValue s = JS_NewString(ctx, n->attrs[i].name);
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)k++, s);
+    }
+    return arr;
+}
+
+static JSValue js_hn_get_text(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n) return JS_NewString(ctx, "");
+    char buf[8192];
+    size_t used = hn_node_text_content(n, buf, sizeof(buf) - 1);
+    return JS_NewStringLen(ctx, buf, used);
+}
+
+static JSValue js_hn_tag(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    return JS_NewString(ctx, (n && n->tag) ? n->tag : "");
+}
+
+/* querySelector/querySelectorAll: 返回 id(串)或 id 数组。
+ * 桥按 id 寻址 —— 命中元素没有 id 属性时(body/html 常态)现场补一个
+ * 唯一 el-N(与 find_by_id 同源, 下次查询稳定复用), 否则永远查得到
+ * 元素却拿不到引用。 */
+static const char *query_ensure_id(js_bridge *b, hn_node *n) {
+    const char *eid = node_id_of(n);
+    if (eid && *eid) return eid;
+    char idbuf[32];
+    for (int i = 1; i < 1000000; i++) {
+        snprintf(idbuf, sizeof(idbuf), "el-%d", i);
+        if (!hn_doc_find_by_id(b->doc, idbuf)) break;
+    }
+    hn_node_set_attr(n, "id", idbuf);
+    return hn_node_attr(n, "id");
+}
+
+static JSValue js_hn_query(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv, int all) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    if (!b || !b->doc || argc < 1 || !JS_IsString(argv[0])) return all ? JS_NewArray(ctx) : JS_NULL;
+    const char *sel = JS_ToCString(ctx, argv[0]);
+    hn_node *hits[256];
+    int n = sel ? hn_doc_query_selector(b->doc, sel, b->ctx, hits, 256) : 0;
+    JSValue r;
+    if (all) {
+        r = JS_NewArray(ctx);
+        for (int i = 0; i < n; i++) {
+            const char *eid = query_ensure_id(b, hits[i]);
+            JSValue s = JS_NewString(ctx, eid ? eid : "");
+            JS_SetPropertyUint32(ctx, r, (uint32_t)i, s);
+        }
+    } else {
+        if (n > 0) {
+            const char *eid = query_ensure_id(b, hits[0]);
+            r = eid ? JS_NewString(ctx, eid) : JS_NULL;
+        } else {
+            r = JS_NULL;
+        }
+    }
+    if (sel) JS_FreeCString(ctx, sel);
+    return r;
+}
+
+static JSValue js_hn_query_one(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    return js_hn_query(ctx, _, argc, argv, 0);
+}
+static JSValue js_hn_query_all(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    return js_hn_query(ctx, _, argc, argv, 1);
+}
+
+static JSValue js_hn_parent(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n || !n->parent || !node_id_of(n->parent)) return JS_NULL;
+    return JS_NewString(ctx, node_id_of(n->parent));
+}
+
+static JSValue js_hn_kids(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    JSValue arr = JS_NewArray(ctx);
+    if (!n) return arr;
+    int k = 0;
+    for (hn_node *ch = n->first; ch; ch = ch->next) {
+        if (ch->kind != HN_ELEM || !node_id_of(ch)) continue;
+        JSValue s = JS_NewString(ctx, node_id_of(ch));
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)k++, s);
+    }
+    return arr;
+}
+
+/* createElement + appendChild 的引擎落点: 节点必须挂在文档树上才有 arena
+   归属 —— 引擎没有"游离文档片段", 所以 create 即挂在 body 尾部(带自动
+   id), appendChild 语义是"移动到目标父尾部"(先从旧父摘除再挂)。 */
+static JSValue js_hn_create_el(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    if (!b || !b->doc || argc < 1 || !JS_IsString(argv[0])) return JS_NULL;
+    const char *tag = JS_ToCString(ctx, argv[0]);
+    if (!tag || !*tag) { if (tag) JS_FreeCString(ctx, tag); return JS_NULL; }
+    char lt[64];
+    snprintf(lt, sizeof(lt), "%s", tag);
+    JS_FreeCString(ctx, tag);
+    for (char *p = lt; *p; p++) *p = (char)tolower((unsigned char)*p);
+    hn_node *body = NULL;
+    hn_node *hits[1];
+    if (hn_doc_query_selector(b->doc, "body", b->ctx, hits, 1) > 0) body = hits[0];
+    if (!body) body = hn_doc_root(b->doc);
+    hn_node *el = hn_node_append_element(body, lt);
+    if (!el) return JS_NULL;
+    /* 自动 id: el-N 找到第一个未占用的 N(桥按 id 寻址, 新节点必须有 id) */
+    char idbuf[32];
+    for (int i = 1; i < 1000000; i++) {
+        snprintf(idbuf, sizeof(idbuf), "el-%d", i);
+        if (!hn_doc_find_by_id(b->doc, idbuf)) break;
+    }
+    hn_node_set_attr(el, "id", idbuf);
+    return JS_NewString(ctx, idbuf);
+}
+
+static JSValue js_hn_append(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *parent = bridge_node(ctx, argc, argv, 0);
+    hn_node *child = bridge_node(ctx, argc, argv, 1);
+    if (!parent || !child || child == parent || !child->parent) return JS_FALSE;
+    if (child->parent == parent) return JS_TRUE;           /* 幂等 */
+    if (!hn_node_remove_child(child->parent, child)) return JS_FALSE;
+    /* 挂到新父尾部(remove_child 已断链, 复用引擎 append 链接语义) */
+    child->parent = parent;
+    child->next = NULL;
+    child->prev = parent->last;
+    if (parent->last) { parent->last->next = child; parent->last = child; }
+    else { parent->first = parent->last = child; }
+    child->anim.fresh = 1;                                 /* 新位置播入场动画 */
+    return JS_TRUE;
+}
+
+static JSValue js_hn_detach(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!n || !n->parent) return JS_FALSE;
+    return hn_node_remove_child(n->parent, n) ? JS_TRUE : JS_FALSE;
+}
+
+static JSValue js_hn_exists(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    if (!b || !b->doc || argc < 1) return JS_FALSE;
+    const char *id = JS_ToCString(ctx, argv[0]);
+    hn_node *n = id ? hn_doc_find_by_id(b->doc, id) : NULL;
+    if (id) JS_FreeCString(ctx, id);
+    return n ? JS_TRUE : JS_FALSE;
+}
+
+static JSValue js_hn_focus(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_node *n = bridge_node(ctx, argc, argv, 0);
+    if (!b || !b->ctx || !n) return JS_FALSE;
+    hn_context_set_focus(b->ctx, n);
+    return JS_TRUE;
 }
 
 /* 释放监听器表持有的全部 JSValue 引用(hn_rt_close / 文档换装调用)。
@@ -2289,31 +2652,147 @@ static const char *EVENT_GLUE_JS =
 "  if (g.__hnMakeEvent) return;"
 "  function capOf(o){return (o===true||(o&&o.capture))?1:0;}"
 "  var EVCACHE={};"
+"  function escSel(s){return String(s).replace(/([^\\w-])/g,'\\$1');}"
+"  function parseDecls(str){"
+"    var out={};"
+"    String(str||'').split(';').forEach(function(d){"
+"      var i=d.indexOf(':');"
+"      if(i>0){out[d.slice(0,i).trim().toLowerCase()]=d.slice(i+1).trim();}"
+"    });"
+"    return out;"
+"  }"
+"  function declsStr(o){"
+"    var s='';"
+"    for(var k in o){ if(o[k]!==''&&o[k]!==undefined){ s+=(s?'; ':'')+k+': '+o[k]; } }"
+"    return s;"
+"  }"
+"  function rekey(z,nid){"
+"    try{delete EVCACHE[String(z.__bid)];}catch(e){}"
+"    /* 只动 __bid: z.id 是访问器(内部读 __bid/属性), 在这里赋值会自递归 */"
+"    z.__bid=nid;EVCACHE[nid]=z;"
+"  }"
+"  /* style 属性代理: camelCase 读写 style 属性(cssText 特判); 每次读写"
+"     都以引擎 style 属性为事实源, 不维护 JS 侧副本。 */"
+"  function makeStyleProxy(zid){"
+"    function toDash(camel){return String(camel).replace(/[A-Z]/g,function(c){return '-'+c.toLowerCase();});}"
+"    function readDecls(){return parseDecls(__hnGetAttr(zid,'style'));}"
+"    function writeDecls(o){__hnSetAttr(zid,'style',declsStr(o));}"
+"    return new Proxy({},{"
+"      get:function(o,k){"
+"        if(k==='cssText')return declsStr(readDecls());"
+"        if(k==='getPropertyValue')return function(p){return readDecls()[String(p).toLowerCase()]||'';};"
+"        if(k==='setProperty')return function(p,v){var d=readDecls();d[String(p).toLowerCase()]=String(v);writeDecls(d);};"
+"        if(k==='removeProperty')return function(p){var d=readDecls();delete d[String(p).toLowerCase()];writeDecls(d);};"
+"        return readDecls()[toDash(k)]||'';"
+"      },"
+"      set:function(o,k,v){"
+"        var d=readDecls();"
+"        if(k==='cssText'){d=parseDecls(String(v));}else{d[toDash(k)]=String(v);}"
+"        writeDecls(d);return true;"
+"      },"
+"      deleteProperty:function(o,k){var d=readDecls();delete d[toDash(k)];writeDecls(d);return true;}"
+"    });"
+"  }"
 "  function hnEl(id){"
 "    id=String(id);"
 "    var z=EVCACHE[id];"
 "    if (z) return z;"
-"    z={id:id};"
+"    z={id:id,__bid:id};"   /* __bid = 桥接 id 槽(id 访问器内部用它, 防自递归) */
 "    z.addEventListener=function(type,fn,opts){"
 "      if (typeof fn!=='function') return 0;"
-"      return __hnAddListener(id,String(type),fn,capOf(opts));};"
+"      return __hnAddListener(String(z.id),String(type),fn,capOf(opts));};"
 "    z.removeEventListener=function(type,fn){"
 "      if (typeof fn!=='function') return;"
-"      __hnRemoveListener(id,String(type),fn);};"
-"    z.getContext=function(kind){return (kind==='2d'||kind==='2D')?hnGet2D(id):null;};"
+"      __hnRemoveListener(String(z.id),String(type),fn);};"
+"    z.getContext=function(kind){return (kind==='2d'||kind==='2D')?hnGet2D(String(z.id)):null;};"
+"    z.getAttribute=function(name){"
+"      var v=__hnGetAttr(String(z.id),String(name));return v===null?null:v;};"
+"    z.setAttribute=function(name,value){"
+"      return !!__hnSetAttr(String(z.id),String(name),String(value));};"
+"    z.removeAttribute=function(name){return !!__hnRemoveAttr(String(z.id),String(name));};"
+"    z.hasAttribute=function(name){return !!__hnHasAttr(String(z.id),String(name));};"
+"    z.querySelector=function(sel){"
+"      var hit=__hnQueryOne('#'+escSel(z.id)+' '+String(sel));"
+"      return hit===null?null:hnEl(hit);};"
+"    z.querySelectorAll=function(sel){"
+"      return __hnQueryAll('#'+escSel(z.id)+' '+String(sel)).map(hnEl);};"
+"    Object.defineProperty(z,'id',{"
+"      get:function(){return __hnGetAttr(String(z.__bid),'id')||String(z.__bid);},"
+"      set:function(v){__hnSetAttr(String(z.__bid),'id',String(v));rekey(z,String(v));}});"
+"    Object.defineProperty(z,'tagName',{get:function(){return String(__hnTag(String(z.id))).toUpperCase();}});"
 "    Object.defineProperty(z,'textContent',{"
-"      set:function(v){hnSetText(id,String(v));},"
-"      get:function(){return '';}});"
+"      set:function(v){hnSetText(String(z.id),String(v));},"
+"      get:function(){return __hnGetText(String(z.id));}});"
 "    Object.defineProperty(z,'value',{"
-"      set:function(v){hnSetValue(id,String(v));},"
-"      get:function(){return __hnGetValue(id);}});"
+"      set:function(v){hnSetValue(String(z.id),String(v));},"
+"      get:function(){return __hnGetValue(String(z.id));}});"
+"    Object.defineProperty(z,'className',{"
+"      set:function(v){__hnSetAttr(String(z.id),'class',String(v));},"
+"      get:function(){return __hnGetAttr(String(z.id),'class')||'';}});"
+"    z.classList=(function(){"
+"      function list(){return (__hnGetAttr(String(z.id),'class')||'').split(/\\s+/).filter(Boolean);}"
+"      function write(a){__hnSetAttr(String(z.id),'class',a.join(' '));}"
+"      return {"
+"        contains:function(c){return list().indexOf(c)>=0;},"
+"        add:function(){var a=list();for(var i=0;i<arguments.length;i++){if(a.indexOf(arguments[i])<0)a.push(arguments[i]);}write(a);},"
+"        remove:function(){var a=list();for(var i=0;i<arguments.length;i++){var j=a.indexOf(arguments[i]);if(j>=0)a.splice(j,1);}write(a);},"
+"        toggle:function(c,force){var a=list(),j=a.indexOf(c);"
+"          var want=(force===undefined)?(j<0):!!force;"
+"          if(want&&j<0){a.push(c);}else if(!want&&j>=0){a.splice(j,1);}"
+"          write(a);return want;},"
+"        get length(){return list().length;},"
+"        item:function(i){return list()[i]||null;},"
+"        toString:function(){return list().join(' ');}};"
+"    })();"
+"    z.dataset=(function(){"
+"      function toDash(k){return String(k).replace(/[A-Z]/g,function(c){return '-'+c.toLowerCase();});}"
+"      return new Proxy({},{"
+"        get:function(o,k){return __hnGetAttr(String(z.id),'data-'+toDash(k));},"
+"        set:function(o,k,v){__hnSetAttr(String(z.id),'data-'+toDash(k),String(v));return true;},"
+"        deleteProperty:function(o,k){__hnRemoveAttr(String(z.id),'data-'+toDash(k));return true;},"
+"        has:function(o,k){return !!__hnHasAttr(String(z.id),'data-'+toDash(k));}"
+"      });"
+"    })();"
+"    Object.defineProperty(z,'style',{get:function(){return makeStyleProxy(String(z.id));}});"
+"    Object.defineProperty(z,'checked',{"
+"      set:function(v){if(v)__hnSetAttr(String(z.id),'checked','');else __hnRemoveAttr(String(z.id),'checked');},"
+"      get:function(){return !!__hnHasAttr(String(z.id),'checked');}});"
+"    Object.defineProperty(z,'disabled',{"
+"      set:function(v){if(v)__hnSetAttr(String(z.id),'disabled','');else __hnRemoveAttr(String(z.id),'disabled');},"
+"      get:function(){return !!__hnHasAttr(String(z.id),'disabled');}});"
+"    Object.defineProperty(z,'hidden',{"
+"      set:function(v){if(v)__hnSetAttr(String(z.id),'hidden','');else __hnRemoveAttr(String(z.id),'hidden');},"
+"      get:function(){return !!__hnHasAttr(String(z.id),'hidden');}});"
+"    Object.defineProperty(z,'parentElement',{get:function(){"
+"      var p=__hnParent(String(z.id));return p===null?null:hnEl(p);}});"
+"    Object.defineProperty(z,'children',{get:function(){"
+"      return __hnKids(String(z.id)).map(hnEl);}});"
+"    Object.defineProperty(z,'firstElementChild',{get:function(){"
+"      var k=__hnKids(String(z.id));return k.length?hnEl(k[0]):null;}});"
+"    Object.defineProperty(z,'lastElementChild',{get:function(){"
+"      var k=__hnKids(String(z.id));return k.length?hnEl(k[k.length-1]):null;}});"
+"    z.appendChild=function(ch){"
+"      if(!ch||typeof ch.id!=='string')return ch;"
+"      __hnAppend(String(z.id),String(ch.id));return ch;};"
+"    z.removeChild=function(ch){"
+"      if(!ch||typeof ch.id!=='string')return ch;"
+"      __hnDetach(String(ch.id));return ch;};"
+"    z.remove=function(){__hnDetach(String(z.id));};"
+"    z.focus=function(){__hnFocus(String(z.id));};"
 "    EVCACHE[id]=z;"
 "    return z;"
 "  }"
 "  if (!g.document || !g.document.__hnevents) {"
 "    g.document={"
 "      __hnevents:true,"
-"      getElementById:function(id){return hnEl(id);},"
+"      getElementById:function(id){"
+"        if(!__hnExists(String(id)))return null;"
+"        return hnEl(id);},"
+"      querySelector:function(sel){"
+"        var hit=__hnQueryOne(String(sel));return hit===null?null:hnEl(hit);},"
+"      querySelectorAll:function(sel){"
+"        return __hnQueryAll(String(sel)).map(hnEl);},"
+"      createElement:function(tag){return hnEl(__hnCreateEl(String(tag)));},"
 "      addEventListener:function(type,fn,opts){"
 "        if (typeof fn!=='function') return 0;"
 "        return __hnAddListener('document',String(type),fn,capOf(opts));},"
@@ -2321,6 +2800,10 @@ static const char *EVENT_GLUE_JS =
 "        if (typeof fn!=='function') return;"
 "        __hnRemoveListener('document',String(type),fn);}"
 "    };"
+"    Object.defineProperty(g.document,'body',{get:function(){"
+"      var hit=__hnQueryOne('body');return hit===null?null:hnEl(hit);}});"
+"    Object.defineProperty(g.document,'documentElement',{get:function(){"
+"      var hit=__hnQueryOne('html');return hit===null?null:hnEl(hit);}});"
 "  }"
 "  g.window=g;"
 "  g.addEventListener=function(type,fn,opts){"
@@ -2388,6 +2871,8 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_measure_text, "hnMeasureText", 2));
     JS_SetPropertyStr(ctx, global, "__hnCanvasPixels",
         JS_NewCFunction(ctx, js_hn_canvas_pixels, "__hnCanvasPixels", 5));
+    JS_SetPropertyStr(ctx, global, "__hnCanvasPng",
+        JS_NewCFunction(ctx, js_hn_canvas_png, "__hnCanvasPng", 1));
     /* 定时器/RAF 内部桥(__hn*; 标准签名由 TIMER_GLUE_JS 转接) */
     JS_SetPropertyStr(ctx, global, "__hnTimer",
         JS_NewCFunction(ctx, js_hn_timer, "__hnTimer", 4));
@@ -2404,6 +2889,39 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_remove_listener, "__hnRemoveListener", 3));
     JS_SetPropertyStr(ctx, global, "__hnGetValue",
         JS_NewCFunction(ctx, js_hn_get_value, "__hnGetValue", 1));
+    /* DOM 标准面桥(glue 转接为 getAttribute/querySelector/classList/...) */
+    JS_SetPropertyStr(ctx, global, "__hnGetAttr",
+        JS_NewCFunction(ctx, js_hn_get_attr, "__hnGetAttr", 2));
+    JS_SetPropertyStr(ctx, global, "__hnSetAttr",
+        JS_NewCFunction(ctx, js_hn_set_attr, "__hnSetAttr", 3));
+    JS_SetPropertyStr(ctx, global, "__hnRemoveAttr",
+        JS_NewCFunction(ctx, js_hn_remove_attr, "__hnRemoveAttr", 2));
+    JS_SetPropertyStr(ctx, global, "__hnHasAttr",
+        JS_NewCFunction(ctx, js_hn_has_attr, "__hnHasAttr", 2));
+    JS_SetPropertyStr(ctx, global, "__hnAttrNames",
+        JS_NewCFunction(ctx, js_hn_attr_names, "__hnAttrNames", 1));
+    JS_SetPropertyStr(ctx, global, "__hnGetText",
+        JS_NewCFunction(ctx, js_hn_get_text, "__hnGetText", 1));
+    JS_SetPropertyStr(ctx, global, "__hnTag",
+        JS_NewCFunction(ctx, js_hn_tag, "__hnTag", 1));
+    JS_SetPropertyStr(ctx, global, "__hnQueryOne",
+        JS_NewCFunction(ctx, js_hn_query_one, "__hnQueryOne", 1));
+    JS_SetPropertyStr(ctx, global, "__hnQueryAll",
+        JS_NewCFunction(ctx, js_hn_query_all, "__hnQueryAll", 1));
+    JS_SetPropertyStr(ctx, global, "__hnParent",
+        JS_NewCFunction(ctx, js_hn_parent, "__hnParent", 1));
+    JS_SetPropertyStr(ctx, global, "__hnKids",
+        JS_NewCFunction(ctx, js_hn_kids, "__hnKids", 1));
+    JS_SetPropertyStr(ctx, global, "__hnCreateEl",
+        JS_NewCFunction(ctx, js_hn_create_el, "__hnCreateEl", 1));
+    JS_SetPropertyStr(ctx, global, "__hnAppend",
+        JS_NewCFunction(ctx, js_hn_append, "__hnAppend", 2));
+    JS_SetPropertyStr(ctx, global, "__hnDetach",
+        JS_NewCFunction(ctx, js_hn_detach, "__hnDetach", 1));
+    JS_SetPropertyStr(ctx, global, "__hnFocus",
+        JS_NewCFunction(ctx, js_hn_focus, "__hnFocus", 1));
+    JS_SetPropertyStr(ctx, global, "__hnExists",
+        JS_NewCFunction(ctx, js_hn_exists, "__hnExists", 1));
     JS_FreeValue(ctx, global);
 
     /* 事件 glue(元素包装 + document/window addEventListener + 事件对象
@@ -2430,7 +2948,12 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JSValue gr = JS_Eval(ctx, CANVAS_GLUE_JS, strlen(CANVAS_GLUE_JS),
                              "<canvas-glue>", JS_EVAL_TYPE_GLOBAL);
         if (JS_IsException(gr)) {
-            JSValue e = JS_GetException(ctx);   /* glue 坏了不拖垮 eval: 吞异常 */
+            /* glue 坏了不拖垮 eval, 但必须留痕 —— 静默吞掉会让 canvas 全面
+               失效却无从查起(本轮实测踩过: 语法错 → hnGet2D 未定义)。 */
+            JSValue e = JS_GetException(ctx);
+            const char *msg = JS_ToCString(ctx, e);
+            fprintf(stderr, "[canvas-glue] %s\n", msg ? msg : "(exception)");
+            if (msg) JS_FreeCString(ctx, msg);
             JS_FreeValue(ctx, e);
         }
         JS_FreeValue(ctx, gr);
@@ -3080,7 +3603,9 @@ static hn_node *rt_focus_next(hn_rt *rt, int back) {
             ? (back ? n - step : step - 1)
             : ((cur + (back ? -step : step)) % n + n) % n;
         hn_node *cand = hn_doc_input_at(doc, i);
-        if (cand && !hn_node_is_disabled(cand)) return cand;
+        /* 按钮不进 Tab 焦点链(不可编辑; 与"点击不落焦点"同口径) */
+        if (cand && !hn_node_is_disabled(cand) &&
+            hn_node_input_kind(cand) != HN_IN_BUTTON) return cand;
     }
     return NULL;
 }

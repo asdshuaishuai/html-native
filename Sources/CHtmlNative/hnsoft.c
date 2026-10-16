@@ -317,14 +317,16 @@ static float sd_rounded(float px, float py, float x, float y, float w, float h, 
     float qx = fabsf(px - (x + w * 0.5f)) - (w * 0.5f - r);
     float qy = fabsf(py - (y + h * 0.5f)) - (h * 0.5f - r);
     float ax = qx > 0 ? qx : 0, ay = qy > 0 ? qy : 0;
-    /* 最后一项必须用 fmaxf(qx, qy)。原先是
-           (qx > qy ? qx : (qy > qx ? qy : 0))
-       它在 qx == qy 时落到 0 —— 而正方形矩形的中心正好 qx == qy, 于是
-       "内部距离"整项丢失, d 塌成 0, 覆盖率 cov = 0.5。
-       后果: 正方形正中心那个像素的不透明度只有一半(半透明色变成四分之一,
-       不透明色变成 50% alpha)。45° 对角线上每一处都受影响。
-       用 fmaxf 才是圆角盒 SDF 的标准写法。 */
-    return sqrtf(ax * ax + ay * ay) + fmaxf(qx, qy) - r;
+    /* 内部项是 min(fmaxf(qx, qy), 0) —— 标准圆角盒 SDF 的写法。
+       只写 fmaxf(qx, qy) 会漏掉那个 min(...,0): 此时"在矩形内、但在圆角
+       安全区外"的那一圈(四条直边带)判成外部, 形状整体四边各缩 r/2。
+       实测(白底 100x100 红块): r=10 -> 90x90; r=50 -> 50x50。也就是说
+       border-radius:50% 的方块只画出**一半**大小的圆。
+       演进: 最早是 (qx > qy ? qx : (qy > qx ? qy : 0)) —— qx==qy 时落到 0,
+       正方形中心那格丢内部距离, cov 塌成 0.5(中心只有半透明); 改成 fmaxf
+       修掉了中心, 但同时引入了上面那条直边内缩。min(fmaxf(..),0) 两者都对:
+       中心处 qx==qy<0 -> 取 qx; 直边带 qx>0,qy<0 -> 取 0(不改半径项)。 */
+    return sqrtf(ax * ax + ay * ay) + fminf(fmaxf(qx, qy), 0.0f) - r;
 }
 
 /* ---------------- 渐变 ---------------- */

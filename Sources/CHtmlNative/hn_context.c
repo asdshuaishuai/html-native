@@ -472,6 +472,8 @@ int hn_node_input_kind(hn_node *n) {
             if (!strcmp(t, "checkbox")) return HN_IN_CHECKBOX;
             if (!strcmp(t, "radio")) return HN_IN_RADIO;
             if (!strcmp(t, "password")) return HN_IN_PASSWORD;
+            if (!strcmp(t, "button") || !strcmp(t, "submit") || !strcmp(t, "reset"))
+                return HN_IN_BUTTON;
         }
         return HN_IN_TEXT;
     }
@@ -519,10 +521,10 @@ static void value_ensure(hn_node *n, size_t need) {
 
 int hn_node_set_value(hn_node *n, const char *utf8, size_t len) {
     if (!hn_node_is_input(n) || !n->arena) return 0;
-    /* checkbox/radio 没有可编辑文本: 值语义是 checked + value 属性,
+    /* checkbox/radio/button 没有可编辑文本: 值语义是 checked/value 属性,
        键盘输入不应写进 value 缓冲 */
     int k = hn_node_input_kind(n);
-    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO) return 0;
+    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO || k == HN_IN_BUTTON) return 0;
     value_ensure(n, len);
     if (len) memcpy(n->value, utf8, len);
     n->value[len] = 0;
@@ -538,7 +540,7 @@ int hn_node_caret(hn_node *n) {
 void hn_node_set_caret(hn_node *n, int byte_off) {
     if (!hn_node_is_input(n)) return;
     int k = hn_node_input_kind(n);
-    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO) return;
+    if (k == HN_IN_CHECKBOX || k == HN_IN_RADIO || k == HN_IN_BUTTON) return;
     if (byte_off < 0) byte_off = 0;
     if ((size_t)byte_off > n->value_len) byte_off = (int)n->value_len;
     n->caret = byte_off;
@@ -654,6 +656,47 @@ void hn_node_debug_background(hn_node *n, hn_color *out) {
 
 /* ---------------- DOM 变更(push_attr / splice 复用) ---------------- */
 
+/* 移除属性(removeAttribute 语义)。attrs 数组本体在 arena 上, 就地前压,
+   旧槽不回收(arena 语义, 无需回收)。命中返回 1。 */
+int hn_node_remove_attr(hn_node *n, const char *name) {
+    if (!n || n->kind != HN_ELEM || !name) return 0;
+    int found = 0;
+    for (int i = 0; i < n->n_attrs; i++) {
+        if (!found && !strcmp(n->attrs[i].name, name)) { found = 1; continue; }
+        if (found) n->attrs[i - 1] = n->attrs[i];
+    }
+    if (found) n->n_attrs--;
+    return found;
+}
+
+/* ---------------- DOM 查询(querySelector) ----------------
+ * 选择器语法与样式表同一套(含组合器/属性选择器/伪类/:not)。
+ * 文档序返回命中元素(上限 max); 选择器语法错返回 -1(调用方映射为
+ * JS 异常), 无命中返回 0。c 可为 NULL —— hover/active/focus 状态伪类
+ * 在无上下文时按未激活匹配。合成包裹根不参与匹配(is_doc_wrapper)。 */
+int hn_doc_query_selector(hn_doc *doc, const char *sel, hn_context *c,
+                          hn_node **out, int max) {
+    if (!doc || !sel || !out || max <= 0) return 0;
+    hn_selgroup *g = hn_css_parse_selgroup(sel, strlen(sel));
+    if (!g) return -1;
+    int n = 0;
+    hn_node *stack[512];
+    int sp = 0;
+    stack[sp++] = doc->root;
+    while (sp > 0 && n < max) {
+        hn_node *nd = stack[--sp];
+        if (nd->kind == HN_ELEM && !nd->is_doc_wrapper &&
+            hn_style_selgroup_match(g, nd, c))
+            out[n++] = nd;
+        hn_node *kids[512];
+        int kn = 0;
+        for (hn_node *ch = nd->first; ch && kn < 512; ch = ch->next) kids[kn++] = ch;
+        for (int i = kn - 1; i >= 0 && sp < 512; i--) stack[sp++] = kids[i];
+    }
+    hn_css_selgroup_free(g);
+    return n;
+}
+
 int hn_node_set_attr(hn_node *n, const char *name, const char *value) {
     if (!n || n->kind != HN_ELEM || !name || !n->arena) return 0;
     /* 已存在则原地改值(值在 arena 上重新分配, 旧值不回收) */
@@ -699,6 +742,7 @@ size_t hn_node_text_content(hn_node *n, char *out, size_t cap) {
 int hn_node_set_text_content(hn_node *n, const char *utf8, size_t len) {
     if (!n || n->kind != HN_ELEM || !n->arena) return 0;
     n->first = n->last = NULL;
+    n->tt_applied = 0;   /* 新文本按当前 text-transform 重新变换(旧守卫作废) */
     if (!utf8 || !len) return 1;
     hn_node *t = hn_arena_alloc(n->arena, sizeof(hn_node));
     if (!t) return 0;
@@ -1769,7 +1813,8 @@ int hn_event_path_len(hn_node *target) {
 
 hn_node *hn_node_ancestor_input(hn_node *n) {
     for (; n; n = n->parent)
-        if (hn_node_is_input(n)) return n;
+        /* 按钮: 命中落在按钮上时不能成为键盘输入目标(不可编辑) */
+        if (hn_node_is_input(n) && hn_node_input_kind(n) != HN_IN_BUTTON) return n;
     return NULL;
 }
 

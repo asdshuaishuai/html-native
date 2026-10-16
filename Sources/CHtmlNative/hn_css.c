@@ -223,6 +223,7 @@ static int read_compound(cps *s, hn_compound *cp) {
                 else if (!strcmp(pse, "disabled")) cp->pseudo = 4;
                 else if (!strcmp(pse, "enabled")) cp->pseudo = 5;
                 else if (!strcmp(pse, "checked")) cp->pseudo = 6;
+                else if (!strcmp(pse, "root")) cp->pseudo = 7;   /* 文档根元素(html) */
                 else if (!strcmp(pse, "nth-child")) {
                     cp->nth = read_nth_arg(s);
                 }
@@ -231,6 +232,7 @@ static int read_compound(cps *s, hn_compound *cp) {
                 }
                 else if (!strcmp(pse, "first-child")) cp->nth = -3;
                 else if (!strcmp(pse, "last-child")) cp->nth = -4;
+                else if (!strcmp(pse, "only-child")) cp->nth = -5;
                 else if (!strcmp(pse, "first-of-type")) cp->nth_type = -3;
                 else if (!strcmp(pse, "last-of-type")) cp->nth_type = -4;
                 else if (!strcmp(pse, "not")) {
@@ -518,6 +520,56 @@ hn_sheet *hn_parse_css(const char *src, size_t len) {
         parse_rules(&s, sh, -1.0f, -1.0f);
     }
     return sh;
+}
+
+/* ---------------- 查询用选择器(querySelector) ----------------
+ * 与样式表同一套 read_compound/组合器语法; 终止条件是串尾而非 '{'。
+ * 独立 arena 持有全部字符串与复合段, hn_css_selgroup_free 一并回收。 */
+hn_selgroup *hn_css_parse_selgroup(const char *src, size_t len) {
+    if (!src || !len) return NULL;
+    hn_arena *ar = hn_arena_create();
+    if (!ar) return NULL;
+    cps s = { src, src + len, ar, 0 };
+    hn_compound sels[8][12];
+    int ns[8], nsel = 0, ok = 1, pend_comb = 0;
+    memset(ns, 0, sizeof(ns));
+    for (;;) {
+        skip_ws(&s);
+        if (s.p >= s.end) break;
+        if (nsel >= 8 || ns[nsel] >= 12 || !read_compound(&s, &sels[nsel][ns[nsel]])) { ok = 0; break; }
+        sels[nsel][ns[nsel]].comb = pend_comb;
+        ns[nsel]++;
+        skip_ws(&s);
+        if (s.p >= s.end) break;
+        if (*s.p == '>') { s.p++; pend_comb = 1; continue; }
+        if (*s.p == '+') { s.p++; pend_comb = 2; continue; }
+        if (*s.p == '~') { s.p++; pend_comb = 3; continue; }
+        if (*s.p == ',') { s.p++; nsel++; pend_comb = 0; continue; }
+        pend_comb = 0;   /* 后代组合 */
+    }
+    if (!ok || (nsel == 0 && ns[0] == 0)) { hn_arena_destroy(ar); return NULL; }
+    if (ns[nsel] == 0 && nsel > 0) { hn_arena_destroy(ar); return NULL; }   /* 尾逗号 */
+    hn_selgroup *g = hn_arena_alloc(ar, sizeof(hn_selgroup));
+    hn_selector *ss = hn_arena_alloc(ar, sizeof(hn_selector) * (size_t)(nsel + 1));
+    hn_compound *flat = hn_arena_alloc(ar, sizeof(hn_compound) * (size_t)((nsel + 1) * 12));
+    if (!g || !ss || !flat) { hn_arena_destroy(ar); return NULL; }
+    int k = 0;
+    for (int i = 0; i <= nsel; i++) {
+        if (ns[i] == 0) { ok = 0; break; }
+        ss[i].parts = &flat[k];
+        ss[i].n_parts = ns[i];
+        for (int j = 0; j < ns[i]; j++) flat[k++] = sels[i][j];
+    }
+    if (!ok) { hn_arena_destroy(ar); return NULL; }
+    g->sels = ss;
+    g->n_sels = nsel + 1;
+    g->arena = ar;
+    return g;
+}
+
+void hn_css_selgroup_free(hn_selgroup *g) {
+    if (!g || !g->arena) return;
+    hn_arena_destroy(g->arena);   /* sels/parts/字符串全在组 arena 上 */
 }
 
 void hn_sheet_free(hn_sheet *sh) {

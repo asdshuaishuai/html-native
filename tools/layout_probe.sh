@@ -14,6 +14,8 @@
 #   2. 相邻 margin 不折叠(间距凭空翻倍, 破坏垂直节奏)
 #   3. flex-shrink 不生效(子项溢出并互相重叠)
 #   4. justify-content: space-around / space-evenly 静默退化为 flex-start
+#   5. 脱离流子元素嵌在定位父里时, 文字被排两遍(绘制指令里同一句话出现
+#      两次, 第二份整体偏移 (left, top); 盒坐标正常, 只有指令数翻倍)
 # 所以每次改布局/样式代码都值得跑一遍。
 
 set -euo pipefail
@@ -189,6 +191,95 @@ r="$(boxes '<html><head><style>html,body{margin:0}
 .f{display:flex;width:300;height:100}.a{width:20;min-width:120;height:20}
 </style></head><body><div class="f"><div class="a" id="a"></div></div></body></html>')"
 near "min-width 生效" "$(get "$r" a)" 0 0 120 20
+
+# ============ 脱离流嵌套: 同一句文字只许进指令表一次 ============
+# 回归用例。layout_out_of_flow 曾在摆放完 ch 之后又手动递归一次, 而
+# layout_box 尾部**已经**调用过 layout_out_of_flow(容器尺寸已定才摆浮层),
+# 于是 ch 的脱离流后代被整棵重排: 盒坐标因 translate 幂等而看不出异常,
+# 但 run_push 只追加不清空 —— TEXT 指令直接翻倍(背景 RECT 仍只有一份),
+# 第二份整体偏移 (left, top)。只能数绘制指令才发现。
+#
+# 判据: 同一段文字, "绝对定位元素直接挂 body 下"与"嵌在绝对定位父容器里"
+# 的 TEXT 条数必须相等。不去硬编码条数 —— 句子在字体回退下的切段数随
+# FreeType 有无而变(中文可能切成多段), 相等性才是与字体无关的不变量。
+text_cmds() {  # text_cmds <body 片段> <额外样式> — TEXT 指令条数
+  printf '<html><head><style>html,body{margin:0}%s</style></head><body>%s</body></html>' \
+    "$2" "$1" > "$D/case.html"
+  "$HN" paint "$D/case.html" 240 120 | grep -c '^TEXT' || true
+}
+
+NEST_STYLE='.chip{position:absolute;left:22;top:20;font-size:12px;color:#fff}
+.stage{position:absolute;left:0;top:0;width:240;height:120;background:#101828}
+.rel{position:relative;left:0;top:0;width:240;height:120;background:#101828}'
+
+n_flat="$(text_cmds '<div class="chip" id="chip">网格变形</div>' "$NEST_STYLE")"
+n_abs="$(text_cmds '<div class="stage"><div class="chip" id="chip">网格变形</div></div>' "$NEST_STYLE")"
+n_rel="$(text_cmds '<div class="rel"><div class="chip" id="chip">网格变形</div></div>' "$NEST_STYLE")"
+
+# <名> <got> <want>: 相等即通过。hn_fail 恒返回 0, set -e 下可安全置于 else。
+eqint() {
+  if [ "$2" = "$3" ]; then NPASS=$((NPASS + 1)); else hn_fail "$1" "$3" "$2"; fi
+}
+
+if [ "$n_flat" -gt 0 ]; then NPASS=$((NPASS + 1)); else hn_fail "文字指令基线(须 >0)" ">0" "$n_flat"; fi
+eqint "absolute 嵌 absolute: 文字不得翻倍" "$n_abs" "$n_flat"
+eqint "absolute 嵌 relative: 文字不得翻倍" "$n_rel" "$n_flat"
+
+# 脱离流子元素的盒位置本身仍要正确(父类 padding 参与参照块)
+r="$(boxes '<html><head><style>html,body{margin:0}
+.p{position:absolute;left:0;top:0;width:300;height:200;padding:10}
+.c{position:absolute;left:5;top:7;width:40;height:20}
+</style></head><body><div class="p"><div class="c" id="a"></div></div></body></html>')"
+ck "absolute 参照父 padding box" "$(get "$r" a)" 15 17 40 20
+
+# 孙级脱离流元素: 相对最近的定位祖先, 不叠加中间 static 祖先的偏移
+r="$(boxes '<html><head><style>html,body{margin:0}
+.p{position:absolute;left:0;top:0;width:300;height:200}
+.m{width:100;height:100}
+.c{position:absolute;left:11;top:13;width:40;height:20}
+</style></head><body><div class="p"><div class="m"><div class="c" id="a"></div></div></div></body></html>')"
+ck "跳过 static 中间层找定位祖先" "$(get "$r" a)" 11 13 40 20
+
+# ============ 百分比高度链(html,body{height:100%} → 子元素 100%) ============
+# 回归用例(ISSUES-1 P1-C 的根因代理)。透明真窗 + Lottie 桌宠页曾只画一角:
+# `html,body{margin:0;width:100%;height:100%}` + `img{width:100%;height:100%}`
+# —— 文档包裹根(html)曾参与作者 CSS 匹配 + body 百分比高解析为 0, 于是 img
+# 的 height:100% 拿到 0, 播放器只按退化盒画出一角。
+# 判据: 952x784 视口里, 这条链上的 img 盒必须铺满整个视口。
+# (同一链路也是 `html,body{height:100%}` + flex 居中的通用页面骨架。)
+r="$(boxes '<html><head><style>html,body{margin:0;width:100%;height:100%}
+img{width:100%;height:100%;display:block}
+</style></head><body><img id="a" src="x.json" hn-lottie></body></html>' 952 784)"
+ck "body height:100% → img 100% 铺满视口" "$(get "$r" a)" 0 0 952 784
+
+# 同链路 + flex 居中(桌宠面板写法): 子盒必须在 952x784 内居中
+r="$(boxes '<html><head><style>html,body{margin:0;width:100%;height:100%}
+body{display:flex;align-items:center;justify-content:center}
+.stage{width:300;height:200}
+</style></head><body><div class="stage" id="a"></div></body></html>' 952 784)"
+ck "html,body 100% + flex 居中" "$(get "$r" a)" 326 292 300 200
+
+# ============ 按钮控件(shrink-to-fit + 居中标签) ============
+# <button> 元素与 <input type=button|submit|reset> 按标签内容收缩(浏览器
+# 惯例); 标签在收缩后的盒内水平居中。曾按可用宽排版标签再收缩盒,
+# 标签落在盒外(实测复现)。
+r="$(boxes '<html><head><style>html,body{margin:0}
+button{font-size:16px}
+</style></head><body><button id="a">按钮</button></body></html>' 400 300)"
+got="$(get "$r" a)"
+if [ "$got" = "MISSING" ]; then hn_fail "button 元素盒存在" "存在" "MISSING";
+else
+  bw="$(printf '%s' "$got" | awk '{print $3}')"
+  if awk -v w="$bw" 'BEGIN{exit !(w>30 && w<200)}'; then NPASS=$((NPASS+1));
+  else hn_fail "button 按内容收缩(非整行)" "30<宽<200" "$bw"; fi
+fi
+r="$(boxes '<html><head><style>html,body{margin:0}
+</style></head><body><input type="button" id="a" value="OK">
+<input type="text" id="b" value="x"></body></html>' 400 300)"
+near "input type=button 收缩(非 180 缺省)" "$(get "$r" a)" 0 0 44 51 4
+r="$(boxes '<html><head><style>html,body{margin:0}
+</style></head><body><input type="text" id="b" value="x"></body></html>' 400 300)"
+near "input type=text 保持 180 缺省宽" "$(get "$r" b)" 0 0 200 51 4
 
 # ============ 报告 ============
 hn_harness_report

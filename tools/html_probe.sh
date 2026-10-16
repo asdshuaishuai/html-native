@@ -362,5 +362,33 @@ else
   ck_bool "折叠模式下行首空白被忽略" 0
 fi
 
+# ============ H5 标准扩展(template / 语义标签 / text-transform) ============
+# <template>: HTML5 口径内容不渲染 —— 盒缺席(或零尺寸)即合规。
+r="$(boxes '<html><head><style>html,body{margin:0}</style></head><body><div id="a"></div><template id="t"><div id="in-t">不可见</div></template></body></html>')"
+# 隐藏信号 = 盒缺席或零尺寸(display:none 不产盒)
+hidden_box() { local b="$1"; [ "$b" = "MISSING" ] && return 0;
+  printf '%s' "$b" | awk '{exit !(($3+0)==0 && ($4+0)==0)}'; }
+if hidden_box "$(hn_box_of "$r" in-t first)"; then NPASS=$((NPASS+1));
+else hn_fail "template 内容不渲染" "零尺寸" "$(hn_box_of "$r" in-t first)"; fi
+if hidden_box "$(hn_box_of "$r" t first)"; then NPASS=$((NPASS+1));
+else hn_fail "template 元素自身不可见" "零尺寸" "$(hn_box_of "$r" t first)"; fi
+if [ "$(hn_box_of "$r" a first)" != "MISSING" ]; then NPASS=$((NPASS+1));
+else hn_fail "同页非模板元素照常渲染" "存在" "MISSING"; fi
+# 语义行内标签: <mark>/<abbr>/<var> 缺省行内排(不独占一行)
+r="$(boxes '<html><head><style>html,body{margin:0}</style></head><body><p id="a">前<mark id="m">中</mark>后</p></body></html>')"
+got="$(hn_box_of "$r" a first)"
+gm="$(hn_box_of "$r" m first)"
+if [ "$gm" != "MISSING" ]; then NPASS=$((NPASS+1));
+else hn_fail "mark 行内渲染(盒存在)" "存在" "MISSING"; fi
+# text-transform: uppercase 落进文本本体(度量与绘制同源)
+r="$(boxes '<html><head><style>html,body{margin:0}
+.tt{text-transform:uppercase}</style></head><body><div class="tt" id="a">abc</div></body></html>')"
+if [ "$(hn_box_of "$r" a first)" != "MISSING" ]; then NPASS=$((NPASS+1));
+else hn_fail "text-transform 页面布局正常" "存在" "MISSING"; fi
+# 行为判据: paint 的 TEXT 指令内容为大写(取 run 文本, 与字体无关)
+printf '<html><head><style>html,body{margin:0}.tt{text-transform:uppercase}</style></head><body><div class="tt">abc</div></body></html>' > "$D/tt.html"
+if "$HN" paint "$D/tt.html" 200 100 | grep '^TEXT' | grep -q 'ABC'; then NPASS=$((NPASS+1));
+else hn_fail "text-transform uppercase 落文本" "ABC" "未命中大写"; fi
+
 # ============ 报告 ============
 hn_harness_report "HTML 探针: "

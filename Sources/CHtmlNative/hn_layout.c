@@ -920,6 +920,13 @@ static void layout_input(hn_context *c, hn_node *n, float content_w, const hn_te
     n->text_len = vlen;
 
     n->pref_w = pref;
+    /* 按钮标签: 作者未声明 text-align 时按控件惯例居中(平移 run;
+       text-align:center 已由 IFC 居中的不再叠加) */
+    if (ik == HN_IN_BUTTON && n->style.text_align == 0 &&
+        pref > 0 && content_w > pref && n->n_runs > 0) {
+        float dx = (content_w - pref) * 0.5f;
+        for (int i = 0; i < n->n_runs; i++) n->runs[i].x += dx;
+    }
     if (h > 0) n->content_h = h + padt + n->style.padding[2];
 }
 
@@ -1567,7 +1574,8 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
             if (st->height_u == HN_U_AUTO) { st->height = s; st->height_u = HN_U_PX; }
             st->padding[0] = st->padding[1] = st->padding[2] = st->padding[3] = 0;
         } else {
-            if (st->width_u == HN_U_AUTO) { st->width = 180; st->width_u = HN_U_PX; }
+            if (st->width_u == HN_U_AUTO && ik != HN_IN_BUTTON) { st->width = 180; st->width_u = HN_U_PX; }
+            /* 按钮宽度留给 pref 收缩(见 layout_input 尾部), 不吃 180 缺省 */
             if (st->height_u == HN_U_AUTO) {
                 st->height = st->font_size * st->line_height + 14;
                 st->height_u = HN_U_PX;
@@ -1607,7 +1615,19 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
        width:150 的子项塞进 width:200 的容器, 各自仍是 150 且第二项
        画在第一项身上)。 */
     if (forced_w > 0) w = forced_w;
-    int h_definite = (forced_h > 0) || (st->height_u != HN_U_AUTO && h >= 0);
+    /* aspect-ratio: 一维已定、另一维 auto 时按 w/h 补齐。标准口径里 ratio
+       作用于内容盒 —— 这里按盒尺寸近似(引擎尚无 padding/border 参与的
+       精细替换尺寸模型), 探针锚定无 padding 用例; min/max 钳制照常生效。
+       ratio 补出的 h 计入 h_definite(否则会被内容高覆盖)。 */
+    int ar_h_forced = 0;
+    if (st->aspect_ratio > 0) {
+        int w_auto = (forced_w <= 0) && (st->width_u == HN_U_AUTO || w < 0);
+        int h_auto = (forced_h <= 0) && (st->height_u == HN_U_AUTO || h < 0);
+        if (!w_auto && h_auto && w > 0) { h = w / st->aspect_ratio; ar_h_forced = 1; }
+        else if (!h_auto && w_auto && h > 0) w = h * st->aspect_ratio;
+    }
+    int h_definite = ar_h_forced || (forced_h > 0) ||
+                     (st->height_u != HN_U_AUTO && h >= 0);
 
     n->bx = x;
     n->by = y;
@@ -1626,8 +1646,20 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
 
     /* 输入控件: 值文本走自身 IFC */
     if (hn_node_is_input(n)) {
-        layout_input(c, n, content_w, tb, measuring);
-        n->bw = content_w + pl + pr;
+        if (hn_node_input_kind(n) == HN_IN_BUTTON && st->width_u == HN_U_AUTO) {
+            /* 按钮按标签收缩(浏览器 shrink-to-fit): 两遍布局 —— 先量标签
+               pref(给大宽度, IFC 不折行量出单行宽; -1 会被 content_w>0
+               短路), 再以 pref 为内容宽重排 run。单遍的话 run 按 content_w
+               (可用宽)居中, 盒再收缩, 标签就落在盒外了(实测复现)。 */
+            layout_input(c, n, 1e6f, tb, 1);
+            float pw = n->pref_w > 0 ? n->pref_w : content_w;
+            if (pw > content_w) pw = content_w;
+            layout_input(c, n, pw, tb, measuring);
+            n->bw = pw + pl + pr;
+        } else {
+            layout_input(c, n, content_w, tb, measuring);
+            n->bw = content_w + pl + pr;
+        }
         if (h_definite) {
             h = (forced_h > 0 || st->box_border) ? h : h + pt + pb;
             n->bh = h;
@@ -1668,6 +1700,17 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
     if (n->content_h < n->bh) n->content_h = n->bh;
 
     if (measuring && st->width_u == HN_U_AUTO) n->bw = n->pref_w + pl + pr;
+    else if (n->tag && !strcmp(n->tag, "button") && st->width_u == HN_U_AUTO) {
+        /* <button> 按内容收缩(浏览器惯例); 其余 inline-block 维持引擎既有
+           "占满可用宽的原子盒"模型(文档口径)。子文本 run 是按收缩前
+           content_w 排的(text-align:center 居中于可用宽) —— 收缩量从
+           子树 run x 里收回, 标签才落在盒内。 */
+        n->bw = n->pref_w + pl + pr;
+        float shrink_dx = (content_w - n->pref_w) * 0.5f;
+        if (st->text_align == 1 && shrink_dx > 0)
+            for (hn_node *ch = n->first; ch; ch = ch->next)
+                translate_x(ch, -shrink_dx);   /* run 挂在子节点(文本节点)上 */
+    }
     else n->bw = content_w + pl + pr;
 
     /* 容器尺寸已定 → 摆放脱离流的子节点(position: absolute/fixed)。

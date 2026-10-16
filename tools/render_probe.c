@@ -534,6 +534,73 @@ static int render_file(int argc, char **argv) {
     return rc;
 }
 
+/* == 圆角矩形几何(border-radius 不得吃掉直边) ==
+ *
+ * 回归用例。sd_rounded 的内部项写成 fmaxf(qx, qy), 漏了标准式的 min(...,0):
+ * 于是"落在矩形内、但在圆角安全区外"的四条直边带被判成外部 —— 形状四边各
+ * 缩 r/2。白底 100x100 红块实测: r=10 -> 90x90, r=50 -> 50x50(也就是说
+ * border-radius:50% 的方块只画出半个圆)。因为是**收缩**而非溢出, 单看
+ * 截图很容易当成"设计如此"; 只有量中线上的实心范围才露馅。
+ *
+ * 判据: 圆角只削四角 —— 中线(y 居中)上的实心范围必须顶满盒宽, 与 r=0 一致;
+ * 同时四角必须确实是空的(否则是"没画圆角", 走到另一个方向去)。
+ */
+static unsigned char *render_radius(float radius, int W, int H) {
+    char html[640];
+    snprintf(html, sizeof(html),
+             "<html><head><style>html,body{margin:0;background:#ffffff}"
+             ".r{position:absolute;left:20;top:20;width:100;height:100;"
+             "background:#ff0000;border-radius:%g}"
+             "</style></head><body><div class=\"r\"></div></body></html>",
+             (double)radius);
+    hn_doc *doc = hn_parse_html(html, strlen(html));
+    hn_context *ctx = hn_context_create();
+    hn_context_set_doc(ctx, doc);
+    hn_text_backend tb = { NULL, measure_cb, metrics_cb };
+    hn_context_layout(ctx, (float)W, (float)H, &tb);
+    const hn_display_list *dl = hn_context_display_list(ctx);
+    unsigned char *px = dl ? hnsoft_render(dl, W, H, 0xFFFFFFFF) : NULL;
+    hn_context_destroy(ctx);
+    return px;   /* 调用方 free */
+}
+
+/* 实心红: 红通道高、绿蓝通道低(避开抗锯齿的半亮像素) */
+static int is_red(const unsigned char *p) {
+    return p[0] > 200 && p[1] < 100 && p[2] < 100;
+}
+
+static void test_rounded(void) {
+    printf("== 圆角矩形几何 ==\n");
+    const int W = 200, H = 200;
+    /* 盒: left/top 20, 100x100 —— 水平中线 y=70, 垂直中线 x=70 */
+    struct { float r; const char *label; } cases[] = {
+        { 0,  "r=0" }, { 10, "r=10" }, { 25, "r=25" }, { 50, "r=50(圆)" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        unsigned char *px = render_radius(cases[i].r, W, H);
+        if (!px) { check(0, "圆角用例渲染出位图"); continue; }
+        int hx0 = -1, hx1 = -1, vy0 = -1, vy1 = -1;
+        for (int x = 0; x < W; x++) if (is_red(px + ((long)70 * W + x) * 4)) { if (hx0 < 0) hx0 = x; hx1 = x; }
+        for (int y = 0; y < H; y++) if (is_red(px + ((long)y * W + 70) * 4)) { if (vy0 < 0) vy0 = y; vy1 = y; }
+        char lab[96];
+        snprintf(lab, sizeof(lab), "%s 水平中线实心范围 = 20..119(直边顶满盒)", cases[i].label);
+        check_int(hx0, 20, lab);
+        check_int(hx1, 119, lab);
+        snprintf(lab, sizeof(lab), "%s 垂直中线实心范围 = 20..119(直边顶满盒)", cases[i].label);
+        check_int(vy0, 20, lab);
+        check_int(vy1, 119, lab);
+        /* 左上角(20,20)在 r>=25 时必须在圆外 —— 否则是"圆角根本没削角" */
+        if (cases[i].r >= 25) {
+            snprintf(lab, sizeof(lab), "%s 左上角被削掉(圆角真实生效)", cases[i].label);
+            check(!is_red(px + ((long)20 * W + 20) * 4), lab);
+        }
+        /* 盒中心在任何半径下都必须实心 */
+        snprintf(lab, sizeof(lab), "%s 盒中心实心", cases[i].label);
+        check(is_red(px + ((long)70 * W + 70) * 4), lab);
+        free(px);
+    }
+}
+
 int main(int argc, char **argv) {
     /* 文件模式: 带路径参数即渲染任意文件(内置用例零参数) */
     if (argc >= 3) return render_file(argc, argv);
@@ -547,6 +614,7 @@ int main(int argc, char **argv) {
     test_anim();
     test_input();
     test_raster();
+    test_rounded();
 
     printf("\n结果: %d 通过, %d 失败\n", g_pass, g_fail);
     if (g_fail == 0) printf("全绿 — 引擎层健康\n");

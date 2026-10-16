@@ -1006,8 +1006,14 @@ static void handle_line(const char *line, char *out, size_t cap) {
         int rc = 1;
         if (dl) {
             /* 复用缓冲(hnsoft_render_reuse): slot 挂在 dapp 上只增不减,
-               shot 反复打不反复分配全页位图; 像素与一次性变体逐位一致。 */
-            unsigned char *px = hnsoft_render_reuse(dl, a->w, a->h, 0x0B0E13FFu,
+               shot 反复打不反复分配全页位图; 像素与一次性变体逐位一致。
+               清屏色随 html/body 背景传播(rt_raster 同一口径)。 */
+            hn_color shot_bg = 0x0B0E13FFu;
+            {
+                hn_color rb = hn_doc_canvas_background(hn_rt_doc(a->rt));
+                if (rb) shot_bg = rb;
+            }
+            unsigned char *px = hnsoft_render_reuse(dl, a->w, a->h, shot_bg,
                                                     &a->shot_buf, &a->shot_cap);
             if (px) {
                 size_t pn = 0;

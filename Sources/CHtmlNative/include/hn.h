@@ -443,6 +443,9 @@ void hn_context_apply_theme(hn_context *c);
 void hn_context_compact(hn_context *c, const char *html, size_t len);
 /* 透明背板: 把 body 的实色背景改为透明(配合窗口 isOpaque=false) */
 void hn_context_strip_root_background(hn_context *c);
+/* 画布背景(html/body 背景传播, 浏览器标准): 返回根链第一个非透明实色,
+ * 0 = 未声明(宿主用各自缺省清屏色)。透明窗宿主忽略本值(逐像素 alpha 契约优先)。 */
+hn_color hn_doc_canvas_background(hn_doc *doc);
 
 /* ---- 解析 ---- */
 /* <include> 装载通道: 告知引擎"正在解析的文档路径"。零构建组件在
@@ -520,7 +523,9 @@ enum {
     HN_IN_TEXTAREA,       /* <textarea> */
     HN_IN_PASSWORD,       /* <input type=password>(绘制时掩码, 值保持原文) */
     HN_IN_CHECKBOX,       /* <input type=checkbox>(checked 属性表达状态) */
-    HN_IN_RADIO           /* <input type=radio>(checked 属性表达状态) */
+    HN_IN_RADIO,          /* <input type=radio>(checked 属性表达状态) */
+    HN_IN_BUTTON          /* <input type=button|submit|reset>: 盒 + 居中标签
+                             (标签 = value 属性; 不可编辑、无插入符、不聚焦) */
 };
 /* 输入控件的 type 语义(HN_IN_*); 非 input/textarea 返回 HN_IN_NONE */
 int  hn_node_input_kind(hn_node *n);
@@ -677,6 +682,12 @@ typedef enum {
 /* ---- DOM 变更(供脚本层与宿主使用; 引擎只做结构操作, 不关心调用者是谁) ---- */
 /* 设置/新建属性(值为空串表示布尔属性); 成功返回 1 */
 int  hn_node_set_attr(hn_node *n, const char *name, const char *value);
+/* 移除属性(removeAttribute 语义); 命中返回 1 */
+int  hn_node_remove_attr(hn_node *n, const char *name);
+/* querySelector: 选择器语法与样式表同(组合器/属性选择器/伪类/:not)。
+ * 文档序返回命中数(截断到 max), 语法错返回 -1。c 可为 NULL(状态伪类按未激活)。 */
+int  hn_doc_query_selector(hn_doc *doc, const char *sel, hn_context *c,
+                           hn_node **out, int max);
 /* 取元素文本内容(深度优先拼接子文本节点, 写入 out, 返回写入长度) */
 size_t hn_node_text_content(hn_node *n, char *out, size_t cap);
 /* 设置元素文本内容(清空子节点后写入一个文本节点); 成功返回 1 */

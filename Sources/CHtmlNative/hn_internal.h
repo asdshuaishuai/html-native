@@ -175,6 +175,14 @@ typedef struct hn_style {
     hn_color      text_shadow_color;
     float         text_shadow_blur, text_shadow_ox, text_shadow_oy;
     unsigned char white_space;    /* 0=normal 1=nowrap 2=pre 3=pre-wrap */
+    /* text-transform: 0=none 1=uppercase 2=lowercase 3=capitalize。
+       应用在文本本体上(hn_style.c compute_rec 尾部) —— 度量与绘制消费
+       同一份字节, 宽度天然一致。只变换 ASCII 字节; 多字节 UTF-8 原样
+       保留(诚实边界: é→É 这类非 ASCII 映射不做)。 */
+    unsigned char text_transform;
+    /* aspect-ratio: w/h 比值(单值 = w/h 自身)。0 = 未设。布局期消费:
+       一维已定、另一维 auto 时按比例补齐。 */
+    float aspect_ratio;
     /* ---- 几何与动画声明(可插值) ---- */
     float      translate_x, translate_y;  /* translate: x y */
     float      scale;                     /* scale: n (默认 1) —— 等比 */
@@ -315,8 +323,15 @@ struct hn_node {
        的标签匹配 —— `html` 选择器只命中真实 <html> 元素(浏览器语义),
        否则 html{display:flex} 会错位包裹根(实测整页偏移)。 */
     unsigned char is_doc_wrapper;
+    /* text-transform 已应用到文本时的变换值(防每帧重复改写 arena):
+       与 style.text_transform 不一致时才重写文本。set_text_content 等
+       文本替换路径须清零本字段。 */
+    unsigned char tt_applied;
     /* text */
     const char *text; size_t text_len;
+    /* text-transform 生效前的原字节(文本节点; arena 指针, 无需回收)。
+       变换始终从原文重算 —— 移除/切换 transform 时能还原。 */
+    const char *tt_orig;
     /* computed style(每次 layout 重算) */
     hn_style style;
     /* 布局结果: border-box 绝对坐标 */
@@ -456,6 +471,19 @@ typedef struct hn_compound {
 } hn_compound;
 
 typedef struct { hn_compound *parts; int n_parts; } hn_selector;
+
+/* 查询用选择器组(querySelector): 逗号分隔的多条 selector + 归属 arena。
+   生命周期由 hn_css_selgroup_free 收(与样式表无关的独立 arena)。 */
+typedef struct {
+    hn_selector *sels; int n_sels;
+    hn_arena *arena;
+} hn_selgroup;
+
+/* css.c: 解析查询用选择器组(语法同样式表); 语法错返回 NULL */
+hn_selgroup *hn_css_parse_selgroup(const char *src, size_t len);
+void         hn_css_selgroup_free(hn_selgroup *g);
+/* style.c: 节点是否命中组内任一 selector(c 可为 NULL) */
+int hn_style_selgroup_match(const hn_selgroup *g, hn_node *n, hn_context *c);
 
 /* 一条规则 = 单个 selector + 声明组(选择器组会被展开成多条) */
 typedef struct {

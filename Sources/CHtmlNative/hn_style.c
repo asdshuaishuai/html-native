@@ -13,16 +13,37 @@
 
 static const char *UA_CSS =
     "head, title, base, link, meta, style, script, noscript { display: none; }\n"
+    /* <template>: HTML5 口径 —— 内容是惰性 DocumentFragment, 不参与渲染。
+       (引擎不建 fragment, 直接不显示; 与浏览器可见行为一致。) */
+    "template { display: none; }\n"
     "b, strong, i, em, span, a, code, small, u, s, sub, sup, label, br, em { display: inline; }\n"
-    "input, button, textarea, img, video, audio, select, canvas { display: inline-block; }\n"
-    "b, strong { font-weight: 700; } i, em { font-style: italic; }\n"
+    /* HTML5 行内语义补全(H5 全标准轮): 缩写/引用/术语/变量/插入/高亮/
+       时间/输出/双向隔离等 —— 缺省按行内排, 不给就整段独占一行。 */
+    "abbr, cite, q, dfn, var, samp, bdi, bdo, ins, mark, time, output, big, "
+    "data, nobr { display: inline; }\n"
+    "input, button, textarea, img, video, audio, select, canvas, meter, progress { display: inline-block; }\n"
+    "b, strong { font-weight: 700; } i, em, var, dfn, cite { font-style: italic; }\n"
+    /* 语义块级观感(浏览器惯例, 主题/作者 CSS 可覆盖) */
+    "blockquote { margin: 12 0; padding: 2 0 2 12; border-left: 3 solid rgba(127,127,127,0.4); }\n"
+    "figure { margin: 12 0; }\n"
+    "figcaption { margin: 4 0; }\n"
+    "summary { display: block; cursor: pointer; }\n"
+    "details, main, section, article, aside, header, footer, nav, address, "
+    "fieldset, hgroup { display: block; }\n"
+    "center { display: block; text-align: center; }\n"
+    "dt { font-weight: 700; }\n"
+    "dd { margin: 0 0 4 26; }\n"
+    "mark { background: rgba(255,220,0,0.55); }\n"
+    "ins { text-decoration: underline; }\n"
     "h1 { font-size: 32; font-weight: 700; margin: 21 0 7; }\n"
     "h2 { font-size: 24; font-weight: 700; margin: 20 0 6; }\n"
     "h3 { font-size: 20; font-weight: 700; margin: 18 0 5; }\n"
     "h4, h5, h6 { font-size: 17; font-weight: 700; margin: 16 0 4; }\n"
     "p { margin: 0 0 12; }\n"
     "body { margin: 8; }\n"
-    "button { text-align: center; }\n"
+    "button { text-align: center; cursor: pointer;\n"
+    "  background: rgba(127,127,127,0.14); border: 1 solid rgba(127,127,127,0.4);\n"
+    "  border-radius: 5; padding: 5 14; }\n"
     "ul, ol { margin: 8 0; padding: 4 0 4 26; }\n"
     "li { display: block; margin: 2 0; }\n"
     "a { color: #0969da; text-decoration: underline; }\n"
@@ -725,9 +746,34 @@ static void apply_decl(hn_style *st, const char *name, const char *value) {
             st->sh_blur = nn >= 3 ? nums[2] : 8;
             st->sh_color = scol;
         }
-    } else if (!strcmp(name, "overflow") || !strcmp(name, "overflow-y")) {
+    } else if (!strcmp(name, "overflow") || !strcmp(name, "overflow-y") ||
+               !strcmp(name, "overflow-x")) {
+        /* 单轴裁剪模型: 引擎按整盒同时裁 x/y(一个字段), overflow-x/-y 均
+           是 overflow 的别名 —— 诚实口径, 不假装支持独立双轴。 */
         if (!next_tok(&v, &t)) return;
         st->overflow = sv_eq(t, "visible") ? 0 : 1;
+    } else if (!strcmp(name, "text-transform")) {
+        if (!next_tok(&v, &t)) return;
+        if (sv_eq(t, "uppercase")) st->text_transform = 1;
+        else if (sv_eq(t, "lowercase")) st->text_transform = 2;
+        else if (sv_eq(t, "capitalize")) st->text_transform = 3;
+        else st->text_transform = 0;
+    } else if (!strcmp(name, "aspect-ratio")) {
+        /* aspect-ratio: <w/h> | <比值>。"16/9" 与 "1.7778" 都收; 非法值
+           (0/负/残缺)保持未设 —— 不猜测。 */
+        sv a = {0};
+        if (next_tok(&v, &a)) {
+            const char *sp = a.n ? memchr(a.s, '/', a.n) : NULL;
+            if (sp) {
+                float w = (float)atof(a.s);
+                float h = (float)atof(sp + 1);
+                st->aspect_ratio = (w > 0 && h > 0) ? w / h : 0;
+            } else {
+                int u; float w = 0;
+                if (sv_len(a, st->font_size, &w, &u))
+                    st->aspect_ratio = w > 0 ? w : 0;
+            }
+        }
     } else if (!strcmp(name, "transition")) {
         /* transition: [属性] <时长> [<延迟>] [<缓动>] [, 段...]
            无属性段 = 全局(作用于所有可动画属性, 旧简写行为);
@@ -1395,7 +1441,12 @@ static int compound_matches(const hn_compound *cp, hn_node *n, hn_context *c) {
        真实 html 反成 flex item: 收缩到内容宽 + 百分比高按 0 居中
        (实测整页内容错位到 (150,200), flex+height:100% 页面全坏)。 */
     if (n->is_doc_wrapper && !n->parent) return 0;
-    if (cp->id && (!n->id || strcmp(cp->id, n->id))) return 0;
+    /* id 匹配回退读属性: n->id 在样式计算时回填(style.c compute_rec),
+       查询(querySelector)可能发生在首次布局前 —— 直接读属性, 消除时序差。 */
+    if (cp->id) {
+        const char *nid = n->id ? n->id : get_attr(n, "id");
+        if (!nid || strcmp(cp->id, nid)) return 0;
+    }
     for (int i = 0; i < cp->n_cls; i++)
         if (!has_class(n, cp->cls[i])) return 0;
     if (!attr_matches(cp, n)) return 0;
@@ -1414,7 +1465,11 @@ static int compound_matches(const hn_compound *cp, hn_node *n, hn_context *c) {
     if (cp->pseudo == 4 && !hn_node_is_disabled(n)) return 0;
     if (cp->pseudo == 5 && hn_node_is_disabled(n)) return 0;
     if (cp->pseudo == 6 && !hn_node_is_checked(n)) return 0;
-    /* :nth-child / :first-child / :last-child — 父元素下按元素序(1 起)匹配 */
+    /* :root — 文档根元素(html)。包裹根(is_doc_wrapper)是引擎合成层, 不是
+       作者文档的一部分: html 的 parent 是它, 反之 html 自身无此标记。 */
+    if (cp->pseudo == 7 && !(n->parent && n->parent->is_doc_wrapper && !n->is_doc_wrapper))
+        return 0;
+    /* :nth-child / :first-child / :last-child / :only-child — 父元素下按元素序(1 起)匹配 */
     if (cp->nth) {
         if (!n->parent) return 0;
         if (cp->nth == -3) {   /* first-child: 前面无元素兄弟 */
@@ -1423,6 +1478,13 @@ static int compound_matches(const hn_compound *cp, hn_node *n, hn_context *c) {
             return 1;
         }
         if (cp->nth == -4) {   /* last-child: 后面无元素兄弟 */
+            for (hn_node *s = n->next; s; s = s->next)
+                if (s->kind == HN_ELEM) return 0;
+            return 1;
+        }
+        if (cp->nth == -5) {   /* only-child: 前后都无元素兄弟 */
+            for (hn_node *s = n->prev; s; s = s->prev)
+                if (s->kind == HN_ELEM) return 0;
             for (hn_node *s = n->next; s; s = s->next)
                 if (s->kind == HN_ELEM) return 0;
             return 1;
@@ -1478,6 +1540,13 @@ static int selector_matches(const hn_selector *sel, hn_node *n, hn_context *c) {
         }
     }
     return 1;
+}
+
+int hn_style_selgroup_match(const hn_selgroup *g, hn_node *n, hn_context *c) {
+    if (!g || !g->sels || !n) return 0;
+    for (int i = 0; i < g->n_sels; i++)
+        if (selector_matches(&g->sels[i], n, c)) return 1;
+    return 0;
 }
 
 /* ---------- 级联计算 ---------- */
@@ -1662,6 +1731,30 @@ static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
        html{font-size} 只命中真实 html, rem 基准须随之(实测 rem 探针
        "基于根字号"在修复后回到默认 16)。 */
     if (n->parent && n->parent->is_doc_wrapper) g_root_font = st.font_size;
+    /* text-transform: 直接改写文本字节(ASCII 范围), 度量与绘制消费同一份
+       —— 宽度天然一致。原文缓存(tt_orig)让移除/切换都能从原文重算
+       (arena 无 free, 不能就地还原); tt_applied 守卫住"值没变不重写",
+       否则逐帧改写会线性吃内存。 */
+    if (n->kind == HN_ELEM &&
+        ((st.text_transform && n->tt_applied != st.text_transform) ||
+         (!st.text_transform && n->tt_applied))) {
+        int tt = st.text_transform;
+        for (hn_node *ch = n->first; ch; ch = ch->next) {
+            if (ch->kind != HN_TEXT || !ch->text || !ch->text_len) continue;
+            if (!ch->tt_orig) ch->tt_orig = ch->text;   /* 首次变换: 记原字节 */
+            if (!tt) { ch->text = ch->tt_orig; continue; }
+            char *t2 = hn_arena_strndup(n->arena, ch->tt_orig, ch->text_len);
+            for (size_t i = 0; i < ch->text_len; i++) {
+                unsigned char c = (unsigned char)t2[i];
+                if (tt == 1 && c >= 'a' && c <= 'z') t2[i] = (char)(c - 32);
+                else if (tt == 2 && c >= 'A' && c <= 'Z') t2[i] = (char)(c + 32);
+                else if (tt == 3 && c >= 'a' && c <= 'z' &&
+                         (i == 0 || !isalnum((unsigned char)t2[i - 1]))) t2[i] = (char)(c - 32);
+            }
+            ch->text = t2;
+        }
+        n->tt_applied = tt;
+    }
     for (hn_node *ch = n->first; ch; ch = ch->next) compute_rec(c, ch, n);
 }
 

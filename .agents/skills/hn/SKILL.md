@@ -100,8 +100,12 @@ hn.fetch(url, {method:'POST', headers:{...}, body:'...'})   // → Promise
 flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / overflow 滚动；
 盒模型 / 圆角(含 50%) / linear-gradient / box-shadow / opacity / transition / cursor；
 `#hex rgb() hsl() transparent` / px pt % em rem vw vh / 免单位数值（`padding:16` ≡ 16px）；
-`:hover :active :focus :nth-child` / `@media (min|max-width)`。
-**没有**：grid / float / `:not()` / 伪元素 / @font-face（边界如实声明, 路线图上）。
+`:hover :active :focus :disabled :enabled :checked` / `:nth-child(odd|even|N)` /
+`:first-child :last-child :only-child :first-of-type :last-of-type :root` / `:not(简单选择器, 可链式)` /
+属性选择器 `[attr] [attr=v] [attr^=v] [attr$=v] [attr*=v] [attr~=v]` / `@media (min|max-width)`。
+`text-transform: uppercase|lowercase|capitalize`（ASCII 范围, 度量绘制同源）；
+`aspect-ratio: 16/9`（一维定另一维 auto 时补齐）；`border-top|right|bottom|left` 分侧边框。
+**没有**：grid / float / 伪元素 / @font-face / calc()（边界如实声明, 路线图上）。
 
 ## 动画（声明式, 引擎插值）
 
@@ -180,7 +184,43 @@ hnMediaVolume('v', .5); // 音量(v<=0 同时静音)
 - `hn-draggable` — 无边框/透明窗的空白区拖动（**默认开**，`=0` 关闭）
 - `hn-stream` + `hn-stream-loop="14"` — 聊天式流式容器：自动贴底跟随 + 环形缓冲只留最近 N 条（agent 轨迹/日志页标配）
 
-**表单控件**：`<input type="text|password|checkbox|radio">`、`<textarea>`（多行+光标）开箱可用；`:focus :disabled :checked` 生效；回车自动提交最近载体。
+**表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset">`、`<textarea>`（多行+光标）、`<button>` 开箱可用；`:focus :disabled :checked :placeholder` 生效；按钮按标签内容收缩（shrink-to-fit）、标签水平居中；回车自动提交最近载体。
+
+## JS DOM 与 Canvas（标准 API 面, 页面 `<script>` 直接用）
+
+```js
+// 标准 DOM 读改写（写透引擎 DOM, 下一帧生效）
+var el = document.getElementById('k')          // 无此节点 → null（非空包装）
+el.textContent                                   // 读 = 子树拼接文本; 写 = 整体替换
+el.getAttribute / setAttribute / removeAttribute / hasAttribute
+el.classList.add / remove / toggle / contains   // 写透 class 属性
+el.dataset.userId = '7'                          // ↔ data-user-id（camel 自动拆线）
+el.style.color = 'red'; el.style.cssText         // ↔ style 属性（setProperty/cssText 同款）
+el.checked / el.disabled / el.hidden             // 布尔属性语义
+el.parentElement / el.children / el.firstElementChild
+el.querySelector(sel) / el.querySelectorAll(sel) // 文档序; 支持组合器/属性选择器/伪类
+el.focus()
+var n = document.createElement('div'); n.id='x'  // id 直接赋值可用
+document.body.appendChild(n); n.remove()         // 移动语义: append 会从旧父摘除
+document.body / document.documentElement
+document.addEventListener / window.addEventListener  // 冒泡链尾
+```
+事件对象含 `type/target/currentTarget/clientX/Y/key/code/detail/shift...` +
+`preventDefault/stopPropagation`（与浏览器同签名）。
+
+```js
+// Canvas 2D（标准方法面 + 少量如实声明的近似）
+var c = document.getElementById('cv').getContext('2d');
+c.fillRect / strokeRect / clearRect / beginPath / moveTo / lineTo / arc / ellipse /
+c.quadraticCurveTo / bezierCurveTo / arcTo / rect / roundRect / fill / stroke / clip /
+c.fillText / strokeText / measureText / drawImage(3/5/9 参) / createLinear·RadialGradient /
+c.createPattern / setLineDash / save / restore / translate / scale / rotate / set·transform /
+c.getTransform() / createImageData / getImageData / putImageData / isPointInPath / toDataURL()
+c.fillStyle / strokeStyle / lineWidth / lineCap / lineJoin / miterLimit / font / textAlign /
+c.textBaseline / globalAlpha / globalCompositeOperation(lighter/multiply/screen) / shadow*
+```
+边界如实声明：`isPointInPath` 按已渲染像素 alpha 判定（抗锯齿边缘 1px 级差异）；
+`toDataURL` 恒出 PNG；stroke 遇 pattern 回落纯色。
 
 ## 调试纪律（界面不对时不靠肉眼猜）
 
