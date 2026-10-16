@@ -256,8 +256,11 @@ spawn 的旧壳 + 相对资产路径解析差异**（daemon CWD ≠ 页面 CWD �
 
 ## 六、待办（本轮暴露，未做）
 
-1. **重拍截图**：`docs/screenshots/` 6 张是旧圆角几何，口径已漂 → 用新引擎重出并核对
-   `README.md` / `docs/index.html` / `docs/threejs-support.md` 的引用。
+1. ~~**重拍截图**~~ → ✅ 已完成(2026-10-15)：新增 `tools/reshoot_docs.{c,sh}`
+   按当前引擎重拍 6 张(`hn_rt_set_scale(2)+hn_rt_shot`, 真 2x 光栅, 非
+   拉伸)。页面映射: dashboard/webpage/showcase/message-card/inputs-focus
+   用同名 examples 页(meta 尺寸), dev-app 改用 `examples/ui-kit.html`
+   (920x900 —— include 组件·主题令牌, 与画廊文案一致; 旧图源页已不存在)。
 2. **重录存量分片**：`recordings2/01-holodeck` / `03-threejs` / `04-agent-stream` / `05-fmt`
    四个分片是旧引擎录的；若要合集内部几何一致，需按新引擎重录。
 3. ~~**P1-C** 待用户侧修完后回归~~ → ✅ 已复核结案（见第二节：干净路径不可复现，

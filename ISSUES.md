@@ -152,9 +152,9 @@
 ## 附: 存量简化(散落多处, 排期防漏)
 
 - Cubism 遮罩/混合观感精修(对照官方 Web runtime, 见 hn_cubism.c 头注)
-- hn_three.c neb3 永久回退后其余缓存槽泄漏
+- ~~hn_three.c neb3 永久回退后其余缓存槽泄漏~~ **已修+回归锚定**(2026-10-15): 回退时整链释放全部槽(`t3_neb3_release_all_slots`, 触发槽先单放不双 free)。新增 `tools/neb3_fallback_probe.{c,sh}` + `tools/fake_neb3.c`(全符号替身 dylib, 对象级存活计数): 三场景(render_fail 4 槽全装配/create_fail/scene_fail)断言回退后 live==0 + 软件路径出图 + 永久性(state=2 不重入), normal+ASan 双跑。
 - hn_three.c --advance 确定性对 hn-three 不成立(文档已修正口径)
-- CG 后端 hn_pe surface 尺寸失败残留旧尺寸(debug 构建触发断言)
+- ~~CG 后端 hn_pe surface 尺寸失败残留旧尺寸(debug 构建触发断言)~~ **已修+回归锚定**: 修复在 fef4c63(失败路径先清零槽 w/h 并 memset, PX_SurfaceFree 由 w!=0 守卫)。新增 `tools/pe_surface_probe.{c,sh}`: PE 池 32MB 上界使超大 surface(4000x3500≈56MB)创建必然失败 —— 正常→失败→正常三段序列断言无残留复用(normal+ASan 双跑); SDK 缺席时 skip。
 - GPU: 直呈/圆角 GPU 化/合成层缓存
 - hn-drag / hn-dismiss / --ttl 到期自毁 / hn new / hn dev
 
