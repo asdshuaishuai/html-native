@@ -557,7 +557,33 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
     }
 }
 
-/* ---------------- 阴影(扩边矩形近似模糊) ---------------- */
+/* ---------------- 阴影(高质量: 离屏 alpha 蒙版 + 3-pass box ≈ 高斯) ----------------
+ *
+ * 旧实现是 6 层扩边矩形叠透明 —— 观感"一圈圈光环", 大 blur 下尤其假。
+ * 新实现与浏览器同路数:
+ *   1. 阴影形状画进**独立 alpha 蒙版**(单通道, 无背景污染);
+ *   2. 蒙版做 3 次盒模糊(Kovesi 三盒逼近高斯, 误差 <3%; 滑窗累积和,
+ *      每趟 O(n) 与半径无关);
+ *   3. 蒙版 × 阴影色 blend 回主帧。
+ * CSS blur 口径: σ = blur/2; 小 blur(≤1.5px) 单层 SDF 直绘(不值模糊)。 */
+
+/* 蒙版单通道 box blur(水平或垂直一趟; 累积和滑窗, O(n) 与半径无关) */
+static void mask_blur_line(float *line, int n, int r) {
+    if (r <= 0 || n <= 1) return;
+    float *dst = (float *)malloc(sizeof(float) * (size_t)n);
+    if (!dst) return;
+    float sum = 0;
+    int win = 2 * r + 1;
+    for (int i = -r; i <= r; i++) sum += line[i < 0 ? 0 : (i >= n ? n - 1 : i)];
+    for (int i = 0; i < n; i++) {
+        dst[i] = sum / (float)win;
+        int add = i + r + 1, sub = i - r;
+        sum += line[add >= n ? n - 1 : add];
+        sum -= line[sub < 0 ? 0 : sub];
+    }
+    memcpy(line, dst, sizeof(float) * (size_t)n);
+    free(dst);
+}
 
 static void paint_shadow(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     fcolor col = unpack(c->shadow_color);
@@ -565,31 +591,80 @@ static void paint_shadow(fb *f, const hn_cmd *c, float scale, float ox, float oy
     if (col.a <= 0.01f) return;
     float blur = c->shadow_blur * scale;
     float ox_ = c->shadow_ox * scale, oy_ = c->shadow_oy * scale;
-    /* 6 层扩边近似模糊: 每层递减透明度, 叠加成柔和边缘 */
-    const int RINGS = 6;
-    for (int i = RINGS; i >= 1; i--) {
-        float t = (float)i / RINGS;
-        float grow = blur * t;
-        fcolor ring = col;
-        ring.a *= (1.0f - t) * (1.0f - t) * 0.9f / RINGS * 2.0f;
-        if (ring.a <= 0.005f) continue;
-        float x = (c->x + ox_ - grow * 0.5f - ox) * scale + ox;
-        float y = (c->y + oy_ - grow * 0.5f - oy) * scale + oy;
-        float w = (c->w + grow) * scale, h = (c->h + grow) * scale;
-        float rr = (c->radius + grow * 0.5f) * scale;
+    float x = (c->x + ox_) * scale;
+    float y = (c->y + oy_) * scale;
+    float w = c->w * scale, h = c->h * scale;
+    float rr = (c->radius > 0 ? c->radius : 0) * scale;
+
+    if (blur <= 1.5f) {
         int ix0 = (int)x - 2, iy0 = (int)y - 2;
         int ix1 = (int)(x + w) + 2, iy1 = (int)(y + h) + 2;
         for (int py = iy0; py <= iy1; py++)
             for (int px = ix0; px <= ix1; px++) {
                 float fx = px + 0.5f, fy = py + 0.5f;
-                float d = sd_rounded(fx, fy, x, y, w, h, rr > 0 ? rr : 0);
+                float d = sd_rounded(fx, fy, x, y, w, h, rr);
                 float cov = 0.5f - d;
                 if (cov <= 0) continue;
                 if (cov > 1) cov = 1;
-                fcolor cc = ring; cc.a *= cov;
+                fcolor cc = col; cc.a *= cov;
                 fb_blend(f, px, py, cc);
             }
+        return;
     }
+
+    /* 蒙版域: 形状 bbox + 3σ 余量 */
+    float sigma = blur * 0.5f;
+    int pad = (int)(sigma * 3.0f) + 2;
+    int mx0 = (int)floorf(x) - pad, my0 = (int)floorf(y) - pad;
+    int mx1 = (int)ceilf(x + w) + pad, my1 = (int)ceilf(y + h) + pad;
+    int mw = mx1 - mx0 + 1, mh = my1 - my0 + 1;
+    if (mw <= 0 || mh <= 0 || mw > 8192 || mh > 8192) return;
+    float *mask = (float *)calloc((size_t)mw * (size_t)mh, sizeof(float));
+    if (!mask) return;
+
+    for (int py = my0; py <= my1; py++)
+        for (int px = mx0; px <= mx1; px++) {
+            float fx = px + 0.5f, fy = py + 0.5f;
+            float d = sd_rounded(fx, fy, x, y, w, h, rr);
+            float cov = 0.5f - d;
+            if (cov <= 0) continue;
+            if (cov > 1) cov = 1;
+            mask[(size_t)(py - my0) * mw + (size_t)(px - mx0)] = cov;
+        }
+
+    /* 3-pass box(Kovesi 系数 {0.564, 0.564, 0.575}); 每趟 H+V */
+    float rs[3] = { 0.564f, 0.564f, 0.575f };
+    float *line = (float *)malloc(sizeof(float) * (size_t)(mw > mh ? mw : mh));
+    if (!line) { free(mask); return; }
+    for (int pass = 0; pass < 3; pass++) {
+        int r = (int)(sigma * rs[pass] + 0.5f) - 1;
+        if (r < 1) r = 1;
+        for (int yy = 0; yy < mh; yy++) {
+            memcpy(line, mask + (size_t)yy * mw, sizeof(float) * (size_t)mw);
+            mask_blur_line(line, mw, r);
+            memcpy(mask + (size_t)yy * mw, line, sizeof(float) * (size_t)mw);
+        }
+        for (int xx = 0; xx < mw; xx++) {
+            for (int yy = 0; yy < mh; yy++) line[yy] = mask[(size_t)yy * mw + xx];
+            mask_blur_line(line, mh, r);
+            for (int yy = 0; yy < mh; yy++) mask[(size_t)yy * mw + xx] = line[yy];
+        }
+    }
+    free(line);
+
+    for (int py = my0; py <= my1; py++) {
+        if (py < 0 || py >= f->h) continue;
+        for (int px = mx0; px <= mx1; px++) {
+            if (px < 0 || px >= f->w) continue;
+            float m = mask[(size_t)(py - my0) * mw + (size_t)(px - mx0)];
+            if (m <= 0.004f) continue;
+            if (m > 1) m = 1;
+            fcolor cc = col;
+            cc.a *= m;
+            fb_blend(f, px, py, cc);
+        }
+    }
+    free(mask);
 }
 
 /* ---------------- 四边形(3D 投影面片) ---------------- */

@@ -120,6 +120,8 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 ```
 `@keyframes` 可用字段：rotate / rotateX / rotateY / translate-x/y / scale / opacity / background / color。
 3D：`transform: rotate(45deg) scale(1.2)` + `perspective: 400`（父或自身）。
+box-shadow 模糊为**真高斯**（3-pass box 逼近, 无光环）; three.js 子集为
+Blinn-Phong 双灯着色（高光 + 半球环境光）。
 
 ## 富媒体（agent 母语）
 
@@ -239,6 +241,7 @@ c.getTransform() / createImageData / getImageData / putImageData / isPointInPath
 c.fillStyle / strokeStyle / lineWidth / lineCap / lineJoin / miterLimit / font / textAlign /
 c.textBaseline / globalAlpha / globalCompositeOperation(lighter/multiply/screen) / shadow*
 c.letterSpacing / wordSpacing（字距进度量与绘制） / c.reset()（清画布+状态归缺省）
+c.filter = 'blur(6px)'（模糊滤镜; 引擎 3-pass 高斯, 实心区浓度有已知偏差）
 ```
 边界如实声明：`isPointInPath` 按已渲染像素 alpha 判定（抗锯齿边缘 1px 级差异）；
 `toDataURL` 恒出 PNG；stroke 遇 pattern 回落纯色。

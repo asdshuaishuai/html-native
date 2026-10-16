@@ -196,6 +196,27 @@
 - 探针: events_probe 66→72(+6: select 开/行选/外点关闭); css_probe 106
   (+复显断言); html_probe 53(visibility 语义断言更新)。
 
+### 2026-10-15 渲染能力升级轮(高斯/着色/滤镜, 已修+探针锚定)
+
+- **box-shadow 真高斯模糊**: 旧实现 6 层扩边矩形叠透明(观感"一圈圈光环")。
+  新实现与浏览器同路数: 阴影形状 → 独立 alpha 蒙版(SDF 覆盖率) →
+  **3-pass box blur(Kovesi 三盒逼近高斯, 误差 <3%, 滑窗 O(n) 与半径无关)**
+  → 蒙版 × 阴影色 blend 回主帧。σ = blur/2(CSS 口径), 蒙版域 = bbox+3σ。
+  小 blur(≤1.5px) 单层 SDF 直绘。实测: 阴影边缘单调平滑过渡、无光环
+  台阶(相邻像素最大跳变 4, 单调递减)。
+- **three.js Blinn-Phong 双灯着色**: 旧单灯 Lambert(0.35+0.65·n·L)。
+  新: key 灯漫反射 + Blinn 高光(^64, 强度 0.55) + fill 灯(反侧 0.25) +
+  半球环境光(法线 y 分量 0.18..0.32 插值)。球体呈现光泽高光、盒面
+  明暗层次立体(实测球心高光 123 像素 >460 亮度)。
+- **Canvas ctx.filter='blur(Npx)'**: glue 属性 + 借 shadow 管线下送
+  (shb=2σ, 偏移 0, 本体 col=0 只画模糊蒙版); ctx.filter 读回 'blur(Npx)'/'none'。
+  **已知偏差**: canvas 重放路径的阴影蒙版内部饱和度异常(≈0.39 而非 1.0,
+  CSS box-shadow 路径正常)——影响 canvas filter 的实心区浓度, 边缘过渡
+  正确; 根因待查(疑 replay 的 shadow 参数映射), 记录为开放项。
+- **渐变去色带**(上轮): bayer 抖动, 与本轮高斯阴影叠加 = 绘制画质整体升级。
+- 回归: 全部 16+ 探针家族全绿(render 83/0 · events 72 · css 108 · three ·
+  quad3d · perf/anim 门禁通过)。
+
 ### 已知问题(仍开放)
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。

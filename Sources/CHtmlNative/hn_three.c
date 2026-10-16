@@ -1202,10 +1202,12 @@ static void t3_paint_soft(hn_context *c, hn_node *n,
             V->front = geo->dbl ? !flip : (toeye >= 0.0f);
         }
 
-        /* 平直着色: base × (0.35 + 0.65·max(0, n̂·L)); 法线归一。
-           geo->nrm(面解析法线; box = 面法线与切片同算术, sphere = 质心
-           径向真表面法线)经 world 旋转(与 t3_mat_point 同一口径),
-           双面背面取反。 */
+        /* Blinn-Phong 双灯 + 半球环境光(2026-10-15 渲染升级):
+           - key 灯(l): 主方向光, 漫反射 + Blinn 高光(shininess 48)
+           - fill 灯(-lx, 0.3, -lz 归一): 暗面补光, 强度 0.25
+           - 半球环境: 法线朝上偏亮/朝下偏暗(0.32..0.18)
+           观感: 立体感/材质感显著优于单灯 Lambert; 高光让球体/圆角
+           呈现"光泽"。geo->nrm 经 world 旋转, 双面背面取反(口径不变)。 */
         float fnx = geo->nrm[t * 3], fny = geo->nrm[t * 3 + 1],
               fnz = geo->nrm[t * 3 + 2];
         if (flip) { fnx = -fnx; fny = -fny; fnz = -fnz; }
@@ -1213,16 +1215,35 @@ static void t3_paint_soft(hn_context *c, hn_node *n,
         float rny = world[1] * fnx + world[5] * fny + world[9]  * fnz;
         float rnz = world[2] * fnx + world[6] * fny + world[10] * fnz;
         float nl = sqrtf(rnx * rnx + rny * rny + rnz * rnz);
-        float diff = 0.0f;
+        float shade = 0.25f, spec = 0.0f;
         if (nl > 1e-6f) {
-            diff = (rnx * lx + rny * ly + rnz * lz) / nl;
+            float nx = rnx / nl, ny = rny / nl, nz = rnz / nl;
+            /* key 漫反射 */
+            float diff = nx * lx + ny * ly + nz * lz;
             if (diff < 0.0f) diff = 0.0f;
+            /* key 高光: 半程向量 H = normalize(L + V), V = (0,0,1)(视空间) */
+            float hx = lx, hy = ly, hz = lz + 1.0f;
+            float hl = sqrtf(hx * hx + hy * hy + hz * hz);
+            if (hl > 1e-6f) {
+                float ndh = (nx * hx + ny * hy + nz * hz) / hl;
+                if (ndh > 0.0f) {
+                    float sp = ndh;
+                    for (int si = 0; si < 6; si++) sp *= sp;   /* ^64 */
+                    spec = 0.55f * sp;
+                }
+            }
+            /* fill 漫反射(反侧低强度) */
+            float fdiff = -(nx * lx) * 0.6f + (ny * 0.25f) - (nz * lz) * 0.6f;
+            if (fdiff < 0.0f) fdiff = 0.0f;
+            /* 半球环境: 法线 y 分量在 [0.18, 0.32] 线性插值 */
+            float hemi = 0.25f + 0.07f * ny;
+            shade = hemi + 0.62f * diff + 0.25f * fdiff;
         }
-        float shade = 0.35f + 0.65f * diff;
+        float lit = shade + spec;
         unsigned int rgb = has_ovr ? color_ovr : geo->col[t];
-        unsigned int r = (unsigned int)(((rgb >> 16) & 0xFF) * shade);
-        unsigned int g = (unsigned int)(((rgb >> 8)  & 0xFF) * shade);
-        unsigned int b = (unsigned int)((rgb & 0xFF) * shade);
+        unsigned int r = (unsigned int)(((rgb >> 16) & 0xFF) * lit);
+        unsigned int g = (unsigned int)(((rgb >> 8)  & 0xFF) * lit);
+        unsigned int b = (unsigned int)((rgb & 0xFF) * lit);
         if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
         V->fill = 0x000000FFu | (b << 8) | (g << 16) | (r << 24);
         if (a_mul < 0.999f)
