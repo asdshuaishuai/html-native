@@ -1807,6 +1807,19 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                     cmd.bitmap_w = hn_gif_width(gg);
                     cmd.bitmap_h = hn_gif_height(gg);
                     cmd.bitmap_pts = (double)n->ext_clock * 0.001;
+                    /* fill 的 alpha 字节是 hnsoft paint_bitmap 的整层不透明度
+                       (与 BITMAP/Lottie 分支同一契约)。此前 memset 0 后从未
+                       设置 → alpha=0 混合 → **GIF 动图在渲染管线完全不可见**
+                       (timer_probe 8c 两条红断言的根因; 图片后端的 IMAGE 分支
+                       走自己通道, 故静态图不受影响)。元素 alpha 折入与
+                       cubism/mesh/three 分支同口径。 */
+                    {
+                        float a_gif = alpha;
+                        if (a_gif < 0.0f) a_gif = 0.0f;
+                        if (a_gif > 1.0f) a_gif = 1.0f;
+                        cmd.fill = 0xFFFFFF00u
+                                 | (unsigned)(a_gif * 255.0f + 0.5f);
+                    }
                     push_cmd(c, &cmd);
                     goto clip_done;
                 }

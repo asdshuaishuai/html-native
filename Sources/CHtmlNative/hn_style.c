@@ -1389,6 +1389,12 @@ static int nth_type_matches(const hn_compound *cp, hn_node *n) {
 static int compound_matches(const hn_compound *cp, hn_node *n, hn_context *c) {
     if (n->kind != HN_ELEM) return 0;
     if (cp->tag && (!n->tag || strcmp(cp->tag, n->tag))) return 0;
+    /* 合成包裹根(doc->root, tag 也是 "html")不参与作者 CSS —— `html` 选择器
+       只该命中真实的 <html> 元素(浏览器语义: html 样式作用于文档元素,
+       视口框架由引擎管)。否则 html{display:flex} 会把包裹根变 flex 容器,
+       真实 html 反成 flex item: 收缩到内容宽 + 百分比高按 0 居中
+       (实测整页内容错位到 (150,200), flex+height:100% 页面全坏)。 */
+    if (n->is_doc_wrapper && !n->parent) return 0;
     if (cp->id && (!n->id || strcmp(cp->id, n->id))) return 0;
     for (int i = 0; i < cp->n_cls; i++)
         if (!has_class(n, cp->cls[i])) return 0;
@@ -1651,7 +1657,11 @@ static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
     }
 
     n->style = st;
-    if (!parent) g_root_font = st.font_size;   /* rem 基准 = 根元素字号 */
+    /* rem 基准 = 真实 <html> 元素字号(父 = 解析器包裹根)。此前取 `!parent`
+       的节点 —— 即包裹根本身; 包裹根不参与作者 CSS 后(见 compound_matches),
+       html{font-size} 只命中真实 html, rem 基准须随之(实测 rem 探针
+       "基于根字号"在修复后回到默认 16)。 */
+    if (n->parent && n->parent->is_doc_wrapper) g_root_font = st.font_size;
     for (hn_node *ch = n->first; ch; ch = ch->next) compute_rec(c, ch, n);
 }
 

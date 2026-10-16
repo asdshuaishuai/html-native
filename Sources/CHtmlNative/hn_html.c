@@ -654,6 +654,7 @@ hn_doc *hn_parse_html(const char *src, size_t len) {
     doc->arena = hn_arena_create();
     doc->root = new_node(doc->arena, HN_ELEM);
     doc->root->tag = "html";
+    doc->root->is_doc_wrapper = 1;   /* 合成包裹根: 不匹配作者 CSS(见 hn_style) */
     if (src && len) {
         /* <include> 装载期拼接在解析**前**完成 —— 解析器对组件零感知。
            拼接失败/无 include 时回退原文, 装载路径零失败。 */

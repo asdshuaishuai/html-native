@@ -311,6 +311,10 @@ struct hn_node {
     const char *tag;
     hn_attr    *attrs; int n_attrs;
     const char *id;
+    /* 解析器合成的文档包裹根(doc->root, tag 同为 "html"): 不参与作者 CSS
+       的标签匹配 —— `html` 选择器只命中真实 <html> 元素(浏览器语义),
+       否则 html{display:flex} 会错位包裹根(实测整页偏移)。 */
+    unsigned char is_doc_wrapper;
     /* text */
     const char *text; size_t text_len;
     /* computed style(每次 layout 重算) */

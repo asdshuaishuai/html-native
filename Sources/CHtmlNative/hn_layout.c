@@ -827,8 +827,12 @@ static void layout_out_of_flow(hn_context *c, hn_node *n, const hn_text_backend 
         else py = n->by + n->style.padding[0];
 
         translate_subtree(ch, px - ch->bx, py - ch->by);
-        /* absolute 的子树里可能还有 absolute: 递归处理 */
-        layout_out_of_flow(c, ch, tb);
+        /* 此处**不要**再递归 layout_out_of_flow(ch): 上面那次 layout_box(ch)
+           走到尾部已经调过一次(见本文件"容器尺寸已定 → 摆放脱离流的子节点"),
+           再调一次会把 ch 的脱离流后代整棵重新排布一遍。盒坐标因 translate
+           幂等而看不出差别, 但 run_push 只追加不清空 —— 文字指令直接翻倍:
+           实测 absolute 子元素嵌在 absolute 父里时, "hn-mesh · 网格变形"
+           被画两遍(第二份整体偏移 (left, top)), 背景 RECT 却只有一份。 */
     }
 }
 
@@ -1304,6 +1308,24 @@ static float layout_flex_body(hn_context *c, hn_node *n, const hn_style *st,
                     if (main_outer < 0) main_outer = 0;
                 }
 
+                /* 百分比高度的本轮重解析: pass1 度量时交叉轴未知(-1),
+                   height:100% 按未知解析成内容高(实测为 0), 居中偏移
+                   cy_off=(H-0)/2 把 flex item 整体下移半视口 —— 实测
+                   html,body{height:100%}+flex 页面全坏。此时行交叉可用高
+                   已定, 百分比高度子项按可用高重排一次再取 outer_h。
+                   (stretch 的 forced 路径本就带定高重排, 不受影响。) */
+                float resolved_h = -1;
+                if (ch->kind == HN_ELEM && ch->style.height_u == HN_U_PCT &&
+                    lcross_avail > 0) {
+                    float inner = lcross_avail - items[i].mt - items[i].mb;
+                    if (inner > 0) {
+                        layout_box(c, ch, 0, 0,
+                                   main_outer - items[i].ml - items[i].mr,
+                                   inner, tb, 1, -1,
+                                   main_outer - items[i].ml - items[i].mr);
+                        resolved_h = ch->bh;
+                    }
+                }
                 float outer_h = items[i].mt + ch->bh + items[i].mb;
             float cy_off = items[i].mt, forced = -1;
             if (ch->kind == HN_ELEM) {
@@ -1311,8 +1333,8 @@ static float layout_flex_body(hn_context *c, hn_node *n, const hn_style *st,
                 hn_align ea = ch->style.has_self_align ? ch->style.self_align : st->align;
                 switch (ea) {
                 case HN_ALIGN_START:  cy_off = items[i].mt; break;
-                case HN_ALIGN_CENTER: cy_off = items[i].mt + (lcross_avail - outer_h) * 0.5f; break;
-                case HN_ALIGN_END:    cy_off = lcross_avail - outer_h + items[i].mt; break;
+                case HN_ALIGN_CENTER: cy_off = items[i].mt + (lcross_avail - (resolved_h > 0 ? resolved_h : outer_h)) * 0.5f; break;
+                case HN_ALIGN_END:    cy_off = lcross_avail - (resolved_h > 0 ? resolved_h : outer_h) + items[i].mt; break;
                 default: /* stretch: 钉到本行交叉可用高(内容超出由 overflow 裁剪) */
                     if (ch->style.height_u == HN_U_AUTO) {
                         forced = lcross_avail - items[i].mt - items[i].mb;
