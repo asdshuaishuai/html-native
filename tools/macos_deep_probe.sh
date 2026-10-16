@@ -492,7 +492,7 @@ int main(int argc, char **argv) {
 CEOF
 if command -v cc >/dev/null 2>&1; then
     hn_sources_full
-    HN_SOURCES=("$SBX/scale/scale_probe.c" "$HN_RT_DIR/hn_rt.c"
+    HN_SOURCES=("$SBX/scale/scale_probe.c" "$HN_RT_DIR/hn_rt.c" "$HN_RT_DIR/hn_sys.c" "$HN_RT_DIR/hn_http.c"
                 "$ROOT/platform/hnp_macos.c"
                 ${HN_SOURCES[@]+"${HN_SOURCES[@]}"})
     for f in "${HN_WASM3[@]}"; do HN_SOURCES+=("$HN_WASM3_DIR/$f"); done
@@ -902,7 +902,7 @@ int main(void) {
 }
 CEOF
     hn_sources_full
-    HN_SOURCES=("$SBX/edit/edit_probe.c" "$HN_RT_DIR/hn_rt.c"
+    HN_SOURCES=("$SBX/edit/edit_probe.c" "$HN_RT_DIR/hn_rt.c" "$HN_RT_DIR/hn_sys.c" "$HN_RT_DIR/hn_http.c"
                 ${HN_SOURCES[@]+"${HN_SOURCES[@]}"})
     for f in "${HN_WASM3[@]}"; do HN_SOURCES+=("$HN_WASM3_DIR/$f"); done
     HN_CFLAGS=(-std=c99 -O2 -Wall -ffp-contract=off)

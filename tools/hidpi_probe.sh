@@ -317,7 +317,7 @@ int main(int argc, char **argv) {
 CEOF
     # 编译口径 = canvas_probe.sh 同款(rt + 引擎 + hnsoft + wasm3 + QuickJS/FreeType)
     hn_sources_full
-    HN_SOURCES=("$TMPD/hidpi_rt_probe.c" "$HN_RT_DIR/hn_rt.c"
+    HN_SOURCES=("$TMPD/hidpi_rt_probe.c" "$HN_RT_DIR/hn_rt.c" "$HN_RT_DIR/hn_sys.c" "$HN_RT_DIR/hn_http.c"
                 ${HN_SOURCES[@]+"${HN_SOURCES[@]}"})
     local_wasm3=""
     for local_wasm3 in "${HN_WASM3[@]}"; do

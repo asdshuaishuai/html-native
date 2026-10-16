@@ -5,10 +5,10 @@
 // 帧完成以非预乘 RGBA8 输出(与 HN_CMD_BITMAP 契约零转换)。
 //
 // v1 支持: FILL_RECT(含阴影)/STROKE_PATH/FILL_PATH/GRAD_RECT/GRAD_PATH
-//          /CLIP_PUSH/CLIP_POP/CLEAR(整幅透明)。
+//          /CLIP_PUSH/CLIP_POP/CLEAR(整幅透明)/CLEAR_RECT(局部透明擦除)。
 // v1 暂不支持(遇到打一次 stderr 并跳过, 不静默刷屏): TEXT(可经 set_font
-//          + TTF 字节补齐)/IMAGE/PDATA/PATTERN_RECT/PATH/CLEAR_RECT
-//          (source-over 无擦除语义)/CLIP_PATH(子路径组)/blend≠source-over。
+//          + TTF 字节补齐)/IMAGE/PDATA/PATTERN_RECT/PATH/CLIP_PATH(子路径组)
+//          /blend≠source-over。
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +35,7 @@ struct ity_backend : hn_canvas_backend {
         vt = &VT;
         width = w; height = h;
         for (auto &f : warned) f = false;
+        cv.save();             /* base state for per-frame reset */
     }
     static const hn_canvas_backend_vt VT;
 };
@@ -103,10 +104,12 @@ void path_points(canvas_ity::canvas &cv, const float *pts, int n, bool closed) {
 
 void apply_gradient(canvas_ity::canvas &cv, const hn_canvas_op *o, bool fill) {
     canvas_ity::brush_type t = fill ? canvas_ity::fill_style : canvas_ity::stroke_style;
+    /* 渐变必须设到将用于绘制的 brush 上: GRAD_RECT/GRAD_PATH 都是 fill
+       操作 —— 此前固定写 stroke_style, fill 渐变落到旧纯色(复审修复)。 */
     if (o->grad_radial)
-        cv.set_radial_gradient(canvas_ity::stroke_style, o->gx0, o->gy0, o->gr0, o->gx1, o->gy1, o->gr1);
+        cv.set_radial_gradient(t, o->gx0, o->gy0, o->gr0, o->gx1, o->gy1, o->gr1);
     else
-        cv.set_linear_gradient(canvas_ity::stroke_style, o->gx0, o->gy0, o->gx1, o->gy1);
+        cv.set_linear_gradient(t, o->gx0, o->gy0, o->gx1, o->gy1);
     hn_color c0 = o->color, c1 = o->color2;
     if (!(o->n_stops >= 2 && o->stops)) {
         add_stop_255(cv, t, 0.0f, (unsigned)c0);
@@ -169,12 +172,25 @@ void ity_op(hn_canvas_backend *self, const hn_canvas_op *o) {
         cv.save();
         b->save_depth++;
         cv.begin_path();
-        cv.rectangle(o->x, o->y, o->x + o->w, o->y + o->h);
+        cv.rectangle(o->x, o->y, o->w, o->h);
         cv.clip();
         break;
     case HN_CV_CLIP_POP:
         if (b->save_depth > 0) b->save_depth--;   /* 空栈 restore 是文档化
                                                      no-op, 配对计数只防欠账 */
+        cv.restore();
+        break;
+    case HN_CV_CLEAR_RECT:
+        /* canvas_ity 没有单独的 clearRect 绘制原语，但 clear_rectangle 已用
+           destination_out + 不透明填充实现“把目的像素变透明”，并且会恢复
+           自身临时改动的 blend/alpha/阴影状态。外层 save+clip 将这个等效
+           擦除严格限制在矩形内；这里的 save/restore 是 op 内部配对，不计入
+           save_depth，故不会改变账本后续 clip/save 的状态。 */
+        cv.save();
+        cv.begin_path();
+        cv.rectangle(o->x, o->y, o->w, o->h);
+        cv.clip();
+        cv.clear_rectangle(o->x, o->y, o->w, o->h);
         cv.restore();
         break;
     default: {
@@ -185,7 +201,6 @@ void ity_op(hn_canvas_backend *self, const hn_canvas_op *o) {
         case HN_CV_PDATA:        slot = 2; break;
         case HN_CV_PATTERN_RECT:
         case HN_CV_PATTERN_PATH: slot = 3; break;
-        case HN_CV_CLEAR_RECT:   slot = 4; break;
         case HN_CV_CLIP_PATH:    slot = 5; break;
         default:                 slot = 6; break;
         }
@@ -197,13 +212,17 @@ void ity_op(hn_canvas_backend *self, const hn_canvas_op *o) {
 
 void ity_clear(hn_canvas_backend *self) {
     auto *b = (ity_backend *)self;
-    /* 新帧清面: 复位账本重放欠下的 save/clip 状态栈(良构账本配对进出,
-       此处通常为 0 次; 欠账不补则下一帧在残余裁剪里画), 再整面清成
-       透明底 —— 与 canvas 构造初始态一致。clear_rectangle 受当前 clip/
-       transform 限制(canvas_ity.hpp:851-855), 故必须先复位再清;
-       transform 引擎侧从不设置(坐标由 JS glue 烘干), 无需处理。 */
+    /* 新帧清面: 先终结核销账本重放欠下的 save/clip 状态栈(良构账本配对
+       进出, 此处通常为 0 次), 再弹出构造期基底 save —— 半透明填充与
+       shadow/blend 等在 canvas_ity 里落在基底状态之外, 只靠核销账本 op
+       清不干净, 残影会跨帧累积(2026-10-15 复审实测: 半透明整面重画,
+       旧实现 alpha 通道单帧 +10)。clear_rectangle 受当前 clip/transform
+       限制, 必须复位后再清; transform 引擎侧从不设置(坐标由 JS glue
+       烘干), 无需处理。清完立刻重新 save, 下一帧重放起点与首帧一致。 */
     while (b->save_depth > 0) { b->cv.restore(); b->save_depth--; }
+    b->cv.restore();       /* 弹出构造期基底 save */
     b->cv.clear_rectangle(0.0f, 0.0f, (float)b->width, (float)b->height);
+    b->cv.save();          /* 重建基底, 下帧重放状态与首帧一致 */
 }
 
 int ity_frame(hn_canvas_backend *self, const unsigned char **rgba,
@@ -254,8 +273,32 @@ static int ity_enabled(void) {
 }
 
 #define ITY_IDS 8
-struct ity_slot { char id[128]; hn_canvas_backend *b; int w, h; };
+struct ity_slot { char id[128]; hn_canvas_backend *b; int w, h; hn_context *owner; };
 static ity_slot g_ity_slots[ITY_IDS];
+
+/* 能力预检: 账本含 ity 不支持的 op(TEXT/IMAGE/PDATA/PATTERN/CLIP_PATH)
+   或非 source-over 混合时返回 0 —— 呼出方整帧回退账本重放, 不让后端
+   "警告后跳过"造成静默缺内容(与 hn_gpu_available 的整帧判定同一纪律)。 */
+static int ity_ledger_supported(const hn_canvas_ledger *l) {
+    for (int i = 0; i < l->n_ops; i++) {
+        const hn_canvas_op *o = &l->ops[i];
+        if (o->blend != HN_BLEND_SRC_OVER) return 0;
+        switch (o->kind) {
+        case HN_CV_FILL_RECT:
+        case HN_CV_STROKE_PATH:
+        case HN_CV_FILL_PATH:
+        case HN_CV_GRAD_RECT:
+        case HN_CV_GRAD_PATH:
+        case HN_CV_CLIP_PUSH:
+        case HN_CV_CLIP_POP:
+        case HN_CV_CLEAR_RECT:
+            break;                       /* v1 支持(见文件头清单) */
+        default:
+            return 0;                    /* TEXT/IMAGE/PDATA/PATTERN/CLIP_PATH/未知 */
+        }
+    }
+    return 1;
+}
 
 int hn_canvas_paint_ity(hn_context *c, const char *id, const hn_canvas_ledger *l,
                         float cw, float ch, float bw, float bh,
@@ -265,12 +308,25 @@ int hn_canvas_paint_ity(hn_context *c, const char *id, const hn_canvas_ledger *l
        被调用, 任何链入本 TU 的构建都被静默改写缺省渲染语义)。 */
     if (!ity_enabled()) return 0;
     if (!c || !id || !l || l->n_ops <= 0) return 0;
+    if (!ity_ledger_supported(l)) return 0;   /* 能力预检: 不支持 → 整帧账本 */
     int W = (int)cw, H = (int)ch;
     if (W <= 0 || H <= 0) return 0;
 
     ity_slot *slot = NULL;
     for (int i = 0; i < ITY_IDS; i++)
-        if (g_ity_slots[i].id[0] && !strcmp(g_ity_slots[i].id, id)) { slot = &g_ity_slots[i]; break; }
+        if (g_ity_slots[i].id[0] && g_ity_slots[i].owner == c &&
+            !strcmp(g_ity_slots[i].id, id)) { slot = &g_ity_slots[i]; break; }
+    /* 旧 owner 的同 id 槽位: 销毁重建 —— 后端面不得跨 context 复用
+       (context 销毁后槽位残留会造成串画/悬垂, 复审修复)。 */
+    for (int i = 0; i < ITY_IDS && !slot; i++) {
+        if (!g_ity_slots[i].id[0] || strcmp(g_ity_slots[i].id, id)) continue;
+        if (g_ity_slots[i].owner != c) {
+            if (g_ity_slots[i].b) g_ity_slots[i].b->vt->dispose(g_ity_slots[i].b);
+            g_ity_slots[i].b = NULL;
+            g_ity_slots[i].id[0] = 0;
+            g_ity_slots[i].owner = NULL;
+        }
+    }
     if (slot && (slot->w != W || slot->h != H)) {
         slot->b->vt->dispose(slot->b);
         slot->b = NULL;
@@ -284,7 +340,7 @@ int hn_canvas_paint_ity(hn_context *c, const char *id, const hn_canvas_ledger *l
             slot->b->vt->dispose(slot->b); slot->id[0] = 0; }
         hn_canvas_backend *b = hn_canvas_backend_ity_create(W, H);
         if (!b) return 0;
-        slot->b = b; slot->w = W; slot->h = H;
+        slot->b = b; slot->w = W; slot->h = H; slot->owner = c;
         snprintf(slot->id, sizeof(slot->id), "%s", id);
     }
 

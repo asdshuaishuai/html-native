@@ -11,19 +11,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <dlfcn.h>
 #include <math.h>   /* NAN(hnWasmCall 失败返回值, 经 quickjs.h 的 JS_NAN) */
-/* statvfs 的声明: Linux/musl 头文件不自依赖, 必须显式包含 statvfs.h,
-   否则 hnapp 的 musl 交叉报 incomplete type。macOS 侧走既有传递包含路径
-   即可(实测 zig 精简 Darwin 头显式包含 mount.h 反而 u_int 裸奔报错)。 */
-#ifndef __APPLE__
-#include <sys/statvfs.h>
-#endif
-
 #include "hn_rt.h"
+#include "hn_sys.h"
+#include "hn_http.h"
 /* 引擎内部接口(动画活跃类别 + ambient 轻重画): 性能治理需要
    hn_context_anim_tick_ex 的类别出口与 hn_context_repaint_light ——
    这两个钩子是引擎专为帧节拍分级开的缝, 不触及其他内部结构。 */
@@ -64,6 +60,11 @@ struct hn_rt {
        N 次 layout+raster 合 1(与 blit 合并配套, 内存带宽第二刀)。 */
     int paint_defer;
     int paint_dirty;
+    /* GPU 直呈(v2): 平台壳注入的 CAMetalLayer(不透明指针); presented =
+       最近一帧经 present 出帧(shot/blit 据此分流 —— shot 需要像素时
+       强制走一次 CPU/readback 渲染)。 */
+    void *gpu_present_layer;
+    int presented;
     /* 轮询表(hx-trigger="every Ns"): 时钟域是**帧步进虚拟钟**(poll_clock_ms,
        每帧 += dt)而非墙钟 —— 与下方 JS 定时器的 clock_ms 同一口径(探针喂
        固定 16 ⇒ 轮询语义确定性可断言, --advance 虚拟快进也能到期; 真窗壳
@@ -106,6 +107,16 @@ struct hn_rt {
     } listeners[HN_LISTENERS_MAX];
     int listen_n;
     int listen_seq;
+    /* HTTP async scope + pending fetch map: hn.fetch() returns Promise immediately,
+       request submitted to scope, completed in hn_rt_frame via drain callback */
+    void *http_scope;          /* hn_http_scope * (lazy init on first fetch) */
+    uint64_t fetch_id_seq;     /* monotonic ID generator */
+    struct {
+        uint64_t id;           /* scope request ID */
+        JSValue resolve;       /* Promise resolve function */
+        JSValue reject;        /* Promise reject function */
+    } pending_fetches[32];     /* max 32 concurrent fetches per runtime */
+    int pending_fetch_n;
 #endif
 };
 
@@ -208,7 +219,9 @@ static void tb_metrics(void *ctx, const hn_font_desc *font,
 }
 static hn_text_backend g_tb = { NULL, tb_measure, tb_metrics };
 
-/* ---------------- sys:// 桥(单源) ---------------- */
+/* ---------------- sys:// 桥 ----------------
+ * 路由实现单源在 rt/hn_sys.c(hn_sys_fragment); store 经回调带各自命名空间。
+ * 此处仅保留 rt 的 store 后端(与 hn_rt_store_* 同一文件)与兼容入口。 */
 
 static char *store_path(const char *store_id) {
     const char *home = getenv("HOME");
@@ -303,17 +316,6 @@ int hn_rt_store_set(const char *store_id, const char *key, const char *val) {
     return ok;
 }
 
-static int qparam(const char *q, const char *key, char *out, size_t cap);
-static void esc_html(const char *s, char *out, size_t cap);
-static double sys_cpu_load(void);
-static long sys_mem_used_mb(void);
-static long sys_mem_total_mb(void);
-static long sys_disk_free_gb(void);
-static double sys_uptime_s(void);
-static void sys_host(char *, size_t);
-static int clip_set(const char *);
-static int clip_get(char *, size_t);
-static int sys_open_url(const char *);
 /* 文档内联 <script> 执行(QuickJS 有实现; 无 JS 引擎时是 no-op stub) */
 static void run_doc_scripts(hn_rt *rt);
 /* JS 定时器/RAF 宿主绑定与帧驱动(QuickJS 有实现; 无 JS 构建为 no-op stub) */
@@ -327,363 +329,18 @@ static int rt_js_has_listener(hn_rt *rt, const char *type);
 static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
                           float x, float y, const char *utf8, int key, int detail);
 
+static int rt_sys_store_get(void *ctx, const char *key, char *out, size_t cap) {
+    return hn_rt_store_get((const char *)ctx, key, out, cap);
+}
+static int rt_sys_store_set(void *ctx, const char *key, const char *value) {
+    return hn_rt_store_set((const char *)ctx, key, value);
+}
+
+/* Compatibility entry for callers that already have a store namespace. */
 char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *store_id) {
-    if (!url || strncmp(url, "sys://", 6)) return NULL;
-    const char *route = url + 6;
-    const char *q = strchr(route, '?');
-    char key[256] = { 0 }, val[1024] = { 0 };
-    char *out = (char *)malloc(4096);
-    if (!out) return NULL;
-    if (!strncmp(route, "store/get", 9)) {
-        if (qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key))) {
-            char v[1024] = { 0 };
-            int got = hn_rt_store_get(store_id, key, v, sizeof(v));
-            char ev[2200];
-            esc_html(got ? v : "", ev, sizeof(ev));
-            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
-        } else snprintf(out, 4096, "<span>missing key</span>");
-    } else if (!strncmp(route, "store/set", 9)) {
-        int hk = qparam(q, "key", key, sizeof(key)) || qparam(form_body, "key", key, sizeof(key));
-        int hv = qparam(q, "value", val, sizeof(val)) || qparam(form_body, "value", val, sizeof(val));
-        if (hk && hv) {
-            hn_rt_store_set(store_id, key, val);
-            char ev[2200];
-            esc_html(val, ev, sizeof(ev));
-            snprintf(out, 4096, "<span id=\"store-value\">%s</span>", ev);
-        } else snprintf(out, 4096, "<span>missing key/value</span>");
-    } else if (!strncmp(route, "store/count", 11)) {
-        snprintf(out, 4096, "<span>1</span>");
-    } else if (!strncmp(route, "cpu", 3)) {
-        double load = sys_cpu_load();
-        snprintf(out, 4096,
-                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%.0f%%</div>"
-                 "<div style=\"font-size:11;color:#6b7386\">CPU load average</div>", load < 0 ? 0 : load);
-    } else if (!strncmp(route, "memory", 6) || !strncmp(route, "mem", 3)) {
-        long used = sys_mem_used_mb(), total = sys_mem_total_mb();
-        int pct = total > 0 ? (int)(used * 100 / total) : 0;
-        snprintf(out, 4096,
-                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%ld MB</div>"
-                 "<div style=\"font-size:11;color:#6b7386\">%ld MB total (%d%%)</div>",
-                 used, total, pct);
-    } else if (!strncmp(route, "disk", 4)) {
-        snprintf(out, 4096,
-                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%ld GB</div>"
-                 "<div style=\"font-size:11;color:#6b7386\">disk free</div>", sys_disk_free_gb());
-    } else if (!strncmp(route, "uptime", 6)) {
-        snprintf(out, 4096,
-                 "<div style=\"font-size:20;font-weight:700;color:#7fdbca\">%.0f s</div>"
-                 "<div style=\"font-size:11;color:#6b7386\">uptime</div>", sys_uptime_s());
-    } else if (!strncmp(route, "host", 4)) {
-        char host[256];
-        sys_host(host, sizeof(host));
-        snprintf(out, 4096,
-                 "<div style=\"font-size:16;font-weight:600;color:#e8eaf0\">%s</div>", host);
-    } else if (!strncmp(route, "clipboard/get", 13)) {
-        char text[4096] = { 0 };
-        clip_get(text, sizeof(text));
-        char ev[4200];
-        esc_html(text, ev, sizeof(ev));
-        snprintf(out, 4096, "<div id=\"clip\">%s</div>", ev);
-    } else if (!strncmp(route, "clipboard/set", 13)) {
-        char v[4096] = { 0 };
-        int ok = (qparam(q, "value", v, sizeof(v)) || qparam(form_body, "value", v, sizeof(v))) && clip_set(v);
-        snprintf(out, 4096, ok ? "<span>copied</span>" : "<span>clip unavailable</span>");
-    } else if (!strncmp(route, "open", 4)) {
-        char target[2048] = { 0 };
-        if (qparam(q, "url", target, sizeof(target)) || qparam(form_body, "url", target, sizeof(target)))
-            sys_open_url(target);
-        snprintf(out, 4096, "<span></span>");
-    } else if (!strncmp(route, "notify", 6)) {
-        char text[2048] = { 0 };
-        qparam(q, "text", text, sizeof(text));
-        fprintf(stderr, "[notify] %s\n", text);
-        snprintf(out, 4096, "<span></span>");
-    } else {
-        free(out);
-        return NULL;
-    }
-    return out;
+    hn_sys_host host = { (void *)store_id, rt_sys_store_get, rt_sys_store_set };
+    return hn_sys_fragment(&host, url, form_body);
 }
-
-static int qparam(const char *q, const char *key, char *out, size_t cap) {
-    if (!q) return 0;
-    size_t kl = strlen(key);
-    const char *p = q;
-    while (*p) {
-        while (*p == '&' || *p == '?') p++;
-        if (!strncmp(p, key, kl) && p[kl] == '=') {
-            const char *v = p + kl + 1;
-            size_t i = 0;
-            while (*v && *v != '&' && i + 1 < cap) out[i++] = *v++;
-            out[i] = 0;
-            return 1;
-        }
-        while (*p && *p != '&') p++;
-    }
-    return 0;
-}
-
-static void esc_html(const char *s, char *out, size_t cap) {
-    size_t i = 0;
-    for (; *s && i + 7 < cap; s++) {
-        switch (*s) {
-        case '<': memcpy(out + i, "&lt;", 4); i += 4; break;
-        case '>': memcpy(out + i, "&gt;", 4); i += 4; break;
-        case '&': memcpy(out + i, "&amp;", 5); i += 5; break;
-        default: out[i++] = *s;
-        }
-    }
-    out[i] = 0;
-}
-
-/* ---------------- sys:// 系统桥补齐(POSIX 可移植) ----------------
- * 缺口: agent 的智能 UI 需要"打通系统层级数据" —— CPU/内存/磁盘/电池/
- * uptime/host/剪贴板/通知/打开。这些此前在 Swift SystemBridge 里, 全层
- * 删除后要在 C 侧重建。macOS 侧走 POSIX sysctl + AppKit NSPasteboard/
- * NSWorkspace(dlopen); Linux 侧走 /proc + xclip。两平台同一语义。 */
-
-#ifdef __APPLE__
-#include <sys/types.h>
-#include <sys/statvfs.h>
-
-/* sysctlbyname 不用 sys/sysctl.h(header 在 _POSIX_C_SOURCE 下拉入 BSD 类型 u_int
-   而 -std=c99 + _POSIX_C_SOURCE 200809L 不定义它 → 编译失败)。 */
-extern int sysctlbyname(const char *, void *, size_t *, const void *, size_t);
-#endif
-#include <time.h>
-
-/* 剪贴板/openURL 的 ObjC 调用: 每次经 dlsym(不依赖链接了哪个 hnp_*.c)。
-   Apple 平台 AppKit 由 hn_objc_bind 在消费点按需装载(见其注释 —— 宿主
-   侧 hnp_init 的装载覆盖不到 daemon/--shot 链路); 非 Apple 直接返回 0。
-
-   ⚠️ 2026-10 修复(本轮): 这里原写 `dlsym((void *)0, "objc_msgSend")` ——
-   **RTLD_DEFAULT 在 macOS 是 (void *)-2 而非 NULL**(dlfcn.h), 传 0 得到
-   的是"找不到符号"的 NULL, 于是三个函数全部走 `if (!gc || !sl || !send)`
-   提前返回: ⌘C/⌘V 与 sys://clipboard 在 macOS 上**从来没工作过**, 只是
-   静默失败(界面显示 "clip unavailable")。同一 bug 在 sys_open_url 上
-   (链接点击/notify 外链同样没打开过)。已全部改为 RTLD_DEFAULT。
-
-   有界 autorelease 池: 本文件在池外调用 stringWithUTF8String: 等
-   convenient 构造器会泄漏(与 hnp_macos.c 事故②同一根因)。这里按
-   hnp_macos.c 的 pool_push/pool_pop 同款手法套一层 —— 对象只在调用
-   期间存活, drain 后立即回收。 */
-#ifdef __APPLE__
-#include <dlfcn.h>
-/* -std=c99 + _POSIX_C_SOURCE 下 Darwin 的 dlfcn.h 不暴露 RTLD_DEFAULT
-   (__DARWIN_C_LEVEL 停在 POSIX 档, RTLD_DEFAULT 在 FULL 档里) ——
-   这正是原作者写 (void *)0 的原因, 而 macOS 上 dlsym(0, ...) **不搜全局
-   (拿到 NULL)**, 于是整块静默失效。这里按 Darwin 真值补定义
-   (dyld 源码/机器码实测 = (void *)-2); 其余平台的 RTLD_DEFAULT 由
-   dlfcn.h 正常给出(glibc = (void *)0, 语义是全局符号表)。 */
-#ifndef RTLD_DEFAULT
-#if defined(__APPLE__)
-#define RTLD_DEFAULT ((void *)-2)
-#else
-#define RTLD_DEFAULT ((void *)0)
-#endif
-#endif
-typedef void *(*hn_dlsym_msgSend_t)(void *, void *, ...);
-typedef struct { void *send, *gc, *sl; } hn_objc_rt;
-static int hn_objc_bind(hn_objc_rt *rt) {
-    /* AppKit 不一定已装载进本进程 —— 宿主各有差异: 真窗壳在 hnp_macos.c
-       的 hnp_init 里 dlopen; daemon 不链任何平台层(app 侧 hnp_init 的调用
-       点 app/hn_app.c:429 与它无关); hn_app 的 --shot 分支在 hnp_init 之前
-       就 return(2026-10-15 复审实测: daemon 与 --shot 两条链路 clipboard
-       路由都换入降级占位 "clip unavailable")。在消费点自行装载, sys://
-       clipboard/open 从此不依赖"宿主记得装 AppKit"。重复 dlopen 已装载的
-       framework 是引用计数 no-op, 对真窗壳零代价; 首次失败(异常系统)不
-       重试, 路由落回既有占位, 其余路径零影响。 */
-    static int appkit_tried = 0;
-    if (!appkit_tried) {
-        dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW);
-        appkit_tried = 1;
-    }
-    rt->gc = dlsym(RTLD_DEFAULT, "objc_getClass");
-    rt->sl = dlsym(RTLD_DEFAULT, "sel_registerName");
-    rt->send = dlsym(RTLD_DEFAULT, "objc_msgSend");
-    return rt->gc && rt->sl && rt->send;
-}
-/* 有界 autorelease 池(与 hnp_macos.c 的 pool_push/pool_pop 同款):
-   NSObject 的 alloc/init 与 drain 都经 objc_msgSend 调用。 */
-static void *hn_pool_enter(const hn_objc_rt *rt) {
-    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt->send;
-    void *(*gc)(const char *) = (void *(*)(const char *))rt->gc;
-    void *(*sel)(const char *) = (void *(*)(const char *))rt->sl;
-    void *cls = gc("NSAutoreleasePool");
-    if (!cls) return NULL;
-    void *o = ((void *(*)(void *, void *))send)(cls, sel("alloc"));
-    if (!o) return NULL;
-    return ((void *(*)(void *, void *))send)(o, sel("init"));
-}
-static void hn_pool_exit(const hn_objc_rt *rt, void *pool) {
-    if (!pool) return;
-    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt->send;
-    void *(*sel)(const char *) = (void *(*)(const char *))rt->sl;
-    ((void (*)(void *, void *))send)(pool, sel("drain"));
-}
-#endif
-
-static double sys_uptime_s(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec;
-}
-
-static double sys_cpu_load(void) {
-#ifdef __APPLE__
-    long loads[3];
-    if (sysctlbyname("vm.loadavg", loads, &(size_t){sizeof(loads)}, NULL, 0) != 0) return -1;
-    return (double)loads[2] / 256.0 * 100.0;
-#else
-    FILE *f = fopen("/proc/loadavg", "r");
-    if (!f) return -1;
-    double l;
-    int r = fscanf(f, "%lf", &l);
-    fclose(f);
-    return r == 1 ? l * 100.0 : -1.0;
-#endif
-}
-
-static long sys_mem_used_mb(void) {
-#ifdef __APPLE__
-    uint64_t total = 0, free_pgs = 0, inactive = 0;
-    size_t sz = sizeof(total);
-    sysctlbyname("hw.memsize", &total, &sz, NULL, 0);
-    sz = sizeof(free_pgs);
-    sysctlbyname("vm.page_free_count", &free_pgs, &sz, NULL, 0);
-    sz = sizeof(inactive);
-    sysctlbyname("vm.page_inactive_count", &inactive, &sz, NULL, 0);
-    long pg = 4096;
-    sz = sizeof(pg);
-    sysctlbyname("vm.pagesize", &pg, &sz, NULL, 0);
-    return (long)((total - (free_pgs + inactive) * (uint64_t)pg) / 1048576);
-#else
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) return -1;
-    long total = 0, avail = 0; char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        if (!strncmp(line, "MemTotal:", 9)) sscanf(line + 9, "%ld", &total);
-        else if (!strncmp(line, "MemAvailable:", 13)) sscanf(line + 13, "%ld", &avail);
-    }
-    fclose(f);
-    return total > 0 ? (total - avail) / 1024 : -1;
-#endif
-}
-
-static long sys_mem_total_mb(void) {
-#ifdef __APPLE__
-    uint64_t v = 0; size_t sz = sizeof(v);
-    sysctlbyname("hw.memsize", &v, &sz, NULL, 0);
-    return (long)(v / 1048576);
-#else
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) return -1;
-    long v = 0; char line[256];
-    while (fgets(line, sizeof(line), f))
-        if (!strncmp(line, "MemTotal:", 9)) { sscanf(line + 9, "%ld", &v); break; }
-    fclose(f);
-    return v / 1024;
-#endif
-}
-
-static long sys_disk_free_gb(void) {
-    struct statvfs st;
-    if (statvfs("/", &st) != 0) return -1;
-    return (long)((double)st.f_bavail * st.f_frsize / 1073741824.0);
-}
-
-static void sys_host(char *out, size_t cap) {
-#ifdef __APPLE__
-    char buf[256]; size_t sz = sizeof(buf) - 1;
-    if (sysctlbyname("kern.hostname", buf, &sz, NULL, 0) == 0) { buf[sz] = 0; snprintf(out, cap, "%s", buf); return; }
-#else
-    FILE *f = fopen("/etc/hostname", "r");
-    if (f) {
-        if (fgets(out, (int)cap, f)) {
-            char *nl = strchr(out, '\n');
-            if (nl) *nl = 0;
-            fclose(f);
-            return;
-        }
-        fclose(f);
-    }
-#endif
-    snprintf(out, cap, "unknown");
-}
-
-/* 剪贴板/打开 URL: macOS 走 AppKit(dlsym); Linux 下一阶段(xclip/xdg-open)。 */
-#ifdef __APPLE__
-#include <dlfcn.h>
-static int clip_set(const char *text) {
-    hn_objc_rt rt;
-    if (!hn_objc_bind(&rt)) return 0;
-    void *pool = hn_pool_enter(&rt);
-    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt.send;
-    void *(*gc)(const char *) = (void *(*)(const char *))rt.gc;
-    void *(*sl)(const char *) = (void *(*)(const char *))rt.sl;
-    int ok = 0;
-    void *pb = ((void *(*)(void *, void *))send)(gc("NSPasteboard"), sl("generalPasteboard"));
-    if (pb) {
-        ((void (*)(void *, void *))send)(pb, sl("clearContents"));
-        void *nscls = gc("NSString");
-        void *str = ((void *(*)(void *, void *, const char *))send)(
-            nscls, sl("stringWithUTF8String:"), text);
-        void *type = ((void *(*)(void *, void *, const char *))send)(
-            nscls, sl("stringWithUTF8String:"), "public.utf8-plain-text");
-        if (str && type)
-            ok = ((void *(*)(void *, void *, void *, void *))send)(
-                pb, sl("setString:forType:"), str, type) ? 1 : 0;
-    }
-    hn_pool_exit(&rt, pool);
-    return ok;
-}
-static int clip_get(char *out, size_t cap) {
-    hn_objc_rt rt;
-    if (!hn_objc_bind(&rt) || !out || cap == 0) return 0;
-    out[0] = 0;
-    void *pool = hn_pool_enter(&rt);
-    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt.send;
-    void *(*gc)(const char *) = (void *(*)(const char *))rt.gc;
-    void *(*sl)(const char *) = (void *(*)(const char *))rt.sl;
-    int ok = 0;
-    void *pb = ((void *(*)(void *, void *))send)(gc("NSPasteboard"), sl("generalPasteboard"));
-    if (pb) {
-        void *type = ((void *(*)(void *, void *, const char *))send)(
-            gc("NSString"), sl("stringWithUTF8String:"), "public.utf8-plain-text");
-        void *str = type ? ((void *(*)(void *, void *, void *))send)(
-            pb, sl("stringForType:"), type) : NULL;
-        const char *c = str ? ((const char *(*)(void *, void *))send)(
-            str, sl("UTF8String")) : NULL;
-        if (c) { snprintf(out, cap, "%s", c); ok = 1; }
-    }
-    hn_pool_exit(&rt, pool);
-    return ok;
-}
-static int sys_open_url(const char *url) {
-    hn_objc_rt rt;
-    if (!hn_objc_bind(&rt)) return 0;
-    void *pool = hn_pool_enter(&rt);
-    void *(*send)(void *, void *, ...) = (void *(*)(void *, void *, ...))rt.send;
-    void *(*gc)(const char *) = (void *(*)(const char *))rt.gc;
-    void *(*sl)(const char *) = (void *(*)(const char *))rt.sl;
-    int ok = 0;
-    void *ws = ((void *(*)(void *, void *))send)(gc("NSWorkspace"), sl("sharedWorkspace"));
-    if (ws) {
-        void *str = ((void *(*)(void *, void *, const char *))send)(
-            gc("NSString"), sl("stringWithUTF8String:"), url);
-        if (str) {
-            ((void (*)(void *, void *, void *))send)(ws, sl("openURL:"), str);
-            ok = 1;
-        }
-    }
-    hn_pool_exit(&rt, pool);
-    return ok;
-}
-#else
-static int clip_set(const char *text) { (void)text; return 0; }
-static int clip_get(char *out, size_t cap) { (void)out; (void)cap; return 0; }
-static int sys_open_url(const char *url) { (void)url; return 0; }
-#endif
 
 
 static hn_node *hx_carrier(hn_node *n) {
@@ -699,23 +356,62 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
     const char *get = hn_node_attr(carrier, "hx-get");
     const char *url = post ? post : get;
     if (!url) return 0;
-    /* 非 sys:// = 外部 fetch。C99 层无任何网络实现(Swift hn.fetch 随
-       c49cfbd 删除; README/ISSUES P1-1 "无网络"是项目定位) —— 必须显式
-       标注而非静默吞掉: 静默失败是排查黑洞, 页面看起来"点了没反应"。 */
-    if (strncmp(url, "sys://", 6)) {
-        fprintf(stderr, "[hx] fetch 不支持: \"%s\" — C99 引擎零网络, 仅 "
-                "sys:// 本地桥; 外部资源走 sys://open 交系统打开\n", url);
-        fflush(stderr);
-        return 0;
-    }
     hn_doc *doc = hn_context_doc(rt->ctx);
     char form[4096];
     form[0] = 0;
     hn_doc_form_encode(doc, form, sizeof(form));
-    char *frag = hn_rt_sys_fragment(url, form, rt->id);
+    /* sys:// remains the local routing boundary. HTTP uses the optional
+       runtime transport; unsupported schemes retain hn_sys diagnostics. */
+    char *frag = NULL;
+    hn_http_response http = {0};
+    int is_http = 0;
+    if (url && (strncasecmp(url, "http://", 7) == 0 || strncasecmp(url, "https://", 8) == 0)) {
+        is_http = 1;
+        /* htmx 语义: GET 把表单拼进 query(?/& 接续), POST 带 urlencoded 头 */
+        const char *req_url = url;
+        char url_q[8192];
+        if (!post && form[0]) {
+            snprintf(url_q, sizeof(url_q), "%s%s%s", url,
+                     strchr(url, '?') ? "&" : "?", form);
+            req_url = url_q;
+        }
+        hn_http_request_opts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.url = req_url;
+        opts.method = post ? "POST" : "GET";
+        opts.body = post ? form : NULL;
+        opts.body_len = post ? strlen(form) : 0;
+        hn_http_header hdr;
+        if (post && form[0]) {
+            hdr.name = "Content-Type";
+            hdr.value = "application/x-www-form-urlencoded";
+            opts.headers = &hdr;
+            opts.header_count = 1;
+        }
+        if (hn_http_request(&opts, &http)) {
+            if (http.status >= 400) {
+                fprintf(stderr, "[hx] http 失败: %s: HTTP %ld\n", url, http.status);
+                fflush(stderr);
+                hn_http_response_free(&http);
+                return 0;
+            }
+            frag = (char *)malloc(http.body_len + 1);
+            if (frag) { memcpy(frag, http.body, http.body_len); frag[http.body_len] = 0; }
+            hn_http_response_free(&http);
+        } else {
+            fprintf(stderr, "[hx] http 失败: %s: %s\n", url, hn_http_last_error());
+            fflush(stderr);
+            return 0;
+        }
+    } else {
+        hn_sys_host host = { (void *)rt->id, rt_sys_store_get, rt_sys_store_set };
+        frag = hn_sys_request(&host, url, form);
+    }
     if (!frag) {
-        fprintf(stderr, "[hx] 未知 sys:// 路由: %s\n", url);
-        fflush(stderr);
+        if (is_http) {
+            fprintf(stderr, "[hx] http 失败: %s: 响应体分配失败\n", url);
+            fflush(stderr);
+        }
         return 0;
     }
     const char *tid = hn_node_attr(carrier, "hx-target");
@@ -800,8 +496,32 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
     (void)dl; (void)w; (void)h; (void)bg; (void)scale; (void)out_bgra;
     return 0;
 }
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+int hn_gpu_render_present(void *ca_metal_layer, const hn_display_list *dl,
+                          int w, int h, hn_color bg, float scale) {
+    (void)ca_metal_layer; (void)dl; (void)w; (void)h; (void)bg; (void)scale;
+    return 0;
+}
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+unsigned long hn_gpu_present_count(void) { return 0; }
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+unsigned long hn_gpu_readback_count(void) { return 0; }
 
 void hn_rt_set_gpu_host(const void *host) { hn_gpu_set_host(host); }
+
+void hn_rt_set_gpu_present_layer(hn_rt *rt, void *ca_metal_layer) {
+    if (!rt) return;
+    rt->gpu_present_layer = ca_metal_layer;
+    if (!ca_metal_layer) rt->presented = 0;
+}
+
+int hn_rt_presented(const hn_rt *rt) { return rt ? rt->presented : 0; }
 
 /* 光栅段(全路径/ambient 轻路径共用): 显示列表 → RGBA → 预乘 BGRA。
    HiDPI: 位图按 (逻辑 × scale) 出图, 显示列表坐标在 paint 时乘 scale
@@ -837,6 +557,16 @@ static int rt_raster(hn_rt *rt) {
     float scale = rt_scale(rt);
     int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);
     hn_color bg = rt->transparent ? 0x00000000u : 0x0B0E13FFu;
+    /* 直呈分流: 平台层注入 CAMetalLayer 且本帧行可 GPU → 直接 present
+       (成功 = 0 次 readback / 0 次 CPU 位图, rt->presented 置位供
+       shot/blit 分流); 失败落回既有 readback/CPU 路径。 */
+    if (rt->gpu_present_layer) {
+        if (hn_gpu_render_present(rt->gpu_present_layer, dl, bw, bh, bg, scale)) {
+            rt->presented = 1;
+            return 1;
+        }
+    }
+    rt->presented = 0;
     unsigned char *bgra = NULL;
     if (hn_gpu_available(dl))
         hn_gpu_render_scaled(dl, bw, bh, bg, scale, &bgra);
@@ -891,7 +621,10 @@ static int rt_render(hn_rt *rt) {
     /* 挂起窗口(app 事件排干中): 只标脏不渲染, 队尾 paint_flush 一次画。
        返回 0 —— 调用方(app)以 flush 的返回值决定是否 blit。 */
     if (rt->paint_defer) { rt->paint_dirty = 1; return 0; }
-    hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+    /* nopaint 布局: layout 内建的 paint 会被下方 anim_tick(0) 重采样后的
+       repaint 整体覆盖 —— 交互帧的显示列表构建从两遍收敛为一遍(性能
+       治理; 语义不变, 见 hn_context_layout_nopaint 注)。 */
+    hn_context_layout_nopaint(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
     /* relayout 会把动画采样值从级联重算冲掉(每帧 tick 后紧跟 render,
        kf_clock 不变)—— 零步进重采样一次再建显示列表, 过渡/关键帧的
        中间态才真正落到像素(与 tools/hncore.c render 路径同一修法)。 */
@@ -1069,10 +802,194 @@ static JSValue js_hn_mesh_param(JSContext *ctx, JSValueConst, int argc, JSValueC
     return JS_NewBool(ctx, n != NULL);
 }
 
-/* ---- 媒体桥(hnMedia*, 契约 §6): 宿主未注入/目标不存在 → 静默 no-op 或
-   缺省值, 不抛异常(与 hnSetText 一致) ---- */
+static JSValue js_hn_fetch_response_text(JSContext *ctx, JSValueConst this_obj,
+                                         int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    JSValue body = JS_GetPropertyStr(ctx, this_obj, "__hnBody");
+    if (!JS_IsString(body)) { JS_FreeValue(ctx, body); return JS_NewString(ctx, ""); }
+    return body;
+}
 
-/* 桥内寻址: opaque {doc, ctx} → 媒体会话可用的 context(doc 反查表兜底) */
+static JSValue js_hn_fetch_response_json(JSContext *ctx, JSValueConst this_obj,
+                                         int argc, JSValueConst *argv) {
+    (void)argc; (void)argv;
+    JSValue body = JS_GetPropertyStr(ctx, this_obj, "__hnBody");
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue json = JS_GetPropertyStr(ctx, global, "JSON");
+    JSValue parse = JS_GetPropertyStr(ctx, json, "parse");
+    JSValue result = JS_IsFunction(ctx, parse)
+        ? JS_Call(ctx, parse, json, 1, (JSValueConst *)&body) : JS_EXCEPTION;
+    JS_FreeValue(ctx, parse); JS_FreeValue(ctx, json); JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, body);
+    return result;
+}
+
+static JSValue js_hn_fetch(JSContext *ctx, JSValueConst this_obj,
+                           int argc, JSValueConst *argv) {
+    (void)this_obj;
+    JSValue funcs[2] = { JS_UNDEFINED, JS_UNDEFINED };
+    JSValue promise = JS_NewPromiseCapability(ctx, funcs);
+    if (JS_IsException(promise)) return promise;
+    const char *url = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    if (!url) {
+        JSValue err = JS_NewError(ctx);
+        JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, "fetch URL is required"));
+        JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&err);
+        JS_FreeValue(ctx, err); JS_FreeValue(ctx, funcs[0]); JS_FreeValue(ctx, funcs[1]);
+        return promise;
+    }
+    const char *method = "GET";
+    char *method_owned = NULL;
+    const char *body_s = NULL;
+    hn_http_header headers[32]; size_t header_n = 0;
+    memset(headers, 0, sizeof(headers));
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        JSValue mv = JS_GetPropertyStr(ctx, argv[1], "method");
+        if (JS_IsString(mv)) { const char *m = JS_ToCString(ctx, mv); if (m && *m) { method_owned = strdup(m); method = method_owned; JS_FreeCString(ctx, m); } else if (m) JS_FreeCString(ctx, m); }
+        JSValue bv = JS_GetPropertyStr(ctx, argv[1], "body");
+        if (JS_IsString(bv)) body_s = JS_ToCString(ctx, bv);
+        JSValue hv = JS_GetPropertyStr(ctx, argv[1], "headers");
+        if (JS_IsObject(hv)) {
+            JSPropertyEnum *props = NULL; uint32_t count = 0;
+            if (JS_GetOwnPropertyNames(ctx, &props, &count, hv, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                for (uint32_t i = 0; i < count && header_n < 32; i++) {
+                    const char *name = JS_AtomToCString(ctx, props[i].atom);
+                    JSValue val = JS_GetProperty(ctx, hv, props[i].atom);
+                    const char *value = JS_ToCString(ctx, val);
+                    if (name && value) { headers[header_n].name = name; headers[header_n].value = value; header_n++; }
+                    else { if (name) JS_FreeCString(ctx, name); if (value) JS_FreeCString(ctx, value); }
+                    JS_FreeValue(ctx, val); JS_FreeAtom(ctx, props[i].atom);
+                }
+                js_free(ctx, props);
+            }
+        }
+        JS_FreeValue(ctx, mv); JS_FreeValue(ctx, bv); JS_FreeValue(ctx, hv);
+    }
+
+    /* Get runtime for async scope */
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_rt *rt = b ? b->rt : NULL;
+    if (!rt) {
+        JSValue err = JS_NewError(ctx);
+        JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, "fetch runtime unavailable"));
+        JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&err);
+        JS_FreeValue(ctx, err);
+        goto cleanup;
+    }
+
+    /* Lazy init HTTP scope */
+    if (!rt->http_scope) {
+        rt->http_scope = hn_http_scope_create();
+        if (!rt->http_scope) {
+            JSValue err = JS_NewError(ctx);
+            JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, "HTTP not available"));
+            JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&err);
+            JS_FreeValue(ctx, err);
+            goto cleanup;
+        }
+    }
+
+    /* Check pending capacity */
+    if (rt->pending_fetch_n >= 32) {
+        JSValue err = JS_NewError(ctx);
+        JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, "too many concurrent fetches"));
+        JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&err);
+        JS_FreeValue(ctx, err);
+        goto cleanup;
+    }
+
+    /* Submit async request */
+    hn_http_request_opts opts;
+    memset(&opts, 0, sizeof(opts)); opts.url = url; opts.method = method;
+    opts.headers = headers; opts.header_count = header_n; opts.body = body_s; opts.body_len = body_s ? strlen(body_s) : 0;
+
+    uint64_t req_id = ++rt->fetch_id_seq;
+    if (!hn_http_async_submit((hn_http_scope *)rt->http_scope, req_id, &opts)) {
+        JSValue err = JS_NewError(ctx);
+        JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx, hn_http_last_error()));
+        JS_Call(ctx, funcs[1], JS_UNDEFINED, 1, (JSValueConst *)&err);
+        JS_FreeValue(ctx, err);
+        goto cleanup;
+    }
+
+    /* Save Promise callbacks for completion */
+    rt->pending_fetches[rt->pending_fetch_n].id = req_id;
+    rt->pending_fetches[rt->pending_fetch_n].resolve = JS_DupValue(ctx, funcs[0]);
+    rt->pending_fetches[rt->pending_fetch_n].reject = JS_DupValue(ctx, funcs[1]);
+    rt->pending_fetch_n++;
+
+cleanup:
+    for (size_t i = 0; i < header_n; i++) { JS_FreeCString(ctx, headers[i].name); JS_FreeCString(ctx, headers[i].value); }
+    if (body_s) JS_FreeCString(ctx, body_s);
+    if (method_owned) free(method_owned);
+    JS_FreeCString(ctx, url);
+    JS_FreeValue(ctx, funcs[0]); JS_FreeValue(ctx, funcs[1]);
+    return promise;
+}
+
+/* HTTP async completion callback: called from hn_rt_frame drain loop */
+static JSContext *js_scope_find(const char *key);   /* defined below (scope table) */
+static void http_complete_cb(uint64_t id, int ok, const hn_http_response *response,
+                             const char *error, void *opaque) {
+    hn_rt *rt = (hn_rt *)opaque;
+    if (!rt) return;
+    JSContext *ctx = js_scope_find(rt->id);
+    if (!ctx) return;
+
+    /* Find pending fetch by ID */
+    int idx = -1;
+    for (int i = 0; i < rt->pending_fetch_n; i++) {
+        if (rt->pending_fetches[i].id == id) { idx = i; break; }
+    }
+    if (idx < 0) return; /* already removed or not found */
+
+    JSValue resolve = rt->pending_fetches[idx].resolve;
+    JSValue reject = rt->pending_fetches[idx].reject;
+
+    if (!ok || !response || response->status >= 400) {
+        JSValue err = JS_NewError(ctx);
+        JS_SetPropertyStr(ctx, err, "message", JS_NewString(ctx,
+            !ok ? (error ? error : "fetch failed")
+                : "HTTP request failed"));
+        if (ok && response)
+            JS_SetPropertyStr(ctx, err, "status", JS_NewInt32(ctx, (int)response->status));
+        JS_Call(ctx, reject, JS_UNDEFINED, 1, (JSValueConst *)&err);
+        JS_FreeValue(ctx, err);
+    } else {
+        JSValue result = JS_NewObject(ctx);
+        char *text = response->body_len > 0 ? (char *)malloc(response->body_len + 1) : NULL;
+        if (text) { memcpy(text, response->body, response->body_len); text[response->body_len] = 0; }
+        JS_SetPropertyStr(ctx, result, "ok", JS_NewBool(ctx, response->status >= 200 && response->status < 300));
+        JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, (int)response->status));
+        const char *status_text = response->status == 200 ? "OK" :
+                                  (response->status == 201 ? "Created" : "HTTP response");
+        JS_SetPropertyStr(ctx, result, "statusText", JS_NewString(ctx, status_text));
+        JSValue header_obj = JS_NewObject(ctx);
+        if (response->content_type)
+            JS_SetPropertyStr(ctx, header_obj, "content-type", JS_NewString(ctx, response->content_type));
+        JS_SetPropertyStr(ctx, result, "headers", header_obj);
+        JS_SetPropertyStr(ctx, result, "__hnBody",
+                         JS_NewStringLen(ctx, text ? text : "", response->body_len));
+        JS_SetPropertyStr(ctx, result, "text",
+                         JS_NewCFunction(ctx, js_hn_fetch_response_text, "text", 0));
+        JS_SetPropertyStr(ctx, result, "json",
+                         JS_NewCFunction(ctx, js_hn_fetch_response_json, "json", 0));
+        JS_Call(ctx, resolve, JS_UNDEFINED, 1, (JSValueConst *)&result);
+        JS_FreeValue(ctx, result);
+        free(text);
+    }
+
+    /* Remove from pending list */
+    JS_FreeValue(ctx, resolve);
+    JS_FreeValue(ctx, reject);
+    memmove(&rt->pending_fetches[idx], &rt->pending_fetches[idx + 1],
+            (size_t)(rt->pending_fetch_n - idx - 1) * sizeof(rt->pending_fetches[0]));
+    rt->pending_fetch_n--;
+}
+
+/* Media bridge: missing host or target is a no-op, matching hnSetText. */
+
+/* Resolve the context carried by the QuickJS bridge. */
 static hn_context *js_media_ctx(JSContext *ctx) {
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     if (!b) return NULL;
@@ -2259,9 +2176,20 @@ static void js_invoke(JSContext *ctx, JSValue func, JSValue args,
 /* hn_rt_frame 的回调驱动: RAF 队头 → 到期定时器, 合计 ≤8 个。只跑回调
    不渲染 —— 返回"是否跑过回调", 渲染由 hn_rt_frame 合并进帧尾一次。 */
 static int js_timers_drain(hn_rt *rt, int *repaint) {
-    if (rt->timer_n == 0 && rt->raf_n == 0) return 0;
     JSContext *ctx = js_scope_find(rt->id);
     if (!ctx) return 0;
+    JSRuntime *job_rt = NULL;
+    for (int si = 0; si < js_scope_n; si++)
+        if (js_scopes[si].ctx == ctx) { job_rt = js_scopes[si].rt; break; }
+    if (!job_rt) return 0;
+    int pending_ran = 0;
+    for (int i = 0; i < 8; i++) {
+        JSContext *job_ctx = ctx;
+        int job_rc = JS_ExecutePendingJob(job_rt, &job_ctx);
+        if (job_rc <= 0) break;
+        pending_ran = 1;
+    }
+    if (rt->timer_n == 0 && rt->raf_n == 0) return pending_ran;
     /* 桥环境对准当前文档(hot reload 换 doc 后回调不悬空; 与 hn_rt_eval
        每次的刷新同一份语义)。rt 槽不动 —— 归属关系不经帧改写。 */
     hn_doc *doc = hn_context_doc(rt->ctx);
@@ -2322,7 +2250,7 @@ static int js_timers_drain(hn_rt *rt, int *repaint) {
        整渲染的浪费, 见 hn_rt_frame 帧头说明)。repaint 形参保留签名
        兼容(现由帧尾统一置位)。 */
     (void)repaint;
-    return ran;
+    return ran || pending_ran;
 }
 
 /* 定时器/RAF 标准签名 glue: __hn* 内部桥 → 浏览器同款全局函数。
@@ -2428,6 +2356,10 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     }
 
     JSValue global = JS_GetGlobalObject(ctx);
+    JSValue hn_api = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, hn_api, "fetch",
+        JS_NewCFunction(ctx, js_hn_fetch, "fetch", 2));
+    JS_SetPropertyStr(ctx, global, "hn", hn_api);
     JS_SetPropertyStr(ctx, global, "hnSetText",
         JS_NewCFunction(ctx, js_hn_set_text, "hnSetText", 2));
     JS_SetPropertyStr(ctx, global, "hnSetValue",
@@ -2620,6 +2552,24 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
 void hn_rt_close(hn_rt *rt) {
     if (!rt) return;
     js_rt_release_timers(rt);   /* 定时器/RAF 持有的 JSValue 先还(上下文仍活着) */
+#ifdef HN_HAVE_QUICKJS
+    /* Release pending fetch Promise functions before destroying scope */
+    {
+        JSContext *ctx = js_scope_find(rt->id);
+        if (ctx) {
+            for (int i = 0; i < rt->pending_fetch_n; i++) {
+                JS_FreeValue(ctx, rt->pending_fetches[i].resolve);
+                JS_FreeValue(ctx, rt->pending_fetches[i].reject);
+            }
+        }
+    }
+    rt->pending_fetch_n = 0;
+    /* Destroy HTTP scope: cancels in-flight requests, waits for threads */
+    if (rt->http_scope) {
+        hn_http_scope_destroy((hn_http_scope *)rt->http_scope);
+        rt->http_scope = NULL;
+    }
+#endif
     js_scope_unbind_rt(rt);     /* 桥反查表里不悬空 —— 宿主没了定时器即失效 */
     js_rt_free(rt);
     if (rt->ctx) {
@@ -2718,6 +2668,15 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     int pend = 0;   /* 0 无 / 1 ambient 轻路径 / 2 全路径 */
     if (js_timers_drain(rt, NULL))
         pend = 2;
+
+    /* Drain HTTP async completions: resolve/reject pending fetch Promises */
+#ifdef HN_HAVE_QUICKJS
+    if (rt->http_scope && rt->pending_fetch_n > 0) {
+        size_t drained = hn_http_async_drain((hn_http_scope *)rt->http_scope,
+                                             http_complete_cb, rt);
+        (void)drained; /* consumed count not used; callback handles state */
+    }
+#endif
 
     /* 动画推进 + 活跃类别分级(性能治理): interactive(过渡/关键帧/媒体/
        平滑滚动)→ 全路径渲染 + 16ms 节拍; 仅 ambient(ext_clock 类)→
@@ -2883,7 +2842,11 @@ int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {
 }
 
 int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
-    if (!rt || !down || button != 0) return 0;
+    if (!rt) return 0;
+    /* 按下态先于早退喂入: up 事件也要清 pointer_down(轨道相机松手进惯性),
+       但 click 管线仍只在 down 跑(原语义, 不双发)。 */
+    hn_context_set_pointer_button(rt->ctx, down && button == 0);
+    if (!down || button != 0) return 0;
     const char *id = hn_context_hit_test(rt->ctx, x, y);
     hn_node *n = hn_context_hit_node(rt->ctx, x, y);
     printf("[click] (%.0f,%.0f) -> <%s id=%s>\n", x, y,
@@ -2911,7 +2874,7 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
     if (lk == HN_LINK_EXTERNAL) {
         char url[2048] = { 0 };
         hn_doc_take_pending_link(hn_context_doc(rt->ctx), url, sizeof url);
-        if (url[0]) sys_open_url(url);
+        if (url[0]) hn_sys_open_url(url);
         return rt_render(rt);
     }
     return 0;
@@ -3075,12 +3038,12 @@ int hn_rt_edit(hn_rt *rt, int op, const char *text) {
     if (op == HN_EDIT_COPY) {
         int vl = 0;
         const char *v = rt_focus_text(rt, &vl);
-        return (vl > 0 && clip_set(v)) ? 0 : 0;   /* 复制不改文档: 不重渲染 */
+        return (vl > 0 && hn_sys_clip_set(v)) ? 0 : 0;   /* 复制不改文档: 不重渲染 */
     }
     if (op == HN_EDIT_CUT) {
         int vl = 0;
         const char *v = rt_focus_text(rt, &vl);
-        if (vl > 0) clip_set(v);
+        if (vl > 0) hn_sys_clip_set(v);
         hn_node_set_value(rt->focus, "", 0);
         hn_node_set_caret(rt->focus, 0);
         return rt_render(rt);
@@ -3090,7 +3053,7 @@ int hn_rt_edit(hn_rt *rt, int op, const char *text) {
         const char *src = text;
         if (!src) {
             tmp[0] = 0;
-            if (!clip_get(tmp, sizeof(tmp))) return 0;
+            if (!hn_sys_clip_get(tmp, sizeof(tmp))) return 0;
             src = tmp;
         }
         return (src && *src) ? (rt_edit_insert(rt, src, 0) ? rt_render(rt) : 0) : 0;
@@ -3291,7 +3254,12 @@ int hn_rt_synthetic(hn_rt *rt, const char *kind, const char *target) {
    往返无损; 半透明像素有 ±1 舍入(探针容差 ±40 吸收)。 */
 int hn_rt_shot(hn_rt *rt, const char *path) {
     if (!rt || !path) return 0;
+    /* 截图需要像素: 直呈模式下 present 帧不产生 CPU 位图 —— 本帧临时
+       摘掉 present 层, rt_render 走 readback/CPU 出像素(下一帧恢复)。 */
+    void *pl = rt->gpu_present_layer;
+    rt->gpu_present_layer = NULL;
     rt_render(rt);
+    rt->gpu_present_layer = pl;
     const hn_display_list *dl = hn_context_display_list(rt->ctx);
     if (!dl) return 0;
     int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="560x520@140,120">
+<meta name="hn-title" content="Lottie Player · 原生标签">
+<meta name="hn-theme" content="dark">
+<style>
+html, body { margin: 0; height: 100%; background: #0b0e13;
+             display: flex; flex-direction: column; align-items: center; }
+.cap { color: #8b93a8; font-size: 12; padding: 12 0 4; }
+lottie-player { width: 476px; height: 392px; display: block; background: #fff;
+                border-radius: 12; }
+.hint { color: #566078; font-size: 11; padding: 10 20; text-align: center; }
+code { color: #7ab7ff; }
+</style>
+</head>
+<body>
+  <div class="cap">Live chatbot — 86 帧 · 30fps · 循环</div>
+  <lottie-player src="assets/robot-chatbot.json" speed="1" background="#ffffff"></lottie-player>
+  <div class="hint">
+    原生 <code>&lt;lottie-player&gt;</code> 标签 — 同名 JS 库的 C99 子集:
+    零脚本 · autoplay · 循环 · <code>speed</code>/<code>background</code> 属性 ·
+    支持 bodymovin JSON 与 .lottie ZIP
+  </div>
+</body>
+</html>

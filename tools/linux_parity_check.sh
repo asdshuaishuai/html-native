@@ -38,7 +38,7 @@ vendor/wasm3/m3_core.c vendor/wasm3/m3_env.c vendor/wasm3/m3_exec.c
 vendor/wasm3/m3_function.c vendor/wasm3/m3_info.c vendor/wasm3/m3_module.c
 vendor/wasm3/m3_parse.c vendor/wasm3/m3_validate.c
 Sources/CHtmlNative/hn_wasm.c"
-ENGINE_SRC="app/hn_app.c rt/hn_rt.c platform/hnp_linux.c
+ENGINE_SRC="app/hn_app.c rt/hn_rt.c rt/hn_sys.c rt/hn_http.c platform/hnp_linux.c
 Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c Sources/CHtmlNative/hn_md.c
 Sources/CHtmlNative/hn_fmt.c Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
 Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c Sources/CHtmlNative/hn_media.c

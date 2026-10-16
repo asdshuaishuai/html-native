@@ -43,6 +43,7 @@
 #include "hn_rt.h"
 #include "hn_platform.h"
 #include "hn_media_platform.h"
+#include "hn_internal.h"   /* GPU 出帧统计(hn_gpu_present/readback_count) */
 
 static char *read_all(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -500,7 +501,26 @@ int main(int argc, char **argv) {
         g_render_scale = rs;                     /* 热重载带进新 rt */
         hn_rt_set_scale(rt, rs);
     }
-    blit_now(rt, w);
+    /* ---- GPU 窗口直呈(v2): HN_GPU=metal 且 HN_GPU_PRESENT=1 且不透明窗 ----
+       CAMetalLayer 挂内容层 → rt 直出 drawable(成功帧 0 readback/0 CPU
+       位图); attach 失败/环境未开 → 既有 blit 路径逐位不变。 */
+    void *present_layer = NULL;
+    {
+        const char *gp = getenv("HN_GPU_PRESENT");
+        if (gp && !strcmp(gp, "1") && getenv("HN_GPU") &&
+            !strcmp(getenv("HN_GPU"), "metal") && !wd.transparent) {
+            present_layer = hnp_window_attach_metal_layer(
+                w, hn_rt_bitmap_width(rt), hn_rt_bitmap_height(rt));
+            if (getenv("HN_GPU_TRACE"))
+                fprintf(stderr, "[gpu-present] attach=%s (%p)\n",
+                        present_layer ? "ok" : "FAIL", present_layer);
+            if (present_layer) {
+                hn_rt_set_gpu_present_layer(rt, present_layer);
+                hn_rt_reflow(rt);   /* 首帧直呈: attach 前的最后一张是 CPU 帧 */
+            }
+        }
+    }
+    if (!hn_rt_presented(rt)) blit_now(rt, w);
     /* 真实键盘焦点在窗口上: 插入符可见(闪烁时机由引擎动画时钟推进;
        失焦由 HNP_EV_FOCUS_OUT 熄灭 —— 桌宠常驻窗口不闪无谓的 caret)。 */
     hn_context_set_caret_visible(hn_rt_context(rt), 1);
@@ -590,6 +610,10 @@ int main(int argc, char **argv) {
                     geo_dirty_at = hnp_now_ms();
                 }
                 hn_rt_reflow(rt);
+                /* 直呈层 drawableSize 跟动物理尺寸(逻辑 × 渲染缩放) */
+                if (present_layer)
+                    hnp_window_metal_layer_resize(
+                        w, hn_rt_bitmap_width(rt), hn_rt_bitmap_height(rt));
                 need_blit = 1;
                 sync_ime_focus(rt, w);   /* 重排后焦点盒可能变 */
                 break;
@@ -661,6 +685,10 @@ int main(int argc, char **argv) {
                 if (!(e2 && *e2)) {
                     g_render_scale = rs;
                     hn_rt_set_scale(rt, rs);
+                    /* 直呈层 drawableSize 跟动物理尺寸 */
+                    if (present_layer)
+                        hnp_window_metal_layer_resize(
+                            w, hn_rt_bitmap_width(rt), hn_rt_bitmap_height(rt));
                     need_blit = 1;
                     printf("[scale] 事件驱动重设: scale=%.0f bmp=%dx%d\n",
                            (double)rs, hn_rt_bitmap_width(rt), hn_rt_bitmap_height(rt));
@@ -741,8 +769,9 @@ int main(int argc, char **argv) {
         int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
         /* 唯一 blit 出口: 本拍排干的事件(need_blit)与帧 tick(repaint)
-           合并成一次平台拷贝。 */
-        if (need_blit || repaint) { blit_now(rt, w); need_blit = 0; }
+           合并成一次平台拷贝。直呈帧(presented)已由 drawable 出屏,
+           跳过 CPU blit。 */
+        if ((need_blit || repaint) && !hn_rt_presented(rt)) { blit_now(rt, w); need_blit = 0; }
         /* ---- 视频图层同步(真窗 GPU 合成): <video> 盒跟随布局/滚动/resize,
            首拍 attach(此后该会话 pf_frame 早退, CPU 拉帧归零), 元素消失/
            热重载换文档时 detach。离屏路径(--shot/--advance)不到这里。 ---- */
@@ -785,6 +814,10 @@ int main(int argc, char **argv) {
         if (hnp_window_origin(w, &gx, &gy)) { geo.x = gx; geo.y = gy; }
         geo_store(gpath, &geo);
     }
+    /* GPU 出帧统计(直呈验收口径: present>0 且运行期 readback 停增; HN_GPU 在场才打) */
+    if (getenv("HN_GPU"))
+        printf("[gpu] 退出统计: presented=%lu readback=%lu\n",
+               hn_gpu_present_count(), hn_gpu_readback_count());
 
     hnp_window_close(w);
     hnp_shutdown();

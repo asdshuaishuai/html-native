@@ -151,7 +151,7 @@ static struct {
                                           void (*)(void *, const void *,
                                                    unsigned long)); // CGDataProviderCreateWithData
     void (*prov_release)(CGDataProviderRef);                    // CGDataProviderRelease
-    void (*draw_image)(CGContextRef, CGImageRef, CGRect);       // CGContextDrawImage
+    void (*draw_image)(CGContextRef, CGRect, CGImageRef);       // CGContextDrawImage
     bool ready;
 } ci;
 
@@ -287,6 +287,8 @@ struct cg_backend : hn_canvas_backend {
                                   op 经 hn_context_assets 加载源图; 可 NULL) */
     cg_img_ent imgs[CG_IMG_CACHE];
     unsigned imgs_gen;         /* 覆盖槽游标(循环替换, 非严格 LRU) */
+    int clip_depth;            /* 本帧账本已入栈的 clip/save 层数(clear
+                                  复位时要回退的量; 构造期基底 save 不计) */
 };
 
 enum {  /* warned 槽位 */
@@ -310,7 +312,7 @@ static void warn_once(cg_backend *b, int slot, const char *msg) {
 
 /* hn_color 字节序 = 引擎统一约定(高→低 r,g,b,a; 见 hnsoft unpack 与
    rt glue rgba() 的 (r<<24)|(g<<16)|(b<<8)|a)—— 2026-10-15 修复: 此前
-   按 0xRRGGBBAA 读, 红蓝互换且 alpha 取错字节。 */
+   错误地按 0xRRGGBBAA 读取，红蓝互换且 alpha 取错字节。 */
 static void rgba_set(CGContextRef ctx, unsigned c, bool stroke) {
     double r = (double)((c >> 24) & 255) / 255.0;
     double g = (double)((c >> 16) & 255) / 255.0;
@@ -467,7 +469,8 @@ static void op_text(cg_backend *b, const hn_canvas_op *o) {
 
 // ---- 图片通道(IMAGE/PDATA/PATTERN 共用) ----
 /* 非预乘 RGBA → 预乘拷贝(canvas 契约值 → CG 位图唯一可行形态, 见文件头
-   实测结论); s' = round(s*a/255), 不变式 s<=a 使结果天然 <=255。 */
+   实测结论); s' = round(s*a/255)，其中 s 与 a 均为 0..255，结果始终有界于
+   0..255。输入为预乘语义时还满足 s<=a，但 canvas 的非预乘输入不要求该条件。 */
 static void premult_copy(const unsigned char *src, unsigned char *dst,
                          size_t npx) {
     for (size_t i = 0; i < npx; i++) {
@@ -580,7 +583,9 @@ static void draw_image_upright(CGContextRef c, CGImageRef img, CGRect r) {
     cg.save(c);
     cg.translate(c, r.x, r.y + r.height);
     cg.scale(c, 1.0, -1.0);
-    ci.draw_image(c, img, CGRect{r.x, 0.0, r.width, r.height});
+    /* CGContextDrawImage(ctx, rect, image) —— SDK 签名就是 ctx/rect/image
+       顺序(此前写反成 ctx/image/rect, 非 (0,0) 目标整块画错)。 */
+    ci.draw_image(c, CGRect{0.0, 0.0, r.width, r.height}, img);
     cg.restore(c);
 }
 
@@ -707,12 +712,16 @@ static int cg_backend_init(cg_backend *b, int w, int h);
 
 static void cg_clear(hn_canvas_backend *self) {
     auto *b = (cg_backend *)self;
-    /* 新帧清面(2026-10-15 复审修复): 直接 memset 预乘底缓冲 —— 透明黑
-       与 cg_backend_init 的初始态逐位一致, 且不受上一帧残留 clip/save
-       栈与 CTM 影响(CGContextClearRect 会吃当前裁剪, 需先复位状态栈,
-       memset 一步到位)。b->out 不必清: frame() 每次整幅覆写。 */
-    if (b->data)
-        memset(b->data, 0, (size_t)b->width * (size_t)b->height * 4);
+    if (!b->ctx) return;
+    /* 新帧清面(2026-10-15 复审修复): 账本欠下的 clip/save 先核销, 再回退
+       构造期基底 save —— CTM 翻转等建上下文状态只存在于那一层之下, 直接
+       memset 缓冲会留下上帧残余 clip/blend 状态, 下一帧重放画错(实测:
+       跨帧遗留裁剪)。回退后再整面清透明黑并重建基底 save, 与首帧状态
+       逐位一致; b->out 不必清: frame() 每次整幅覆写。 */
+    while (b->clip_depth > 0) { cg.restore(b->ctx); b->clip_depth--; }
+    cg.restore(b->ctx);        /* 弹出构造期基底 save */
+    memset(b->data, 0, (size_t)b->width * (size_t)b->height * 4);
+    cg.save(b->ctx);           /* 重建基底, 下帧重放起点与首帧一致 */
 }
 
 static int cg_resize(hn_canvas_backend *self, int w, int h) {
@@ -773,14 +782,19 @@ static void cg_op(hn_canvas_backend *self, const hn_canvas_op *o) {
         break;
     case HN_CV_CLIP_PUSH:
         cg.save(ctx);
+        b->clip_depth++;
         cg.clip_rect(ctx, CGRect{(double)o->x, (double)o->y,
                                  (double)o->w, (double)o->h});
         break;
     case HN_CV_CLIP_POP:
-        cg.restore(ctx);
+        if (b->clip_depth > 0) {
+            b->clip_depth--;
+            cg.restore(ctx);
+        }
         break;
     case HN_CV_CLIP_PATH:
         cg.save(ctx);
+        b->clip_depth++;
         build_ctx_path(ctx, o->pts, o->n_pts, true, o->segs, o->n_segs);
         cg.clip(ctx);
         break;
@@ -815,8 +829,8 @@ static int cg_frame(hn_canvas_backend *self, const unsigned char **rgba,
     auto *b = (cg_backend *)self;
     if (!b->ctx || !b->data || !b->out) return 0;
     /* 预乘 → 非预乘(文件头"关键实测结论"): a=255 直通, a=0 清零,
-       其余 s' = round(s*255/a); 预乘不变式 s<=a 使结果天然 <=255,
-       钳制只为脏数据兜底。out 生命周期到下次 frame/resize/dispose。 */
+       其余 s' = round(s*255/a); 对有效预乘值，round(s*255/a) 仍有界于 0..255，
+       转换后的 dst_rgb<=dst_alpha；钳制只为脏数据兜底。out 生命周期到下次 frame/resize/dispose。 */
     size_t npx = (size_t)b->width * (size_t)b->height;
     const unsigned char *src = b->data;
     unsigned char *dst = b->out;
@@ -886,6 +900,7 @@ static int cg_backend_init(cg_backend *b, int w, int h) {
     /* y 翻转: CG 原点左下 → 引擎左上, 之后全部 op 坐标免换算直填。 */
     cg.translate(b->ctx, 0.0, (double)h);
     cg.scale(b->ctx, 1.0, -1.0);
+    cg.save(b->ctx);           /* 构造期基底 save(clear 复位用) */
     return 1;
 }
 
@@ -930,7 +945,7 @@ static int cg_enabled(void) {
 }
 
 #define CG_IDS 8
-struct cg_slot { char id[128]; hn_canvas_backend *b; int w, h; };
+struct cg_slot { char id[128]; hn_canvas_backend *b; int w, h; hn_context *owner; };
 static cg_slot g_cg_paint_slots[CG_IDS];
 
 int hn_canvas_paint_cg(hn_context *c, const char *id, const hn_canvas_ledger *l,
@@ -945,9 +960,22 @@ int hn_canvas_paint_cg(hn_context *c, const char *id, const hn_canvas_ledger *l,
 
     cg_slot *slot = NULL;
     for (int i = 0; i < CG_IDS; i++)
-        if (g_cg_paint_slots[i].id[0] && !strcmp(g_cg_paint_slots[i].id, id)) {
+        if (g_cg_paint_slots[i].id[0] && g_cg_paint_slots[i].owner == c &&
+            !strcmp(g_cg_paint_slots[i].id, id)) {
             slot = &g_cg_paint_slots[i]; break;
         }
+    /* 旧 owner 的同 id 槽位: 销毁重建 —— cg_backend 持有 hn_context*
+       (hc, 图像类 op 的资产通道), 跨 context 复用 = 悬垂解引用(复审修复)。 */
+    for (int i = 0; i < CG_IDS && !slot; i++) {
+        if (!g_cg_paint_slots[i].id[0] || strcmp(g_cg_paint_slots[i].id, id)) continue;
+        if (g_cg_paint_slots[i].owner != c) {
+            if (g_cg_paint_slots[i].b)
+                g_cg_paint_slots[i].b->vt->dispose(g_cg_paint_slots[i].b);
+            g_cg_paint_slots[i].b = NULL;
+            g_cg_paint_slots[i].id[0] = 0;
+            g_cg_paint_slots[i].owner = NULL;
+        }
+    }
     if (slot && (slot->w != W || slot->h != H)) {
         slot->b->vt->dispose(slot->b);
         slot->b = NULL;
@@ -961,7 +989,7 @@ int hn_canvas_paint_cg(hn_context *c, const char *id, const hn_canvas_ledger *l,
             slot->b->vt->dispose(slot->b); slot->id[0] = 0; }
         hn_canvas_backend *b = hn_canvas_backend_cg_create_ctx(W, H, c);
         if (!b) return 0;
-        slot->b = b; slot->w = W; slot->h = H;
+        slot->b = b; slot->w = W; slot->h = H; slot->owner = c;
         snprintf(slot->id, sizeof(slot->id), "%s", id);
     }
 

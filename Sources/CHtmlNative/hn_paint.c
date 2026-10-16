@@ -417,6 +417,54 @@ static const char *hn_attr_lottie_src(hn_node *n) {
     return v;
 }
 
+/* Web Component 风格播放器标签(同名 JS 库的**原生子集**, 零脚本):
+     <lottie-player src="a.json" speed="2" background="#0b0e13">
+     <dotlottie-wc src="a.lottie" ...>   (src 支持 bodymovin JSON 与
+     <dotlottie-player src="...">        dotLottie .lottie ZIP 两种格式)
+   语义对齐: autoplay 恒开、循环播放(hn-lottie 声明同一纪律);
+   speed 属性映射 hn-lottie-speed; background 属性映射元素底色。
+   元素无固有尺寸 —— 必须用 CSS width/height 定盒(与 <canvas> 同一约定)。 */
+static int hn_tag_is_lottie_player(const hn_node *n) {
+    if (!n || !n->tag) return 0;
+    static const char *const tags[] = {
+        "lottie-player", "dotlottie-wc", "dotlottie-player", "dotlottie-player-lite",
+    };
+    for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++)
+        if (!strcmp(n->tag, tags[i])) return 1;
+    return 0;
+}
+
+/* 播放器标签的源属性: src 为主(dotlottie-wc 亦认 animation 别名) */
+static const char *hn_lottie_player_src(hn_node *n) {
+    const char *v = hn_node_attr(n, "src");
+    if (!v || !*v) v = hn_node_attr(n, "animation");
+    return (v && *v) ? v : NULL;
+}
+
+/* 播放器标签 background="#hex" → 引擎色(与 CSS 十六进制同义; 解析失败
+   返回 0 = 无底色)。只认 #rgb/#rrggbb —— 库的常用面就这么大。 */
+static hn_color lottie_player_bg(hn_node *n) {
+    const char *v = hn_node_attr(n, "background");
+    hn_color c = 0;
+    if (!v || v[0] != '#') return 0;
+    size_t n_dig = strlen(v + 1);
+    if (n_dig != 3 && n_dig != 6) return 0;
+    unsigned rgb = 0;
+    for (const char *p = v + 1; *p; p++) {
+        int d;
+        if (*p >= '0' && *p <= '9') d = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
+        else return 0;
+        rgb = (rgb << 4) | (unsigned)d;
+    }
+    if (n_dig == 3)   /* #abc → #aabbcc */
+        rgb = (((rgb & 0xF00) >> 8) * 0x11 << 16)
+            | (((rgb & 0x0F0) >> 4) * 0x11 << 8)
+            | ((rgb & 0x00F) * 0x11);
+    return ((rgb & 0xFFFFFF) << 8) | 0xFFu;   /* 引擎色序 r,g,b,a(高→低) */
+}
+
 /* object-fit 的固有尺寸来源: 图片后端(运行时注入的尺寸查询)优先; 没有它
    时引擎自己从**文件头**嗅探 —— 资产后端已是现成的字节通道, PNG 的 IHDR、
    GIF 的逻辑屏、BMP 的 biWidth/biHeight 都在头 32 字节里, 无需解码像素。
@@ -1594,23 +1642,36 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     }
 
     /* Lottie 矢量动画: 声明了 hn-lottie 的元素整体由动画接管(覆盖盒背景与子节点)。
-       解析结果按路径缓存, 时钟取自节点的 ext_clock(由动画 tick 推进)。 */
+       解析结果按路径缓存, 时钟取自节点的 ext_clock(由动画 tick 推进)。
+       播放器标签(lottie-player/dotlottie-wc/...)走同一管线, src 属性供源。 */
     if (n->tag) {
         const char *lsrc = hn_attr_lottie_src(n);
-        if (lsrc) {
+        int is_player = 0;
+        if (!lsrc && hn_tag_is_lottie_player(n)) {
+            lsrc = hn_lottie_player_src(n);
+            is_player = 1;
+        }
+        if (lsrc && *lsrc) {
             struct hn_lottie *l = hn_context_lottie(c, lsrc);
             if (l) {
                 float bw = n->bw * g->scale * g->scale_x, bh = n->bh * g->scale * g->scale_y;
                 float bx = tfx(g, sx, n->bx, n->by), by = tfy(g, sy, n->bx, n->by);
                 /* 元素盒背景仍要画(承载底色/圆角), 动画画在其上 */
                 int lf = (st->background & 0xFFu) || st->has_gradient;
+                hn_color attr_bg = 0;
+                if (!lf && is_player) {
+                    attr_bg = lottie_player_bg(n);   /* background="#hex" 兼容面 */
+                    lf = attr_bg != 0;
+                }
                 if (lf) {
                     hn_cmd bg;
                     memset(&bg, 0, sizeof(bg));
                     bg.kind = HN_CMD_RECT;
                     bg.x = bx; bg.y = by; bg.w = bw; bg.h = bh;
                     bg.radius = eff_radius(st, bw, bh);
-                    bg.fill = fill_color(st, st->background, alpha);
+                    bg.fill = lf ? fill_color(st, st->background, alpha) : 0;
+                    if (!st->background && attr_bg)
+                        bg.fill = ((attr_bg & 0xFFFFFF00u) | (unsigned)(alpha * 255.0f));
                     if (st->has_gradient) {
                         bg.gradient = 1;
                         bg.grad_from = fill_color(st, st->grad_from, alpha);
@@ -1621,6 +1682,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 }
                 float speed = 1.0f;
                 const char *sp = hn_node_attr(n, "hn-lottie-speed");
+                if (is_player && (!sp || !*sp)) sp = hn_node_attr(n, "speed");
                 if (sp && *sp) { speed = (float)atof(sp); if (speed <= 0.01f) speed = 1.0f; }
                 const char *fit = hn_node_attr(n, "hn-lottie-fit");
                 hn_lottie_emit(c, l, n->ext_clock * speed, bw, bh, bx, by,

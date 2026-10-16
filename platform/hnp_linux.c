@@ -565,6 +565,14 @@ void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int b
 
 void hnp_window_invalidate(hnp_window *w) { (void)w; }
 
+/* GPU 直呈层: X11 路径暂无 Metal 层宿主, 恒 NULL(壳回落 blit 路径)。 */
+void *hnp_window_attach_metal_layer(hnp_window *w, int phys_w, int phys_h) {
+    (void)w; (void)phys_w; (void)phys_h; return NULL;
+}
+void hnp_window_metal_layer_resize(hnp_window *w, int phys_w, int phys_h) {
+    (void)w; (void)phys_w; (void)phys_h;
+}
+
 void hnp_window_set_title(hnp_window *w, const char *utf8) {
     if (w && utf8) x11.XStoreName(x11.dpy, w->xw, utf8);
 }
@@ -673,14 +681,17 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     if (!ev || !x11.dpy) return 0;
     ev->kind = HNP_EV_NONE;
     ev->utf8 = NULL;
-    /* select 等 X 连接可读(带超时); 或立即返回 */
+    /* select 等 X 连接可读(带超时); 或立即返回。
+       timeout_ms == 0 = 非阻塞排干 —— 传 NULL 超时给 select 是**无限等待**
+       (复审修复: 此前 0 走 NULL 分支, 与"立即返回"语义相反, 队尾零超时
+       轮询会卡死帧循环)。 */
     if (x11.XPending(x11.dpy) == 0 && timeout_ms >= 0 && timeout_ms < 0x7FFFFFFF) {
         int fd = x11.XConnectionNumber(x11.dpy);
         fd_set rf;
         FD_ZERO(&rf);
         FD_SET(fd, &rf);
         struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-        if (select(fd + 1, &rf, NULL, NULL, timeout_ms > 0 ? &tv : NULL) == 0)
+        if (select(fd + 1, &rf, NULL, NULL, &tv) == 0)
             return 0;
     }
     xevent_buf xb;

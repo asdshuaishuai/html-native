@@ -194,6 +194,14 @@ void hn_rt_set_media(const hn_media_host *host);
  * 渲染分支与回退口径见 hn_rt.c 的 rt_raster / hn_rt_shot。 */
 void hn_rt_set_gpu_host(const void *host);
 
+/* GPU 窗口直呈(v2, 壳注入; 不透明指针 = CAMetalLayer*): 非空时 rt_raster
+   优先走 hn_gpu_render_present(成功帧 0 readback/0 CPU 位图, rt->presented
+   置位); 任何失败整帧落回既有 readback/CPU 路径。截图(shot)自动临时摘层
+   走像素路径。透明窗口/无 GPU 时壳不应注入。 */
+void hn_rt_set_gpu_present_layer(hn_rt *rt, void *ca_metal_layer);
+/* 最近一帧是否经 GPU 直呈出帧(壳据此跳过 CPU blit; 层未注入恒 0) */
+int  hn_rt_presented(const hn_rt *rt);
+
 /* ---------------- sys:// 桥(单源) ---------------- */
 
 /* sys:// → HTML 片段(malloc; free)。非 sys:// 或未知路由返回 NULL。

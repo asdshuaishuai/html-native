@@ -157,7 +157,8 @@ const char *hnp_name(void) { return "macos"; }
 struct hnp_window {
     obj_t win, iv, img;
     int w, h, transparent;
-    int layered;   /* contentView 已 setWantsLayer:YES(视频图层挂载时置位) */
+    int layered;   /* contentView 已 setWantsLayer:YES(视频图层/直呈层挂载时置位) */
+    obj_t mlayer;  /* GPU 直呈层(CAMetalLayer; attach_metal_layer 建, close 释放) */
 
     /* ---- 呈现直通(深度 1): 视图自持位图 ---- */
     obj_t cg;              /* 当前内容的 CGImage(blit 建; 视图据此重画) */
@@ -829,6 +830,8 @@ void hnp_window_close(hnp_window *w) {
     /* IME 挂起队列里属于本窗的槽清掉(悬垂指针防线) */
     for (int i = 0; i < HN_IME_Q_CAP; i++)
         if (g_ime_q[i].used && g_ime_q[i].win == w) g_ime_q[i].used = 0;
+    /* GPU 直呈层(挂上去的 CAMetalLayer 归本窗所有, close 时释放) */
+    if (w->mlayer) MSG0(void, w->mlayer, "release");
     /* 呈现直通资源: 先释放 CGImage(数据源指向 frame), 再 free frame */
     if (w->cg) ((void (*)(CGImageRef))dlsym(RTLD_DEFAULT, "CGImageRelease"))(w->cg);
     free(w->frame);
@@ -891,6 +894,35 @@ static int blit_fallback(void) {
         f = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
     }
     return f;
+}
+
+/* ---- GPU 直呈层(v2): CAMetalLayer 挂为内容层, drawable 直出窗口 ---- */
+
+void *hnp_window_attach_metal_layer(hnp_window *w, int phys_w, int phys_h) {
+    if (!w || !w->iv || phys_w <= 0 || phys_h <= 0) return NULL;
+    obj_t pool = pool_push();
+    if (w->mlayer) { pool_pop(pool); return (void *)w->mlayer; }   /* 幂等 */
+    obj_t cls = o_getClass("CAMetalLayer");
+    if (!cls) { pool_pop(pool); return NULL; }   /* 无 Metal.framework */
+    obj_t layer = MSG0(obj_t, cls, "alloc");
+    layer = MSG0(obj_t, layer, "init");
+    if (!layer) { pool_pop(pool); return NULL; }
+    CGSize ds = { (double)phys_w, (double)phys_h };
+    ((void (*)(obj_t, sel_t, CGSize))o_msgSend)(layer, o_sel("setDrawableSize:"), ds);
+    /* 视图换层: wantsLayer + setLayer —— 本模式的呈现由 drawable 直出,
+       contentView.image 兼容面(pet/hidpi 探针)对直呈窗口不适用(契约注)。 */
+    MSGUL(void, w->iv, "setWantsLayer:", 1ul);
+    MSG1(void, w->iv, "setLayer:", layer);
+    w->layered = 1;
+    w->mlayer = layer;
+    pool_pop(pool);
+    return (void *)layer;
+}
+
+void hnp_window_metal_layer_resize(hnp_window *w, int phys_w, int phys_h) {
+    if (!w || !w->mlayer || phys_w <= 0 || phys_h <= 0) return;
+    CGSize ds = { (double)phys_w, (double)phys_h };
+    ((void (*)(obj_t, sel_t, CGSize))o_msgSend)(w->mlayer, o_sel("setDrawableSize:"), ds);
 }
 
 void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int bh, size_t stride) {

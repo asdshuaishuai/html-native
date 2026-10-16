@@ -139,6 +139,11 @@ static obj_t g_rt;            /* 离屏渲染目标纹理 */
 static int g_rtw, g_rth;
 static obj_t g_cmdbuf;        /* id<MTLCommandBuffer>(本帧) */
 static obj_t g_enc;           /* id<MTLRenderCommandEncoder>(本帧) */
+/* 直呈(v2)帧状态: nextDrawable 返回 autorelease 对象 —— 显式 retain,
+   异步 present 完成前不得释放(下帧入口同步点释放); prev_cmdbuf 非持有。 */
+static obj_t g_drawable;      /* 本帧 present 的 drawable(retained) */
+static obj_t g_prev_drawable; /* 上一帧 drawable(retained; 同步完成后释放) */
+static obj_t g_prev_cmdbuf;   /* 上一帧命令缓冲(非持有; 入口同步用) */
 static obj_t g_pool;          /* 有界 autorelease 池(帧窗口; 手法同 hnp_macos.c
                                  pool_push —— commandBuffer/encoder/RPD 按
                                  autorelease 归还, 无池逐帧泄漏) */
@@ -432,7 +437,9 @@ static int mtl_init(void) {
 }
 
 static void mtl_shutdown(void) {
-    if (!g_ready) return;
+    /* 幂等全量回收: 不再以 g_ready 守卫早退 —— mtl_init 的部分失败路径
+       (设备/队列已建、g_ready 未置)经 hnp_gpu_backend 的失败调用回收,
+       不泄漏半初始化对象(所有 release 判空)。 */
     for (int i = 0; i < g_tex_n; i++) tex_release_slot(i);
     g_tex_n = 0;
     if (g_rt) { MSG0(void, g_rt, "release"); g_rt = NULL; }
@@ -448,6 +455,10 @@ static void mtl_shutdown(void) {
     if (g_queue) { MSG0(void, g_queue, "release"); g_queue = NULL; }
     if (g_device) { MSG0(void, g_device, "release"); g_device = NULL; }
     if (g_pool) { MSG0(void, g_pool, "drain"); g_pool = NULL; }
+    /* 直呈遗留对象(retained drawable + retained prev_cmdbuf) */
+    if (g_drawable) { MSG0(void, g_drawable, "release"); g_drawable = NULL; }
+    if (g_prev_drawable) { MSG0(void, g_prev_drawable, "release"); g_prev_drawable = NULL; }
+    if (g_prev_cmdbuf) { MSG0(void, g_prev_cmdbuf, "release"); g_prev_cmdbuf = NULL; }
     g_ready = 0;
 }
 
@@ -504,7 +515,15 @@ static void premul_rgba(unsigned char *px, size_t n) {
 
 static hnp_gpu_tex mtl_tex_create(int w, int h, const unsigned char *rgba) {
     if (!g_ready || w <= 0 || h <= 0 || w > 16384 || h > 16384) return 0;
-    if (g_tex_n >= TEX_CAP) return 0;
+    /* 墓碑槽位: 句柄=下标+1, 释放只置空不搬移 —— 交换删除会让其他存活
+       纹理的外部句柄指向错误槽位(句柄失效不可由调用方自愈)。 */
+    int slot = -1;
+    for (int i = 0; i < g_tex_n; i++)
+        if (!g_tex[i].tex) { slot = i; break; }
+    if (slot < 0) {
+        if (g_tex_n >= TEX_CAP) return 0;
+        slot = g_tex_n++;
+    }
     obj_t t = make_tex(w, h, MTL_TU_SHREAD);
     if (!t) return 0;
     /* replaceRegion: 上传整幅(预乘后)。Shared 纹理 CPU 写即生效。 */
@@ -519,10 +538,10 @@ static hnp_gpu_tex mtl_tex_create(int w, int h, const unsigned char *rgba) {
         t, o_sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:"),
         r, 0ul, buf, (unsigned long)w * 4);
     free(buf);
-    g_tex[g_tex_n].tex = t;
-    g_tex[g_tex_n].w = w;
-    g_tex[g_tex_n].h = h;
-    return (hnp_gpu_tex)(++g_tex_n);   /* 句柄 = 下标+1(0 保留为无效) */
+    g_tex[slot].tex = t;
+    g_tex[slot].w = w;
+    g_tex[slot].h = h;
+    return (hnp_gpu_tex)(slot + 1);   /* 句柄 = 下标+1(0 保留为无效) */
 }
 
 static void mtl_tex_update(hnp_gpu_tex t, const unsigned char *rgba) {
@@ -544,45 +563,16 @@ static void mtl_tex_update(hnp_gpu_tex t, const unsigned char *rgba) {
 static void mtl_tex_free(hnp_gpu_tex t) {
     int i = (int)t - 1;
     if (t == 0 || i < 0 || i >= g_tex_n) return;
-    tex_release_slot(i);
-    g_tex[i] = g_tex[g_tex_n - 1];   /* 交换删除; 已发出去的句柄失效由引擎侧
-                                        缓存管理保证(逐出时先摘缓存再 free) */
-    g_tex_n--;
+    tex_release_slot(i);   /* 墓碑: 槽位置空, 下标稳定 —— 其他句柄不受影响 */
 }
 
 /* ---------------- 渲染目标 / 帧窗口 ---------------- */
 
-static int mtl_begin(int w, int h, unsigned bg) {
-    if (!g_ready || w <= 0 || h <= 0 || w > 16384 || h > 16384) return 0;
-    /* 上一帧若异常中止(begin 后没走到 end_readback), 先把挂着帧收干净
-       (encoder 不 endEncoding 就 release 会触发 Metal 校验断言, 实测
-       abort), 再回收池 —— 引擎侧"逐帧静默回退"允许任何一帧被放弃。 */
-    if (g_enc) {
-        MSG0(void, g_enc, "endEncoding");
-        g_enc = NULL;
-        MSG0(void, g_cmdbuf, "commit");
-        MSG0(void, g_cmdbuf, "waitUntilCompleted");
-        g_cmdbuf = NULL;
-    }
-    if (g_pool) pool_pop();
-    g_enc = NULL; g_cmdbuf = NULL;
-
+/* 帧装配公共尾(readback/present 共用): 池 + 清屏色 + cmdbuf/rpd/encoder
+   + viewport/cull + 栈复位。target = 本帧渲染目标(离屏 g_rt 或 drawable
+   纹理)。失败路径各自 pool_pop 保平。 */
+static int mtl_begin_pass(obj_t target, int w, int h, unsigned bg) {
     pool_push();
-
-    if (g_rt && (g_rtw != w || g_rth != h)) {
-        MSG0(void, g_rt, "release");
-        g_rt = NULL;
-    }
-    if (!g_rt) {
-        /* 渲染目标 = BGRA8Unorm(字节序 = readback 契约) + RenderTarget|ShaderRead */
-        obj_t td = make_tex_desc(MTL_PF_BGRA8, (unsigned long)w, (unsigned long)h,
-                                 MTL_TU_SHREAD | MTL_TU_RENDERT);
-        if (!td) { pool_pop(); return 0; }
-        g_rt = MSG1(obj_t, g_device, "newTextureWithDescriptor:", td);
-        MSG0(void, td, "release");
-        if (!g_rt) { pool_pop(); return 0; }
-        g_rtw = w; g_rth = h;
-    }
 
     /* 清屏色 = 引擎底色(RGBA8 非预乘) → **预乘**(帧缓冲是预乘域;
        半透明底色(透明窗口 bg alpha=0)换算后为全零 = 透明黑, 与 hnsoft
@@ -599,7 +589,7 @@ static int mtl_begin(int w, int h, unsigned bg) {
     if (!rpd) { pool_pop(); return 0; }
     obj_t ca = color_attachment(rpd, 0);
     if (!ca) { pool_pop(); return 0; }
-    MSG1(void, ca, "setTexture:", g_rt);
+    MSG1(void, ca, "setTexture:", target);
     MSGUL(void, ca, "setLoadAction:", MTL_LA_CLEAR);
     MSGUL(void, ca, "setStoreAction:", MTL_SA_STORE);
     ((void (*)(obj_t, sel_t, MTLClearColor_))o_msgSend)(ca, o_sel("setClearColor:"), cc);
@@ -615,6 +605,109 @@ static int mtl_begin(int w, int h, unsigned bg) {
 
     g_clip_n = 0;   /* 帧内裁剪栈归零(clip_push/pop 由引擎保证配平) */
     g_voff = 0;     /* 顶点 arena 写头归零(帧内追加制, 见 draw_quads 注释) */
+    return 1;
+}
+
+static int mtl_begin(int w, int h, unsigned bg) {
+    if (!g_ready || w <= 0 || h <= 0 || w > 16384 || h > 16384) return 0;
+    /* 上一帧若异常中止(begin 后没走到 end_readback), 先把挂着帧收干净
+       (encoder 不 endEncoding 就 release 会触发 Metal 校验断言, 实测
+       abort), 再回收池 —— 引擎侧"逐帧静默回退"允许任何一帧被放弃。 */
+    if (g_enc) {
+        MSG0(void, g_enc, "endEncoding");
+        g_enc = NULL;
+        MSG0(void, g_cmdbuf, "commit");
+        MSG0(void, g_cmdbuf, "waitUntilCompleted");
+        g_cmdbuf = NULL;
+    }
+    if (g_pool) pool_pop();
+    g_enc = NULL; g_cmdbuf = NULL;
+
+    if (g_rt && (g_rtw != w || g_rth != h)) {
+        MSG0(void, g_rt, "release");
+        g_rt = NULL;
+    }
+    if (!g_rt) {
+        /* 渲染目标 = BGRA8Unorm(字节序 = readback 契约) + RenderTarget|ShaderRead */
+        obj_t td = make_tex_desc(MTL_PF_BGRA8, (unsigned long)w, (unsigned long)h,
+                                 MTL_TU_SHREAD | MTL_TU_RENDERT);
+        if (!td) return 0;
+        g_rt = MSG1(obj_t, g_device, "newTextureWithDescriptor:", td);
+        MSG0(void, td, "release");
+        if (!g_rt) return 0;
+        g_rtw = w; g_rth = h;
+    }
+    return mtl_begin_pass(g_rt, w, h, bg);
+}
+
+/* ---- v2 直呈: CAMetalLayer.nextDrawable 为渲染目标, presentDrawable 出帧 ----
+   (帧状态 g_drawable/g_prev_drawable/g_prev_cmdbuf 声明在文件头静态区) */
+
+static int mtl_begin_present(void *layer, int w, int h, unsigned bg) {
+    static int tr = -1;
+    if (tr < 0) tr = getenv("HN_GPU_TRACE") ? 1 : 0;
+    if (!g_ready || !layer || w <= 0 || h <= 0 || w > 16384 || h > 16384) return 0;
+    if (tr) fprintf(stderr, "[bp] enter\n");
+    /* 前帧同步: 上一帧 present 后未等待 —— 覆写共享顶点/纹理前等它完成;
+       prev_cmdbuf/prev_drawable 均 retained(autorelease 对象, 命令队列
+       完成后即回收 —— 不 retain 的话这里的 msgSend 就是打在已释放对象上,
+       实测 EXC_BAD_ACCESS), 同步完成后成对释放。 */
+    if (g_prev_cmdbuf) {
+        MSG0(void, g_prev_cmdbuf, "waitUntilCompleted");
+        MSG0(void, g_prev_cmdbuf, "release");
+        g_prev_cmdbuf = NULL;
+    }
+    if (g_prev_drawable) {
+        MSG0(void, g_prev_drawable, "release");
+        g_prev_drawable = NULL;
+    }
+    if (g_enc) {   /* 异常中止帧收干净(与 mtl_begin 同款) */
+        MSG0(void, g_enc, "endEncoding");
+        g_enc = NULL;
+        MSG0(void, g_cmdbuf, "commit");
+        MSG0(void, g_cmdbuf, "waitUntilCompleted");
+        g_cmdbuf = NULL;
+    }
+    if (g_pool) pool_pop();
+    if (g_drawable) { MSG0(void, g_drawable, "release"); }   /* 中止帧(retained);
+                                                               prev_drawable 已在
+                                                               入口同步处释放, 勿重复 */
+    g_enc = NULL; g_cmdbuf = NULL; g_drawable = NULL;
+
+    obj_t dr = MSG0(obj_t, (obj_t)layer, "nextDrawable");
+    if (!dr) {
+        /* CAMetalLayer.device 为 nil 时 nextDrawable 恒 nil(实测 0/0) ——
+           首次绑定本后端的设备(PSO/纹理与之同设备; 已设则不动)。 */
+        obj_t cur_dev = MSG0(obj_t, (obj_t)layer, "device");
+        if (!cur_dev) MSG1(void, (obj_t)layer, "setDevice:", g_device);
+        dr = MSG0(obj_t, (obj_t)layer, "nextDrawable");
+    }
+    if (!dr) return 0;   /* 仍无 drawable(最小化/首帧前): 呼出方整帧回退 readback */
+    MSG0(void, dr, "retain");   /* autorelease 对象: 异步 present 需要它活过本帧 */
+    obj_t tex = MSG0(obj_t, dr, "texture");
+    if (!tex) return 0;
+    g_drawable = dr;
+    g_rtw = w; g_rth = h;   /* 裁剪/视口边界以 drawable 尺寸为准 */
+    return mtl_begin_pass(tex, w, h, bg);
+}
+
+static int mtl_end_present(void) {
+    if (!g_cmdbuf || !g_enc || !g_drawable) {
+        g_enc = NULL; g_cmdbuf = NULL;
+        if (g_drawable) { MSG0(void, g_drawable, "release"); g_drawable = NULL; }
+        if (g_pool) pool_pop();
+        return 0;
+    }
+    MSG0(void, g_enc, "endEncoding");
+    g_enc = NULL;
+    MSG1(void, g_cmdbuf, "presentDrawable:", g_drawable);
+    MSG0(void, g_cmdbuf, "commit");          /* 不等完成 —— 直呈的意义 */
+    MSG0(void, g_cmdbuf, "retain");          /* autorelease; prev 追踪需持有 */
+    g_prev_cmdbuf = g_cmdbuf;
+    g_prev_drawable = g_drawable;            /* retained; 下帧入口同步后释放 */
+    g_cmdbuf = NULL;
+    g_drawable = NULL;
+    pool_pop();
     return 1;
 }
 
@@ -769,9 +862,6 @@ static int mtl_draw_quads(const float *verts, int quad_count,
     int fi = (tex ? 1 : 0) | (mask_tex ? 2 : 0);
 
     MSG1(void, g_enc, "setRenderPipelineState:", g_pso[fi][blend]);
-    ((void (*)(obj_t, sel_t, obj_t, unsigned long, unsigned long))o_msgSend)(
-        g_enc, o_sel("setVertexBuffer:offset:atIndex:"), g_vbuf,
-        (unsigned long)g_voff, 0ul);
     ((void (*)(obj_t, sel_t, const void *, unsigned long, unsigned long))o_msgSend)(
         g_enc, o_sel("setVertexBytes:length:atIndex:"), &u, (unsigned long)sizeof(u), 1ul);
     ((void (*)(obj_t, sel_t, const void *, unsigned long, unsigned long))o_msgSend)(
@@ -793,15 +883,22 @@ static int mtl_draw_quads(const float *verts, int quad_count,
             g_enc, o_sel("setFragmentSamplerState:atIndex:"), g_samp[0], 1ul);
     }
 
+    /* 分块绘制: IBO 索引恒为 [0, chunk*4) 相对本块顶点绑定基址 —— 第 2+
+       块把顶点缓冲偏移推进到 g_voff + done*16*4 并用 IBO 偏移 0。
+       (旧实现用 IBO 偏移 done*6*4: 第 2 块读越过 IBO 尾部且顶点基址
+       不随块推进 —— >16384 quad 的批次越界。) */
     int done = 0;
     while (done < quad_count) {
         int chunk = quad_count - done;
         if (chunk > IBO_CAP_QUADS) chunk = IBO_CAP_QUADS;
+        ((void (*)(obj_t, sel_t, obj_t, unsigned long, unsigned long))o_msgSend)(
+            g_enc, o_sel("setVertexBuffer:offset:atIndex:"), g_vbuf,
+            (unsigned long)(g_voff + (size_t)done * 16 * 4), 0ul);
         ((void (*)(obj_t, sel_t, unsigned long, unsigned long, unsigned long,
                    obj_t, unsigned long))o_msgSend)(
             g_enc, o_sel("drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:"),
             MTL_PT_TRIANGLE, (unsigned long)chunk * 6, MTL_IT_U32,
-            g_ibuf, (unsigned long)done * 6 * sizeof(unsigned int));
+            g_ibuf, 0ul);
         done += chunk;
     }
     g_voff += need;   /* arena 前进(下一调用不覆盖本调用的顶点) */
@@ -821,6 +918,15 @@ static int mtl_end_readback(unsigned char *out_bgra, int w, int h) {
     MSG0(void, g_cmdbuf, "commit");
     MSG0(void, g_cmdbuf, "waitUntilCompleted");   /* v1 同步帧(GPU 离屏 + readback
                                                      本来就要等结果; 直呈模式再异步) */
+    /* 命令缓冲执行状态: 4=completed, 5=error —— 执行失败的帧不得当成功
+       帧回读(否则调用方拿到的是垃圾/未定义像素, 复审修复)。 */
+    unsigned long st = MSG0(unsigned long, g_cmdbuf, "status");
+    if (st == 5ul) {
+        fprintf(stderr, "[gpu-metal] 命令缓冲执行失败(status=%lu), 帧回退\n", st);
+        g_cmdbuf = NULL;
+        pool_pop();
+        return 0;
+    }
     /* Shared 纹理: CPU 直接 getBytes(免 Managed 的 synchronizeResource)。 */
     MTLRegion_ r = { { 0, 0, 0 }, { (unsigned long)w, (unsigned long)h, 1 } };
     ((void (*)(obj_t, sel_t, void *, unsigned long, MTLRegion_, unsigned long))o_msgSend)(
@@ -851,12 +957,14 @@ static const hnp_gpu_host g_metal_host = {
     mtl_clip_push,
     mtl_clip_pop,
     mtl_clip_mask_push,
+    mtl_begin_present,
+    mtl_end_present,
 };
 
 const hnp_gpu_host *hnp_gpu_backend(void) {
     /* 惰性 init(首次询问才装 Metal/编着色器 —— 缺省 HN_GPU 未设时
        hn_app 根本不会调到这里, 零开销)。函数名见 hn_platform.h 尾注
        (typedef hnp_gpu_host 与同名函数在 C 的单一普通标识符命名空间冲突)。 */
-    if (!g_ready && !mtl_init()) return NULL;
+    if (!g_ready && !mtl_init()) { mtl_shutdown(); return NULL; }
     return &g_metal_host;
 }

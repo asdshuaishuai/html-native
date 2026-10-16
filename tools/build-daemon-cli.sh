@@ -13,27 +13,13 @@ OUT="$ROOT/dist"
 cd "$ROOT"
 mkdir -p "$OUT"
 
-ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
-     Sources/CHtmlNative/hn_md.c \
-     Sources/CHtmlNative/hn_fmt.c \
-     Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
-     Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
-     Sources/CHtmlNative/hn_media.c \
-     Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
-     Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
-     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c \
-     Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c Sources/CHtmlNative/neb3_soft.c \
-     Sources/CHtmlNative/hnsoft.c)
-# hn_pe/hn_cubism/hn_three 与 hn_paint.c 同列(paint_walk 硬引用三个 *_paint,
-# 缺任一源即链接失败; 未定义 SDK 宏时前两者降级为空操作, 口径同
-# tools/_engine_sources.sh HN_ENGINE_CORE)。
-# WASM 缝(media-design §7): rt/hn_rt.c 的 hnWasm* 桥引用 hn_wasm_* 符号,
-# 引擎源必须带上 hn_wasm.c + wasm3 最小 11 源 —— 与主脚本 WASM_SRC 同一份。
-WASM3_SRC=(vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c vendor/wasm3/m3_compile.c
-           vendor/wasm3/m3_core.c vendor/wasm3/m3_env.c vendor/wasm3/m3_exec.c
-           vendor/wasm3/m3_function.c vendor/wasm3/m3_info.c vendor/wasm3/m3_module.c
-           vendor/wasm3/m3_parse.c vendor/wasm3/m3_validate.c)
-ENGINE_SRC+=("${WASM3_SRC[@]}" Sources/CHtmlNative/hn_wasm.c)
+. "$ROOT/tools/_engine_sources.sh"
+hn_sources_full
+ENGINE_SRC=("${HN_SOURCES[@]}")
+for f in "${HN_WASM3[@]}"; do ENGINE_SRC+=("$HN_WASM3_DIR/$f"); done
+CANVAS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/hn-daemon-canvas-XXXXXX")"
+trap 'rm -rf "$CANVAS_TMP"' EXIT
+hn_canvas_build native "$CANVAS_TMP" "${CXX:-c++}"
 INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3"
 FT_INC=""
 if [ -d /opt/homebrew/include/freetype2 ]; then FT_INC="-I/opt/homebrew/include/freetype2"; fi
@@ -50,8 +36,8 @@ fi
 CFLAGS=(-std=c99 -O2 -ffp-contract=off $INC $FT_INC $QJ_INC $QJ_DEF -DHN_VERSION='"0.1.0"')
 
 printf '  %-14s ' "hn-daemon"
-cc "${CFLAGS[@]}" tools/hn_daemon.c rt/hn_rt.c "${ENGINE_SRC[@]}" \
-    -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hn-daemon"
+cc "${CFLAGS[@]}" tools/hn_daemon.c rt/hn_rt.c rt/hn_sys.c rt/hn_http.c "${ENGINE_SRC[@]}" ${HN_CANVAS_DEFS[@]+"${HN_CANVAS_DEFS[@]}"} ${HN_CANVAS_OBJECTS[@]+"${HN_CANVAS_OBJECTS[@]}"} \
+    -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -pthread ${HN_CANVAS_LIBS[@]+"${HN_CANVAS_LIBS[@]}"} -o "$OUT/hn-daemon"
 printf '✓ dist/hn-daemon %s\n' "$([ -n "$QJ_LIB" ] && echo '+QuickJS' || echo '无JS')"
 
 printf '  %-14s ' "hn"

@@ -134,6 +134,15 @@ void hnp_window_blit(hnp_window *win, const unsigned char *bgra_pre,
 /* 请求重绘(下一次 pump 时收到 HNP_EV_EXPOSE)。 */
 void hnp_window_invalidate(hnp_window *w);
 
+/* ---------------- GPU 直呈层(v2, 可选; 仅 macOS Metal 实现) ----------------
+   attach: 创建 CAMetalLayer 挂为窗口内容层并设 drawableSize(物理 px)。
+   仅在壳显式开启直呈时调用 —— 替换视图的 CGImage 呈现路径(contentView
+   .image 兼容面对该模式不再适用)。返回 CAMetalLayer* 不透明句柄(转给
+   hn_rt_set_gpu_present_layer); 失败/平台不支持返回 NULL(壳回落 blit)。
+   resize: 内容区/缩放变化后同步 drawableSize。NULL 安全。 */
+void *hnp_window_attach_metal_layer(hnp_window *w, int phys_w, int phys_h);
+void hnp_window_metal_layer_resize(hnp_window *w, int phys_w, int phys_h);
+
 /* 标题(热更新后清单变化同步到窗口) */
 void hnp_window_set_title(hnp_window *w, const char *utf8);
 
@@ -472,6 +481,16 @@ struct hnp_gpu_host {
        槽单个, 呼出方(hn_gpu_available)扫到即整帧回退。 */
     int  (*clip_mask_push)(hnp_gpu_tex mask, float ox, float oy,
                            float w, float h);
+    /* ── v2 契约扩展: 窗口直呈(可选; 非 Metal 后端恒 NULL = 不支持) ──
+       begin_present: 以 CAMetalLayer 的 nextDrawable 纹理替代离屏 g_rt
+       作渲染目标(常规 draw_quads/clip 原语不变); 无 drawable(最小化/
+       drawable 池耗尽前的异常态)返回 0, 呼出方整帧回退 readback 路径。
+       end_present: endEncoding + presentDrawable + commit, **不等 GPU
+       完成** —— 直呈的意义。共享资源(vbuf/tex_update)的覆写时序由后端
+       负责(见 hnp_gpu_metal.c 的 present 注: 前帧 cmdbuf 同步 + 顶点
+       环形缓冲), 呼出方无需额外围栏。 */
+    int  (*begin_present)(void *ca_metal_layer, int w, int h, unsigned bg);
+    int  (*end_present)(void);
 };
 
 /* 平台装配: 返回平台 GPU 原语表; 无 GPU 后端返回 NULL(呼出方回退 hnsoft)。

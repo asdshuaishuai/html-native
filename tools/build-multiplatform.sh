@@ -22,32 +22,22 @@ VERSION="${VERSION:-0.1.0}"
 cd "$ROOT"
 mkdir -p "$OUT"
 
-# WASM 缝(docs/media-design.md §7): wasm3 最小 11 源(vendor 快照, MIT, 只读)
-# + 引擎封装 hn_wasm.c。纯 C99 零外部依赖 → 三平台无条件入列, 无条件编译。
-# 不入列的: m3_api_libc/wasi/uvwasi/meta_wasi/tracer(不做 WASI)、
-# m3_snapshot/m3_deterministic/m3_xxh64(实测可去; m3_info/m3_module 不可去)。
-WASM3_SRC=(vendor/wasm3/m3_bind.c vendor/wasm3/m3_code.c vendor/wasm3/m3_compile.c
-           vendor/wasm3/m3_core.c vendor/wasm3/m3_env.c vendor/wasm3/m3_exec.c
-           vendor/wasm3/m3_function.c vendor/wasm3/m3_info.c vendor/wasm3/m3_module.c
-           vendor/wasm3/m3_parse.c vendor/wasm3/m3_validate.c)
-WASM_SRC=("${WASM3_SRC[@]}" Sources/CHtmlNative/hn_wasm.c)
-
-SRC=(tools/hncore.c app/hn_media_synth.c Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c \
-     Sources/CHtmlNative/hn_md.c \
-     Sources/CHtmlNative/hn_fmt.c \
-     Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c \
-     Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c \
-     Sources/CHtmlNative/hn_media.c \
-     Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c \
-     Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c \
-     Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c \
-     Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c Sources/CHtmlNative/neb3_soft.c \
-     Sources/CHtmlNative/hnsoft.c)
-# hn_pe/hn_cubism/hn_three 必须与 hn_paint.c 同列: paint_walk 直接调用
-# hn_pe_paint/hn_cubism_paint/hn_three_paint, 缺任一源即链接失败
-# (未定义 SDK 宏时 hn_pe/hn_cubism 整模块降级为空操作, 链入安全 ——
-#  口径同 tools/_engine_sources.sh HN_ENGINE_CORE)。
-SRC+=("${WASM_SRC[@]}")
+. "$ROOT/tools/_engine_sources.sh"
+hn_sources_full
+CORE_SRC=("${HN_SOURCES[@]}")
+WASM3_SRC=()
+for f in "${HN_WASM3[@]}"; do WASM3_SRC+=("$HN_WASM3_DIR/$f"); done
+SRC=(tools/hncore.c app/hn_media_synth.c "${CORE_SRC[@]}" "${WASM3_SRC[@]}")
+CANVAS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/hn-build-canvas-XXXXXX")"
+trap 'rm -rf "$CANVAS_TMP"' EXIT
+canvas_for_target() {
+    local target="$1"
+    # CG only exists on macOS; keep cross-platform targets on ledger/ity.
+    case "$target" in
+      *macos*) hn_canvas_build "$target" "$CANVAS_TMP/$target" "$ZIG" c++ ;;
+      *) HN_CANVAS_CG=0 hn_canvas_build "$target" "$CANVAS_TMP/$target" "$ZIG" c++ ;;
+    esac
+}
 
 # cairo 绘制后端的额外源。与 hnsoft **同签名**(hncairo_render vs hnsoft_render),
 # 所以换后端只需换链接目标, 调用方一行不改 —— 这正是"一个绘制框架喂所有平台"
@@ -64,22 +54,6 @@ FT_INC=""
 if [ -d /opt/homebrew/include/freetype2 ]; then FT_INC="-I/opt/homebrew/include/freetype2"; fi
 CFLAGS=(-std=c99 -O2 -Wall -ffp-contract=off -I Sources/CHtmlNative/include
         -I Sources/CHtmlNative -I vendor/wasm3 $FT_INC -DHN_VERSION="\"$VERSION\"")
-
-# tag: <os>-<arch>
-build() {
-    local tag="$1" target="$2" ext="${3:-}"
-    local out="$OUT/hncore-$tag$ext"
-    printf '  %-22s ' "$tag"
-    if "$ZIG" cc -target "$target" "${CFLAGS[@]}" "${SRC[@]}" -o "$out" 2>/tmp/hn_build_err.txt; then
-        local size
-        size=$(wc -c < "$out" | tr -d ' ')
-        printf '✓  %s (%s KB)\n' "$(basename "$out")" "$((size / 1024))"
-    else
-        printf '✘ 失败\n'
-        sed 's/^/      /' /tmp/hn_build_err.txt | head -6
-        return 1
-    fi
-}
 
 echo "构建 hncore $VERSION (三平台)"
 echo
@@ -118,8 +92,9 @@ build() {  # tag target ext with_text [libs] [srcs...]
     # ELF(ENOEXEC), cp 覆盖正被执行的产物则 ETXTBSY —— 实测两个工作流共用
     # 本仓库时, 门禁探针因此空 stdout 崩掉过两轮。先写带 PID 的临时文件,
     # 完成后 mv 原子替换(rename 不受"旧 inode 正被执行"影响)。
+    canvas_for_target "$target"
     local tmp_out="$out.tmp$$"
-    if "$ZIG" cc -target "$target" "${CFLAGS[@]}" $extra $libs "${srcs[@]}" -o "$tmp_out" 2>/tmp/hn_build_err.txt \
+    if "$ZIG" cc -target "$target" "${CFLAGS[@]}" ${HN_CANVAS_DEFS[@]+"${HN_CANVAS_DEFS[@]}"} $extra "${srcs[@]}" ${HN_CANVAS_OBJECTS[@]+"${HN_CANVAS_OBJECTS[@]}"} $libs ${HN_CANVAS_LIBS[@]+"${HN_CANVAS_LIBS[@]}"} -o "$tmp_out" 2>/tmp/hn_build_err.txt \
        && mv -f "$tmp_out" "$out"; then
         local size
         size=$(wc -c < "$out" | tr -d ' ')
@@ -161,19 +136,7 @@ build "hncore-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT"
 # 需要链接 win32 系统库(user32/gdi32/ole32/oleaut32/shell32)。
 # hnwebview.c(WebView2 兜底)与 litehtml/QuickJS 探针已删除 —— 只走 C99 一条路径。
 # 接进来之后交叉编译立刻暴露它们。
-WIN_RT=(tools/hnwin.c tools/sysbridge.c
-        Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
-        Sources/CHtmlNative/hn_md.c
-        Sources/CHtmlNative/hn_fmt.c
-        Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
-        Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
-        Sources/CHtmlNative/hn_media.c
-        Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
-        Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
-        Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c Sources/CHtmlNative/neb3_soft.c
-        Sources/CHtmlNative/hnsoft.c)
-WIN_RT+=("${WASM_SRC[@]}")
+WIN_RT=(tools/hnwin.c tools/sysbridge.c "${CORE_SRC[@]}" "${WASM3_SRC[@]}")
 
 WIN_LIBS="-luser32 -lgdi32 -lole32 -loleaut32 -lshell32"
 build "hnwin-windows-x86_64" "x86_64-windows-gnu" ".exe" "-DHN_NO_TEXT" \
@@ -186,19 +149,7 @@ echo
 # (hncore.c:248), 而壳自带 --probe/--shot 的 main(镜像 hnwin.c:669),
 # 两份 main 链接即重复定义; sysbridge.c 是 Windows 专属(#include <windows.h>)。
 # musl 静态 + 运行期 dlopen: 无 X 环境时壳退化为无头 probe/shot。
-LINUX_RT=(tools/hnweb_linux.c
-          Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
-        Sources/CHtmlNative/hn_md.c
-        Sources/CHtmlNative/hn_fmt.c
-          Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
-          Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
-          Sources/CHtmlNative/hn_media.c
-          Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
-          Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-          Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
-          Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c Sources/CHtmlNative/neb3_soft.c
-          Sources/CHtmlNative/hnsoft.c)
-LINUX_RT+=("${WASM_SRC[@]}")
+LINUX_RT=(tools/hnweb_linux.c "${CORE_SRC[@]}" "${WASM3_SRC[@]}")
 build "hnweb-linux-x86_64"  "x86_64-linux-musl"  "" "-DHN_NO_TEXT" \
       "" "${LINUX_RT[@]}"
 build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
@@ -214,45 +165,21 @@ build "hnweb-linux-aarch64" "aarch64-linux-musl" "" "-DHN_NO_TEXT" \
 # ABI 留位不实现)。
 # 源不含 hncore.c(那是 CLI 的 main; 壳自带 main, 两份即重复定义 ——
 # 与 hnweb-linux 目标同一理由)。
-MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c
-        Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
-        Sources/CHtmlNative/hn_md.c
-        Sources/CHtmlNative/hn_fmt.c
-        Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
-        Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
-        Sources/CHtmlNative/hn_media.c
-        Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
-        Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-        Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
-        Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c Sources/CHtmlNative/neb3_soft.c
-        Sources/CHtmlNative/hnsoft.c)
-MAC_RT+=("${WASM_SRC[@]}")
+MAC_RT=(tools/hnweb_macos.c platform/hnp_media_macos.c "${CORE_SRC[@]}" "${WASM3_SRC[@]}")
 build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 
 
 # ---------------- 新分层架构(引擎 → hn_rt → 平台 API) ----------------
 # app/hn_app.c 是唯一主循环; 链接不同平台实现 = 该平台的应用。
 # headless 在本机可跑(CI/agent 无显示环境), macOS 同样可跑。
-RT_SRC="rt/hn_rt.c"
+RT_SRC="rt/hn_rt.c rt/hn_sys.c rt/hn_http.c"
 # GPU 渲染后端引擎侧翻译器(hn_gpu.c): 只入 hnapp 的引擎数组 —— 它经宿主
 # 槽(const void*)接收平台原语表, 不引用 hnp_gpu_host() 函数本身, 因此
 # hncore(无平台文件)等目标不需要它; hn_rt.c 里是弱桩, 不链本文件的构建
 # (probe 现场编译)自动恒回退 hnsoft。平台实现(hnp_gpu_metal.c)只入列
 # macos 目标(纯 dlopen Metal, 链接期零 framework; headless/linux 的
 # hnp_gpu_host() 返回 NULL —— 与 hnp_media_supported 留位同一口径)。
-ENGINE_SRC=(Sources/CHtmlNative/hn_arena.c Sources/CHtmlNative/hn_html.c
-        Sources/CHtmlNative/hn_md.c
-        Sources/CHtmlNative/hn_fmt.c
-            Sources/CHtmlNative/hn_css.c Sources/CHtmlNative/hn_style.c
-            Sources/CHtmlNative/hn_layout.c Sources/CHtmlNative/hn_paint.c
-            Sources/CHtmlNative/hn_media.c
-            Sources/CHtmlNative/hn_context.c Sources/CHtmlNative/hn_theme.c
-            Sources/CHtmlNative/hn_json.c Sources/CHtmlNative/hn_lottie.c
-            Sources/CHtmlNative/hn_mesh.c Sources/CHtmlNative/hn_png.c Sources/CHtmlNative/hn_gif.c Sources/CHtmlNative/hn_canvas.c
-            Sources/CHtmlNative/hn_pe.c Sources/CHtmlNative/hn_cubism.c Sources/CHtmlNative/hn_three.c Sources/CHtmlNative/neb3_soft.c
-            Sources/CHtmlNative/hn_gpu.c
-            Sources/CHtmlNative/hnsoft.c)
-ENGINE_SRC+=("${WASM_SRC[@]}")
+ENGINE_SRC=("${CORE_SRC[@]}" "$HN_ENG/hn_gpu.c" "${WASM3_SRC[@]}")
 RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3 $FT_INC"
 
 # 媒体宿主装配(app/hn_media_platform.c): 三个 hnapp 目标统一入列 ——
@@ -277,28 +204,30 @@ if [ -f "$QJ_OPT/include/quickjs/quickjs.h" ] && [ -f "$QJ_OPT/lib/quickjs/libqu
     QJ_LIB="$QJ_OPT/lib/quickjs/libquickjs.a"
 fi
 
+canvas_for_target aarch64-macos
 printf '  %-22s ' "hnapp-headless"
-if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF -DHN_VERSION="\"$VERSION\"" \
-        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_headless.c "${ENGINE_SRC[@]}" \
-        -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-headless" 2>/tmp/hn_build_err.txt; then
+if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF ${HN_CANVAS_DEFS[@]+"${HN_CANVAS_DEFS[@]}"} -DHN_VERSION="\"$VERSION\"" \
+        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_headless.c "${ENGINE_SRC[@]}" ${HN_CANVAS_OBJECTS[@]+"${HN_CANVAS_OBJECTS[@]}"} \
+        -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm ${HN_CANVAS_LIBS[@]+"${HN_CANVAS_LIBS[@]}"} -o "$OUT/hnapp-macos-headless" 2>/tmp/hn_build_err.txt; then
     printf '✓  hnapp-macos-headless (%s KB) 无 GUI·合成媒体宿主\n' "$(($(wc -c < "$OUT/hnapp-macos-headless") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
 fi
 printf '  %-22s ' "hnapp-macos-arm64"
 if "$ZIG" cc -target aarch64-macos -std=c99 -O2 -ffp-contract=off $RT_INC $QJ_INC $QJ_DEF \
-        -DHN_MEDIA_PLATFORM_AVFOUNDATION -DHN_VERSION="\"$VERSION\"" \
+        -DHN_MEDIA_PLATFORM_AVFOUNDATION ${HN_CANVAS_DEFS[@]+"${HN_CANVAS_DEFS[@]}"} -DHN_VERSION="\"$VERSION\"" \
         app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_macos.c platform/hnp_media_macos.c \
-        platform/hnp_gpu_metal.c "${ENGINE_SRC[@]}" \
-        -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
+        platform/hnp_gpu_metal.c "${ENGINE_SRC[@]}" ${HN_CANVAS_OBJECTS[@]+"${HN_CANVAS_OBJECTS[@]}"} \
+        -L/opt/homebrew/lib -lfreetype $QJ_LIB -lm ${HN_CANVAS_LIBS[@]+"${HN_CANVAS_LIBS[@]}"} -o "$OUT/hnapp-macos-arm64" 2>/tmp/hn_build_err.txt; then
     printf '✓  hnapp-macos-arm64 (%s KB) 真窗口·AVFoundation 媒体宿主\n' "$(($(wc -c < "$OUT/hnapp-macos-arm64") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
 fi
+canvas_for_target x86_64-linux-musl
 printf '  %-22s ' "hnapp-linux-x86_64"
-if "$ZIG" cc -target x86_64-linux-musl -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_NO_TEXT -DHN_VERSION="\"$VERSION\"" \
-        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_linux.c "${ENGINE_SRC[@]}" \
-        -lm -ldl -o "$OUT/hnapp-linux-x86_64" 2>/tmp/hn_build_err.txt; then
+if "$ZIG" cc -target x86_64-linux-musl -std=c99 -O2 -ffp-contract=off $RT_INC -DHN_NO_TEXT ${HN_CANVAS_DEFS[@]+"${HN_CANVAS_DEFS[@]}"} -DHN_VERSION="\"$VERSION\"" \
+        app/hn_app.c $MEDIA_SRC $RT_SRC platform/hnp_linux.c "${ENGINE_SRC[@]}" ${HN_CANVAS_OBJECTS[@]+"${HN_CANVAS_OBJECTS[@]}"} \
+        -lm -ldl ${HN_CANVAS_LIBS[@]+"${HN_CANVAS_LIBS[@]}"} -o "$OUT/hnapp-linux-x86_64" 2>/tmp/hn_build_err.txt; then
     printf '✓  hnapp-linux-x86_64 (%s KB) dlopen X11·合成媒体宿主\n' "$(($(wc -c < "$OUT/hnapp-linux-x86_64") / 1024))"
 else
     printf '✘ 失败\n'; sed 's/^/      /' /tmp/hn_build_err.txt | head -4
@@ -363,7 +292,7 @@ echo "跨架构确定性(同 HN_NO_TEXT 口径, 布局输出须逐字节一致):
 # 所以这里额外编一个 **HN_NO_TEXT 的本机架构**产物专门用于比对
 # (只进临时目录, 不污染 dist 的发布产物)。
 HOST_NT="$(mktemp -t hncore-notext)"
-trap 'rm -f "$HOST_NT"' EXIT
+trap 'rm -f "$HOST_NT"; rm -rf "$CANVAS_TMP"' EXIT
 # zig cc 产出的文件权限是 0600, 必须 chmod 才能执行(否则后面调用会
 # "permission denied", 且 `set -e` 会让整个脚本以 126 退出)
 if "$ZIG" cc -target aarch64-macos "${CFLAGS[@]}" -DHN_NO_TEXT "${SRC[@]}" \

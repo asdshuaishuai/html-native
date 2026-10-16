@@ -129,6 +129,21 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 | 透明桌宠 | `hn-transparent=1` + `hn-click-through` + `hn-level` |
 | **视频/音频播放** | `<video id="v" src="x.mp4">` 真窗 AVFoundation 解码出声；JS 控制桥见下 |
 
+**Lottie 播放器标签**（同名 JS 库的 C99 原生子集, 零脚本, 2026-10-16 起）：
+
+```html
+<lottie-player src="anim.json" speed="2" background="#0b0e13"
+               style="display:block;width:476px;height:392px"></lottie-player>
+<dotlottie-wc animation="anim.lottie"></dotlottie-wc>
+<dotlottie-player src="anim.lottie"></dotlottie-player>
+```
+
+- `src` 支持 bodymovin JSON 与 dotLottie `.lottie` ZIP 两种格式; `animation` 是 dotlottie-wc 的别名
+- autoplay 恒开 + 循环; `speed` 倍速; `background="#hex"` 底色
+- **必须** `display:block` + CSS `width/height` 定盒（元素无固有尺寸, 与 canvas 同约定）
+- 支持: 形状层/预合成/纯色/图片层、椭圆/矩形/路径(含变形关键帧)、填充/描边/渐变、trim/repeater/mask、**parent 骨架层链**(AE 卡通绑定手法)
+- 已知边界: 表达式/文字层/轨道 matte 不支持; 渐变填充在 hnsoft 下呈色带近似
+
 **视频/音频 JS 控制桥**（自定义播放器 UI 的完整 API, 均按元素 id）：
 
 ```js

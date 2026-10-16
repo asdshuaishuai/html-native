@@ -86,10 +86,12 @@ sample_cpu() {
 run_window() {
     local html="$1" secs="$2"
     local log="$SBX/win-$$.log"
-    (cd "$ROOT/examples" && exec env HN_ANIM_FPS="${HN_ANIM_FPS:-30}" "$HN_APP" "$html" 360 360) >"$log" 2>&1 &
+    # -u HN_GPU: CPU 基线不被外层 HN_GPU=metal 污染(复审修复; 此前继承)
+    (cd "$ROOT/examples" && exec env -u HN_GPU HN_ANIM_FPS="${HN_ANIM_FPS:-30}" "$HN_APP" "$html" 360 360) >"$log" 2>&1 &
     local pid=$!
     PIDS="$PIDS $pid"
     sleep 1
+    local w0=$(date +%s)
     local t0=$(ps -o time= -p "$pid" 2>/dev/null | tr -d ' ')
     local r0=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
     local s1="" s2="" s3=""
@@ -103,17 +105,20 @@ run_window() {
     sleep $((remain - half)); s3=$(sample_cpu "$pid")
     local t1=$(ps -o time= -p "$pid" 2>/dev/null | tr -d ' ')
     local r1=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
+    local w1=$(date +%s)
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     PIDS="${PIDS%% $pid}"   # 已收口, 免 trap 重复 kill
     PIDS="${PIDS# }"
-    # CPU% = CPU 时间差 / 墙钟 ×100(bash 无浮点, 交给 awk); RSS 取三点趋势
-    CPU_OUT=$(awk -v a="$t0" -v b="$t1" -v r0="$r0" -v rm="$rm" -v r1="$r1" -v s1="$s1" -v s2="$s2" -v s3="$s3" -v w="$secs" '
+    # CPU% = CPU 时间差 / **实测墙钟**差 ×100(复审修复: 此前除以名义 secs,
+    # 实际窗口 = secs-1, 均值被低估 ~1/6); RSS 取三点趋势
+    CPU_OUT=$(awk -v a="$t0" -v b="$t1" -v r0="$r0" -v rm="$rm" -v r1="$r1" -v s1="$s1" -v s2="$s2" -v s3="$s3" -v w="$((w1 - w0))" '
       function secs(t) { if (t == "" || index(t, ":") == 0) return -1
         n = split(t, p, ":"); return p[n-1] * 60 + p[n] }
       BEGIN { c0 = secs(a); c1 = secs(b)
         if (c0 < 0 || c1 < 0) printf "avg=-1.0 samples=%s/%s/%s rss=?MB", s1, s2, s3
         else { d = c1 - c0; if (d < 0) d = 0
-          printf "avg=%.1f cpu=%.2fs samples=%s/%s/%s rss=%d->%d->%dMB", d * 100 / w, d, s1, s2, s3, r0 / 1024, rm / 1024, r1 / 1024 } }')
+          if (w < 1) w = 1
+          printf "avg=%.1f cpu=%.2fs wall=%ds samples=%s/%s/%s rss=%d->%d->%dMB", d * 100 / w, d, w, s1, s2, s3, r0 / 1024, rm / 1024, r1 / 1024 } }')
     echo "$CPU_OUT"
 }
 
@@ -208,9 +213,11 @@ CHURN_B=0
 RSS_DIFF="?"
 if [ -n "$RSS1" ] && [ -n "$RSS3" ]; then
     RSS_DIFF=$((RSS3 - RSS1))
-    [ "$RSS_DIFF" -lt 10240 ] && CHURN_B=1
+    # RSS1/RSS3 解析自输出的 MB 段 —— 阈值即 MB(复审修复: 此前 <10240
+    # 当"KB"比, 实际放行 10GiB 增长, 断言无牙)
+    [ "$RSS_DIFF" -lt 10 ] && CHURN_B=1
 fi
-ck "⑥ 12s RSS 无增长趋势(${RSS1:-?}->${RSS3:-?}MB, 差 ${RSS_DIFF}KB < 10MB)" "$CHURN_B"
+ck "⑥ 12s RSS 无增长趋势(${RSS1:-?}->${RSS3:-?}MB, 差 ${RSS_DIFF}MB < 10MB)" "$CHURN_B"
 
 # ---------- ⑦ 对照(信息值; 采样窗口见各行; CPU=进程 rusage 差分) ----------
 echo "  ----------------------------------------"

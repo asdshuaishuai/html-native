@@ -35,12 +35,9 @@ HN_ENG="$HN_REPO_ROOT/Sources/CHtmlNative"
 HN_RT_DIR="$HN_REPO_ROOT/rt"
 HN_WASM3_DIR="$HN_REPO_ROOT/vendor/wasm3"
 
-# 引擎核心 20 源(直染层公共子集; 各 .py 里顺序互有出入, 单条 cc 命令里
-# 顺序不影响语义, 此处统一为一份口径)。hn_pe.c/hn_cubism.c 未定义
-# HN_HAVE_PE/HN_HAVE_CUBISM 时整模块降级(空操作/占位卡), 探针不定义 SDK
-# 宏 → 链入安全; hn_paint.c 的 paint_walk 直接调用 hn_cubism_paint/
-# hn_pe_paint/hn_three_paint, 缺任一源即链接失败(2026-10-14 修复
-# events_probe 链接漂移: pe/cubism 补齐后又漏 hn_three.c, 一并补上)。
+# 所有 build*.sh 与探针共用的必需 C99 引擎清单。
+# hn_paint 硬引用 pe/cubism/three; 无 SDK 宏时对应模块安全降级。
+# Canvas C++ 后端是可选项，由 hn_canvas_build 独立编译并配套定义宏。
 HN_ENGINE_CORE=(hn_arena.c hn_html.c hn_md.c hn_css.c hn_style.c hn_layout.c
                 hn_paint.c hn_context.c hn_theme.c hn_canvas.c hn_json.c
                 hn_lottie.c hn_mesh.c hn_png.c hn_gif.c hn_media.c hn_fmt.c
@@ -49,7 +46,7 @@ HN_ENGINE_SOFT=(hnsoft.c)      # 软渲染宿主(hnsoft 位图后端)
 HN_ENGINE_WASM=(hn_wasm.c)     # WASM 缝(须连 vendor/wasm3 一起链)
 HN_WASM3=(m3_bind.c m3_code.c m3_compile.c m3_core.c m3_env.c m3_exec.c
           m3_function.c m3_info.c m3_module.c m3_parse.c m3_validate.c)
-HN_RT_SRC=(hn_rt.c)            # 公共运行时(QuickJS 求值面)
+HN_RT_SRC=(hn_rt.c hn_sys.c hn_http.c)   # 公共运行时 + 单源 sys:// 路由 + HTTP
 HN_WASM3_EXPECT=11             # vendor 快照 = 契约最小 11 源(glob 数漂移即报错)
 
 HN_QUICKJS_A="/opt/homebrew/opt/quickjs/lib/quickjs/libquickjs.a"
@@ -98,6 +95,43 @@ hn_freetype_inc() {
   return 1
 }
 
+# hn_canvas_build <target|native> <object-dir> <C++ compiler> [compiler args...]
+# HN_CANVAS_ITY=1 / HN_CANVAS_CG=1 opt in; flags and objects always travel together.
+# C++ is compiled separately so C99 callers keep their language mode.
+hn_canvas_build() {
+  local target="$1" objdir="$2"; shift 2
+  HN_CANVAS_DEFS=() HN_CANVAS_OBJECTS=() HN_CANVAS_LIBS=()
+  local ity="${HN_CANVAS_ITY:-0}" cg="${HN_CANVAS_CG:-0}"
+  case "$ity:$cg" in 0:0) return 0 ;; 0:1|1:0|1:1) ;; *)
+    printf '%s\n' 'HN_CANVAS_ITY / HN_CANVAS_CG must be 0 or 1' >&2; return 1 ;;
+  esac
+  local flags=()
+  if [ "$target" != native ]; then flags=(-target "$target"); fi
+  if [ "$cg" = 1 ]; then
+    case "$target" in
+      *macos*|*apple-darwin*) ;;
+      native) [ "$(uname -s)" = Darwin ] || { printf '%s\n' 'Canvas CG requires macOS' >&2; return 1; } ;;
+      *) printf '%s\n' 'Canvas CG requires a macOS target' >&2; return 1 ;;
+    esac
+  fi
+  mkdir -p "$objdir"
+  local backend macro
+  for backend in ity cg; do
+    case "$backend" in ity) [ "$ity" = 1 ] || continue; macro=HN_HAVE_CANVAS_ITY ;;
+                       cg) [ "$cg" = 1 ] || continue; macro=HN_HAVE_CANVAS_CG ;; esac
+    "$@" "${flags[@]+"${flags[@]}"}" -std=c++17 -fno-exceptions -fno-rtti -O2 \
+      -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/vendor/canvas_ity" \
+      -c "$HN_ENG/hn_canvas_$backend.cpp" -o "$objdir/hn_canvas_$backend.o" || return 1
+    HN_CANVAS_DEFS+=("-D$macro")
+    HN_CANVAS_OBJECTS+=("$objdir/hn_canvas_$backend.o")
+  done
+  case "$target" in
+    *macos*|*apple-darwin*) HN_CANVAS_LIBS=(-lc++ -lc++abi) ;;
+    native) if [ "$(uname -s)" = Darwin ]; then HN_CANVAS_LIBS=(-lc++); else HN_CANVAS_LIBS=(-lstdc++); fi ;;
+    *) HN_CANVAS_LIBS=(-lc++) ;;
+  esac
+}
+
 # ---- 2. 统一编译 ------------------------------------------------------------
 
 HN_CC="${CC:-cc}"
@@ -123,20 +157,31 @@ hn_up_to_date() {
 # 时 16 份探针只各编一次)。
 hn_probe_compile() {
   local label="$1" out="$2"
-  if hn_up_to_date "$out" ${HN_SOURCES[@]+"${HN_SOURCES[@]}"}; then
+  if [ "${HN_CANVAS_ITY:-0}:${HN_CANVAS_CG:-0}" = 0:0 ] && \
+     hn_up_to_date "$out" "$HN_TOOLS_DIR/_engine_sources.sh" ${HN_SOURCES[@]+"${HN_SOURCES[@]}"}; then
     echo "$label: 缓存命中(产物比全部源新), 跳过编译: $out"
     return 0
   fi
   echo "$label: 编译: $HN_CC ${HN_CFLAGS[*]+"${HN_CFLAGS[*]}"} ${HN_DEFS[*]+"${HN_DEFS[*]}"} ${HN_INCS[*]+"${HN_INCS[*]}"} ${HN_SOURCES[*]+"${HN_SOURCES[*]}"} ${HN_LIBS[*]+"${HN_LIBS[*]}"} -o $out"
   local errlog
   errlog="$(mktemp "${TMPDIR:-/tmp}/hncc-XXXXXX")"
+  local canvas_dir
+  canvas_dir="$(mktemp -d "${TMPDIR:-/tmp}/hncanvas-XXXXXX")"
+  if ! hn_canvas_build native "$canvas_dir" "${CXX:-c++}"; then
+    rm -rf "$canvas_dir"
+    return 1
+  fi
   # shellcheck disable=SC2086
   if "$HN_CC" ${HN_CFLAGS[@]+"${HN_CFLAGS[@]}"} ${HN_DEFS[@]+"${HN_DEFS[@]}"} \
+       ${HN_CANVAS_DEFS[@]+"${HN_CANVAS_DEFS[@]}"} \
        ${HN_INCS[@]+"${HN_INCS[@]}"} ${HN_SOURCES[@]+"${HN_SOURCES[@]}"} \
-       ${HN_LIBS[@]+"${HN_LIBS[@]}"} -o "$out" 2>"$errlog"; then
+       ${HN_CANVAS_OBJECTS[@]+"${HN_CANVAS_OBJECTS[@]}"} \
+       ${HN_LIBS[@]+"${HN_LIBS[@]}"} ${HN_CANVAS_LIBS[@]+"${HN_CANVAS_LIBS[@]}"} -o "$out" 2>"$errlog"; then
+    rm -rf "$canvas_dir"
     rm -f "$errlog"
     return 0
   fi
+  rm -rf "$canvas_dir"
   echo "$label: 编译失败" >&2
   if [ -s "$errlog" ]; then
     tail -c 4000 "$errlog" >&2

@@ -113,6 +113,22 @@ void hn_context_layout(hn_context *c, float width, float height,
     gif_grave_flush(c);   /* 显示列表已重建: 逐出 GIF 的旧引用必已消亡, 放心释放 */
 }
 
+/* 布局不绘制(内部): rt_render 的全路径用 —— layout 后紧跟 anim_tick(0)
+   重采样 + repaint, layout 内建的那次 paint 会被立刻整体覆盖, 纯浪费
+   (交互帧的 paint 走了两遍; 显示列表构建是 CPU 大头之一)。语义不变:
+   调用方必须在返回后自行 repaint 才有可消费的显示列表。 */
+void hn_context_layout_nopaint(hn_context *c, float width, float height,
+                               const hn_text_backend *backend) {
+    if (!c->doc) return;
+    c->vw = width;
+    c->vh = height;
+    if (backend) { c->tb = *backend; c->tb_valid = 1; } else { c->tb_valid = 0; }
+    layout_pass(c);
+    if (stream_loop_walk(c->doc->root))
+        layout_pass(c);
+    stream_anchor_walk(c, c->doc->root);
+}
+
 void hn_context_repaint(hn_context *c) {
     if (!c->doc) return;
     hn_paint_root(c);
@@ -408,6 +424,13 @@ void hn_context_set_pointer(hn_context *c, float x, float y) {
     c->pointer_x = x;
     c->pointer_y = y;
     c->has_pointer = 1;
+}
+
+/* 主按钮按下态(hn_rt_button down/up 喂入): 轨道相机拖拽等"按下才生效"
+   的交互用 —— 只存这一份状态, 不引入第二事实源。 */
+void hn_context_set_pointer_button(hn_context *c, int down) {
+    if (!c) return;
+    c->pointer_down = down ? 1 : 0;
 }
 
 

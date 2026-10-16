@@ -475,6 +475,11 @@ hn_doc     *hn_context_doc(hn_context *c);
 /* 布局 + 生成绘制指令; 可随窗口尺寸变化反复调用 */
 void hn_context_layout(hn_context *c, float width, float height,
                        const hn_text_backend *backend);
+/* 布局不绘制(内部路径): rt 全路径帧用 —— 调用方随后自行 repaint;
+   避免 layout 内建 paint 被同帧 repaint 覆盖的双走(语义不变, 显示
+   列表在返回时不可消费, 必须先 repaint) */
+void hn_context_layout_nopaint(hn_context *c, float width, float height,
+                               const hn_text_backend *backend);
 /* 仅重跑绘制(滚动等不改变布局的更新) */
 void hn_context_repaint(hn_context *c);
 const hn_display_list *hn_context_display_list(const hn_context *c);
@@ -495,6 +500,9 @@ void hn_context_set_active(hn_context *c, hn_node *n);
    不存坐标, 唯独网格变形的 hn-mesh-look(视线/头部跟随)需要在求值时知道
    "指针相对元素中心在哪个方向" —— 这里是它的唯一事实源。 */
 void hn_context_set_pointer(hn_context *c, float x, float y);
+/* 主按钮按下态(运行时在 button down/up 事件处喂入): 轨道相机拖拽等
+   "按住才生效"的交互语义用。 */
+void hn_context_set_pointer_button(hn_context *c, int down);
 /* 焦点元素(:focus 伪类)与插入符可见性。
    set_focus 在已有布局时会**立即重渲染**(样式重算 + 重布局 + 重绘),
    使 :focus 规则与引擎默认焦点环即刻生效; 禁用的控件拒绝聚焦。 */

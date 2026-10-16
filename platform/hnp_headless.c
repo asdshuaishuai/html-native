@@ -59,6 +59,13 @@ void hnp_window_blit(hnp_window *w, const unsigned char *bgra_pre, int bw, int b
 }
 
 void hnp_window_invalidate(hnp_window *w) { (void)w; }
+/* GPU 直呈层: 无表面平台不支持, 恒 NULL(壳回落 blit 路径)。 */
+void *hnp_window_attach_metal_layer(hnp_window *w, int phys_w, int phys_h) {
+    (void)w; (void)phys_w; (void)phys_h; return NULL;
+}
+void hnp_window_metal_layer_resize(hnp_window *w, int phys_w, int phys_h) {
+    (void)w; (void)phys_w; (void)phys_h;
+}
 void hnp_window_set_title(hnp_window *w, const char *utf8) {
     if (!w) return;
     snprintf(w->title, sizeof(w->title), "%s", utf8 ? utf8 : "hn");

@@ -604,6 +604,8 @@ struct hn_context {
        现场重算, 不引入第二事实源。 */
     float    pointer_x, pointer_y;
     int      has_pointer;   /* 0 = 尚未收到过事件(look 目标 = 回中) */
+    int      pointer_down;  /* 1 = 主按钮按下中(hn_rt_button 喂入; 轨道相机
+                               等拖拽语义用 —— 悬停移动不再被误当拖拽) */
     int      caret_on;   /* 是否绘制插入符(窗口聚焦时) */
     int      has_theme;  /* 索引 1 是否为主题槽(热更新时替换) */
     /* 透明背板: 1 = 每次样式计算后把 html/body 的底色清掉。
@@ -832,5 +834,13 @@ int  hn_gpu_available(const hn_display_list *dl);
    free)。任何一步失败返回 0(调用方整帧回退 hnsoft —— 逐帧静默)。 */
 int  hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
                           float scale, unsigned char **out_bgra);
+/* 窗口直呈(v2): 显示列表直接画进 CAMetalLayer 的 drawable 并 present,
+   成功帧 0 次 readback / 0 次 CPU 位图分配; 失败返回 0(呼出方整帧回退
+   readback/CPU 路径)。layer = 平台层注入的不透明指针(CAMetalLayer*)。 */
+int  hn_gpu_render_present(void *ca_metal_layer, const hn_display_list *dl,
+                           int w, int h, hn_color bg, float scale);
+/* 帧统计(诊断/验收: 直呈窗口 present>0 且运行期 readback 停增) */
+unsigned long hn_gpu_present_count(void);
+unsigned long hn_gpu_readback_count(void);
 
 #endif

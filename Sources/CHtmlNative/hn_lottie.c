@@ -147,6 +147,13 @@ typedef struct {
     hn_color solid_color;
     lprop anchor, pos, scale, rot, opacity;
     lshape *shapes; int n_shapes;
+    int    parent;                    /* 父层 index(-1 = 无); Lottie 的层可以
+                                         挂在另一层的坐标系下(ind 引用) ——
+                                         父层的 ks 变换(通常是 NULL 层的平移)
+                                         必须叠加到子层, 否则子层内容整体
+                                         偏离画布中心(常见"内容缩在左下角") */
+    unsigned char has_parent;         /* parent 是否有效(>0 且能解析回引) */
+    unsigned char ao;                 /* auto-orient: 沿运动路径朝向(占位) */
     /* mask 最小版(masksProperties): 第一条 mode="a" 且 inv=false 的蒙版,
        在绘制该层内容前用 CLIP_PUSH 裁剪。路径是**图层局部坐标**的贝塞尔
        顶点(与形状层的 sh 同一几何编码), 展开为折线后取外接矩形做矩形
@@ -815,6 +822,17 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
             parse_prop(a, hn_json_obj_get(ks, "s"), &ly->scale);
             parse_prop(a, hn_json_obj_get(ks, "r"), &ly->rot);
             parse_prop(a, hn_json_obj_get(ks, "o"), &ly->opacity);
+            /* 父层链接: "parent" 是另一层的 ind 值。AE 导出的常用手法是
+               放一个 NULL(空形状)层当骨架, 子层挂它坐标系 —— 不解析的话
+               子层几何整体偏移(实测"机器人缩在左下角")。绘制期按 index
+               递归叠父矩阵(load 后统一回填 index, 见 n_layers 循环尾)。 */
+            ly->parent = -1;
+            ly->has_parent = 0;
+            {
+                long pv = (long)hn_json_num(hn_json_obj_get(lj, "parent"), -1);
+                if (pv > 0) { ly->parent = (int)pv; ly->has_parent = 1; }
+            }
+            ly->ao = (unsigned char)hn_json_num(hn_json_obj_get(lj, "ao"), 0);
             if (ty == 0) {
                 /* 预合成: 展开 asset 的内层图层 */
                 const char *ref = hn_json_str(hn_json_obj_get(lj, "refId"), NULL);
@@ -890,6 +908,22 @@ struct hn_lottie *hn_lottie_load(hn_context *c, const char *path) {
             n++;
         }
         l->n_layers = n;
+        /* parent: ind 引用 → 数组 index 回填。ind 缺席的层按"声明序 1 起"
+           对待(bodymovin 导出恒带 ind; 手写文件缺 ind 时 parent 也不会指)。 */
+        for (int i = 0; i < l->n_layers; i++) {
+            if (!l->layers[i].has_parent) continue;
+            int want = l->layers[i].parent;
+            int found = -1;
+            for (int j = 0; j < l->n_layers; j++) {
+                hn_json *lj = hn_json_at(layers, j);
+                if (!lj || lj->kind != HN_JSON_OBJ) continue;
+                if ((long)hn_json_num(hn_json_obj_get(lj, "ind"), -1) == want) {
+                    found = j;
+                    break;
+                }
+            }
+            l->layers[i].parent = found;    /* -1 = 引用悬空, 绘制期忽略 */
+        }
     }
     if (l->n_layers == 0 || l->duration_ms <= 0) {
         hn_lottie_free(l);
@@ -1566,6 +1600,24 @@ void hn_lottie_emit(hn_context *c, struct hn_lottie *l, float clock_ms,
         float la = alpha * lo;
         if (la <= 0.003f) continue;
         lmat m = lm_from(&ly->anchor, &ly->pos, &ly->scale, &ly->rot, t);
+        /* 父层链: 子层坐标系挂在父层下(AE 常用 NULL 骨架层手法) —— 子层
+           点**先经自身变换**, 再经父层变换到合成空间(与 emit_group 的
+           "先本组, 后父级"同一口径)。不解析 parent 的话, 挂骨架的层
+           (p 常为负值)按负坐标画到盒外, 实测"机器人只剩左下一角"。
+           链环/悬空(has_parent 但 parent<0)按无父处理。 */
+        int guard = 0, pi = ly->parent;
+        while (ly->has_parent && pi >= 0 && pi < l->n_layers && guard++ < 16) {
+            const llayer *pl = &l->layers[pi];
+            lmat pm = lm_from(&pl->anchor, &pl->pos, &pl->scale, &pl->rot, t);
+            m = lm_mul(m, pm);
+            float pov[4];
+            lprop_at(&pl->opacity, t, pov);
+            if (pl->opacity.ncomp || pl->opacity.n_kf)
+                la *= norm_op(pov[0]);
+            if (pi == pl->parent) break;              /* 自引用防线 */
+            pi = pl->has_parent ? pl->parent : -1;
+        }
+        if (la <= 0.003f) continue;
         if (ly->kind == 2) {                              /* 图片层 */
             if (!ly->image_src) continue;
             float x0, y0, x1, y1;

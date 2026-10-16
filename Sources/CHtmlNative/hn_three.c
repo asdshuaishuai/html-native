@@ -807,7 +807,9 @@ static void t3_orbit_step(t3_orbit *o, hn_context *c, hn_node *n) {
     int grab = 0;
     if (c->has_pointer) {
         hn_node *hit = hn_context_hit_node(c, c->pointer_x, c->pointer_y);
-        grab = (hit == n);
+        /* 拖拽语义: 命中且主按钮按下中(hn_context_set_pointer_button) ——
+           此前无按下态, 悬停滑过即旋转、移出还带惯性, 不是拖拽(复审修复)。 */
+        grab = (hit == n && c->pointer_down);
     }
     if (grab) {
         if (!o->grab) {                    /* 抓住: 记锚点, 清惯性 */
@@ -890,7 +892,7 @@ static void t3_tex_gate_put(hn_doc *doc, hn_node *n, const char *path, int ok) {
     g_tex_gate[slot].doc = doc;
     g_tex_gate[slot].node = n;
     g_tex_gate[slot].achk = n->arena;
-    g_tex_gate[slot].path = ok ? t3_strdup(path) : NULL;
+    g_tex_gate[slot].path = t3_strdup(path);
     g_tex_gate[slot].ok = ok;
     g_tex_gate[slot].tick = ++g_tex_tick;
 }
@@ -898,11 +900,13 @@ static void t3_tex_gate_put(hn_doc *doc, hn_node *n, const char *path, int ok) {
 /* 命中返回 1 并把可贴图路径(负判定为 NULL)写进 *out; 未命中返回 0。
    *out 指向门自有串 —— 调用方不得把该指针压进显示列表(门槽 LRU 逐出
    会 free 它); 压显示列表前必须拷进引擎临时区(见 t3_paint_soft)。 */
-static int t3_tex_gate_get(hn_doc *doc, hn_node *n, const char **out) {
+static int t3_tex_gate_get(hn_doc *doc, hn_node *n, const char *path,
+                           const char **out) {
     for (int i = 0; i < T3_TEX_SLOTS; i++)
         if (g_tex_gate[i].doc == doc && g_tex_gate[i].node == n &&
-            g_tex_gate[i].achk == n->arena) {
-            *out = g_tex_gate[i].path;
+            g_tex_gate[i].achk == n->arena && g_tex_gate[i].path &&
+            path && !strcmp(g_tex_gate[i].path, path)) {
+            *out = g_tex_gate[i].ok ? g_tex_gate[i].path : NULL;
             return 1;
         }
     return 0;
@@ -914,7 +918,7 @@ static int t3_tex_gate_get(hn_doc *doc, hn_node *n, const char **out) {
 static const char *t3_tex_resolve(hn_context *c, hn_node *n, const char *path) {
     const char *hit = NULL;
     hn_doc *doc = hn_context_doc(c);
-    if (t3_tex_gate_get(doc, n, &hit)) return hit;
+    if (t3_tex_gate_get(doc, n, path, &hit)) return hit;
     const hn_asset_backend *ab = hn_context_assets(c);
     if (!ab || !ab->load || !path || !*path) {
         t3_tex_gate_put(doc, n, path, 0);
@@ -1155,13 +1159,15 @@ static void t3_paint_soft(hn_context *c, hn_node *n,
                 flip = 1;
         }
 
-        /* 裁剪空间 + 近平面(整三角剔除边界, 见头注) */
+        /* 裁剪空间 + 近平面(整三角剔除边界, 见头注)。
+           投影用上面已算好的 **world 变换后**顶点(wx/wy/wz)—— 此前这里
+           重新取原始 geo->pos 直穿 view, world(自转+倾角)只影响光照不进
+           几何, 画面上的盒子不随 ext_clock 旋转(复审修复)。 */
         float cx[3], cy[3], cw[3], vcz[3];
         int behind = 0;
         for (int k = 0; k < 3; k++) {
-            const float *p = &geo->pos[geo->ix[t * 3 + k] * 3];
             float vp[4], cl[4];
-            t3_mat_point(view, p[0], p[1], p[2], vp);
+            t3_mat_point(view, wx[k], wy[k], wz[k], vp);
             vcz[k] = vp[2];
             t3_mat_point(proj, vp[0], vp[1], vp[2], cl);
             cx[k] = cl[0]; cy[k] = cl[1]; cw[k] = cl[3];

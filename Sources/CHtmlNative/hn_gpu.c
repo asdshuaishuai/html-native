@@ -339,6 +339,12 @@ static img_ent *img_lookup(const char *path) {
     return e;
 }
 
+/* ---------------- 帧事务标志 ----------------
+   批次/资源任一失败置位, 帧尾整帧回退 hnsoft —— 失败帧不得当成功帧呈现
+   (部分缺笔比整帧回退更糟: 用户看到的是错画)。 */
+static int g_failed;
+static int g_glyph_oom;              /* glyph_get 资源失败(区别于缺字形跳过) */
+
 /* ---------------- 媒体帧纹理(按指针缓存, 命中即整幅更新) ---------------- */
 
 static hnp_gpu_tex bmp_tex(const hn_cmd *c) {
@@ -355,6 +361,9 @@ static hnp_gpu_tex bmp_tex(const hn_cmd *c) {
                            ptr + (size_t)y * c->bitmap_stride, (size_t)w * 4);
                 g_gpu->tex_update(g_bmps[i].tex, packed);
                 free(packed);
+            } else {
+                g_failed = 1;      /* 更新失败还返回旧纹理 = 陈旧帧冒充本帧 → 整帧回退 */
+                return 0;
             }
             g_bmps[i].used = ++g_frame_clock;
             return g_bmps[i].tex;
@@ -363,13 +372,13 @@ static hnp_gpu_tex bmp_tex(const hn_cmd *c) {
     int w = c->bitmap_w, h = c->bitmap_h;
     if (!ptr || w <= 0 || h <= 0 || c->bitmap_stride <= 0) return 0;
     unsigned char *packed = (unsigned char *)malloc((size_t)w * h * 4);
-    if (!packed) return 0;
+    if (!packed) { g_failed = 1; return 0; }   /* 资源失败 → 整帧回退 */
     for (int y = 0; y < h; y++)
         memcpy(packed + (size_t)y * w * 4,
                ptr + (size_t)y * c->bitmap_stride, (size_t)w * 4);
     hnp_gpu_tex tex = g_gpu->tex_create(w, h, packed);
     free(packed);
-    if (!tex) return 0;
+    if (!tex) { g_failed = 1; return 0; }      /* 资源失败 → 整帧回退 */
     if (g_bmp_n >= (int)(sizeof(g_bmps) / sizeof(g_bmps[0]))) {
         int old = 0;
         for (int i = 1; i < g_bmp_n; i++)
@@ -413,10 +422,11 @@ static hnp_gpu_tex grad_lut(const hn_cmd *c) {
     unsigned char rgba[256 * 4];
     for (int i = 0; i < 256; i++) {
         fcolor col = grad_color_at(c, ((float)i + 0.5f) / 256.0f);
-        /* 非预乘 → 预乘(LUT 在预乘域被采样, 与纹理混合口径一致) */
-        rgba[i * 4 + 0] = (unsigned char)(col.r * col.a * 255.0f + 0.5f);
-        rgba[i * 4 + 1] = (unsigned char)(col.g * col.a * 255.0f + 0.5f);
-        rgba[i * 4 + 2] = (unsigned char)(col.b * col.a * 255.0f + 0.5f);
+        /* 直写非预乘 RGBA: tex_create 上传路径统一做一次预乘 —— 此处若
+           预乘, 半透明渐变会变成 rgb×a²(双重预乘, 复审实测偏暗)。 */
+        rgba[i * 4 + 0] = (unsigned char)(col.r * 255.0f + 0.5f);
+        rgba[i * 4 + 1] = (unsigned char)(col.g * 255.0f + 0.5f);
+        rgba[i * 4 + 2] = (unsigned char)(col.b * 255.0f + 0.5f);
         rgba[i * 4 + 3] = (unsigned char)(col.a * 255.0f + 0.5f);
     }
     hnp_gpu_tex tex = g_gpu->tex_create(256, 1, rgba);
@@ -480,38 +490,44 @@ static const glyph_ent *glyph_get(int cp, int size_px) {
     for (int i = 0; i < g_glyph_n; i++)
         if (g_glyphs[i].cp == cp && g_glyphs[i].size_px == size_px) return &g_glyphs[i];
     gpu_font_init();
-    if (!ft_face_ok) return NULL;
-    if (g_glyph_n >= (int)(sizeof(g_glyphs) / sizeof(g_glyphs[0]))) return NULL;  /* 满 → 整帧回退 */
+    if (!ft_face_ok) return NULL;   /* 无字体: 走缺字形口径, 不标 OOM */
+    if (g_glyph_n >= (int)(sizeof(g_glyphs) / sizeof(g_glyphs[0]))) {
+        g_glyph_oom = 1;            /* 表满 → 整帧回退(原注释口径, 现在真回退) */
+        return NULL;
+    }
     FT_Set_Pixel_Sizes(ft_face, 0, size_px);
-    if (FT_Load_Char(ft_face, (FT_ULong)cp, FT_LOAD_RENDER)) return NULL;
+    if (FT_Load_Char(ft_face, (FT_ULong)cp, FT_LOAD_RENDER)) return NULL;  /* 缺字形: 跳过(hnsoft 同款) */
     FT_GlyphSlot g = ft_face->glyph;
-    glyph_ent *e = &g_glyphs[g_glyph_n++];
-    e->cp = cp;
-    e->size_px = size_px;
-    e->w = (int)g->bitmap.width;
-    e->h = (int)g->bitmap.rows;
-    e->left = g->bitmap_left;
-    e->topv = g->bitmap_top;
-    e->adv = (int)(g->advance.x >> 6);
-    e->tex = 0;
-    if (e->w > 0 && e->h > 0) {
+    /* 先构建成功再入表计数 —— 计数先于提交会在 malloc/上传失败后留下空壳
+       条目, 下一帧重复构建把缓存填满坏副本(复审修复)。 */
+    glyph_ent ent;
+    ent.cp = cp;
+    ent.size_px = size_px;
+    ent.w = (int)g->bitmap.width;
+    ent.h = (int)g->bitmap.rows;
+    ent.left = g->bitmap_left;
+    ent.topv = g->bitmap_top;
+    ent.adv = (int)(g->advance.x >> 6);
+    ent.tex = 0;
+    if (ent.w > 0 && ent.h > 0) {
         /* 非预乘白 × 覆盖率 alpha(宿主上传时统一预乘 → 纹理即预乘白,
            (cov,cov,cov,cov) —— 覆盖率同时作用在 rgb 与 a)。若这里直接
            存 cov 到 rgb, 宿主再乘一次就是双重预乘(实测边缘像素深一倍)。 */
-        unsigned char *rgba = (unsigned char *)malloc((size_t)e->w * e->h * 4);
-        if (!rgba) return NULL;
-        for (int i = 0; i < e->w * e->h; i++) {
+        unsigned char *rgba = (unsigned char *)malloc((size_t)ent.w * ent.h * 4);
+        if (!rgba) { g_glyph_oom = 1; return NULL; }
+        for (int i = 0; i < ent.w * ent.h; i++) {
             unsigned char cov = g->bitmap.buffer[i];
             rgba[i * 4 + 0] = 255;
             rgba[i * 4 + 1] = 255;
             rgba[i * 4 + 2] = 255;
             rgba[i * 4 + 3] = cov;
         }
-        e->tex = g_gpu->tex_create(e->w, e->h, rgba);
+        ent.tex = g_gpu->tex_create(ent.w, ent.h, rgba);
         free(rgba);
-        if (!e->tex) return NULL;   /* 纹理资源紧张 → 整帧回退 */
+        if (!ent.tex) { g_glyph_oom = 1; return NULL; }   /* 纹理资源紧张 → 整帧回退 */
     }
-    return e;
+    g_glyphs[g_glyph_n++] = ent;    /* 成功才提交 */
+    return &g_glyphs[g_glyph_n - 1];
 }
 #endif /* !HN_NO_TEXT */
 
@@ -537,8 +553,9 @@ static void draw_state(unsigned blend, unsigned addr) {
 
 static void quads_flush(void) {
     if (!g_q_any) return;
-    g_gpu->draw_quads(g_qv, g_qv_n, g_q_tex, g_q_rgba,
-                      g_q_blend | (g_q_addr << 2));
+    if (!g_gpu->draw_quads(g_qv, g_qv_n, g_q_tex, g_q_rgba,
+                           g_q_blend | (g_q_addr << 2)))
+        g_failed = 1;               /* 宿主绘制失败: 整帧回退(见 g_failed 注) */
     g_q_any = 0;
     g_qv_n = 0;
 }
@@ -558,7 +575,7 @@ static void quad_emit(hnp_gpu_tex tex, unsigned rgba,
     if (g_qv_n + 1 > g_qv_cap) {
         int nc = g_qv_cap ? g_qv_cap * 2 : 1024;
         float *nv = (float *)realloc(g_qv, (size_t)nc * 16 * sizeof(float));
-        if (!nv) return;   /* 分配失败: 丢弃该 quad(上界外的防御) */
+        if (!nv) { g_failed = 1; return; }   /* 分配失败: 整帧回退(不再静默丢 quad) */
         g_qv = nv;
         g_qv_cap = nc;
     }
@@ -597,7 +614,7 @@ static void emit_rect(const hn_cmd *c, float scale) {
     if (grad) {
         /* 渐变(hnsoft: 渐变声明时无论 fill 是否可见都画) */
         hnp_gpu_tex lut = grad_lut(c);
-        if (!lut) { quads_flush(); return; }   /* LUT 资源紧张: 该盒缺笔(容差内) */
+        if (!lut) { quads_flush(); g_failed = 1; return; }   /* LUT 资源紧张: 整帧回退(缺笔比回退更糟) */
         if (c->grad_kind == 2) {
             /* radial: t 非屏幕仿射 → 盒面 24×24 细分, 每顶点按 grad_t_eval
                求 t(近似精度与近似范围见头注 3) */
@@ -721,7 +738,10 @@ static void emit_text(const hn_cmd *c, float scale) {
         i += (size_t)n;
         if (cp == ' ') { continue; }   /* hnsoft 同款: 空格不落笔, 笔不进 */
         const glyph_ent *gl = glyph_get(cp, size_px);
-        if (!gl) continue;             /* hnsoft 同款: 缺字形跳过该字, 笔不进 */
+        if (!gl) {
+            if (g_glyph_oom) { g_failed = 1; g_glyph_oom = 0; break; }  /* 资源失败: 整帧回退 */
+            continue;             /* 缺字形: hnsoft 同款跳过该字, 笔不进 */
+        }
         if (gl->tex && gl->w > 0 && gl->h > 0) {
             int gx = (int)pen_x + gl->left;
             int gy = (int)baseline - gl->topv;
@@ -742,16 +762,20 @@ static void emit_text(const hn_cmd *c, float scale) {
  * 环绕、交点式与方向权重逐式抄 hnsoft 的 pip_poly/paint_pattern 扫描线
  * (闭合多边形总环绕 = 0 → 前缀和非零 ⇔ 右侧后缀和非零, 与逐点 pip 同
  * 判定 —— 探针以 hnsoft 为对照校准过)。掩码矩形 = 顶点包围盒 ∩ 视口
- * (视口外掩码不可见, 顺带给成本封顶)。返回 0 = 包围盒空(clip 语义 =
- * 什么都不画)或栅格失败(资源紧张, 呼出方按 ok=0 整帧回退)。
+ * (视口外掩码不可见, 顺带给成本封顶)。返回 0 + *failed=0 = 包围盒空
+ * (clip 语义 = 什么都不画); 返回 0 + *failed=1 = 栅格/资源失败(呼出方
+ * 按 ok=0 整帧回退 —— 此前两种 0 混作空包围盒, 资源失败被当成合法
+ * 全挡裁剪, 复审修复)。
  * 每 op 现栅格不缓存: cmd.poly 指向显示列表临时区(每次 repaint 换指针),
  * 缓存键不稳; 扫描线 O(高×边数), 探针/常规页量级可忽略(诚实成本注)。 */
 static hnp_gpu_tex path_mask_raster(const hn_cmd *c, float rs, int vw, int vh,
-                                    float *ox, float *oy, float *mw, float *mh) {
+                                    float *ox, float *oy, float *mw, float *mh,
+                                    int *failed) {
     const float *poly = c->poly;
     int n = c->poly_n;
     const int *segs = c->clip_segs;
     int nsegs = c->clip_nsegs;
+    if (failed) *failed = 0;
     if (!poly || n < 3) return 0;
     float minx = poly[0] * rs, maxx = minx, miny = poly[1] * rs, maxy = miny;
     for (int i = 1; i < n; i++) {
@@ -767,10 +791,10 @@ static hnp_gpu_tex path_mask_raster(const hn_cmd *c, float rs, int vw, int vh,
     if (y0 < 0) y0 = 0;
     if (x1 > vw) x1 = vw;
     if (y1 > vh) y1 = vh;
-    if (x1 - x0 <= 0 || y1 - y0 <= 0) return 0;   /* 视口外/空 → 裁剪全挡 */
+    if (x1 - x0 <= 0 || y1 - y0 <= 0) return 0;   /* 视口外/空 → 裁剪全挡(合法) */
     int w = x1 - x0, h = y1 - y0;
     unsigned char *rgba = (unsigned char *)malloc((size_t)w * h * 4);
-    if (!rgba) return 0;
+    if (!rgba) { if (failed) *failed = 1; return 0; }   /* 资源失败 → 整帧回退 */
     memset(rgba, 0, (size_t)w * h * 4);
     /* 每条扫描线: 收交点(方向权重) → 排序 → 非零前缀和开区间 → 置覆盖。
        交点槽上限: 单行交点数超槽 = 超复杂路径(诚实降级 —— 静默截断会
@@ -828,10 +852,10 @@ static hnp_gpu_tex path_mask_raster(const hn_cmd *c, float rs, int vw, int vh,
             }
         }
     }
-    if (oflow) { free(rgba); return 0; }
+    if (oflow) { free(rgba); if (failed) *failed = 1; return 0; }  /* 超复杂路径 → 整帧回退 */
     hnp_gpu_tex tex = g_gpu->tex_create(w, h, rgba);
     free(rgba);
-    if (!tex) return 0;
+    if (!tex) { if (failed) *failed = 1; return 0; }               /* 上传失败 → 整帧回退 */
     *ox = (float)x0;
     *oy = (float)y0;
     *mw = (float)w;
@@ -887,6 +911,7 @@ static void emit_pattern(const hn_cmd *c, float scale, int vw, int vh, int *ok) 
     float bx0f, by0f, bx1f, by1f;
     hnp_gpu_tex pmask = 0;
     float pmx = 0, pmy = 0, pmw = 0, pmh = 0;
+    int mfail = 0;
     if (!c->poly) {
         bx0f = c->x * scale; by0f = c->y * scale;
         bx1f = (c->x + c->w) * scale; by1f = (c->y + c->h) * scale;
@@ -903,8 +928,9 @@ static void emit_pattern(const hn_cmd *c, float scale, int vw, int vh, int *ok) 
         }
         /* 多边形 → 掩码裁剪(ppath; 掩码基建与 CLIP_PATH 共用)。叠在已有
            路径裁剪里 = 嵌套掩码, hn_gpu_available 已挡(这里防御回退)。 */
-        pmask = path_mask_raster(c, scale, vw, vh, &pmx, &pmy, &pmw, &pmh);
-        if (!pmask) { *ok = 0; return; }
+        pmask = path_mask_raster(c, scale, vw, vh, &pmx, &pmy, &pmw, &pmh, &mfail);
+        if (!pmask) { *ok = 0; return; }   /* 空包围盒/失败都整帧回退: 软件路径
+                                              对空区域同样不落笔, 回退结果逐位等价 */
         quads_flush();
         if (!g_gpu->clip_mask_push(pmask, pmx, pmy, pmw, pmh)) {
             g_gpu->tex_free(pmask);
@@ -1028,12 +1054,24 @@ int hn_gpu_available(const hn_display_list *dl) {
 
 /* ---------------- 主翻译循环 ---------------- */
 
-int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
-                         float scale, unsigned char **out_bgra) {
-    if (!out_bgra || !dl || w <= 0 || h <= 0) return 0;
+/* ---- 帧统计(直呈验收口径: present 帧数 > 0 且期间 readback 帧数 = 0) ---- */
+static unsigned long g_present_frames, g_readback_frames;
+unsigned long hn_gpu_present_count(void) { return g_present_frames; }
+unsigned long hn_gpu_readback_count(void) { return g_readback_frames; }
+static unsigned char **g_out_bgra;   /* 本帧 readback 出参(render_common 用) */
+
+/* 本帧出帧模式: NULL = 离屏 readback; 非空 = CAMetalLayer 直呈 */
+static void *g_present_layer;
+
+/* 共享帧管线: begin(readback 或 present) → 翻译 → 冲批 → end(按模式) */
+static int render_common(const hn_display_list *dl, int w, int h, hn_color bg,
+                         float scale) {
     float rs = (scale >= 0.5f) ? scale : 1.0f;
     if (!host_ready()) return 0;
-    if (!g_gpu->begin(w, h, bg)) return 0;
+    if (g_present_layer) {
+        if (!g_gpu->begin_present || !g_gpu->end_present) return 0;
+        if (!g_gpu->begin_present(g_present_layer, w, h, bg)) return 0;
+    } else if (!g_gpu->begin(w, h, bg)) return 0;
 
     g_q_any = 0;
     g_qv_n = 0;
@@ -1043,6 +1081,8 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
     g_q_addr = 0;
     g_q_blend_pend = 0;
     g_q_addr_pend = 0;
+    g_failed = 0;   /* 帧事务: 任一 emit/批次失败在帧尾触发整帧回退 */
+    g_glyph_oom = 0;
 
     /* 引擎侧裁剪配平栈(与平台栈平行): 记每层是否有掩码纹理, POP 时据此
        释放掩码(矩形层无资源)。深度上界与 available 的 31 一致;
@@ -1109,7 +1149,8 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
             /* 嵌套路径裁剪: available 已挡(单掩码槽); 直呼 render 防御回退 */
             if (pdepth > 0 || csp >= 32) { ok = 0; break; }
             float mox, moy, pmw, pmh;
-            hnp_gpu_tex mt = path_mask_raster(c, rs, w, h, &mox, &moy, &pmw, &pmh);
+            int mfail = 0;
+            hnp_gpu_tex mt = path_mask_raster(c, rs, w, h, &mox, &moy, &pmw, &pmh, &mfail);
             if (mt) {
                 if (!g_gpu->clip_mask_push(mt, mox, moy, pmw, pmh)) {
                     g_gpu->tex_free(mt);
@@ -1120,6 +1161,9 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
                 cstack[csp].tex = mt;
                 csp++;
                 pdepth++;
+            } else if (mfail) {
+                ok = 0;   /* 栅格/资源失败 → 整帧回退(不是合法全挡) */
+                break;
             } else {
                 /* 空包围盒(视口外多边形)= 裁剪全挡: 零面积矩形层占位,
                    hnsoft 的 bbox 空交叠同判(全部像素画不出来) */
@@ -1154,13 +1198,49 @@ int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
     }
     quads_flush();
 
+    if (g_present_layer) {
+        /* 直呈尾: presentDrawable + commit, 不回读不分配 CPU 帧 */
+        if (!ok || g_failed || !g_gpu->end_present()) return 0;
+        g_present_frames++;
+        return 1;
+    }
+
     unsigned char *buf = (unsigned char *)malloc((size_t)w * h * 4);
-    if (!ok || !buf || !g_gpu->end_readback(buf, w, h)) {
-        /* 帧被放弃: end_readback 未调时宿主在下次 begin 兜底回收(契约允许
-           呼出方逐帧放弃) —— 调用方静默回退 hnsoft */
+    if (!ok || g_failed || !buf || !g_gpu->end_readback(buf, w, h)) {
+        /* 帧被放弃(含资源/批次失败的帧事务): end_readback 未调时宿主在下次
+           begin 兜底回收(契约允许呼出方逐帧放弃) —— 调用方整帧回退 hnsoft */
         free(buf);
         return 0;
     }
-    *out_bgra = buf;
+    g_readback_frames++;
+    *g_out_bgra = buf;
     return 1;
+}
+
+int hn_gpu_render_scaled(const hn_display_list *dl, int w, int h, hn_color bg,
+                         float scale, unsigned char **out_bgra) {
+    if (!out_bgra || !dl || w <= 0 || h <= 0) return 0;
+    g_present_layer = NULL;
+    g_out_bgra = out_bgra;
+    return render_common(dl, w, h, bg, scale);
+}
+
+/* 窗口直呈: 显示列表直接画进 CAMetalLayer 的 drawable 并 present ——
+   成功帧 0 次 readback / 0 次 CPU 位图分配。失败返回 0, 呼出方整帧回退
+   既有 readback/CPU 路径(不混合半帧)。 */
+int hn_gpu_render_present(void *ca_metal_layer, const hn_display_list *dl,
+                          int w, int h, hn_color bg, float scale) {
+    static int trace = -1;
+    if (trace < 0) trace = getenv("HN_GPU_TRACE") ? 1 : 0;
+    if (!ca_metal_layer || !dl || w <= 0 || h <= 0) return 0;
+    if (!hn_gpu_available(dl)) {   /* 与 rt_raster 同一可用性门 */
+        if (trace) fprintf(stderr, "[gpu-present] available=0\n");
+        return 0;
+    }
+    g_present_layer = ca_metal_layer;
+    g_out_bgra = NULL;
+    int r = render_common(dl, w, h, bg, scale);
+    if (trace && !r) fprintf(stderr, "[gpu-present] render_common=0\n");
+    g_present_layer = NULL;
+    return r;
 }

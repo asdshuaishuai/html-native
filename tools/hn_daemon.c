@@ -54,9 +54,10 @@
  *   - 窗口/事件循环归各平台壳(tools/hnweb_macos.c / hnweb_linux.c / hnwin.c)
  *     —— daemon 只管**无头**应用的文档生命周期; 开窗 = spawn 平台壳子进程
  *     (open window:1), 窗口的事件循环仍在壳里, daemon 只记 pid/生命周期。
- *   - sys:// 桥单源在 rt/hn_rt.c 的 hn_rt_sys_fragment(daemon 与 rt 同链
+ *   - sys:// 桥单源在 rt/hn_sys.c 的 hn_sys_fragment(daemon 与 rt 同链
  *     编译直呼; 原 daemon 本地 4 路由副本已删 —— 副本漂移曾使 hx-test-get
- *     的 daemon 驱动流静默断裂)。
+ *     的 daemon 驱动流静默断裂)。store 经 hn_sys_host 回调各带命名空间:
+ *     daemon 恒 "default", rt 用应用 id(切换前两链路的落盘口径不变)。
  *
  * 用法: hn_daemon [--socket PATH]   默认 ~/.html-native/hn-daemon.sock
  */
@@ -64,6 +65,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
@@ -73,12 +75,15 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/select.h>
 
 extern char **environ;
 
 #include "hn.h"
 #include "hnsoft.h"
 #include "hn_rt.h"
+#include "hn_sys.h"
+#include "hn_http.h"
 #include <time.h>
 
 #include "hn.h"
@@ -186,12 +191,37 @@ static hn_context *app_ctx(dapp *a) {
 static void app_destroy(dapp *a) {
     if (a->rt) hn_rt_close(a->rt);
     free(a->html);
-    free(a->shot_buf);    /* 复用缓冲随应用实例释放(app_create 时为 NULL, free 安全) */
+    free(a->shot_buf);
     a->shot_buf = NULL;
     a->shot_cap = 0;
     a->rt = NULL;
     a->alive = 0;
 }
+
+static void daemon_frame_apps(void) {
+    /* 真实单调时钟差分: 空闲时主循环 50ms 一拍, 固定传 16ms 会让动画/
+       轮询钟以 1/3 速率走(复审修复)。首拍 dt=0 只排干 pending jobs。 */
+    static struct timespec last;
+    static int have_last;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    float dt = 0.0f;
+    if (have_last) {
+        long dms = (now.tv_sec - last.tv_sec) * 1000L
+                 + (now.tv_nsec - last.tv_nsec) / 1000000L;
+        if (dms < 0) dms = 0;
+        if (dms > 250) dms = 250;   /* 长眠醒来限步(与 rt 定时器同款防大跳) */
+        dt = (float)dms;
+    }
+    last = now;
+    have_last = 1;
+    for (int i = 0; i < g_app_n; i++) {
+        if (!g_apps[i].alive || !g_apps[i].headless || !g_apps[i].rt) continue;
+        int repaint = 0;
+        hn_rt_frame(g_apps[i].rt, dt, &repaint);
+    }
+}
+
 
 /* ---------------- 窗口应用表(spawn 平台壳子进程, 每窗一进程) ----------------
  *
@@ -469,18 +499,22 @@ static void esc_html(const char *s, char *out, size_t cap) {
     out[i] = 0;
 }
 
-/* sys:// → HTML 片段: 单源在 rt/hn_rt.c 的 hn_rt_sys_fragment(daemon 与 rt
-   同链编译, 见 build-daemon-cli.sh, hx_perform 直呼)。原这里养过一份只有
-   store/get、store/set、store/count、info 四条路由的本地副本 —— 副本缺
-   host/uptime/cpu/memory/disk/clipboard/open/notify, 使 hx-test-get 等页的
-   daemon 驱动流静默断裂(副本漂移正是根因), 已删。store KV 文件路径两份
-   实现逐字节一致(~/.html-native/store/<id>.json), 语义无缝切换。
-   clipboard/open 两条路由需要 AppKit 已装载进本进程 —— daemon 不链任何
-   平台层, 没人替我们调 hnp_init; rt/hn_rt.c 的 hn_objc_bind 已改为在
-   消费点自行 dlopen(2026-10-15 复审实测修复), daemon 零额外动作,
-   路由全集在 daemon 链路与 app 链路等效。 */
+/* sys:// → HTML 片段: 单源在 rt/hn_sys.c 的 hn_sys_fragment(daemon 与 rt
+   同链编译, hx_perform 直呼)。daemon 原来的 4 路由副本已删 —— 副本漂移曾
+   使 hx-test-get 的 daemon 驱动流静默断裂。Store 经 hn_sys_host 回调接入:
+   daemon 维持 default 命名空间；rt 维持应用 id。平台能力由共享 TU 承担。 */
 
 /* ---------------- hx-* 执行(与三壳同一套 htmx 语义) ---------------- */
+
+/* store 回调适配: daemon 无文档 id, 命名空间沿用既有 "default" —— 与切换前
+   hn_rt_sys_fragment(url, form, g_store_id_default) 落盘同一文件
+   (~/.html-native/store/default.json), 语义无缝。 */
+static int daemon_store_get(void *ctx, const char *key, char *out, size_t cap) {
+    return hn_rt_store_get((const char *)ctx, key, out, cap);
+}
+static int daemon_store_set(void *ctx, const char *key, const char *value) {
+    return hn_rt_store_set((const char *)ctx, key, value);
+}
 
 static hn_node *hx_carrier(hn_node *n) {
     if (!n) return NULL;
@@ -495,22 +529,62 @@ static int hx_perform(dapp *a, hn_node *carrier) {
     const char *get = hn_node_attr(carrier, "hx-get");
     const char *url = post ? post : get;
     if (!url) return 0;
-    /* 非 sys:// = 外部 fetch —— 与 rt/hn_rt.c hx_perform 同一纪律: 显式标注
-       而非静默吞掉(C99 层无网络实现; 静默失败是排查黑洞, 页面"点了没反应")。 */
-    if (strncmp(url, "sys://", 6)) {
-        fprintf(stderr, "[hx] fetch 不支持: \"%s\" — C99 引擎零网络, 仅 "
-                "sys:// 本地桥; 外部资源走 sys://open 交系统打开\n", url);
-        fflush(stderr);
-        return 0;
-    }
     hn_doc *doc = hn_context_doc(app_ctx(a));
     char form[4096];
     form[0] = 0;
     hn_doc_form_encode(doc, form, sizeof(form));
-    char *frag = hn_rt_sys_fragment(url, form, g_store_id_default);
+    /* Keep sys:// dispatch ahead of HTTP. Unsupported schemes continue through
+       hn_sys_request so their existing diagnostic remains deterministic. */
+    char *frag = NULL;
+    hn_http_response http = {0};
+    int is_http = 0;
+    if (url && (strncasecmp(url, "http://", 7) == 0 || strncasecmp(url, "https://", 8) == 0)) {
+        is_http = 1;
+        /* htmx 语义(与 rt/hn_rt.c 的 hx_perform 同款): GET 拼 query, POST 带 urlencoded 头 */
+        const char *req_url = url;
+        char url_q[8192];
+        if (!post && form[0]) {
+            snprintf(url_q, sizeof(url_q), "%s%s%s", url,
+                     strchr(url, '?') ? "&" : "?", form);
+            req_url = url_q;
+        }
+        hn_http_request_opts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.url = req_url;
+        opts.method = post ? "POST" : "GET";
+        opts.body = post ? form : NULL;
+        opts.body_len = post ? strlen(form) : 0;
+        hn_http_header hdr;
+        if (post && form[0]) {
+            hdr.name = "Content-Type";
+            hdr.value = "application/x-www-form-urlencoded";
+            opts.headers = &hdr;
+            opts.header_count = 1;
+        }
+        if (hn_http_request(&opts, &http)) {
+            if (http.status >= 400) {
+                fprintf(stderr, "[hx] http 失败: %s: HTTP %ld\n", url, http.status);
+                fflush(stderr);
+                hn_http_response_free(&http);
+                return 0;
+            }
+            frag = (char *)malloc(http.body_len + 1);
+            if (frag) { memcpy(frag, http.body, http.body_len); frag[http.body_len] = 0; }
+            hn_http_response_free(&http);
+        } else {
+            fprintf(stderr, "[hx] http 失败: %s: %s\n", url, hn_http_last_error());
+            fflush(stderr);
+            return 0;
+        }
+    } else {
+        hn_sys_host host = { (void *)g_store_id_default, daemon_store_get, daemon_store_set };
+        frag = hn_sys_request(&host, url, form);
+    }
     if (!frag) {
-        fprintf(stderr, "[hx] 未知 sys:// 路由: %s\n", url);
-        fflush(stderr);
+        if (is_http) {
+            fprintf(stderr, "[hx] http 失败: %s: 响应体分配失败\n", url);
+            fflush(stderr);
+        }
         return 0;
     }
     const char *tid = hn_node_attr(carrier, "hx-target");
@@ -756,6 +830,12 @@ static void handle_line(const char *line, char *out, size_t cap) {
     /* 需要 id 的 op 在这里统一解析一次 */
     char *id = json_str(line, "id");
     dapp *a = id ? app_find(id) : NULL;
+    /* Advance one runtime frame before servicing an inspection request. This
+       drains QuickJS Promise jobs (including hn.fetch) for headless apps. */
+    if (a && a->alive && a->rt) {
+        int repaint = 0;
+        hn_rt_frame(a->rt, 16.0f, &repaint);
+    }
 
     /* window 应用只伺候 open/update(热推送)/close/list —— eval/shot/
        dump/text 需要 daemon 内的文档句柄, 而窗口应用的文档在子进程
@@ -1074,7 +1154,9 @@ static volatile sig_atomic_t g_run = 1;
 static void on_term(int sig) { (void)sig; g_run = 0; }
 
 static int serve_line(int fd, const char *line, char *resp, size_t cap) {
+    daemon_frame_apps();
     handle_line(line, resp, cap);
+    daemon_frame_apps();
     size_t n = strlen(resp);
     size_t off = 0;
     while (off < n) {
@@ -1160,6 +1242,24 @@ int main(int argc, char **argv) {
     if (!no_resident) resident_restore();
 
     while (g_run) {
+        /* Non-blocking accept with timeout: drain async HTTP completions periodically */
+        struct timeval tv = { 0, 50000 }; /* 50ms timeout */
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(g_listen, &rfds);
+        int sel = select(g_listen + 1, &rfds, NULL, NULL, &tv);
+
+        /* Advance all headless apps to drain async completions */
+        daemon_frame_apps();
+
+        if (sel < 0) {
+            if (errno == EINTR && !g_run) break; /* signal interrupted */
+            if (errno == EINTR) continue; /* retry */
+            break;
+        }
+        if (sel == 0) continue; /* timeout, no connection */
+
+        /* Connection available */
         int cfd = accept(g_listen, NULL, NULL);
         if (cfd < 0) { if (g_run) continue; break; }
         serve(cfd);

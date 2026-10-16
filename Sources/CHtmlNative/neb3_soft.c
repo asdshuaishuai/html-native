@@ -4,6 +4,7 @@
  * and deliberately stays independent from Rust/wgpu.
  */
 #include "neb3.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -70,16 +71,15 @@ int neb3_scene_set_rotation(neb3_scene *s, float r) { if (!s) return 0; s->rotat
 int neb3_scene_set_depth(neb3_scene *s, int enabled) { if (!s) return 0; s->depth = !!enabled; return 1; }
 int neb3_render(neb3_scene *s, float time_ms, const neb3_color *clear,
                 const unsigned char **rgba, size_t *bytes, neb3_render_info *info) {
-    (void)time_ms; (void)clear;
-    if (!s || !s->rt || !s->mesh || !s->mat || !rgba || !bytes) return 0;
-    size_t n = (size_t)s->rt->d.width * (size_t)s->rt->d.height * 4;
-    if (s->frame_bytes != n) { free(s->frame); s->frame = (unsigned char *)malloc(n); s->frame_bytes = n; }
-    if (!s->frame) return 0;
-    memset(s->frame, 0, n); /* transparent fallback frame; hn_three owns draw list */
-    *rgba = s->frame; *bytes = n;
-    if (info) { info->width = s->rt->d.width; info->height = s->rt->d.height;
-        info->msaa_samples = 1; info->depth_enabled = s->depth; info->gpu = 0; }
-    return 1;
+    (void)time_ms; (void)clear; (void)rgba; (void)bytes; (void)info;
+    if (!s || !s->rt || !s->mesh || !s->mat) return 0;
+    /* Phase A 占位实现: 没有真实像素。返回失败让 hn_three 走软件路径
+       (t3_paint_soft) —— 此前返回全透明"成功"帧, 会被当有效帧吞掉
+       软件输出, 页面直接空白(复审修复, 对齐 docs/threejs-support.md
+       "未设置/加载失败 → C99 兜底 + hn_three 软件路径"的契约)。 */
+    snprintf(s->rt->error, sizeof(s->rt->error),
+             "soft backend has no real frame; hn_three falls back to software");
+    return 0;
 }
 void neb3_release_frame(neb3_scene *s) { (void)s; }
 const char *neb3_last_error(neb3_runtime *rt) { return rt ? rt->error : "no runtime"; }

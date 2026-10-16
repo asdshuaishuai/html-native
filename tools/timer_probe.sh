@@ -21,7 +21,7 @@ LABEL="timer_probe.sh"
 
 # 源清单: 探针 + rt + 引擎核心/hnsoft/hn_wasm + wasm3 11 源
 hn_sources_full
-HN_SOURCES=("$HN_TOOLS_DIR/timer_probe.c" "$HN_RT_DIR/hn_rt.c"
+HN_SOURCES=("$HN_TOOLS_DIR/timer_probe.c" "$HN_RT_DIR/hn_rt.c" "$HN_RT_DIR/hn_sys.c" "$HN_RT_DIR/hn_http.c"
             ${HN_SOURCES[@]+"${HN_SOURCES[@]}"})
 local_wasm3=""
 for local_wasm3 in "${HN_WASM3[@]}"; do
