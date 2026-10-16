@@ -299,6 +299,26 @@ static void test_canvas(hn_rt *rt) {
         "c.rect(1,1,10,10); c.reset();"
         "(c.globalAlpha===1&&c.lineWidth===1)?1:0"), 1,
         "ctx.reset() 状态归缺省");
+    /* ctx.filter blur 语义(浓度在 A 通道: 引擎 getImageData 是非预乘 RGBA,
+       RGB 为直通色, 模糊浓度衰减体现在 alpha —— 2026-10-17 复核澄清)。
+       实心区: alpha=255(蒙版内部保值 1.0)+RGB=纯 fill 色;
+       边缘外: RGB 同色但 alpha 呈高斯单调衰减(0..255 中间值)。 */
+    {
+        char *fx = eval_str(rt, SCOPE,
+            "c.clearRect(0,0,300,200); c.filter='blur(6px)'; c.fillStyle='#ff3355';"
+            "c.fillRect(30,30,80,50); c.filter='none';"
+            "var ctr=c.getImageData(70,55,1,1).data;"
+            "var e1=c.getImageData(24,55,1,1).data;"
+            "var e2=c.getImageData(27,55,1,1).data;"
+            "(ctr[3]+','+ctr[1]+'|'+e1[3]+','+e2[3])");
+        int ca=0,cg=0,a1=0,a2=0;
+        if (fx) sscanf(fx, "%d,%d|%d,%d", &ca,&cg,&a1,&a2);
+        check(ca == 255 && cg > 42 && cg < 62,
+              "filter blur 实心区: alpha=255 + RGB=纯色(蒙版内部保值)");
+        check(a1 >= 0 && a1 < 80 && a2 > a1 && a2 < 240,
+              "filter blur 边缘 alpha 高斯单调衰减");
+        free(fx);
+    }
 }
 
 int main(void) {

@@ -652,6 +652,7 @@ static void paint_shadow(fb *f, const hn_cmd *c, float scale, float ox, float oy
     }
     free(line);
 
+
     for (int py = my0; py <= my1; py++) {
         if (py < 0 || py >= f->h) continue;
         for (int px = mx0; px <= mx1; px++) {

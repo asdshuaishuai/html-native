@@ -241,7 +241,7 @@ c.getTransform() / createImageData / getImageData / putImageData / isPointInPath
 c.fillStyle / strokeStyle / lineWidth / lineCap / lineJoin / miterLimit / font / textAlign /
 c.textBaseline / globalAlpha / globalCompositeOperation(lighter/multiply/screen) / shadow*
 c.letterSpacing / wordSpacing（字距进度量与绘制） / c.reset()（清画布+状态归缺省）
-c.filter = 'blur(6px)'（模糊滤镜; 引擎 3-pass 高斯, 实心区浓度有已知偏差）
+c.filter = 'blur(6px)'（模糊滤镜; 引擎 3-pass 高斯; 浓度衰减在 alpha 通道——getImageData 非预乘口径）
 ```
 边界如实声明：`isPointInPath` 按已渲染像素 alpha 判定（抗锯齿边缘 1px 级差异）；
 `toDataURL` 恒出 PNG；stroke 遇 pattern 回落纯色。

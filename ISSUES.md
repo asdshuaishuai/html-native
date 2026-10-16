@@ -210,9 +210,11 @@
   明暗层次立体(实测球心高光 123 像素 >460 亮度)。
 - **Canvas ctx.filter='blur(Npx)'**: glue 属性 + 借 shadow 管线下送
   (shb=2σ, 偏移 0, 本体 col=0 只画模糊蒙版); ctx.filter 读回 'blur(Npx)'/'none'。
-  **已知偏差**: canvas 重放路径的阴影蒙版内部饱和度异常(≈0.39 而非 1.0,
-  CSS box-shadow 路径正常)——影响 canvas filter 的实心区浓度, 边缘过渡
-  正确; 根因待查(疑 replay 的 shadow 参数映射), 记录为开放项。
+  ~~蒙版内部饱和度异常~~ **复核结案(2026-10-17)**: 非缺陷 —— 引擎
+  getImageData 是**非预乘 RGBA**(RGB 直通色, 模糊浓度衰减在 **alpha 通道**);
+  此前观察读的是 RGB 通道故误判 0.39。逐层验证: replay 参数链正确
+  (shcol/blur/ks 直查) → paint_shadow 蒙版行完美高斯(0/0.03/0.28/0.72/0.97/1.0)
+  → A 通道实测 0..253 单调衰减。dom_probe 两断言钉住(A=255 实心 + 边缘衰减)。
 - **渐变去色带**(上轮): bayer 抖动, 与本轮高斯阴影叠加 = 绘制画质整体升级。
 - 回归: 全部 16+ 探针家族全绿(render 83/0 · events 72 · css 108 · three ·
   quad3d · perf/anim 门禁通过)。

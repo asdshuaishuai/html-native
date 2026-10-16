@@ -32,6 +32,10 @@
 /* ---------------- 结构 ---------------- */
 
 struct hn_rt {
+    /* input[type=range] 拖拽态(pointer_move 消费; 输入路径在 QuickJS
+       守卫之外 —— 字段必须对所有构建可见) */
+    int range_drag;
+    char range_id[64];
     hn_context *ctx;
     int w, h;
     float scale;                /* HiDPI 设备缩放(位图 = 逻辑 × scale; 布局/
@@ -94,10 +98,6 @@ struct hn_rt {
     struct { int id; JSValue cb; } raf_q[64];
     int raf_n;
     int raf_seq;
-    /* input[type=range] 拖拽态 + <select> 弹层外状态(输入路径用,
-       不依赖 QuickJS —— pointer/button 函数在守卫之外) */
-    int range_drag;
-    char range_id[64];
     /* JS 事件监听器表(addEventListener; 上限 256, 与定时器表同款管理):
        target = 元素 id 串或 "document"/"window" —— 只存 id 串不存节点指针,
        派发时按 id 现查命中链, 文档换装天然无悬挂。capture 记录但 v1 派发
