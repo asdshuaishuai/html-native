@@ -179,6 +179,10 @@ typedef struct {
     HBITMAP dib;            /* 不透明窗口用的 DIB section */
     unsigned char *dib_bits;
     hn_node *hover;         /* 当前 hover 元素(避免每像素重排) */
+    /* Smart-UX 窗口动效: 入场渐显(reveal)/关闭淡出(fade);
+       16ms WM_TIMER 驱动(与过渡动画同一帧循环) */
+    int reveal_t;           /* -1 待首帧 / >=0 ms 计数 / INT_MAX 完成 */
+    int fade_t;             /* -1 无 / >=0 淡出 ms 计数 */
 } app_t;
 
 static app_t g_app;
@@ -521,8 +525,28 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             app_raster(hn_context_display_list(g_app.ctx), g_app.w, g_app.h);
             app_present(hwnd);
         }
+        /* Smart-UX 窗口动效步进(16ms WM_TIMER; 与过渡动画同一帧循环) */
+        if (g_app.reveal_t >= 0 && g_app.reveal_t < 220) {
+            g_app.reveal_t += 16;
+            float t = (float)g_app.reveal_t / 220.0f;
+            if (t > 1) t = 1;
+            float e = 1.0f - (1.0f - t) * (1.0f - t);
+            if (!SetLayeredWindowAttributes(hwnd, 0,
+                    (BYTE)(e * 255.0f), LWA_ALPHA))
+                g_app.reveal_t = 220;   /* 失败即完成 */
+        } else if (g_app.reveal_t >= 0) g_app.reveal_t = 220;
+        if (g_app.fade_t >= 0) {
+            g_app.fade_t += 16;
+            float t = (float)g_app.fade_t / 150.0f;
+            SetLayeredWindowAttributes(hwnd, 0,
+                (BYTE)(t >= 1 ? 0 : (BYTE)((1.0f - t) * 255.0f)), LWA_ALPHA);
+            if (t >= 1) { DestroyWindow(hwnd); return 0; }
+        }
         return 0;
     }
+    case WM_CLOSE:
+        if (g_app.fade_t < 0) g_app.fade_t = 0;   /* 启动淡出(WM_TIMER 步进到销毁) */
+        return 0;
     case WM_KEYDOWN: {
         /* 回车提交: input 上按 Enter → 自身 → 祖先 → 最近容器第一个
            hx-post/get 载体(与 native 引擎语义一致) */
@@ -765,12 +789,16 @@ int main(int argc, char **argv) {
     wchar_t *title_w = utf8_to_w(man.title && man.title[0] ? man.title : "hnwin");
     if (!title_w) title_w = utf8_to_w("hnwin");
 
-    DWORD exstyle = man.transparent ? WS_EX_LAYERED : 0;
+    /* Smart-UX 窗口入场: 全程 WS_EX_LAYERED + SetLayeredWindowAttributes
+       做 alpha 渐显(含不透明窗 — layered 对不透明内容无观感损耗);
+       开窗即隐(alpha 0), 首帧渲染完成后 16ms WM_TIMER 步进淡入。 */
+    DWORD exstyle = WS_EX_LAYERED;
     HWND hwnd = CreateWindowExW(exstyle, cls, title_w, WS_OVERLAPPEDWINDOW,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
                                 r.right - r.left, r.bottom - r.top,
                                 NULL, NULL, wc.hInstance, NULL);
     if (!hwnd) { fprintf(stderr, "hnwin: CreateWindow 失败\n"); return 1; }
+    SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);   /* 开窗即隐 */
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -790,6 +818,9 @@ int main(int argc, char **argv) {
         ReleaseDC(hwnd, hdc);
     }
     app_present(hwnd);
+    g_app.reveal_t = 0;    /* 首帧就绪 → 启动入场渐显(0→220ms) */
+    g_app.fade_t = -1;
+    SetTimer(hwnd, 2, 16, NULL);   /* 动效帧循环(与 1 号 hx 定时器并存) */
     run_load_actions(); /* hx-trigger="load" 立即执行一次 */
 
     /* console 输出 UTF-8(命中 id 可能是中文), 否则终端按本地代码页乱码 */

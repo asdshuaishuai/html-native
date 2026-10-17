@@ -252,7 +252,10 @@
 - **帧节拍联动**: 渐显/淡出在途时宿主帧节拍提到 16ms
   (`hnp_window_reveal_active` 查询) —— 静态页空闲 250ms 节拍下渐显
   不变幻灯片。
-- 全平台口径: Linux/headless 空桩(接口齐全); Windows hnwin 未接(下轮)。
+- **Windows hnwin 同步接入**: 全程 WS_EX_LAYERED + 开窗即隐(alpha 0) →
+  首帧后 16ms WM_TIMER 步进 SetLayeredWindowAttributes 淡入(220ms);
+  WM_CLOSE 拦截 → 淡出 150ms → DestroyWindow。Linux/headless 空桩
+  (接口齐全, 上轮); 三平台窗口呈现口径一致。
 - 顺带修: 早前中断的构建留下 0 字节 hnapp-macos-arm64(检窗先看大小);
   hnp_linux/hnp_headless 的 reveal 桩曾被插进函数体中部(正则锚定失误)。
 - 视觉验收: HN_REVEAL_TRACE 实测 alpha 斜坡
