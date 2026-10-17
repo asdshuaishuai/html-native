@@ -374,12 +374,115 @@ static void test_smartux_enter_exit(void) {
     hn_rt_close(rt);
 }
 
+/* == E. 桌面画板呈现(画刷铺色遮罩) ==
+   纯函数端点/单调/羽化带 + rt 集成(不透明窗 = 画纸混合, 透明窗 = alpha 缩放)。
+   确定性锚: apply 只动被喂的位图, --shot/--probe 路径不经过(见 hn_rt.h)。 */
+static void test_paint_reveal(void) {
+    printf("== E. 桌面画板呈现(画刷铺色遮罩) ==\n");
+    const float W = 400, H = 300;
+    /* 端点: u=0 全 0, u=1 全 1 */
+    int bad = 0;
+    for (int y = 0; y < 30; y++)
+        for (int x = 0; x < 40; x++) {
+            float fx = (x + 0.5f) * W / 40, fy = (y + 0.5f) * H / 30;
+            if (hn_rt_paint_mask_cov(0.0f, fx, fy, W, H) != 0.0f) bad++;
+            if (hn_rt_paint_mask_cov(1.0f, fx, fy, W, H) != 1.0f) bad++;
+        }
+    check(bad == 0, "遮罩端点: u=0 恒 0 / u=1 恒 1");
+    /* 单调: 采样点随 u 不降 */
+    bad = 0;
+    for (int y = 0; y < 15; y++)
+        for (int x = 0; x < 20; x++) {
+            float fx = (x + 0.5f) * W / 20, fy = (y + 0.5f) * H / 15;
+            float prev = -1;
+            for (int k = 0; k <= 10; k++) {
+                float m = hn_rt_paint_mask_cov(k / 10.0f, fx, fy, W, H);
+                if (m < prev - 1e-6f) bad++;
+                prev = m;
+            }
+        }
+    check(bad == 0, "遮罩对 u 单调不降(画只往前铺, 不回卷)");
+    /* u=0.5 三态并存: 已铺区(=1)/未铺区(=0)/羽化带(0<m<1) */
+    int full = 0, none = 0, mid = 0, total = 0;
+    for (int y = 0; y < 100; y++)
+        for (int x = 0; x < 133; x++) {
+            float fx = (x + 0.5f) * W / 133, fy = (y + 0.5f) * H / 100;
+            float m = hn_rt_paint_mask_cov(0.5f, fx, fy, W, H);
+            total++;
+            if (m >= 1) full++;
+            else if (m <= 0) none++;
+            else mid++;
+        }
+    check(full > 0 && none > 0, "u=0.5 铺色进行中: 已铺/未铺两区并存");
+    check(mid * 100 >= total * 2 && mid * 100 <= total * 45,
+          "羽化带面积有界(2%~45%: 软笔锋, 不是硬擦线也不是全图虚化)");
+    /* rt 集成: 不透明窗 = 未铺区域回落画纸底色 */
+    const char *html =
+        "<html><head><meta charset=\"utf-8\"><meta name=\"hn-transparent\" content=\"1\"></head>"
+        "<body style=\"margin:0;background:transparent\">"
+        "<div style=\"position:absolute;left:0;top:0;width:200;height:200;"
+        "background:#ffffff\"></div></body></html>";
+    hn_rt_desc d = { "anim-probe", html, strlen(html), NULL, 0, 120, 120 };
+    hn_rt *rt = hn_rt_open(&d);
+    check(rt != NULL, "画刷集成: rt 打开(透明窗)");
+    if (rt) {
+        /* 负断言: 不透明窗(哪怕无边框)不 eligible —— 否则先出画板再画内容 */
+        const char *opaque =
+            "<html><head><meta charset=\"utf-8\"><meta name=\"hn-frameless\" content=\"1\"></head>"
+            "<body style=\"margin:0;background:#204080\"></body></html>";
+        hn_rt_desc od = { "anim-probe-opaque", opaque, strlen(opaque), NULL, 0, 80, 80 };
+        hn_rt *ort = hn_rt_open(&od);
+        if (ort) {
+            hn_rt_paint_reveal_begin(ort, 1000);
+            check(hn_rt_paint_reveal_active(ort, 1100) == 0,
+                  "不透明窗不做画刷(会先出画板, 用户裁决)");
+            hn_rt_close(ort);
+        }
+        /* 负断言: 有标题栏窗口(无 frameless/transparent)不 eligible */
+        const char *titled =
+            "<html><head><meta charset=\"utf-8\"></head>"
+            "<body style=\"margin:0;background:#204080\"></body></html>";
+        hn_rt_desc td = { "anim-probe-titled", titled, strlen(titled), NULL, 0, 80, 80 };
+        hn_rt *trt = hn_rt_open(&td);
+        if (trt) {
+            hn_rt_paint_reveal_begin(trt, 1000);
+            check(hn_rt_paint_reveal_active(trt, 1100) == 0,
+                  "有标题栏窗口不做画刷(平台淡入口径, 用户裁决)");
+            hn_rt_close(trt);
+        }
+        hn_rt_paint_reveal_begin(rt, 1000);
+        check(hn_rt_paint_reveal_active(rt, 1000) == 1, "begin 后在途");
+        hn_rt_paint_reveal_apply(rt, 1000 + 120);   /* u=0.25 */
+        const unsigned char *px = hn_rt_pixels(rt);
+        check(px != NULL, "位图在");
+        if (px) {
+            int bw = hn_rt_bitmap_width(rt), bh = hn_rt_bitmap_height(rt);
+            /* 透明窗口径: 未铺区域 alpha=0(透出桌面), 已铺区域 = 内容本色。
+               右下角 = 轴投影最远, u=0.25 覆盖恰 0 → 全透明; 左下角在笔锋
+               带内(小窗羽化占比高)→ 中间 alpha; 轴近端 = 白块不透明。 */
+            int i_far = ((size_t)(bh - 2) * bw + (bw - 2)) * 4;
+            check(px[i_far + 3] == 0,
+                  "u=0.25 投影最远角 alpha=0(直接透出桌面, 不是画板)");
+            int i_near = ((size_t)(bh - 2) * bw + 1) * 4;
+            int a = px[i_near + 3];
+            check(a > 0 && a < 255, "u=0.25 笔锋带外缘 = 中间 alpha(软边铺色)");
+            int i_paint = ((size_t)2 * bw + 2) * 4;
+            check(px[i_paint] == 0xFF && px[i_paint + 3] == 0xFF,
+                  "u=0.25 轴近端 = 内容已铺(白块不透明)");
+        }
+        /* u≥1 收口: active 落 0 */
+        check(hn_rt_paint_reveal_active(rt, 1000 + 481) == 0, "480ms 后收口");
+        hn_rt_close(rt);
+    }
+}
+
 int main(void) {
     printf("anim_probe: 动画/交互/流畅性验收\n");
     test_transition();
     test_frame_pacing();
     test_anchor_scroll();
     test_smartux_enter_exit();
+    test_paint_reveal();
     printf("\nanim_probe: %d 项断言, 失败 %d\n", g_pass + g_fail, g_fail);
     return g_fail ? 1 : 0;
 }

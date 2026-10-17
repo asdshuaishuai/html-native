@@ -265,6 +265,8 @@ hn event myapp click --target btn   # 注入事件验证交互
 | `HN_ANIM_FPS=16\|30\|60` | 环境动画节拍（缺省 30） |
 | `HN_RENDER_SCALE=1\|2` | 渲染缩放覆盖（真窗 Retina 缺省 2） |
 | `HN_WINDOW_POS="X,Y"` | 窗口钉位（左上原点; 探针真窗钉副屏用, 不写几何记忆） |
+| `HN_REVEAL=paint\|fade\|none` | 呈现动画风格（画刷铺色/平台淡入/硬出现） |
+| `HN_REVEAL_MS=N` | 画刷铺色时长（缺省 480ms; 验收连拍/慢放用） |
 | `HN_GPU=metal HN_GPU_PRESENT=1` | hnapp 真窗 GPU 直呈（不透明窗; 零回读） |
 
 真窗探针钉副屏（不占开发者主屏）：
@@ -272,3 +274,8 @@ hn event myapp click --target btn   # 注入事件验证交互
 ```bash
 export HN_WINDOW_POS="$(bash tools/_secondary_screen.sh 360 360)"   # 单屏输出空→回落居中
 ```
+
+呈现动画口径：**画刷铺色（"内容被画上桌面"）只属于逐像素透明窗**
+（hn-transparent=1）—— 未铺区域 alpha=0 透出桌面；不透明窗缺省只走
+平台淡入（否则会先出现一块画板再画内容, 是错误形态）。页面要用画刷
+呈现时, body 不要铺全窗底色（否则画的是底色矩形）。

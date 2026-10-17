@@ -71,6 +71,33 @@ float hn_rt_scale(const hn_rt *rt);
 int hn_rt_bitmap_width(const hn_rt *rt);
 int hn_rt_bitmap_height(const hn_rt *rt);
 
+/* ---------------- 桌面画板呈现(画刷铺色 reveal) ----------------
+ * 形态语义(用户裁决): **画上去 = 逐像素透明窗的呈现** —— 未铺区域
+ * alpha=0 直接透出桌面, 内容像颜料画上去; 不透明窗(标题栏/无边框不透明)
+ * 会先出现一块"画板"再画内容(用户指出的错误形态), 缺省只走平台淡入。
+ * hn-reveal=none 一律硬出现。
+ *
+ * "整个桌面是一块画板, 内容被画上去": 首帧就绪后 ~480ms 内, 内容沿对角
+ * 轴以羽化笔锋(波纹摆动的软边)逐步铺开 —— rt 层单源实现, 三平台壳共用。
+ * 不透明窗: 未铺到区域显示"画纸"(画布底色), 内容像颜料一样盖上来;
+ * 透明窗: 逐像素 alpha 缩放, 窗口真被画到桌面上。GPU 直呈帧无 CPU 位图,
+ * 该帧自动退化为平台淡入(如实口径, 非直呈路径不受影响)。
+ * 探针确定性: 纯遮罩函数 hn_rt_paint_mask_cov 无状态可单测; apply 只在
+ * 真窗主循环被壳调用 —— --shot/--probe 离屏路径恒不经过, 像素锚不破。 */
+
+/* 画刷覆盖(0..1): u ∈ [0,1] 铺色进度, (fx,fy) 物理像素坐标(中心),
+   w/h 位图尺寸。u≤0 恒 0, u≥1 恒 1; 单调; 羽化带 ~20% 对角跨 + 波纹笔锋。 */
+float hn_rt_paint_mask_cov(float u, float fx, float fy, float w, float h);
+
+/* 生命周期(壳驱动; now_ms = 壳的单调毫秒钟):
+   begin   首帧就绪时调一次(幂等);
+   active  在途返回 1(壳据此强制重绘 + 16ms 节拍);
+   apply   把当前进度的遮罩盖到 rt 的 BGRA 帧上(blit 前调用;
+           每帧都基于**新光栅**的帧, 不会叠加污染)。 */
+void hn_rt_paint_reveal_begin(hn_rt *rt, unsigned long now_ms);
+int  hn_rt_paint_reveal_active(const hn_rt *rt, unsigned long now_ms);
+void hn_rt_paint_reveal_apply(hn_rt *rt, unsigned long now_ms);
+
 /* ---------------- 帧步进(动画/轮询) ---------------- */
 
 /* 推进动画时钟并按需重渲染; 轮询到期触发 hx。

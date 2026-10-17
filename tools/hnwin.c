@@ -183,6 +183,13 @@ typedef struct {
        16ms WM_TIMER 驱动(与过渡动画同一帧循环) */
     int reveal_t;           /* -1 待首帧 / >=0 ms 计数 / INT_MAX 完成 */
     int fade_t;             /* -1 无 / >=0 淡出 ms 计数 */
+    /* 桌面画板呈现(画刷铺色): 与 macOS/Linux 的 hn_rt 口径一致(遮罩数学
+       在引擎单源 hnsoft_paint_mask_cov, 本壳直接调); tick 时钟 = GetTickCount */
+    DWORD paint_t0;         /* 0 = 未开始/结束 */
+    int paint_done;
+    int paint_eligible;     /* 无窗形态才 1(透明/无边框/popup·layer) */
+    int reveal_mode;        /* hn.h hn_reveal: 0=paint 1=fade 2=none */
+    unsigned int paint_bg;  /* 画纸底色 0xRRGGBBAA(不透明窗未铺区域混合目标) */
 } app_t;
 
 static app_t g_app;
@@ -244,6 +251,35 @@ static void rgba_to_bgra(unsigned char *dst, const unsigned char *src, int n, in
             b = (unsigned char)((b * a) / 255);
         }
         dst[i * 4] = b; dst[i * 4 + 1] = g; dst[i * 4 + 2] = r; dst[i * 4 + 3] = a;
+    }
+}
+
+/* 桌面画板遮罩盖到 RGBA(直通)位图: 透明窗缩 RGBA(上屏时才预乘),
+   不透明窗向画纸底色混合。数学单源 = hnsoft_paint_mask_cov。 */
+static void paint_mask_apply_rgba(unsigned char *px, int w, int h, float u) {
+    if (!px || u <= 0 || u >= 1) return;
+    unsigned int bg = g_app.paint_bg ? g_app.paint_bg : 0x0B0E13FFu;
+    unsigned char pr = (unsigned char)(bg >> 24), pg = (unsigned char)(bg >> 16),
+                  pb = (unsigned char)(bg >> 8);
+    for (int y = 0; y < h; y++) {
+        float fy = (float)y + 0.5f;
+        for (int x = 0; x < w; x++) {
+            float m = hnsoft_paint_mask_cov(u, (float)x + 0.5f, fy, (float)w, (float)h);
+            if (m >= 1) continue;
+            unsigned char *p = px + ((size_t)y * w + x) * 4;
+            if (g_app.transparent) {
+                if (m <= 0) { p[0] = p[1] = p[2] = p[3] = 0; continue; }
+                p[0] = (unsigned char)(p[0] * m);
+                p[1] = (unsigned char)(p[1] * m);
+                p[2] = (unsigned char)(p[2] * m);
+                p[3] = (unsigned char)(p[3] * m);
+            } else {
+                if (m <= 0) { p[0] = pb; p[1] = pg; p[2] = pr; continue; }
+                p[0] = (unsigned char)((float)pb + ((float)p[0] - pb) * m);
+                p[1] = (unsigned char)((float)pg + ((float)p[1] - pg) * m);
+                p[2] = (unsigned char)((float)pr + ((float)p[2] - pr) * m);
+            }
+        }
     }
 }
 
@@ -525,6 +561,32 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             app_raster(hn_context_display_list(g_app.ctx), g_app.w, g_app.h);
             app_present(hwnd);
         }
+        /* 桌面画板呈现(画刷铺色)步进: 每拍重光栅 + 盖遮罩 + 上屏。
+           遮罩只画在当帧位图上(每拍 app_raster 重出), 无跨帧叠加。 */
+        if (g_app.paint_t0 && !g_app.paint_done && g_app.reveal_mode == 0
+            && g_app.paint_eligible) {
+            /* 时长口径与 hn_app 一致: HN_REVEAL_MS 可覆盖(缺省 480ms) */
+            static float reveal_ms = -1;
+            if (reveal_ms < 0) {
+                reveal_ms = 480.0f;
+                const char *e = getenv("HN_REVEAL_MS");
+                if (e && *e) {
+                    float v = (float)atof(e);
+                    if (v >= 50) reveal_ms = v;
+                }
+            }
+            DWORD el = GetTickCount() - g_app.paint_t0;
+            if ((float)el >= reveal_ms) {
+                g_app.paint_done = 1;
+            } else {
+                const hn_display_list *dl = hn_context_display_list(g_app.ctx);
+                if (dl && app_raster(dl, g_app.w, g_app.h)) {
+                    paint_mask_apply_rgba(g_app.px, g_app.w, g_app.h,
+                                          (float)el / reveal_ms);
+                    app_present(hwnd);
+                }
+            }
+        }
         /* Smart-UX 窗口动效步进(16ms WM_TIMER; 与过渡动画同一帧循环) */
         if (g_app.reveal_t >= 0 && g_app.reveal_t < 220) {
             g_app.reveal_t += 16;
@@ -739,6 +801,20 @@ int main(int argc, char **argv) {
     g_app.ctx = ctx;
     g_app.w = W; g_app.h = H;
     g_app.transparent = man.transparent;
+    /* 呈现动画风格: 文档声明为底, HN_REVEAL 环境钮覆盖(与 hn_app 同纪律)。
+       画刷 eligible = 逐像素透明窗(与 hn_rt 口径一致: 未铺区域透出桌面)。 */
+    g_app.paint_eligible = g_app.transparent;
+    g_app.reveal_mode = (int)man.reveal;
+    {
+        const char *rv = getenv("HN_REVEAL");
+        if (rv && *rv) {
+            if (!strcmp(rv, "fade")) g_app.reveal_mode = 1;
+            else if (!strcmp(rv, "none")) g_app.reveal_mode = 2;
+            else g_app.reveal_mode = 0;
+        }
+    }
+    g_app.paint_bg = hn_doc_canvas_background(doc);
+    if (!g_app.paint_bg) g_app.paint_bg = 0x0B0E13FFu;
     g_html_path = path;
 
     /* store id: 文件 stem(dashboard.html → dashboard) */
@@ -819,6 +895,8 @@ int main(int argc, char **argv) {
     }
     app_present(hwnd);
     g_app.reveal_t = 0;    /* 首帧就绪 → 启动入场渐显(0→220ms) */
+    if (g_app.reveal_mode == 0 && g_app.paint_eligible)
+        g_app.paint_t0 = GetTickCount();   /* 画刷铺色同起(无窗形态) */
     g_app.fade_t = -1;
     SetTimer(hwnd, 2, 16, NULL);   /* 动效帧循环(与 1 号 hx 定时器并存) */
     run_load_actions(); /* hx-trigger="load" 立即执行一次 */

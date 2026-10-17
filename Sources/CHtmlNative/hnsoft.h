@@ -70,6 +70,14 @@ unsigned char *hnsoft_encode_png(const unsigned char *rgba, int w, int h,
 /* 供测试: FreeType 字体是否加载成功(0=未加载) */
 int hnsoft_font_loaded(void);
 
+/* ---------------- 桌面画板呈现: 画刷覆盖(纯函数, 壳共用) ----------------
+ * "窗口被画上桌面"的遮罩核心: u ∈ [0,1] 铺色进度, (fx,fy) = 像素中心
+ * 物理坐标, w/h = 位图尺寸。对角轴铺开 + 20% 羽化笔锋 + 波纹摆边。
+ * u≤0 恒 0, u≥1 恒 1, 对 u 单调 —— 壳(hn_app/hnwin)每帧对位图逐像素
+ * 乘它(不透明窗向画纸底色混合, 透明窗缩 alpha); rt 层包了生命周期
+ * (hn_rt_paint_reveal_*), 本函数无状态可单测。 */
+float hnsoft_paint_mask_cov(float u, float fx, float fy, float w, float h);
+
 /* 布局期文本测量后端(对应 hn.h 的 hn_text_backend 回调):
    运行时把它注入 hn_context_layout, 引擎即按真实字形宽度排布,
    而不是等宽估算(CJK 按字节数×字号×0.55 会显著偏宽, 窄容器里

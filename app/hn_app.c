@@ -534,7 +534,12 @@ int main(int argc, char **argv) {
         }
     }
     if (!hn_rt_presented(rt)) blit_now(rt, w);
-    hnp_window_reveal_begin(w);   /* Smart-UX: 首帧就绪 → 窗口渐显入场 */
+    /* Smart-UX 呈现: hn-reveal=none 硬出现(跳过平台淡入); paint/fade 都
+       保留平台淡入打底, paint 再叠加 rt 层画刷铺色(桌面画板, 见 hn_rt.h) */
+    if (man.reveal != HN_REVEAL_NONE) {
+        hnp_window_reveal_begin(w);           /* 首帧就绪 → 窗口渐显入场 */
+        hn_rt_paint_reveal_begin(rt, hnp_now_ms());   /* 画刷铺色(paint 模式) */
+    }
     /* 真实键盘焦点在窗口上: 插入符可见(闪烁时机由引擎动画时钟推进;
        失焦由 HNP_EV_FOCUS_OUT 熄灭 —— 桌宠常驻窗口不闪无谓的 caret)。 */
     hn_context_set_caret_visible(hn_rt_context(rt), 1);
@@ -784,11 +789,20 @@ int main(int argc, char **argv) {
         int repaint = 0;
         int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
+        /* 桌面画板呈现(画刷铺色)在途: 每拍强制重出新帧 + blit 前盖遮罩 ——
+           遮罩只画在**当帧**位图上, 不存在跨帧叠加。 */
+        int painting = hn_rt_paint_reveal_active(rt, now);
+        if (painting) repaint = 1;
         /* 唯一 blit 出口: 本拍排干的事件(need_blit)与帧 tick(repaint)
            合并成一次平台拷贝。直呈帧(presented)已由 drawable 出屏,
            跳过 CPU blit。 */
-        if ((need_blit || repaint) && !hn_rt_presented(rt)) { blit_now(rt, w); need_blit = 0; }
-        hnp_window_reveal_begin(w);   /* 直呈路径首帧同样触发 */
+        if ((need_blit || repaint) && !hn_rt_presented(rt)) {
+            if (painting) hn_rt_paint_reveal_apply(rt, now);
+            blit_now(rt, w);
+            need_blit = 0;
+        }
+        if (man.reveal != HN_REVEAL_NONE)
+            hnp_window_reveal_begin(w);   /* 直呈路径首帧同样触发 */
         /* ---- 视频图层同步(真窗 GPU 合成): <video> 盒跟随布局/滚动/resize,
            首拍 attach(此后该会话 pf_frame 早退, CPU 拉帧归零), 元素消失/
            热重载换文档时 detach。离屏路径(--shot/--advance)不到这里。 ---- */
@@ -821,8 +835,8 @@ int main(int argc, char **argv) {
            只改唤醒节奏, 不改任何渲染语义: 重绘仍只发生在 hn_rt_frame/
            事件处理报告 repaint 时, dt 口径(now-last)与原先一致。 */
         pump_ms = beat < 0 ? HN_IDLE_PUMP_MS : (beat < 1 ? 1 : beat);
-        /* Smart-UX: 窗口入场/退场动效在途 → 16ms 帧节拍(平滑渐变) */
-        if (hnp_window_reveal_active(w) || hnp_window_close_fade_step(-1) > 0)
+        /* Smart-UX: 窗口入场/退场动效/画刷铺色在途 → 16ms 帧节拍(平滑渐变) */
+        if (painting || hnp_window_reveal_active(w) || hnp_window_close_fade_step(-1) > 0)
             pump_ms = 16;
     }
 

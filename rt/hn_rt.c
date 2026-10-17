@@ -70,6 +70,23 @@ struct hn_rt {
        强制走一次 CPU/readback 渲染)。 */
     void *gpu_present_layer;
     int presented;
+    /* 桌面画板呈现(画刷铺色): paint_t0 = 起始单调毫秒(0 = 未开始/已结束),
+       paint_done 防重入; paint_bg = 画纸底色(不透明窗未铺区域的混合目标,
+       rt_raster 每帧随清屏色记账)。reveal_mode 见 hn.h hn_reveal。
+       paint_eligible = **逐像素透明窗**才 eligible(用户裁决: "直接在
+       桌面上绘制这个窗口" —— 未铺区域 alpha=0 透出桌面; 不透明窗会先
+       出现一块画板再画内容, 是错的, 缺省只走平台淡入)。 */
+    unsigned long paint_t0;
+    int paint_done;
+    int paint_eligible;
+    hn_color paint_bg;
+    int reveal_mode;
+    /* 遮罩帧代数: rt_raster 每次成功出帧自增; apply 记上次盖遮罩的代数 ——
+       同一代数上二次 apply = 原地叠加污染(遮罩乘两次), 守卫强制先重出
+       干净帧(静态页壳只强制 blit 不重光栅, 不守卫会在几十拍内把内容
+       乘没 —— 实测: 不透明页收敛成纯画板, 透明页收敛成全透明)。 */
+    unsigned long raster_gen;
+    unsigned long paint_applied_gen;
     /* 轮询表(hx-trigger="every Ns"): 时钟域是**帧步进虚拟钟**(poll_clock_ms,
        每帧 += dt)而非墙钟 —— 与下方 JS 定时器的 clock_ms 同一口径(探针喂
        固定 16 ⇒ 轮询语义确定性可断言, --advance 虚拟快进也能到期; 真窗壳
@@ -453,6 +470,8 @@ static void run_load_actions(hn_rt *rt) {
 
 /* ---------------- 渲染 ---------------- */
 
+static int rt_render(hn_rt *rt);   /* 前置: 画刷 apply 的干净帧守卫要用 */
+
 /* 当前渲染缩放与位图物理尺寸(逻辑 × scale; 缺省/非法回落 1.0) */
 static float rt_scale(const hn_rt *rt) {
     return (rt && rt->scale >= 0.5f) ? rt->scale : 1.0f;
@@ -572,6 +591,7 @@ static int rt_raster(hn_rt *rt) {
         hn_color rb = hn_doc_canvas_background(hn_context_doc(rt->ctx));
         if (rb) bg = rb;
     }
+    rt->paint_bg = bg;   /* 画纸底色(画刷 reveal 的未铺区域混合目标)记账 */
     /* 直呈分流: 平台层注入 CAMetalLayer 且本帧行可 GPU → 直接 present
        (成功 = 0 次 readback / 0 次 CPU 位图, rt->presented 置位供
        shot/blit 分流); 失败落回既有 readback/CPU 路径。 */
@@ -617,7 +637,106 @@ static int rt_raster(hn_rt *rt) {
     }
     alloc_trace_tick();
     render_trace(bw, bh, scale);
+    rt->raster_gen++;
     return 1;
+}
+
+/* ---------------- 桌面画板呈现(画刷铺色) ---------------- */
+
+/* 铺色时长(ms): HN_REVEAL_MS 环境钮可覆盖(验收连拍/演示慢放, 与
+   HN_ANIM_FPS 同款观测口径); 缺省 480ms。 */
+static float paint_reveal_ms(void) {
+    static float ms = -1;
+    if (ms < 0) {
+        ms = 480.0f;
+        const char *e = getenv("HN_REVEAL_MS");
+        if (e && *e) {
+            float v = (float)atof(e);
+            if (v >= 50) ms = v;
+        }
+    }
+    return ms;
+}
+
+/* 画刷覆盖: 内容沿对角轴(左上 → 右下)以软笔锋铺开。
+   - 头部位置 ease-out(起笔快、收笔稳);
+   - 笔锋带宽 = 20% 对角跨(smoothstep 软边, 不是硬擦除线);
+   - 边缘叠加沿"垂直轴坐标"的慢波纹 —— 拉刷的手腕摆动, 边缘不是直线。 */
+float hn_rt_paint_mask_cov(float u, float fx, float fy, float w, float h) {
+    return hnsoft_paint_mask_cov(u, fx, fy, w, h);   /* 数学在引擎单源(hnwin 同用) */
+}
+
+void hn_rt_paint_reveal_begin(hn_rt *rt, unsigned long now_ms) {
+    if (!rt || rt->paint_t0 || rt->paint_done) return;
+    if (rt->reveal_mode != HN_REVEAL_PAINT || !rt->paint_eligible) return;
+    rt->paint_t0 = now_ms ? now_ms : 1;   /* 0 保留为"未开始"哨兵 */
+}
+
+int hn_rt_paint_reveal_active(const hn_rt *rt, unsigned long now_ms) {
+    if (!rt || !rt->paint_t0 || rt->paint_done || !rt->paint_eligible) return 0;
+    return (float)(now_ms - rt->paint_t0) < paint_reveal_ms();
+}
+
+/* 把当前进度的遮罩盖到 BGRA 帧(预乘)。只由真窗主循环在**新光栅**之后
+   调用 —— 帧缓冲每帧整体重出, 不存在遮罩叠加污染。GPU 直呈帧(presented)
+   没有 CPU 位图, 自然跳过(该窗口的呈现退化为平台淡入, 如实口径)。 */
+void hn_rt_paint_reveal_apply(hn_rt *rt, unsigned long now_ms) {
+    if (!rt || !rt->bgra || rt->presented) return;
+    if (rt->reveal_mode != HN_REVEAL_PAINT || !rt->paint_eligible) return;
+    float u = (float)(double)(now_ms - rt->paint_t0) / paint_reveal_ms();
+    if (u <= 0) return;
+    if (u >= 1) { rt->paint_done = 1; return; }
+    /* 干净帧守卫: 本拍尚未重光栅(rt_raster 未跑过) → 内部重出一次。
+       遮罩是乘法, 只允许作用于当帧新像素; 壳若只强制 blit 不重光栅,
+       没有这一步就会原地叠加(见 raster_gen 注)。 */
+    if (rt->paint_applied_gen == rt->raster_gen)
+        rt_render(rt);
+    rt->paint_applied_gen = rt->raster_gen;
+    /* HN_REVEAL_TRACE=1: 铺色推进取证(与平台 reveal trace 同一环境钮) */
+    {
+        static int tr = -1;
+        if (tr < 0) tr = getenv("HN_REVEAL_TRACE") ? 1 : 0;
+        if (tr) { fprintf(stderr, "[paint-reveal] apply u=%.2f bmp=%dx%d t=%d\n",
+                          (double)u, rt_bitmap_w(rt), rt_bitmap_h(rt), (int)rt->transparent);
+                  fflush(stderr); }
+    }
+    int bw = rt_bitmap_w(rt), bh = rt_bitmap_h(rt);
+    unsigned char *px = rt->bgra;
+    if (rt->transparent) {
+        /* 透明窗: 预乘 BGRA 四通道同乘覆盖 —— 窗口真被逐像素画上桌面 */
+        for (int y = 0; y < bh; y++) {
+            float fy = (float)y + 0.5f;
+            for (int x = 0; x < bw; x++) {
+                float m = hn_rt_paint_mask_cov(u, (float)x + 0.5f, fy,
+                                               (float)bw, (float)bh);
+                if (m >= 1) continue;
+                unsigned char *p = px + ((size_t)y * bw + x) * 4;
+                if (m <= 0) { p[0] = p[1] = p[2] = p[3] = 0; continue; }
+                p[0] = (unsigned char)(p[0] * m);
+                p[1] = (unsigned char)(p[1] * m);
+                p[2] = (unsigned char)(p[2] * m);
+                p[3] = (unsigned char)(p[3] * m);
+            }
+        }
+        return;
+    }
+    /* 不透明窗: 未铺区域显示"画纸"(画布底色), 内容像颜料盖上来 */
+    hn_color bg = rt->paint_bg ? rt->paint_bg : 0x0B0E13FFu;
+    unsigned char pr = (unsigned char)(bg >> 24), pg = (unsigned char)(bg >> 16),
+                  pb = (unsigned char)(bg >> 8);
+    for (int y = 0; y < bh; y++) {
+        float fy = (float)y + 0.5f;
+        for (int x = 0; x < bw; x++) {
+            float m = hn_rt_paint_mask_cov(u, (float)x + 0.5f, fy,
+                                           (float)bw, (float)bh);
+            if (m >= 1) continue;
+            unsigned char *p = px + ((size_t)y * bw + x) * 4;
+            if (m <= 0) { p[0] = pb; p[1] = pg; p[2] = pr; continue; }
+            p[0] = (unsigned char)((float)pb + ((float)p[0] - pb) * m);
+            p[1] = (unsigned char)((float)pg + ((float)p[1] - pg) * m);
+            p[2] = (unsigned char)((float)pr + ((float)p[2] - pr) * m);
+        }
+    }
 }
 
 /* HN_RT_RENDER_TRACE=1: 每次真渲染落一行 stderr(帧拍取证口径 —— 对比
@@ -736,6 +855,22 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     if (m.w > 0) rt->w = m.w;
     if (m.h > 0) rt->h = m.h;
     rt->transparent = (m.transparent == 1);
+    /* 画刷 eligible = **逐像素透明窗**(用户裁决第二轮: "直接在桌面上
+       绘制这个窗口" —— 未铺区域必须透出桌面, 只有逐像素 alpha 做得到;
+       不透明窗(含无边框不透明)会出现"先一块画板再画内容"的假象, 缺省
+       只走平台淡入)。 */
+    rt->paint_eligible = rt->transparent;
+    /* 呈现动画风格: 文档声明为底, HN_REVEAL 环境钮覆盖(探针/演示不改文档
+       翻风格, 与 HN_CLICK_THROUGH 同款纪律)。未知值 = 声明原样(缺省 paint)。 */
+    rt->reveal_mode = (int)m.reveal;
+    {
+        const char *rv = getenv("HN_REVEAL");
+        if (rv && *rv) {
+            if (!strcmp(rv, "fade")) rt->reveal_mode = HN_REVEAL_FADE;
+            else if (!strcmp(rv, "none")) rt->reveal_mode = HN_REVEAL_NONE;
+            else rt->reveal_mode = HN_REVEAL_PAINT;
+        }
+    }
 
     if (d->css && d->css_len) hn_context_add_sheet(rt->ctx, hn_parse_css(d->css, d->css_len));
     doc_ctx_bind(doc, rt->ctx);

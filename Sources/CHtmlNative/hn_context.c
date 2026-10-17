@@ -2446,6 +2446,7 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
     out->transparent = 0;
     out->shadow = 1;        /* 默认带投影 */
     out->draggable = 1;     /* 默认可拖动 */
+    out->reveal = HN_REVEAL_PAINT;   /* 缺省画刷铺色 */
     out->lifecycle = NULL;
     out->presence = HN_PRESENCE_AUTO;
     out->applet = NULL;
@@ -2473,6 +2474,12 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
                     out->shadow = strcmp(content, "false") && strcmp(content, "0");
                 } else if (!strcmp(name, "hn-draggable")) {
                     out->draggable = strcmp(content, "false") && strcmp(content, "0");
+                } else if (!strcmp(name, "hn-reveal")) {
+                    /* 呈现动画风格: paint = 画刷铺色(缺省), fade = 平台淡入,
+                       none = 硬出现。未知值回落缺省。 */
+                    if (!strcmp(content, "fade")) out->reveal = HN_REVEAL_FADE;
+                    else if (!strcmp(content, "none")) out->reveal = HN_REVEAL_NONE;
+                    else out->reveal = HN_REVEAL_PAINT;
                 } else if (!strcmp(name, "hn-surface")) {
                     if (!strncmp(content, "popup", 5)) out->surface = HN_SURFACE_POPUP;
                     else if (!strncmp(content, "layer", 5)) out->surface = HN_SURFACE_LAYER;

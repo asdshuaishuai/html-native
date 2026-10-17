@@ -398,6 +398,12 @@ typedef enum {
     HN_PRESENCE_APP       /* 明确要求应用身份: 驻留 Dock 并带图标 */
 } hn_presence;
 
+typedef enum {
+    HN_REVEAL_PAINT = 0,  /* 缺省: 画刷铺色 —— 内容沿对角"画"上桌面(羽化笔锋) */
+    HN_REVEAL_FADE,       /* 只做平台级淡入(旧 Smart-UX 口径) */
+    HN_REVEAL_NONE        /* 不做呈现动画(硬出现) */
+} hn_reveal;
+
 typedef struct hn_manifest {
     hn_surface_kind surface;
     float w, h;            /* 0 = 自动 */
@@ -407,6 +413,7 @@ typedef struct hn_manifest {
     int transparent;       /* hn-transparent: 1 = 窗口无底色(逐像素 alpha) */
     int shadow;            /* hn-shadow: 1 = 窗口投影(默认开); 0 = 关闭 */
     int draggable;         /* hn-draggable: 1 = 空白区域可拖动窗口(默认开) */
+    hn_reveal reveal;      /* hn-reveal: 呈现动画风格(缺省 paint) */
     /* 小程序式生命周期: 页面关心自己被显示/隐藏/销毁(见 hn_lifecycle)。
        声明后运行时按顺序派发同名事件; 缺省不派发。 */
     const char *lifecycle;

@@ -2101,6 +2101,22 @@ unsigned char *hnsoft_encode_png(const unsigned char *rgba, int w, int h, size_t
     return out;
 }
 
+float hnsoft_paint_mask_cov(float u, float fx, float fy, float w, float h) {
+    if (u <= 0) return 0;
+    if (u >= 1) return 1;
+    float ax = 0.858f, ay = 0.514f;               /* 单位轴(≈55° 对角) */
+    float L = w * ax + h * ay;                    /* 投影跨度 */
+    if (L <= 0) return 1;
+    float F = L * 0.20f;                          /* 笔锋带宽 */
+    float e = 1.0f - (1.0f - u) * (1.0f - u);     /* ease-out */
+    float P = -F + e * (L + 2.0f * F);            /* 笔锋头部投影位置 */
+    float across = fx * ay - fy * ax;             /* 垂直轴坐标 */
+    float ripple = sinf(across * 0.020f + u * 5.2f) * (L * 0.015f);
+    float m = (P + ripple - (fx * ax + fy * ay)) / F;
+    if (m < 0) m = 0; else if (m > 1) m = 1;
+    return m * m * (3.0f - 2.0f * m);             /* smoothstep */
+}
+
 int hnsoft_font_loaded(void) {
 #ifndef HN_NO_TEXT
     font_init();
