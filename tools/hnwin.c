@@ -578,6 +578,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             DWORD el = GetTickCount() - g_app.paint_t0;
             if ((float)el >= reveal_ms) {
                 g_app.paint_done = 1;
+                /* 收口: 补一张干净帧 —— 不补会停在 u≈0.99 的遮罩帧(残影) */
+                if (app_render(g_app.w, g_app.h)) app_present(hwnd);
             } else {
                 const hn_display_list *dl = hn_context_display_list(g_app.ctx);
                 if (dl && app_raster(dl, g_app.w, g_app.h)) {

@@ -470,8 +470,6 @@ static void run_load_actions(hn_rt *rt) {
 
 /* ---------------- 渲染 ---------------- */
 
-static int rt_render(hn_rt *rt);   /* 前置: 画刷 apply 的干净帧守卫要用 */
-
 /* 当前渲染缩放与位图物理尺寸(逻辑 × scale; 缺省/非法回落 1.0) */
 static float rt_scale(const hn_rt *rt) {
     return (rt && rt->scale >= 0.5f) ? rt->scale : 1.0f;
@@ -685,12 +683,22 @@ void hn_rt_paint_reveal_apply(hn_rt *rt, unsigned long now_ms) {
     if (rt->reveal_mode != HN_REVEAL_PAINT || !rt->paint_eligible) return;
     float u = (float)(double)(now_ms - rt->paint_t0) / paint_reveal_ms();
     if (u <= 0) return;
-    if (u >= 1) { rt->paint_done = 1; return; }
+    if (u >= 1) {
+        rt->paint_done = 1;
+        rt->paint_applied_gen = rt->raster_gen;   /* 收口帧=干净帧, 记账防叠加 */
+        return;
+    }
     /* 干净帧守卫: 本拍尚未重光栅(rt_raster 未跑过) → 内部重出一次。
        遮罩是乘法, 只允许作用于当帧新像素; 壳若只强制 blit 不重光栅,
-       没有这一步就会原地叠加(见 raster_gen 注)。 */
-    if (rt->paint_applied_gen == rt->raster_gen)
-        rt_render(rt);
+       没有这一步就会原地叠加(见 raster_gen 注)。
+       重出走 **ambient 轻路径**(repaint_light + raster, 免 relayout ——
+       铺色期间布局不变, 全量 rt_render 的 relayout 是 4 倍浪费; 且
+       rt_raster 不查 paint_defer, 守卫在挂起窗口也成立, 没有 defer 洞)。 */
+    if (rt->paint_applied_gen == rt->raster_gen) {
+        hn_context_anim_tick(rt->ctx, 0);
+        hn_context_repaint_light(rt->ctx);
+        if (!rt_raster(rt)) return;   /* 重出失败(OOM): 不盖旧帧, 防叠加 */
+    }
     rt->paint_applied_gen = rt->raster_gen;
     /* HN_REVEAL_TRACE=1: 铺色推进取证(与平台 reveal trace 同一环境钮) */
     {

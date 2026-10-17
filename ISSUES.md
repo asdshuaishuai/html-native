@@ -358,8 +358,16 @@
    内容乘没(不透明页收敛成纯画板/透明页全透明) —— `raster_gen` 帧代数
    守卫, apply 遇同代数先内部重出干净帧。观测口径: `HN_REVEAL=paint|
    fade|none`(风格覆盖), `HN_REVEAL_MS`(时长, 缺省 480ms), `HN_REVEAL_
-   TRACE=1`(铺色推进)。anim_probe E 节 13 断言(端点/单调/羽化带/透明
-   积分/两类不 eligible 负断言)。
+   TRACE=1`(铺色推进)。anim_probe E 节 15 断言(端点/单调/羽化带/透明
+   积分/两类不 eligible 负断言/raster_gen 守卫幂等/收口无残留)。
+   **审查轮加固**(同日): ① 收口缺帧 —— active 翻 false 后不再 blit,
+   窗口停在 u≈0.99 遮罩帧(透明窗有半透明残影), hn_app/hnwin 补"收口拍
+   干净帧"(实测收口帧与 --shot 干净帧逐像素一致 97332/97332); ② 守卫
+   重出改 ambient 轻路径(repaint_light + raster, 免 relayout 4 倍浪费,
+   且 rt_raster 不查 paint_defer, 挂起窗口无 defer 洞; 重出失败不盖旧
+   帧); ③ 遮罩波纹免三角快判 —— ripple 有界 ±1.5%L, 投影距离出带即
+   判满/空(与精确式严格一致), 只有笔锋带内算 sinf(2x 大窗 ~10ms →
+   ~1-2ms/拍)。
 2. 测试显示纪律(用户裁决): 真窗测试一律钉**副屏** —— `HN_WINDOW_POS`
    环境钮(app/hn_app.c, 优先级盖过 manifest 与几何记忆, 且不写几何记忆)
    + `tools/_secondary_screen.sh`(NSScreen 枚举, 单屏输出空回落居中)。

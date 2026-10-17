@@ -472,6 +472,30 @@ static void test_paint_reveal(void) {
         }
         /* u≥1 收口: active 落 0 */
         check(hn_rt_paint_reveal_active(rt, 1000 + 481) == 0, "480ms 后收口");
+        /* 干净帧守卫(遮罩原地叠加回归锚): 不重光栅连拍两次 apply, 输出
+           必须与一次 apply 逐位一致 —— 守卫内部重出干净帧, 遮罩不叠加 */
+        hn_rt_reflow(rt);
+        hn_rt_paint_reveal_begin(rt, 2000);
+        hn_rt_paint_reveal_apply(rt, 2000 + 120);
+        unsigned char *snap1 = NULL;
+        {
+            int bw = hn_rt_bitmap_width(rt), bh = hn_rt_bitmap_height(rt);
+            size_t n = (size_t)bw * bh * 4;
+            snap1 = malloc(n);
+            memcpy(snap1, hn_rt_pixels(rt), n);
+            hn_rt_paint_reveal_apply(rt, 2000 + 121);   /* 同帧二次 apply */
+            check(memcmp(snap1, hn_rt_pixels(rt), n) == 0,
+                  "同帧二次 apply 逐位一致(raster_gen 守卫防叠加)");
+        }
+        /* 收口后重光栅 = 全干净帧(无遮罩残留) */
+        hn_rt_reflow(rt);
+        {
+            int bw = hn_rt_bitmap_width(rt), bh = hn_rt_bitmap_height(rt);
+            const unsigned char *p2 = hn_rt_pixels(rt);
+            int i_far = ((size_t)(bh - 2) * bw + (bw - 2)) * 4;
+            check(p2[i_far + 3] == 255, "收口后重光栅 = 全内容(无遮罩残留)");
+        }
+        free(snap1);
         hn_rt_close(rt);
     }
 }

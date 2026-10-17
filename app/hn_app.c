@@ -586,6 +586,7 @@ int main(int argc, char **argv) {
     int ww = hn_rt_width(rt), wh = hn_rt_height(rt);   /* 当前窗口表面尺寸 */
 
     int quit = 0;
+    int prev_painting = 0;   /* 画刷铺色上一拍在途?(收口拍补干净帧用) */
     unsigned long last = hnp_now_ms();
     /* 唤醒节奏(ms): 首帧前按空闲节奏起步, 之后由 hn_rt_frame 的返回值
        逐帧刷新(见循环尾部的"帧节拍接线")。 */
@@ -790,9 +791,17 @@ int main(int argc, char **argv) {
         int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
         last = now;
         /* 桌面画板呈现(画刷铺色)在途: 每拍强制重出新帧 + blit 前盖遮罩 ——
-           遮罩只画在**当帧**位图上, 不存在跨帧叠加。 */
+           遮罩只画在**当帧**位图上(apply 内有 raster_gen 守卫兜底), 不存在
+           跨帧叠加。收口: active 翻 false 的那一拍补一张**干净帧** blit ——
+           不补的话窗口永远停在 u≈0.99 的遮罩帧(内容带半透明尾巴)。 */
         int painting = hn_rt_paint_reveal_active(rt, now);
         if (painting) repaint = 1;
+        else if (prev_painting && !hn_rt_presented(rt)) {
+            hn_rt_reflow(rt);
+            blit_now(rt, w);
+            need_blit = 0;
+        }
+        prev_painting = painting;
         /* 唯一 blit 出口: 本拍排干的事件(need_blit)与帧 tick(repaint)
            合并成一次平台拷贝。直呈帧(presented)已由 drawable 出屏,
            跳过 CPU blit。 */
