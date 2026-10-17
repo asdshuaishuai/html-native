@@ -445,7 +445,6 @@ static const char *hn_lottie_player_src(hn_node *n) {
    返回 0 = 无底色)。只认 #rgb/#rrggbb —— 库的常用面就这么大。 */
 static hn_color lottie_player_bg(hn_node *n) {
     const char *v = hn_node_attr(n, "background");
-    hn_color c = 0;
     if (!v || v[0] != '#') return 0;
     size_t n_dig = strlen(v + 1);
     if (n_dig != 3 && n_dig != 6) return 0;
@@ -1322,7 +1321,7 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
        ity/cg 命中时出的是矩形 BITMAP 贴图 —— 后端帧缓冲只认账本 op,
        不含元素圆角信息, 圆角 canvas 的四角会整块溢出; 这里与下方账本
        重放同款 eff_radius CLIP_PUSH 收口(渲染端 BITMAP 逐像素过裁剪
-       栈, fb_clip_ok 认半径)。命中后端即 POP 返回; 回落账本重放则同
+       栈, fb_clip_cov 认半径)。命中后端即 POP 返回; 回落账本重放则同
        一对 CLIP 原样复用, 指令流与既有口径逐位一致。 */
     hn_cmd cp;
     memset(&cp, 0, sizeof(cp));

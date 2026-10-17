@@ -918,7 +918,7 @@ static void js_rt_free(hn_rt *rt) {
 }
 
 /* hn_set_text(id, text): JS 桥 → 引擎文本更新(与 hn_doc_set_text 同口径) */
-static JSValue js_hn_set_text(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_set_text(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -930,7 +930,7 @@ static JSValue js_hn_set_text(JSContext *ctx, JSValueConst, int argc, JSValueCon
 }
 
 /* hn_set_value(id, value): input 的 value 更新 */
-static JSValue js_hn_set_value(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_set_value(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -948,7 +948,7 @@ static JSValue js_hn_set_value(JSContext *ctx, JSValueConst, int argc, JSValueCo
    把形变参数写到节点上, 下一次网格求值生效。name ∈ look_x/look_y/mouth/
    body_x/body_y(值 -1..1, 引擎侧钳位; 未知名静默忽略)。与 hnSetText 同一
    纪律: 找不到 id → 返回 false, 不抛异常。 */
-static JSValue js_hn_mesh_param(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_mesh_param(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 3 || !JS_IsString(argv[1])) return JS_FALSE;
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -1157,7 +1157,7 @@ static hn_context *js_media_ctx(JSContext *ctx) {
     return doc_ctx_find(b->doc);
 }
 
-static JSValue js_hn_media_play(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_media_play(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 1) return JS_FALSE;
     hn_context *c = js_media_ctx(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -1167,7 +1167,7 @@ static JSValue js_hn_media_play(JSContext *ctx, JSValueConst, int argc, JSValueC
     return JS_NewBool(ctx, ok);
 }
 
-static JSValue js_hn_media_pause(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_media_pause(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 1) return JS_UNDEFINED;
     hn_context *c = js_media_ctx(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -1177,7 +1177,7 @@ static JSValue js_hn_media_pause(JSContext *ctx, JSValueConst, int argc, JSValue
     return JS_UNDEFINED;
 }
 
-static JSValue js_hn_media_seek(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_media_seek(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 2) return JS_FALSE;
     hn_context *c = js_media_ctx(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -1189,7 +1189,7 @@ static JSValue js_hn_media_seek(JSContext *ctx, JSValueConst, int argc, JSValueC
     return JS_NewBool(ctx, ok);
 }
 
-static JSValue js_hn_media_time(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_media_time(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NewFloat64(ctx, 0);
     hn_context *c = js_media_ctx(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -1199,7 +1199,7 @@ static JSValue js_hn_media_time(JSContext *ctx, JSValueConst, int argc, JSValueC
     return JS_NewFloat64(ctx, t);
 }
 
-static JSValue js_hn_media_duration(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_media_duration(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NewFloat64(ctx, -1);
     hn_context *c = js_media_ctx(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -1211,7 +1211,7 @@ static JSValue js_hn_media_duration(JSContext *ctx, JSValueConst, int argc, JSVa
 
 /* hnMediaVolume(id, v): 音量 + 静音联动(契约表: set_volume + set_muted)。
    v>0 = 解除静音, v<=0 = 静音 —— 音量归零与静音同义。 */
-static JSValue js_hn_media_volume(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_media_volume(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
     hn_context *c = js_media_ctx(ctx);
     const char *id = JS_ToCString(ctx, argv[0]);
@@ -1232,7 +1232,7 @@ static JSValue js_hn_media_volume(JSContext *ctx, JSValueConst, int argc, JSValu
 /* hnWasmLoad(bytesOrPath) → id(≥1; 失败 -1)。bytes = ArrayBuffer/Uint8Array;
    字符串按资产路径经资产后端读(引擎不做 I/O, 复用 hn_rt 的资产表)。
    hn_wasm_load 内部复制字节, JS 侧缓冲生命周期无关。 */
-static JSValue js_hn_wasm_load(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_wasm_load(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NewInt32(ctx, -1);
     const unsigned char *bytes = NULL;
     size_t n = 0;
@@ -1268,7 +1268,7 @@ static JSValue js_hn_wasm_load(JSContext *ctx, JSValueConst, int argc, JSValueCo
 }
 
 /* hnWasmCall(id, fn, ...args) → i32 结果; 失败 NaN(契约 §6: args 按 Number→i32) */
-static JSValue js_hn_wasm_call(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_wasm_call(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 2 || argc - 2 > 64) return JS_NAN;
     int32_t id = 0;
     JS_ToInt32(ctx, &id, argv[0]);
@@ -1291,7 +1291,7 @@ static JSValue js_hn_wasm_call(JSContext *ctx, JSValueConst, int argc, JSValueCo
  * CTM 变换、颜色已 RGBA), JSON 序列化后调本桥 → 引擎 hn_canvas_record
  * 落账(协议见 Sources/CHtmlNative/hn_canvas.c 头注)。
  * 返回记录后的账本 op 数(失败 -1; clear 返回清掉的条数)。 */
-static JSValue js_hn_canvas_2d(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_canvas_2d(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     if (argc < 1 || !JS_IsString(argv[0])) return JS_NewInt32(ctx, -1);
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     hn_context *c = b ? (b->ctx ? b->ctx : doc_ctx_find(b->doc)) : NULL;
@@ -1308,7 +1308,7 @@ static JSValue js_hn_canvas_2d(JSContext *ctx, JSValueConst, int argc, JSValueCo
  * 测量缝)。走 hn_canvas_measure —— 引擎 context 的文本后端(与布局排版
  * 同一测量入口); 无后端构建 = 字节数×字号×0.55 估算, 与引擎同口径。
  * 字号按 glue 现值传入(canvas font 只解析字号, 缺省 400/无衬线)。 */
-static JSValue js_hn_measure_text(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+static JSValue js_hn_measure_text(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
     hn_context *c = b ? (b->ctx ? b->ctx : doc_ctx_find(b->doc)) : NULL;
     double px = 10.0;
@@ -2261,11 +2261,6 @@ static JSValue js_hn_get_value(JSContext *ctx, JSValueConst _, int argc, JSValue
 /* ---------------- DOM 标准面桥(getAttribute/querySelector/树操作) ----------------
  * 全部按 id 寻址(与 hnSetText 同一寻址纪律); 失败返回 null/false/空,
  * 不抛异常 —— 语法错(querySelector)由 glue 侧映射为异常。 */
-
-/* 节点 id 读口: find_by_id 走 "id" 属性(find_by_id_rec), 这里同源读取 */
-static const char *node_id_of(hn_node *n) {
-    return n ? hn_node_attr(n, "id") : NULL;
-}
 
 static hn_node *bridge_node(JSContext *ctx, int argc, JSValueConst *argv, int idx) {
     js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);

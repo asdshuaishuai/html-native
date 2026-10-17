@@ -364,9 +364,9 @@ int  hnp_media_position(hnp_media *m, double *sec_out);
 int  hnp_media_state(hnp_media *m, int *ready, int *ended);
 
 /* 拉当前视频帧(RGBA8 非预乘, 原点左上, 顶上到底下)。
-   调用方给缓冲与容量 cap(字节); *w/*h 写实际帧尺寸; *pts_sec 写该帧
+   调用方给缓冲与容量 cap(字节); *w 与 *h 写实际帧尺寸; *pts_sec 写该帧
    显示时间戳(秒)。返回: 1=新帧已写入(内容与上次不同), 0=无新帧(内容未变,
-   *w/*h 仍有效), -1=无视频轨或失败。
+   *w 与 *h 仍有效), -1=无视频轨或失败。
    cap 不足以容纳整帧时写 -1 并返回 -1(调用方按 meta 重新分配后重试)。
    实现注意(实机验证): 实际产出的 CVPixelBuffer 是 '420v' planar,
    请求 BGRA 的 attributes 会被忽略 —— 用 GetBaseAddressOfPlane(0/1)+

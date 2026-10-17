@@ -52,7 +52,7 @@
  *    目标(ppath)= 多边形栅格成 A8 掩码(见 8)后按矩形目标同路平铺。
  * 8. CLIP_PATH(v2): 折线多边形(子路径按 clip_segs 分段闭合)CPU 扫描线
  *    栅格成**二值**掩码纹理(非零环绕, 逐像素中心判定 —— 与 hnsoft
- *    pip_poly/fb_clip_ok 同式同判定), clip_mask_push 入栈绑片段槽 1,
+ *    pip_poly/fb_clip_cov 同式同判定), clip_mask_push 入栈绑片段槽 1,
  *    片段 = 颜色 × 掩码采样。掩码每帧每 op 现栅格(包围盒∩视口定界),
  *    pop+冲批后即 free。嵌套路径裁剪(路径内再入路径)不做 —— 掩码槽单个,
  *    hn_gpu_available 扫到即整帧回退。

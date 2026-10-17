@@ -517,7 +517,7 @@ static void test_stroke_ring(void) {
 }
 
 /* == 圆角裁剪(overflow:hidden)边缘 AA ==
-   旧实现 fb_clip_ok 二值判定 —— 圆角容器内容(头像等)裁边 1px 硬台阶。
+   旧实现 fb_clip_ok(现 fb_clip_cov 前身) 二值判定 —— 圆角容器内容(头像等)裁边 1px 硬台阶。
    断言: 45° 方向裁边上存在中间覆盖像素, 且与同尺寸实心圆(AA4 基线)
    的过渡特征一致。 */
 static void test_rounded_clip_aa(void) {

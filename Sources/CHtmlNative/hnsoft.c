@@ -161,7 +161,7 @@ typedef struct {
         float scale;
     } clip[32];
     int clip_n;
-    int poly_clips;       /* 栈内 poly 条目数(fb_clip_ok 的快速开关) */
+    int poly_clips;       /* 栈内 poly 条目数(fb_clip_cov 的快速开关) */
     unsigned char blend;  /* 当前指令的混合模式(HN_CMD_* 的 blend 字段,
                              render_cmds 逐指令装填; fb_blend 消费) */
 } fb;
@@ -209,7 +209,7 @@ static void fb_push_clip(fb *f, float x0, float y0, float x1, float y1, float r)
 }
 
 /* 精确路径裁剪入栈: bbox = 顶点包围盒与前层的交叠(快速拒绝),
-   poly 判定在 fb_clip_ok 里追加。 */
+   poly 判定在 fb_clip_cov 里追加。 */
 static void fb_push_clip_poly(fb *f, const float *poly, int n,
                               const int *segs, int nsegs, float scale) {
     if (!poly || n < 3 || f->clip_n >= 32) return;
@@ -313,10 +313,6 @@ static float fb_clip_cov(fb *f, int x, int y) {
         }
     }
     return cov;
-}
-
-static int fb_clip_ok(fb *f, int x, int y) {
-    return fb_clip_cov(f, x, y) > 0.0f;
 }
 
 static void fb_blend(fb *f, int x, int y, fcolor c) {
@@ -533,9 +529,9 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
     int grad = (c->gradient || c->grad_kind) != 0;
     int do_stroke = (c->stroke_w > 0 && sc.a > 0.01f);
 
-    /* 行级剪裁外提(与 blend_rgba 同一构造): 接受域用与 fb_clip_ok **同一个**
+    /* 行级剪裁外提(与 blend_rgba 同一构造): 接受域用与 fb_clip_cov **同一个**
        浮点谓词单调走查, 圆角/病态剪裁退回逐像素原路 → 逐位等价。
-       profile: fb_clip_ok 是交互页 Top 叶子之一 —— 全页矩形每像素都重跑
+       profile: fb_clip_cov 是交互页 Top 叶子之一 —— 全页矩形每像素都重跑
        4 次浮点比较 + 裁剪栈读。 */
     int fast = 1, xlo = 0, xhi = f->w - 1;
     float cy0 = 0, cy1 = 0;
@@ -546,7 +542,7 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
         if (!(cx0 == cx0) || !(cy0c == cy0c) || !(cx1 == cx1) || !(cy1c == cy1c) || cr > 0) {
             fast = 0;
         } else if (f->poly_clips > 0) {
-            fast = 0;   /* 路径裁剪: 行级外提覆盖不了, 退回逐像素 fb_clip_ok */
+            fast = 0;   /* 路径裁剪: 行级外提覆盖不了, 退回逐像素 fb_clip_cov */
         } else {
             cy0 = cy0c;
             cy1 = cy1c;
@@ -561,7 +557,7 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
     const int solid = (r == 0.0f && !do_stroke);
 
     for (int py = iy0; py <= iy1; py++) {
-        if (py < 0 || py >= f->h) continue;   /* fb_clip_ok 的帧界, 快路必须保住 */
+        if (py < 0 || py >= f->h) continue;   /* fb_clip_cov 的帧界, 快路必须保住 */
         if (fast && f->clip_n > 0) {
             const float fy = (float)py + 0.5f;
             if (!(fy >= cy0) || !(fy < cy1)) continue;
@@ -1586,10 +1582,10 @@ static const unsigned char *image_pixels_cached(const char *path, int *w, int *h
    脏矩形裁剪都化归到这里)。
    目标 rect (x0,y0,w,h) 拉伸贴出源子矩形。
 
-   扫描线快路(profile: fb_blend/fb_clip_ok 是三页共同的 Top 叶子 ——
-   全幅 blit 每像素都重跑一遍浮点剪裁判定): 把 fb_clip_ok 的接受域
+   扫描线快路(profile: fb_blend/fb_clip_cov 是三页共同的 Top 叶子 ——
+   全幅 blit 每像素都重跑一遍浮点剪裁判定): 把 fb_clip_cov 的接受域
    **一次性**外提成整数 x 区间 + 行级 y 判定, 圆角裁剪与 NaN 坐标退回
-   逐像素原路。等价性靠构造保证: 区间端点用与 fb_clip_ok **同一个**
+   逐像素原路。等价性靠构造保证: 区间端点用与 fb_clip_cov **同一个**
    浮点谓词单调走查(x+0.5f >= cx0 / x+0.5f < cx1), 不引入任何新的
    舍入路径 → 接受集逐位相同。不透明快路(源 alpha=255、组 alpha≥0.999、
    目底 alpha=255 → blend 走双不透明直写)已对 0..255 全值验证
@@ -1607,14 +1603,14 @@ static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int i
         const float cx0 = f->clip[f->clip_n - 1].x0, cy0c = f->clip[f->clip_n - 1].y0;
         const float cx1 = f->clip[f->clip_n - 1].x1, cy1c = f->clip[f->clip_n - 1].y1;
         const float cr = f->clip[f->clip_n - 1].r;
-        /* NaN/非有限剪裁坐标: fb_clip_ok 的比较全为假反而"放行", 语义病态,
+        /* NaN/非有限剪裁坐标: fb_clip_cov 的比较全为假反而"放行", 语义病态,
            不赌快路的区间推导 —— 退回逐像素原路逐位复刻 */
         if (!(cx0 == cx0) || !(cy0c == cy0c) || !(cx1 == cx1) || !(cy1c == cy1c) || cr > 0) {
             fast = 0;
         } else {
             cy0 = cy0c;
             cy1 = cy1c;
-            /* 接受列 ⇔ x+0.5f >= cx0 且 x+0.5f < cx1(与 fb_clip_ok 同式);
+            /* 接受列 ⇔ x+0.5f >= cx0 且 x+0.5f < cx1(与 fb_clip_cov 同式);
                谓词沿 x 单调, 从两端向内走查即得精确接受区间 */
             while (xlo <= xhi && !((float)xlo + 0.5f >= cx0)) xlo++;
             while (xhi >= xlo && !((float)xhi + 0.5f < cx1)) xhi--;
@@ -1653,7 +1649,7 @@ static void blend_rgba(fb *f, const unsigned char *px, int stride, int iw, int i
                 }
             }
         } else {
-            /* 原路(圆角/病态剪裁/混合模式): 逐像素 fb_clip_ok + blend_mode,
+            /* 原路(圆角/病态剪裁/混合模式): 逐像素 fb_clip_cov + blend_mode,
                source-over 下逐位不变 */
             for (int xx = 0; xx < w; xx++) {
                 int sx = (int)(sx0 + (float)xx * sw0 / wdiv);
@@ -1873,9 +1869,18 @@ static void paint_clear_rect(fb *f, const hn_cmd *c, float scale) {
     unsigned char ba = (unsigned char)(b.a * 255.0f + 0.5f);
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
-            if (!fb_clip_ok(f, x, y)) continue;
+            float cov = fb_clip_cov(f, x, y);
+            if (cov <= 0) continue;
             unsigned char *p = &f->px[(y * f->w + x) * 4];
-            p[0] = br; p[1] = bg; p[2] = bb; p[3] = ba;
+            if (cov >= 1) {
+                p[0] = br; p[1] = bg; p[2] = bb; p[3] = ba;
+            } else {
+                /* 裁剪边缘按覆盖回填(SOURCE 语义的分数覆盖), 与填充同口径 */
+                p[0] = (unsigned char)(p[0] * (1 - cov) + br * cov);
+                p[1] = (unsigned char)(p[1] * (1 - cov) + bg * cov);
+                p[2] = (unsigned char)(p[2] * (1 - cov) + bb * cov);
+                p[3] = (unsigned char)(p[3] * (1 - cov) + ba * cov);
+            }
         }
 }
 
@@ -1970,7 +1975,7 @@ unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int he
 /* 公开变体②(主实现, 带 scale): 渲染进**调用方持有的复用缓冲**。
  * 需求字节(w*h*4) > *slot_cap 时 realloc 扩容(只增不减), 然后与变体①
  * 同一条 fb_fill_bg + render_cmds 路径 —— 像素逐位一致。失败返回 NULL
- * 且 *slot/*slot_cap 保持原值(旧缓冲原地保留, 上一帧位图仍可 blit)。 */
+ * 且 *slot 与 *slot_cap 保持原值(旧缓冲原地保留, 上一帧位图仍可 blit)。 */
 unsigned char *hnsoft_render_reuse_scaled(const hn_display_list *dl, int width, int height,
                                           hn_color bg, float scale,
                                           unsigned char **slot, int *slot_cap) {

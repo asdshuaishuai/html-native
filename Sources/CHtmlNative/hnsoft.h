@@ -41,8 +41,8 @@ unsigned char *hnsoft_render_scaled(const hn_display_list *dl, int width, int he
  *     分配), 渲染进该缓冲并返回它;
  *   - 每帧先全像素覆盖底色再跑同一条指令循环(与 hnsoft_render 同一条
  *     渲染核心), 像素输出**逐位一致** —— 差别只在缓冲归谁分配;
- *   - 失败返回 NULL 且 *slot/*slot_cap 保持原值(旧缓冲原地保留, 上一帧
- *     位图仍可 blit)。
+ *   - 失败返回 NULL 且 *slot 与 *slot_cap 保持原值(旧缓冲原地保留, 上一
+ *     帧位图仍可 blit)。
  * 契约: 缓冲生命周期归调用方(用完 free(*slot)); hnsoft 不缓存不释放。
  * 动画/媒体宿主每帧调用即可消除"每帧 malloc+free 一张全页位图"的
  * 分配器 churn(920x520 下 ~2MB × 帧率)。 */

@@ -347,6 +347,17 @@
 ## 待裁决
 
 1. 网络层已落地为运行时系统 transport；后续可继续扩展代理、证书策略和更多响应头映射。
+2. 收尾清理轮(2026-10-17): ① **回归修**: fb_clip_cov 的 ±0.5px 外扩早出框
+   误用于直角裁剪 —— clip 外缘渗出半像素且与 blend_rgba 快路径谓词不一致;
+   现外扩只属于圆角羽化带, 直角走严格 bbox(与快路径逐位同式)。
+   ② clearRect 裁剪边缘从"任一覆盖即全填"改**分数覆盖回填**(SOURCE 语义
+   乘 cov), 与填充同口径。 ③ 死代码: fb_clip_ok 包装(无调用者)、
+   hn_rt node_id_of(无调用者)、hn_paint lottie_player_bg 未用变量删除。
+   ④ 警告清零: hnsoft.h/hnsoft.c/hn_platform.h 嵌套 `/*` 注释、hn_rt
+   13 处匿名参数补名(QuickJS `_` 惯例) —— hnsoft/hn_context/hn_paint/
+   hn_rt 四核心 -Wall -Wunused -Wcomment 全 0。 ⑤ 残缺补全: render_probe/
+   mesh_probe/sysbridge_probe 三个有断言无运行器的探针补齐 tools/*.sh
+   薄封装(此前只能手工编译), 全量 23 探针族绿。
 2. 桌面画板呈现(画刷铺色)已落地(2026-10-17): "内容像颜料直接画上桌面"。
    **形态语义(用户两轮裁决)**: 画上去 = **逐像素透明窗**专属 —— 未铺区域
    alpha=0 直接透出桌面; 不透明窗(标题栏/无边框不透明)会先出现一块
