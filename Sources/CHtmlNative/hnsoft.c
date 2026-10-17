@@ -468,6 +468,22 @@ static float quad_grad_corner_t(const hn_cmd *c, int k, float scale) {
 
 /* ---------------- 矩形(填充/渐变/描边) ---------------- */
 
+/* 边缘像素 4-tap 旋转网格超采样(RGSS): 单像素单采样把 SDF 覆盖率量化成
+   1px 台阶 —— 大圆/大圆角的楼梯感(用户实测截图)即此。4 个亚像素 tap 让
+   边缘方向有 5 级覆盖过渡, 台阶散成短渐变。只对边缘像素调用(内部像素
+   走 solid 快路, 开销与周长成正比)。 */
+static float sd_rounded_aa4(float fx, float fy, float x, float y, float w, float h, float r) {
+    float c0 = 0.5f - sd_rounded(fx - 0.25f, fy - 0.125f, x, y, w, h, r);
+    float c1 = 0.5f - sd_rounded(fx + 0.25f, fy + 0.125f, x, y, w, h, r);
+    float c2 = 0.5f - sd_rounded(fx - 0.125f, fy + 0.25f, x, y, w, h, r);
+    float c3 = 0.5f - sd_rounded(fx + 0.125f, fy - 0.25f, x, y, w, h, r);
+    c0 = c0 < 0 ? 0 : (c0 > 1 ? 1 : c0);
+    c1 = c1 < 0 ? 0 : (c1 > 1 ? 1 : c1);
+    c2 = c2 < 0 ? 0 : (c2 > 1 ? 1 : c2);
+    c3 = c3 < 0 ? 0 : (c3 > 1 ? 1 : c3);
+    return (c0 + c1 + c2 + c3) * 0.25f;
+}
+
 static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     float x = (c->x - ox) * scale + ox, y = (c->y - oy) * scale + oy;
     float w = c->w * scale, h = c->h * scale, r = c->radius * scale;
@@ -540,6 +556,9 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
                 cov = 0.5f - d;
                 if (cov <= 0) continue;
                 if (cov > 1) cov = 1;
+                /* 边缘像素: 4-tap 超采样(锯齿治理); 渐变色仍取像素中心 */
+                if (cov > 0.02f && cov < 0.98f)
+                    cov = sd_rounded_aa4(fx, fy, x, y, w, h, r);
                 if (grad) col = grad_at(c, fx, fy, scale); else col = base;
             }
             col.a *= cov;

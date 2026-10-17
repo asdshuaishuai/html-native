@@ -427,6 +427,43 @@ static void test_input(void) {
 }
 
 /* == 光栅与 PNG(位图即窗口所见) == */
+/* 圆形边缘 AA 质量测试: 沿理想圆周采样, 统计过渡像素占比。
+   单采样覆盖率的锯齿特征 = 圆周上大半样本全 0/全 1(硬跳变);
+   4-tap 边缘超采样后过渡样本占比显著上升(AA4 ≥ 20%)。 */
+static void test_circle_edge_aa(void) {
+    printf("== 圆形边缘 AA(AA4 超采样) ==\n");
+    const char *html =
+        "<html><head><style>html,body{margin:0;background:#ffffff}</style></head><body>"
+        "<div style=\"position:absolute;left:60;top:30;width:280;height:280;"
+        "border-radius:50%;background:#7c5cff\"></div></body></html>";
+    hn_doc *doc = hn_parse_html(html, strlen(html));
+    hn_context *ctx = hn_context_create();
+    hn_context_set_doc(ctx, doc);
+    hn_context_layout(ctx, 400, 340, NULL);
+    const hn_display_list *dl = hn_context_display_list(ctx);
+    unsigned char *px = dl ? hnsoft_render(dl, 400, 340, 0xFFFFFFFFu) : NULL;
+    check(px != NULL, "圆渲染出位图");
+    if (!px) { hn_context_destroy(ctx); return; }
+
+    /* 圆心/半径按声明几何: left=60 w=280 → cx=200; top=30 h=280 → cy=170 */
+    const float cx = 60 + 140, cy = 30 + 140, R = 140.0f;
+    int total = 0, inter = 0;
+    for (int a = 0; a < 3600; a++) {
+        float ang = (float)a * 0.1f * 3.1415926f / 180.0f;
+        int x = (int)(cx + (R + 0.5f) * cosf(ang));
+        int y = (int)(cy + (R + 0.5f) * sinf(ang));
+        /* G 通道: 紫底 #7c5cff G=0x5c=92, 白底 G=255 */
+        int g = px[((long)y * 400 + x) * 4 + 1];
+        total++;
+        if (g > 130 && g < 220) inter++;
+    }
+    float ratio = (float)inter / (float)total;
+    check(ratio >= 0.20f, "圆周过渡像素占比 ≥ 20%(AA4 平滑, 单采样 ≈ 13%)");
+    check(ratio <= 0.60f, "过渡占比上限(防全图虚化回归)");
+    free(px);
+    hn_context_destroy(ctx);
+}
+
 static void test_raster(void) {
     printf("== 光栅/PNG ==\n");
     hn_doc *doc = hn_parse_html(DOC_HTML, strlen(DOC_HTML));
@@ -613,6 +650,7 @@ int main(int argc, char **argv) {
     test_display_list();
     test_anim();
     test_input();
+    test_circle_edge_aa();
     test_raster();
     test_rounded();
 

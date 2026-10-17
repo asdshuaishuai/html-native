@@ -309,6 +309,13 @@
 - hn_three.c --advance 确定性对 hn-three 不成立(文档已修正口径)
 - ~~CG 后端 hn_pe surface 尺寸失败残留旧尺寸(debug 构建触发断言)~~ **已修+回归锚定**: 修复在 fef4c63(失败路径先清零槽 w/h 并 memset, PX_SurfaceFree 由 w!=0 守卫)。新增 `tools/pe_surface_probe.{c,sh}`: PE 池 32MB 上界使超大 surface(4000x3500≈56MB)创建必然失败 —— 正常→失败→正常三段序列断言无残留复用(normal+ASan 双跑); SDK 缺席时 skip。
 - GPU: 直呈/圆角 GPU 化/合成层缓存
+- ~~圆/圆角边缘 1px 台阶锯齿~~ **已修+回归锚定**(2026-10-17): 根因是
+  paint_rect 对 SDF 覆盖率单像素单采样 —— 覆盖量化成 1px 台阶, 大圆/大
+  圆角呈楼梯感(用户圆桌应用截图实证)。修复 `sd_rounded_aa4`(4-tap 旋转
+  网格 RGSS 亚像素超采样, 5 级覆盖过渡), 仅边缘像素(cov∈(0.02,0.98))
+  调用, 内部像素仍走 solid 快路, 开销与周长成正比。`render_probe` 圆边
+  断言: border-radius:50% 圆周 3600 采样, 中间 G 通道占比断言 ∈[0.20,
+  0.60](实测 0.265; 修复前单采样 ≈0)。GPU 端 MSAA 路径不受此影响。
 - hn-drag / hn-dismiss / --ttl 到期自毁 / hn new / hn dev
 
 ---
