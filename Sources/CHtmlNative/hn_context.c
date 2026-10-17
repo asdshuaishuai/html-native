@@ -2452,7 +2452,8 @@ void hn_doc_manifest(const hn_doc *doc, hn_manifest *out) {
     out->applet = NULL;
     /* 桌宠形态缺省: 普通层级/有边框/不穿透/不跨空间(与既有行为一致) */
     out->level = HN_LEVEL_NORMAL;
-    out->frameless = 0;
+    out->frameless = 1;     /* 默认无标题栏(hn 语义: 窗口即画布, 标题栏是
+                               例外 —— hn-frameless="0" 显式要系统标题栏) */
     out->click_through = 0;
     out->spaces_all = 0;
     if (!doc || !doc->root) return;

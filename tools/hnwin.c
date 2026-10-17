@@ -187,7 +187,8 @@ typedef struct {
        在引擎单源 hnsoft_paint_mask_cov, 本壳直接调); tick 时钟 = GetTickCount */
     DWORD paint_t0;         /* 0 = 未开始/结束 */
     int paint_done;
-    int paint_eligible;     /* 无窗形态才 1(透明/无边框/popup·layer) */
+    int frameless;          /* manifest: 无边框(hn 默认 1) */
+    int paint_eligible;     /* 逐像素透明窗才 1 */
     int reveal_mode;        /* hn.h hn_reveal: 0=paint 1=fade 2=none */
     unsigned int paint_bg;  /* 画纸底色 0xRRGGBBAA(不透明窗未铺区域混合目标) */
 } app_t;
@@ -526,6 +527,28 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_NCHITTEST: {
+        /* 无边框窗的拖拽面: 命中"非交互内容" = HTCAPTION(系统拖动),
+           与 macOS movableByWindowBackground 同观感; 交互元素(hx 载体/
+           input 控件/手型光标/可滚动区)照常 HTCLIENT 收点击。 */
+        if (!g_app.frameless) break;
+        POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
+        ScreenToClient(hwnd, &pt);
+        hn_node *n = hn_context_hit_node(g_app.ctx, (float)pt.x, (float)pt.y);
+        if (!n) return HTCAPTION;
+        /* 交互元素: 手型光标/输入控件/禁用件/hx 载体/可滚动区 */
+        if (hn_node_cursor(n) == 1) break;
+        if (hn_node_input_kind(n) != 0) break;
+        if (hn_node_attr(n, "hx-get") || hn_node_attr(n, "hx-post") ||
+            hn_node_attr(n, "hx-trigger")) break;
+        if (hn_context_scrollable_at(g_app.ctx, (float)pt.x, (float)pt.y)) break;
+        /* 祖先链上有交互载体 → HTCLIENT(点的是交互内容) */
+        if (hn_node_ancestor_with_attr(n, "hx-get") ||
+            hn_node_ancestor_with_attr(n, "hx-post") ||
+            hn_node_ancestor_with_attr(n, "hx-trigger"))
+            return HTCLIENT;
+        return HTCAPTION;
+    }
     case WM_LBUTTONDOWN:
         on_click(hwnd, LOWORD(lp), HIWORD(lp));
         return 0;
@@ -803,6 +826,7 @@ int main(int argc, char **argv) {
     g_app.ctx = ctx;
     g_app.w = W; g_app.h = H;
     g_app.transparent = man.transparent;
+    g_app.frameless = man.frameless;
     /* 呈现动画风格: 文档声明为底, HN_REVEAL 环境钮覆盖(与 hn_app 同纪律)。
        画刷 eligible = 逐像素透明窗(与 hn_rt 口径一致: 未铺区域透出桌面)。 */
     g_app.paint_eligible = g_app.transparent;
@@ -859,9 +883,12 @@ int main(int argc, char **argv) {
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    /* client 区正好 W×H */
+    /* client 区正好 W×H。hn 语义: 窗口默认无标题栏(hn_doc_manifest
+       frameless 缺省 1) —— borderless = WS_POPUP(无装饰), hn-frameless="0"
+       才给 WS_OVERLAPPEDWINDOW。 */
+    DWORD winstyle = man.frameless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
     RECT r = { 0, 0, W, H };
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    AdjustWindowRect(&r, winstyle, FALSE);
 
     /* 标题: manifest 里是 UTF-8, 转 UTF-16 后进宽字符 API */
     wchar_t *title_w = utf8_to_w(man.title && man.title[0] ? man.title : "hnwin");
@@ -871,7 +898,7 @@ int main(int argc, char **argv) {
        做 alpha 渐显(含不透明窗 — layered 对不透明内容无观感损耗);
        开窗即隐(alpha 0), 首帧渲染完成后 16ms WM_TIMER 步进淡入。 */
     DWORD exstyle = WS_EX_LAYERED;
-    HWND hwnd = CreateWindowExW(exstyle, cls, title_w, WS_OVERLAPPEDWINDOW,
+    HWND hwnd = CreateWindowExW(exstyle, cls, title_w, winstyle,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
                                 r.right - r.left, r.bottom - r.top,
                                 NULL, NULL, wc.hInstance, NULL);

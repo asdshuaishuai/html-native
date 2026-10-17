@@ -330,7 +330,10 @@
   调用, 内部像素仍走 solid 快路, 开销与周长成正比。`render_probe` 圆边
   断言: border-radius:50% 圆周 3600 采样, 中间 G 通道占比断言 ∈[0.20,
   0.60](实测 0.265; 修复前单采样 ≈0)。GPU 端 MSAA 路径不受此影响。
-- **macos_deep_probe ② 两呈现路径截图分歧(存量, 待专项)**(2026-10-17 实测):
+- ~~macos_deep_probe ② 两呈现路径截图分歧(存量, 待专项)~~ **已消解**
+  (2026-10-17): 根源是有标题栏窗口的 overlay 标题栏语义 —— 窗口默认
+  无边框后两路径逐位一致, 探针转绿(见上文"窗口默认无标题栏"裁决)。
+  原始实测记录:
   有标题栏窗口(static.html 360x360)在当前 macOS(darwin 27)上, 新直呈
   路径(drawRect)与旧 NSImage 回退路径(HN_BLIT_FALLBACK=1)窗口截图
   逐位对照失败 —— 直呈臂 1:1 忠实引擎位图(与 --shot 地面真值逐列吻合,
@@ -347,7 +350,17 @@
 ## 待裁决
 
 1. 网络层已落地为运行时系统 transport；后续可继续扩展代理、证书策略和更多响应头映射。
-2. 收尾清理轮(2026-10-17): ① **回归修**: fb_clip_cov 的 ±0.5px 外扩早出框
+2. **窗口默认无标题栏(hn 语义裁决, 2026-10-17)**: hn 产出的窗口默认
+   frameless(窗口即画布, 标题栏是例外) —— `hn_doc_manifest` frameless
+   缺省改 1, `hn-frameless="0"` 显式要系统标题栏。三平台对齐: macOS
+   style=0 / Linux _MOTIF_WM_HINTS(原有) + **hnwin 补齐**(此前从不读
+   frameless, 恒 WS_OVERLAPPEDWINDOW —— 现按声明 WS_POPUP, 并补
+   WM_NCHITTEST 背景拖拽: 非交互内容=HTCAPTION, hx 载体/输入控件/
+   手型光标/可滚动区=HTCLIENT, 与 macOS movableByWindowBackground 同
+   观感)。**副产品**: macos_deep_probe ② "两呈现路径截图分歧(存量待
+   专项)"随之消解 —— 分歧根源是有标题栏窗口的 overlay 标题栏语义,
+   默认无边框后 drawRect 直呈与 NSImage 回退逐位一致, 该探针转绿。
+3. 收尾清理轮(2026-10-17): ① **回归修**: fb_clip_cov 的 ±0.5px 外扩早出框
    误用于直角裁剪 —— clip 外缘渗出半像素且与 blend_rgba 快路径谓词不一致;
    现外扩只属于圆角羽化带, 直角走严格 bbox(与快路径逐位同式)。
    ② clearRect 裁剪边缘从"任一覆盖即全填"改**分数覆盖回填**(SOURCE 语义
