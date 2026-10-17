@@ -43,6 +43,8 @@ set -u  # 不用 -e: 断言里自己收 failed 计数
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="${1:-$ROOT/dist}"
 HN_APP="$DIST/hnapp-macos-arm64"
+# 真窗钉副屏(不占主屏); 单屏时为空 → 缺省主屏居中, 行为不变
+export HN_WINDOW_POS="$(bash "$ROOT/tools/_secondary_screen.sh" 520 820)"
 HN_HEADLESS="$DIST/hnapp-macos-headless"
 DEMO="$ROOT/examples/media-demo.html"
 SBX="$(mktemp -d /tmp/hn-media-probe-XXXXXX)"

@@ -455,9 +455,22 @@ int main(int argc, char **argv) {
     wd.y = HNP_WINDOW_POS_AUTO;
     /* 环境钮(验收脚本/调试): HN_CLICK_THROUGH=0|1 覆盖文档声明,
        便于对同一份桌宠页面演示"幽灵模式"两个态而不改文档。 */
+    int pos_env = 0;
     {
         const char *ct = getenv("HN_CLICK_THROUGH");
         if (ct && *ct) wd.click_through = atoi(ct) ? 1 : 0;
+    }
+    /* 环境钮 HN_WINDOW_POS="X,Y"(探针/验收副屏钉位, tools/_secondary_screen.sh
+       产出): 优先级最高 —— 盖过 manifest 与几何记忆, 让测试窗口落副屏,
+       不与开发者主屏争焦点。坐标口径同 manifest @x,y(左上原点 y 向下)。 */
+    {
+        const char *p = getenv("HN_WINDOW_POS");
+        if (p && *p) {
+            int px, py;
+            if (sscanf(p, "%d,%d", &px, &py) == 2) {
+                wd.x = px; wd.y = py; pos_env = 1;
+            }
+        }
     }
     /* ---- 几何记忆读回(必须赶在开窗前 —— 位置随 desc 进开窗调用) ----
        manifest 显式 @x,y 时作者声明优先(此前只拿它挡记忆、从未赋给
@@ -554,8 +567,10 @@ int main(int argc, char **argv) {
         int gx, gy;
         if (hnp_window_origin(w, &gx, &gy)) {
             geo.x = gx; geo.y = gy;
-            geo_have = 1;
-            geo_store(gpath, &geo);
+            /* HN_WINDOW_POS 钉位不进几何记忆 —— 探针的副屏摆位若落账,
+               用户下次正常开窗会被钉到测试位; 整条记忆路径静默。 */
+            geo_have = pos_env ? 0 : 1;
+            if (geo_have) geo_store(gpath, &geo);
         }
     }
 

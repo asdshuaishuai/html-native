@@ -30,6 +30,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/tools/_engine_sources.sh"   # hn_sources_full / hn_probe_compile(现场编译口径)
 DIST="${1:-$ROOT/dist}"
 HN_APP="$DIST/hnapp-macos-arm64"
+# 真窗钉副屏(不占主屏); 单屏时为空 → 缺省主屏居中, 行为不变
+export HN_WINDOW_POS="$(bash "$ROOT/tools/_secondary_screen.sh" 480 700)"
 PET="$ROOT/examples/pet.html"
 SBX="$(mktemp -d /tmp/hn-hidpi-probe-XXXXXX)"
 

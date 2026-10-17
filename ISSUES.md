@@ -316,6 +316,16 @@
   调用, 内部像素仍走 solid 快路, 开销与周长成正比。`render_probe` 圆边
   断言: border-radius:50% 圆周 3600 采样, 中间 G 通道占比断言 ∈[0.20,
   0.60](实测 0.265; 修复前单采样 ≈0)。GPU 端 MSAA 路径不受此影响。
+- **macos_deep_probe ② 两呈现路径截图分歧(存量, 待专项)**(2026-10-17 实测):
+  有标题栏窗口(static.html 360x360)在当前 macOS(darwin 27)上, 新直呈
+  路径(drawRect)与旧 NSImage 回退路径(HN_BLIT_FALLBACK=1)窗口截图
+  逐位对照失败 —— 直呈臂 1:1 忠实引擎位图(与 --shot 地面真值逐列吻合,
+  顶部 20..28px 被系统标题栏覆盖, 疑似系统 overlay 标题栏语义);
+  回退臂被 NSImageView 按视野比例缩放 0.92(200 宽红框实测 184, 垂直
+  332/360 压缩+水平居中)。钉副屏/主屏都复现(主屏 diff_px=111359 更重),
+  与当日改动(副屏钉位/AA4)无关 —— 探针 ② 本机历史绿是在旧 macOS 上。
+  修复方向: 回退臂 NSImageView 设 NSImageScaleNone 1:1 起画, 并核实
+  contentRect/frame 语义; 与"macOS Metal 真直呈"阶段同场收口。
 - hn-drag / hn-dismiss / --ttl 到期自毁 / hn new / hn dev
 
 ---
@@ -323,3 +333,8 @@
 ## 待裁决
 
 1. 网络层已落地为运行时系统 transport；后续可继续扩展代理、证书策略和更多响应头映射。
+2. 测试显示纪律(用户裁决): 真窗测试一律钉**副屏** —— `HN_WINDOW_POS`
+   环境钮(app/hn_app.c, 优先级盖过 manifest 与几何记忆, 且不写几何记忆)
+   + `tools/_secondary_screen.sh`(NSScreen 枚举, 单屏输出空回落居中)。
+   已接线: perf/hidpi/media_window/macos_deep 四探针; 后续新增真窗探针
+   照此办理, 不再占开发者主屏。

@@ -264,4 +264,11 @@ hn event myapp click --target btn   # 注入事件验证交互
 | `HN_FETCH_TIMEOUT_MS=N` | HTTP 超时（缺省 20000） |
 | `HN_ANIM_FPS=16\|30\|60` | 环境动画节拍（缺省 30） |
 | `HN_RENDER_SCALE=1\|2` | 渲染缩放覆盖（真窗 Retina 缺省 2） |
+| `HN_WINDOW_POS="X,Y"` | 窗口钉位（左上原点; 探针真窗钉副屏用, 不写几何记忆） |
 | `HN_GPU=metal HN_GPU_PRESENT=1` | hnapp 真窗 GPU 直呈（不透明窗; 零回读） |
+
+真窗探针钉副屏（不占开发者主屏）：
+
+```bash
+export HN_WINDOW_POS="$(bash tools/_secondary_screen.sh 360 360)"   # 单屏输出空→回落居中
+```
