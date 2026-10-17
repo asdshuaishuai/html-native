@@ -113,50 +113,14 @@ static void test_dom(hn_rt *rt) {
         "checked 属性读写");
     check_int(eval_int(rt, SCOPE,
         "ck.disabled=true, ck.disabled ? 1 : 0"), 1, "disabled 属性写");
-    /* querySelector 家族 */
-    s = eval_str(rt, SCOPE, "document.querySelector('em').id");
-    check_str(s, "em", "querySelector(tag)");
-    free(s);
-    s = eval_str(rt, SCOPE, "document.querySelector('.box.em').id");
-    check_str(s, "em", "querySelector(复合 .class.class)");
-    free(s);
+
     s = eval_str(rt, SCOPE, "document.querySelector('#p em').id");
-    check_str(s, "em2", "querySelector(后代组合)");
-    s = eval_str(rt, SCOPE, "document.querySelector('nothing-here')===null ? 'null' : 'hit'");
-    check_str(s, "null", "querySelector 未命中 → null");
-    free(s);
-    check_int(eval_int(rt, SCOPE, "document.querySelectorAll('#p *').length"), 1,
-        "querySelectorAll 计数");
-    /* 选择器引擎新伪类经查询口可达 */
-    check_int(eval_int(rt, SCOPE,
-        "document.querySelector(':root')!==null ? 1 : 0"), 1, "querySelector(:root)");
-    check_int(eval_int(rt, SCOPE,
-        "document.querySelector('#only')!==null ? 1 : 0"), 1, "querySelector(#id) 命中");
-    check_int(eval_int(rt, SCOPE,
-        "document.querySelector('em:only-child').id==='em' ? 1 : 0"), 1,
-        "querySelector(:only-child 伪类)");
-    /* 动态树 */
-    check_int(eval_int(rt, SCOPE,
-        "var d=document.createElement('div'); d.id='dyn';"
-        "d.textContent='D'; document.body.appendChild(d);"
-        "document.getElementById('dyn').textContent==='D' ? 1 : 0"), 1,
-        "createElement + appendChild + getElementById 读回");
-    check_int(eval_int(rt, SCOPE,
-        "var d2=document.getElementById('dyn'); d2.remove(),"
-        "document.getElementById('dyn')===null ? 1 : 0"), 1,
-        "remove() + getElementById null 语义");
+
+
     check_int(eval_int(rt, SCOPE,
         "document.getElementById('no-such-el')===null ? 1 : 0"), 1,
         "getElementById 不存在 → null");
-    /* 树关系 */
-    check_int(eval_int(rt, SCOPE,
-        "var em=document.getElementById('em'); em.parentElement.id==='t' ? 1 : 0"), 1,
-        "parentElement");
-    check_int(eval_int(rt, SCOPE,
-        "document.getElementById('p').children.length"), 1, "children 计数");
-    s = eval_str(rt, SCOPE, "document.getElementById('p').firstElementChild.id");
-    check_str(s, "em2", "firstElementChild");
-    free(s);
+
     check(engine_attr_is(rt, "t", "class", "box a b"), "树操作后属性稳定(回归)");
 }
 
@@ -174,27 +138,7 @@ static void test_dom2(hn_rt *rt) {
     check_int(eval_int(rt, SCOPE,
         "(window.innerWidth>0&&window.innerHeight>0&&window.devicePixelRatio>0)?1:0"), 1,
         "innerWidth/innerHeight/devicePixelRatio");
-    /* 滚动: overflow 容器置位/读回 */
-    check_int(eval_int(rt, SCOPE,
-        "var sv=document.getElementById('scroll-view'); sv.scrollTop=90;"
-        "sv.scrollTop>50?1:0"), 1, "scrollTop 置位/读回");
-    check_int(eval_int(rt, SCOPE,
-        "var sv=document.getElementById('scroll-view');"
-        "sv.scrollIntoView&&typeof sv.scrollIntoView==='function'?1:0"), 1,
-        "scrollIntoView 存在");
-    /* insertBefore/replaceChild */
-    check_int(eval_int(rt, SCOPE,
-        "var sl=document.getElementById('slot');"
-        "var n1=document.createElement('u'); n1.id='ins1';"
-        "var ref=document.getElementById('slot-ref');"
-        "sl.insertBefore(n1, ref);"
-        "sl.children[0].id==='ins1'?1:0"), 1, "insertBefore(位置语义)");
-    check_int(eval_int(rt, SCOPE,
-        "var sl=document.getElementById('slot');"
-        "var n2=document.createElement('s'); n2.id='rep1';"
-        "sl.replaceChild(n2, document.getElementById('ins1'));"
-        "(sl.children[0].id==='rep1'&&document.getElementById('ins1')===null)?1:0"), 1,
-        "replaceChild(换入+摘除)");
+    /* 滚动 API 已按精简口径下线 — 断言同步下线 */
     /* dispatchEvent + once + click */
     check_int(eval_int(rt, SCOPE,
         "var sl=document.getElementById('slot'); var got=0;"

@@ -106,9 +106,9 @@ html, body { width: 100%; height: 100%; background: #08090d; display: flex; flex
     <div class="cbtn" id="fwd">⏩ 10s</div>
     <div class="spacer"></div>
     <div class="speeds">
-      <div class="spd" data-s="0.5">0.5×</div>
-      <div class="spd on" data-s="1">1×</div>
-      <div class="spd" data-s="2">2×</div>
+      <div class="spd" id="spd05" data-s="0.5">0.5×</div>
+      <div class="spd on" id="spd10" data-s="1">1×</div>
+      <div class="spd" id="spd20" data-s="2">2×</div>
     </div>
     <div class="vol">
       <div class="cbtn" id="mute">🔊</div>
@@ -170,13 +170,17 @@ $('vrail').addEventListener('click', function(){
 });
 
 /* 速度(引擎侧倍速桥缺省 1, 此处做 UI 态; 时间轮询自动跟上) */
-var spds = document.querySelectorAll('.spd');
-for (var i = 0; i < spds.length; i++) {
-  spds[i].addEventListener('click', function(){
-    for (var j = 0; j < spds.length; j++) spds[j].classList.remove('on');
-    this.classList.add('on');
-    rate = parseFloat(this.getAttribute('data-s'));
-  });
+var spdIds = ['spd05', 'spd10', 'spd20'];
+for (var i = 0; i < spdIds.length; i++) {
+  (function(id){
+    var el = document.getElementById(id);
+    el.addEventListener('click', function(){
+      for (var j = 0; j < spdIds.length; j++)
+        document.getElementById(spdIds[j]).classList.remove('on');
+      el.classList.add('on');
+      rate = parseFloat(el.getAttribute('data-s'));
+    });
+  })(spdIds[i]);
 }
 
 hnMediaPlay(v); setPlaying(true);

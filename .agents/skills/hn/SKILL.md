@@ -223,14 +223,14 @@ document.body / document.documentElement
 document.addEventListener / window.addEventListener  // 冒泡链尾
 el.getBoundingClientRect()                            // {left,top,right,bottom,width,height,x,y}
 el.offsetWidth / offsetHeight / offsetLeft / offsetTop
-el.scrollTop / scrollLeft (读写) / el.scrollIntoView()
-el.insertBefore(n, ref) / el.replaceChild(n, old)      // 移动语义
 el.dispatchEvent({type:'custom', detail: 7})           // 合成事件(冒泡链全程)
 el.click()                                             // 合成 click(含原生默认动作)
 addEventListener(type, fn, {once: true})               // once/capture 支持
 window.innerWidth / innerHeight / devicePixelRatio
 canvas.width = 300                                     // 属性写 → 位图变化 + 画布清空
 ```
+(2026-10-17 精简口径: querySelector/classList/dataset/style/createElement 等
+轻能力保留, querySelector/树遍历/scroll 已下线 — 元素定位走 getElementById。)
 事件对象含 `type/target/currentTarget/clientX/Y/key/code/detail/shift...` +
 `preventDefault/stopPropagation`（与浏览器同签名）。
 

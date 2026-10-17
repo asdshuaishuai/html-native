@@ -261,7 +261,20 @@
 - 视觉验收: HN_REVEAL_TRACE 实测 alpha 斜坡
   0→0.79→0.92→0.96→0.99→1.00(ease-out)。
 
-### 已知问题(仍开放)
+### 2026-10-17 JS 面精简裁决(用户裁决: 精简保留)
+
+- **保留**(轻能力, H5 页面常用): 属性读写四件套、classList、dataset、
+  style 代理、getBoundingClientRect/offset 四件套、checked/disabled/hidden、
+  textContent/value、focus/dispatchEvent/click、width/height 属性写、
+  getElementById(null 语义)、addEventListener(once)。
+- **下线**(偏浏览器重能力): querySelector/querySelectorAll、
+  createElement、insertBefore/replaceChild、parentElement/children/
+  first·lastElementChild、scrollTop/scrollLeft/scrollIntoView。
+  dom_probe 同步裁剪(53→36 断言); video-player 示例改 getElementById。
+- 裁剪过程中的教训: 对 800 行 C 字符串胶水做**行级手术**极易切碎多行
+  语句 —— 最终以 node --check 验证整块重写(提取→语法校验→回填)收口。
+- canvas.width/height 动态改尺寸(hn_canvas_sync_element_size)、
+  ctx.filter/letterSpacing/reset 等与本裁决无关, 均保留。
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。
 - neb3 原生纹理直入合成器(免 CPU 回读)为下一阶段: 需要 wgpu↔Metal 设备互操作与跨队列同步设计, 计划独立推进。

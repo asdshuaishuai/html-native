@@ -2198,101 +2198,6 @@ static JSValue js_hn_tag(JSContext *ctx, JSValueConst _, int argc, JSValueConst 
     return JS_NewString(ctx, (n && n->tag) ? n->tag : "");
 }
 
-/* querySelector/querySelectorAll: 返回 id(串)或 id 数组。
- * 桥按 id 寻址 —— 命中元素没有 id 属性时(body/html 常态)现场补一个
- * 唯一 el-N(与 find_by_id 同源, 下次查询稳定复用), 否则永远查得到
- * 元素却拿不到引用。 */
-static const char *query_ensure_id(js_bridge *b, hn_node *n) {
-    const char *eid = node_id_of(n);
-    if (eid && *eid) return eid;
-    char idbuf[32];
-    for (int i = 1; i < 1000000; i++) {
-        snprintf(idbuf, sizeof(idbuf), "el-%d", i);
-        if (!hn_doc_find_by_id(b->doc, idbuf)) break;
-    }
-    hn_node_set_attr(n, "id", idbuf);
-    return hn_node_attr(n, "id");
-}
-
-static JSValue js_hn_query(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv, int all) {
-    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
-    if (!b || !b->doc || argc < 1 || !JS_IsString(argv[0])) return all ? JS_NewArray(ctx) : JS_NULL;
-    const char *sel = JS_ToCString(ctx, argv[0]);
-    hn_node *hits[256];
-    int n = sel ? hn_doc_query_selector(b->doc, sel, b->ctx, hits, 256) : 0;
-    JSValue r;
-    if (all) {
-        r = JS_NewArray(ctx);
-        for (int i = 0; i < n; i++) {
-            const char *eid = query_ensure_id(b, hits[i]);
-            JSValue s = JS_NewString(ctx, eid ? eid : "");
-            JS_SetPropertyUint32(ctx, r, (uint32_t)i, s);
-        }
-    } else {
-        if (n > 0) {
-            const char *eid = query_ensure_id(b, hits[0]);
-            r = eid ? JS_NewString(ctx, eid) : JS_NULL;
-        } else {
-            r = JS_NULL;
-        }
-    }
-    if (sel) JS_FreeCString(ctx, sel);
-    return r;
-}
-
-static JSValue js_hn_query_one(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    return js_hn_query(ctx, _, argc, argv, 0);
-}
-static JSValue js_hn_query_all(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    return js_hn_query(ctx, _, argc, argv, 1);
-}
-
-static JSValue js_hn_parent(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    hn_node *n = bridge_node(ctx, argc, argv, 0);
-    if (!n || !n->parent || !node_id_of(n->parent)) return JS_NULL;
-    return JS_NewString(ctx, node_id_of(n->parent));
-}
-
-static JSValue js_hn_kids(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    hn_node *n = bridge_node(ctx, argc, argv, 0);
-    JSValue arr = JS_NewArray(ctx);
-    if (!n) return arr;
-    int k = 0;
-    for (hn_node *ch = n->first; ch; ch = ch->next) {
-        if (ch->kind != HN_ELEM || !node_id_of(ch)) continue;
-        JSValue s = JS_NewString(ctx, node_id_of(ch));
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)k++, s);
-    }
-    return arr;
-}
-
-/* createElement + appendChild 的引擎落点: 节点必须挂在文档树上才有 arena
-   归属 —— 引擎没有"游离文档片段", 所以 create 即挂在 body 尾部(带自动
-   id), appendChild 语义是"移动到目标父尾部"(先从旧父摘除再挂)。 */
-static JSValue js_hn_create_el(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
-    if (!b || !b->doc || argc < 1 || !JS_IsString(argv[0])) return JS_NULL;
-    const char *tag = JS_ToCString(ctx, argv[0]);
-    if (!tag || !*tag) { if (tag) JS_FreeCString(ctx, tag); return JS_NULL; }
-    char lt[64];
-    snprintf(lt, sizeof(lt), "%s", tag);
-    JS_FreeCString(ctx, tag);
-    for (char *p = lt; *p; p++) *p = (char)tolower((unsigned char)*p);
-    hn_node *body = NULL;
-    hn_node *hits[1];
-    if (hn_doc_query_selector(b->doc, "body", b->ctx, hits, 1) > 0) body = hits[0];
-    if (!body) body = hn_doc_root(b->doc);
-    hn_node *el = hn_node_append_element(body, lt);
-    if (!el) return JS_NULL;
-    /* 自动 id: el-N 找到第一个未占用的 N(桥按 id 寻址, 新节点必须有 id) */
-    char idbuf[32];
-    for (int i = 1; i < 1000000; i++) {
-        snprintf(idbuf, sizeof(idbuf), "el-%d", i);
-        if (!hn_doc_find_by_id(b->doc, idbuf)) break;
-    }
-    hn_node_set_attr(el, "id", idbuf);
-    return JS_NewString(ctx, idbuf);
-}
 
 static JSValue js_hn_append(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
     hn_node *parent = bridge_node(ctx, argc, argv, 0);
@@ -2333,42 +2238,7 @@ static JSValue js_hn_get_rect(JSContext *ctx, JSValueConst _, int argc, JSValueC
 
 /* __hnScrollInfo(id) → [x, y, maxX, maxY]; __hnScrollTo(id, x, y) 置位。
  * 引擎口是 scroll_by(增量), 置位 = 差量换算(当前值 + 钳制范围内)。 */
-static JSValue js_hn_scroll_info(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    hn_node *n = bridge_node(ctx, argc, argv, 0);
-    JSValue arr = JS_NewArray(ctx);
-    if (!n) return arr;
-    float sx = 0, sy = 0, mx = 0, my = 0;
-    hn_node_scroll_get(n, &sx, &sy);
-    hn_node_scroll_range(n, &mx, &my);
-    JSValue vs[4] = { JS_NewFloat64(ctx, sx), JS_NewFloat64(ctx, sy),
-                      JS_NewFloat64(ctx, mx), JS_NewFloat64(ctx, my) };
-    for (int i = 0; i < 4; i++) JS_SetPropertyUint32(ctx, arr, (uint32_t)i, vs[i]);
-    return arr;
-}
-
-static JSValue js_hn_scroll_to(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    hn_node *n = bridge_node(ctx, argc, argv, 0);
-    if (!n || argc < 3) return JS_FALSE;
-    double tx = 0, ty = 0;
-    JS_ToFloat64(ctx, &tx, argv[1]);
-    JS_ToFloat64(ctx, &ty, argv[2]);
-    float sx = 0, sy = 0;
-    hn_node_scroll_get(n, &sx, &sy);
-    hn_node_scroll_by(n, (float)tx - sx, (float)ty - sy);
-    return JS_TRUE;
-}
-
 /* __hnInsertBefore(parentId, childId, refId|null): 移动语义(与 append 同)。 */
-static JSValue js_hn_insert_before(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
-    hn_node *parent = bridge_node(ctx, argc, argv, 0);
-    hn_node *child = bridge_node(ctx, argc, argv, 1);
-    hn_node *ref = argc >= 3 ? bridge_node(ctx, argc, argv, 2) : NULL;
-    if (!parent || !child || child == parent) return JS_FALSE;
-    if (ref == child) return JS_TRUE;                       /* 幂等 */
-    hn_node_insert_before(parent, child, ref);
-    return JS_TRUE;
-}
-
 /* __hnDispatch(id, type, detail): 合成事件派发(与平台输入同一入口
    rt_js_dispatch → 冒泡链 → JS 监听器)。返回是否有监听器消费。 */
 static JSValue js_hn_dispatch(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
@@ -2781,7 +2651,6 @@ static const char *EVENT_GLUE_JS =
 "  if (g.__hnMakeEvent) return;"
 "  function capOf(o){return (o===true||(o&&o.capture))?1:0;}"
 "  var EVCACHE={};"
-"  function escSel(s){return String(s).replace(/([^\\w-])/g,'\\$1');}"
 "  function parseDecls(str){"
 "    var out={};"
 "    String(str||'').split(';').forEach(function(d){"
@@ -2797,7 +2666,6 @@ static const char *EVENT_GLUE_JS =
 "  }"
 "  function rekey(z,nid){"
 "    try{delete EVCACHE[String(z.__bid)];}catch(e){}"
-"    /* 只动 __bid: z.id 是访问器(内部读 __bid/属性), 在这里赋值会自递归 */"
 "    z.__bid=nid;EVCACHE[nid]=z;"
 "  }"
 "  /* style 属性代理: camelCase 读写 style 属性(cssText 特判); 每次读写"
@@ -2826,7 +2694,7 @@ static const char *EVENT_GLUE_JS =
 "    id=String(id);"
 "    var z=EVCACHE[id];"
 "    if (z) return z;"
-"    z={id:id,__bid:id};"   /* __bid = 桥接 id 槽(id 访问器内部用它, 防自递归) */
+"    z={id:id,__bid:id};"
 "    z.addEventListener=function(type,fn,opts){"
 "      if (typeof fn!=='function') return 0;"
 "      if (opts && opts.once){"
@@ -2858,51 +2726,6 @@ static const char *EVENT_GLUE_JS =
 "      var r=__hnGetRect(String(z.id));return r?JSON.parse(r).x:0;}});"
 "    Object.defineProperty(z,'offsetTop',{get:function(){"
 "      var r=__hnGetRect(String(z.id));return r?JSON.parse(r).y:0;}});"
-"    Object.defineProperty(z,'scrollTop',{"
-"      set:function(v){__hnScrollTo(String(z.id),z.scrollLeft,+v||0);},"
-"      get:function(){var i=__hnScrollInfo(String(z.id));return i?i[1]:0;}});"
-"    Object.defineProperty(z,'scrollLeft',{"
-"      set:function(v){__hnScrollTo(String(z.id),+v||0,z.scrollTop);},"
-"      get:function(){var i=__hnScrollInfo(String(z.id));return i?i[0]:0;}});"
-"    z.scrollIntoView=function(arg){"
-"      /* v1: 就近可滚祖先, 块向置中(arg==='center')或贴口 */"
-"      var r=z.getBoundingClientRect(); if(!r)return;"
-"      var pid=String(z.id);"
-"      for(var hop=0;hop<8;hop++){"
-"        pid=__hnParent(pid); if(pid===null)break;"
-"        var i=__hnScrollInfo(pid); if(!i)continue;"
-"        if(i[2]<=0&&i[3]<=0)continue;"
-"        var pr=hnEl(pid).getBoundingClientRect(); if(!pr)continue;"
-"        var dx=r.left-pr.left, dy=r.top-pr.top;"
-"        var cx=arg==='center'?-(pr.height-r.height)/2:0;"
-"        __hnScrollTo(pid,i[0]+0,i[1]+dy+cx);"
-"        return;"
-"      }"
-"    };"
-"    z.insertBefore=function(ch,ref){"
-"      if(!ch||typeof ch.id!=='string')return ch;"
-"      __hnInsertBefore(String(z.id),String(ch.id),ref?String(ref.id):null);"
-"      return ch;};"
-"    z.replaceChild=function(nch,och){"
-"      if(!nch||!och||typeof nch.id!=='string'||typeof och.id!=='string')return nch;"
-"      __hnInsertBefore(String(z.id),String(nch.id),String(och.id));"
-"      __hnDetach(String(och.id));return nch;};"
-"    z.dispatchEvent=function(ev){"
-"      if(!ev||typeof ev.type!=='string')return false;"
-"      return !!__hnDispatch(String(z.id),ev.type,ev&&ev.detail?+ev.detail:0);};"
-"    z.click=function(){__hnDispatch(String(z.id),'click',0);};"
-"    /* width/height 属性语义(canvas/img: 位图/固有尺寸属性, 非 style) */"
-"    Object.defineProperty(z,'width',{"
-"      set:function(v){__hnSetAttr(String(z.id),'width',String(+v||0));},"
-"      get:function(){var v=__hnGetAttr(String(z.id),'width');return v===null?0:+v;}});"
-"    Object.defineProperty(z,'height',{"
-"      set:function(v){__hnSetAttr(String(z.id),'height',String(+v||0));},"
-"      get:function(){var v=__hnGetAttr(String(z.id),'height');return v===null?0:+v;}});"
-"    z.querySelector=function(sel){"
-"      var hit=__hnQueryOne('#'+escSel(z.id)+' '+String(sel));"
-"      return hit===null?null:hnEl(hit);};"
-"    z.querySelectorAll=function(sel){"
-"      return __hnQueryAll('#'+escSel(z.id)+' '+String(sel)).map(hnEl);};"
 "    Object.defineProperty(z,'id',{"
 "      get:function(){return __hnGetAttr(String(z.__bid),'id')||String(z.__bid);},"
 "      set:function(v){__hnSetAttr(String(z.__bid),'id',String(v));rekey(z,String(v));}});"
@@ -2950,14 +2773,6 @@ static const char *EVENT_GLUE_JS =
 "    Object.defineProperty(z,'hidden',{"
 "      set:function(v){if(v)__hnSetAttr(String(z.id),'hidden','');else __hnRemoveAttr(String(z.id),'hidden');},"
 "      get:function(){return !!__hnHasAttr(String(z.id),'hidden');}});"
-"    Object.defineProperty(z,'parentElement',{get:function(){"
-"      var p=__hnParent(String(z.id));return p===null?null:hnEl(p);}});"
-"    Object.defineProperty(z,'children',{get:function(){"
-"      return __hnKids(String(z.id)).map(hnEl);}});"
-"    Object.defineProperty(z,'firstElementChild',{get:function(){"
-"      var k=__hnKids(String(z.id));return k.length?hnEl(k[0]):null;}});"
-"    Object.defineProperty(z,'lastElementChild',{get:function(){"
-"      var k=__hnKids(String(z.id));return k.length?hnEl(k[k.length-1]):null;}});"
 "    z.appendChild=function(ch){"
 "      if(!ch||typeof ch.id!=='string')return ch;"
 "      __hnAppend(String(z.id),String(ch.id));return ch;};"
@@ -2966,6 +2781,17 @@ static const char *EVENT_GLUE_JS =
 "      __hnDetach(String(ch.id));return ch;};"
 "    z.remove=function(){__hnDetach(String(z.id));};"
 "    z.focus=function(){__hnFocus(String(z.id));};"
+"    z.dispatchEvent=function(ev){"
+"      if(!ev||typeof ev.type!=='string')return false;"
+"      return !!__hnDispatch(String(z.id),ev.type,ev&&ev.detail?+ev.detail:0);};"
+"    z.click=function(){__hnDispatch(String(z.id),'click',0);};"
+"    /* width/height 属性语义(canvas/img: 位图/固有尺寸属性, 非 style) */"
+"    Object.defineProperty(z,'width',{"
+"      set:function(v){__hnSetAttr(String(z.id),'width',String(+v||0));},"
+"      get:function(){var v=__hnGetAttr(String(z.id),'width');return v===null?0:+v;}});"
+"    Object.defineProperty(z,'height',{"
+"      set:function(v){__hnSetAttr(String(z.id),'height',String(+v||0));},"
+"      get:function(){var v=__hnGetAttr(String(z.id),'height');return v===null?0:+v;}});"
 "    EVCACHE[id]=z;"
 "    return z;"
 "  }"
@@ -2975,11 +2801,6 @@ static const char *EVENT_GLUE_JS =
 "      getElementById:function(id){"
 "        if(!__hnExists(String(id)))return null;"
 "        return hnEl(id);},"
-"      querySelector:function(sel){"
-"        var hit=__hnQueryOne(String(sel));return hit===null?null:hnEl(hit);},"
-"      querySelectorAll:function(sel){"
-"        return __hnQueryAll(String(sel)).map(hnEl);},"
-"      createElement:function(tag){return hnEl(__hnCreateEl(String(tag)));},"
 "      addEventListener:function(type,fn,opts){"
 "        if (typeof fn!=='function') return 0;"
 "        return __hnAddListener('document',String(type),fn,capOf(opts));},"
@@ -2987,10 +2808,6 @@ static const char *EVENT_GLUE_JS =
 "        if (typeof fn!=='function') return;"
 "        __hnRemoveListener('document',String(type),fn);}"
 "    };"
-"    Object.defineProperty(g.document,'body',{get:function(){"
-"      var hit=__hnQueryOne('body');return hit===null?null:hnEl(hit);}});"
-"    Object.defineProperty(g.document,'documentElement',{get:function(){"
-"      var hit=__hnQueryOne('html');return hit===null?null:hnEl(hit);}});"
 "  }"
 "  g.window=g;"
 "  Object.defineProperty(g,'innerWidth',{get:function(){return __hnViewport()[0];}});"
@@ -3094,16 +2911,6 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
         JS_NewCFunction(ctx, js_hn_get_text, "__hnGetText", 1));
     JS_SetPropertyStr(ctx, global, "__hnTag",
         JS_NewCFunction(ctx, js_hn_tag, "__hnTag", 1));
-    JS_SetPropertyStr(ctx, global, "__hnQueryOne",
-        JS_NewCFunction(ctx, js_hn_query_one, "__hnQueryOne", 1));
-    JS_SetPropertyStr(ctx, global, "__hnQueryAll",
-        JS_NewCFunction(ctx, js_hn_query_all, "__hnQueryAll", 1));
-    JS_SetPropertyStr(ctx, global, "__hnParent",
-        JS_NewCFunction(ctx, js_hn_parent, "__hnParent", 1));
-    JS_SetPropertyStr(ctx, global, "__hnKids",
-        JS_NewCFunction(ctx, js_hn_kids, "__hnKids", 1));
-    JS_SetPropertyStr(ctx, global, "__hnCreateEl",
-        JS_NewCFunction(ctx, js_hn_create_el, "__hnCreateEl", 1));
     JS_SetPropertyStr(ctx, global, "__hnAppend",
         JS_NewCFunction(ctx, js_hn_append, "__hnAppend", 2));
     JS_SetPropertyStr(ctx, global, "__hnDetach",
@@ -3115,12 +2922,6 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     /* DOM 第二轮桥(rect/scroll/insert/dispatch/viewport) */
     JS_SetPropertyStr(ctx, global, "__hnGetRect",
         JS_NewCFunction(ctx, js_hn_get_rect, "__hnGetRect", 1));
-    JS_SetPropertyStr(ctx, global, "__hnScrollInfo",
-        JS_NewCFunction(ctx, js_hn_scroll_info, "__hnScrollInfo", 1));
-    JS_SetPropertyStr(ctx, global, "__hnScrollTo",
-        JS_NewCFunction(ctx, js_hn_scroll_to, "__hnScrollTo", 3));
-    JS_SetPropertyStr(ctx, global, "__hnInsertBefore",
-        JS_NewCFunction(ctx, js_hn_insert_before, "__hnInsertBefore", 3));
     JS_SetPropertyStr(ctx, global, "__hnDispatch",
         JS_NewCFunction(ctx, js_hn_dispatch, "__hnDispatch", 3));
     JS_SetPropertyStr(ctx, global, "__hnViewport",
