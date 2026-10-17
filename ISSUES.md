@@ -309,6 +309,20 @@
 - hn_three.c --advance 确定性对 hn-three 不成立(文档已修正口径)
 - ~~CG 后端 hn_pe surface 尺寸失败残留旧尺寸(debug 构建触发断言)~~ **已修+回归锚定**: 修复在 fef4c63(失败路径先清零槽 w/h 并 memset, PX_SurfaceFree 由 w!=0 守卫)。新增 `tools/pe_surface_probe.{c,sh}`: PE 池 32MB 上界使超大 surface(4000x3500≈56MB)创建必然失败 —— 正常→失败→正常三段序列断言无残留复用(normal+ASan 双跑); SDK 缺席时 skip。
 - GPU: 直呈/圆角 GPU 化/合成层缓存
+- ~~描边环几何错位(边框幽灵化)+ 圆角裁剪硬边 + QUAD 三档边~~ **已修+回归锚定**(2026-10-17, 第二轮):
+  复现页逐边实测锁定三处(用户"继续修锯齿"):
+  ① paint_rect 描边环把带画在盒边**中心**(旧式 |d|∈[bw/2±0.5] + 内调制
+  因子), 宽边框被压成 ~半透明幽灵环(实测 2px 边只剩 8% 覆盖, 3px 圆环
+  只剩一个 44% 像素)且半透明环自身是硬边 —— 改为 CSS 语义环带
+  [sd ∈ (-bw, 0)]: 覆盖 = clamp01(0.5-sd) - clamp01(0.5-sd-bw), 过渡带
+  4-tap AA4(sd_ring/sd_ring_aa4);
+  ② fb_clip_ok 圆角裁剪二值判定 —— overflow:hidden 圆角容器内容(头像)
+  裁边 1px 硬台阶 —— 改 fb_clip_cov 覆盖率混合(fb_blend 乘 clip 覆盖,
+  边缘像素 AA4; 直边/内部像素同费用), poly 裁剪仍二值(如实声明);
+  ③ QUAD(3D 面片)边缘 0/0.5/1 三档 —— 改扫描线跨与像素域的解析重叠长。
+  `render_probe` 新增 test_stroke_ring(3px 圆环全带 ≥70% + 内侧回落)+
+  test_rounded_clip_aa(头像 45° 裁边过渡 ≥15%), 86→93 断言全绿;
+  css/canvas/three/quad3d/perf/hidpi/media_window 全量回归无回归。
 - ~~圆/圆角边缘 1px 台阶锯齿~~ **已修+回归锚定**(2026-10-17): 根因是
   paint_rect 对 SDF 覆盖率单像素单采样 —— 覆盖量化成 1px 台阶, 大圆/大
   圆角呈楼梯感(用户圆桌应用截图实证)。修复 `sd_rounded_aa4`(4-tap 旋转

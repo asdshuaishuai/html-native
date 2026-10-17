@@ -464,6 +464,97 @@ static void test_circle_edge_aa(void) {
     hn_context_destroy(ctx);
 }
 
+/* == 描边环(CSS border 语义) ==
+   环带必须画在盒边内侧 [sd ∈ (-bw, 0)] 且**实心**: 旧实现带以盒边为中心
+   (|d|∈[bw/2±0.5])再被内调制压成 ~半透明幽灵环(实测 2px 边只剩 8% 覆盖,
+   3px 圆环只剩一个 44% 像素)。断言: 边框带全像素 ≥70% 覆盖 + 带内不再
+   出现"中部幽灵"(带中心覆盖必须接近满)。 */
+static void test_stroke_ring(void) {
+    printf("== 描边环(CSS border 内带 + AA4) ==\n");
+    const char *html =
+        "<html><head><style>html,body{margin:0;background:#ffffff}</style></head><body>"
+        "<div style=\"position:absolute;left:20;top:20;width:120;height:120;"
+        "border:3px solid #d04f7a;border-radius:50%\"></div>"
+        "<div style=\"position:absolute;left:170;top:20;width:120;height:120;"
+        "border:2px solid #444466;border-radius:14px;background:#f0ede6\"></div>"
+        "</body></html>";
+    hn_doc *doc = hn_parse_html(html, strlen(html));
+    hn_context *ctx = hn_context_create();
+    hn_context_set_doc(ctx, doc);
+    hn_context_layout(ctx, 320, 170, NULL);
+    const hn_display_list *dl = hn_context_display_list(ctx);
+    unsigned char *px = dl ? hnsoft_render(dl, 320, 170, 0xFFFFFFFFu) : NULL;
+    check(px != NULL, "描边页渲染出位图");
+    if (!px) { hn_context_destroy(ctx); return; }
+
+    /* 圆环: 盒 20..140 x 20..140, r=60, 心(80,80); 水平直径 y=80,
+       环带 x ∈ [20, 23](3px)。
+       R 通道: 环色 0xd0=208, 白底 255。覆盖 = (255-R)/(255-208)。 */
+    int band_px = 0, band_ok = 0;
+    for (int x = 20; x < 23; x++) {
+        int r = px[((long)80 * 320 + x) * 4];
+        float cov = (255.0f - (float)r) / 47.0f;
+        band_px++;
+        if (cov >= 0.70f) band_ok++;
+    }
+    check(band_ok == band_px, "3px 圆环水平直径全带覆盖 ≥70%(旧实现仅 44%% 幽灵)");
+
+    /* 直角卡片: 盒 170..290 x 20..140, 2px 边 #444466; 直边 y=80, 带 x ∈ [170,172] */
+    band_px = 0; band_ok = 0;
+    for (int x = 170; x < 172; x++) {
+        int r = px[((long)80 * 320 + x) * 4];
+        float cov = (255.0f - (float)r) / (255.0f - 68.0f);
+        band_px++;
+        if (cov >= 0.70f) band_ok++;
+    }
+    check(band_ok == band_px, "2px 直边全带覆盖 ≥70%(旧实现 8%% 幽灵)");
+
+    /* 带内紧邻像素(环内侧)必须已回落到填充/底色: 环不得向内漫延 */
+    int r_in = px[((long)80 * 320 + 25) * 4];
+    check(r_in > 200, "圆环内侧 2px 已回落底色(环带不向内漫延)");
+    free(px);
+    hn_context_destroy(ctx);
+}
+
+/* == 圆角裁剪(overflow:hidden)边缘 AA ==
+   旧实现 fb_clip_ok 二值判定 —— 圆角容器内容(头像等)裁边 1px 硬台阶。
+   断言: 45° 方向裁边上存在中间覆盖像素, 且与同尺寸实心圆(AA4 基线)
+   的过渡特征一致。 */
+static void test_rounded_clip_aa(void) {
+    printf("== 圆角裁剪边缘 AA ==\n");
+    const char *html =
+        "<html><head><style>html,body{margin:0;background:#ffffff}</style></head><body>"
+        "<div style=\"position:absolute;left:20;top:20;width:120;height:120;"
+        "border-radius:50%;overflow:hidden\">"
+        "<div style=\"position:absolute;left:0;top:0;width:120;height:120;background:#2f88d0\">"
+        "</div></div></body></html>";
+    hn_doc *doc = hn_parse_html(html, strlen(html));
+    hn_context *ctx = hn_context_create();
+    hn_context_set_doc(ctx, doc);
+    hn_context_layout(ctx, 170, 170, NULL);
+    const hn_display_list *dl = hn_context_display_list(ctx);
+    unsigned char *px = dl ? hnsoft_render(dl, 170, 170, 0xFFFFFFFFu) : NULL;
+    check(px != NULL, "裁剪页渲染出位图");
+    if (!px) { hn_context_destroy(ctx); return; }
+
+    /* 45° 半径采样: 心(80,80) R=60, 沿圆周 720 点统计 G 通道中间过渡
+       (蓝 #2f88d0 G=0x88=136, 白 255 → 中间带 150..240) */
+    int total = 0, inter = 0;
+    for (int a = 0; a < 720; a++) {
+        float ang = (float)a * 0.5f * 3.1415926f / 180.0f;
+        int x = (int)(80 + 60.5f * cosf(ang));
+        int y = (int)(80 + 60.5f * sinf(ang));
+        int g = px[((long)y * 170 + x) * 4 + 1];
+        total++;
+        if (g > 150 && g < 240) inter++;
+    }
+    float ratio = (float)inter / (float)total;
+    check(ratio >= 0.15f, "头像裁边 45° 过渡占比 ≥ 15%(二值裁剪 ≈ 0)");
+    check(ratio <= 0.60f, "裁剪过渡占比上限(防过度羽化)");
+    free(px);
+    hn_context_destroy(ctx);
+}
+
 static void test_raster(void) {
     printf("== 光栅/PNG ==\n");
     hn_doc *doc = hn_parse_html(DOC_HTML, strlen(DOC_HTML));
@@ -651,6 +742,8 @@ int main(int argc, char **argv) {
     test_anim();
     test_input();
     test_circle_edge_aa();
+    test_stroke_ring();
+    test_rounded_clip_aa();
     test_raster();
     test_rounded();
 

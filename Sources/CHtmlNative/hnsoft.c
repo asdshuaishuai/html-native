@@ -168,6 +168,7 @@ typedef struct {
 
 /* 圆角矩形 SDF(定义在下方"圆角矩形 SDF"一节; 裁剪判定先用) */
 static float sd_rounded(float px, float py, float x, float y, float w, float h, float r);
+static float sd_rounded_aa4(float fx, float fy, float x, float y, float w, float h, float r);
 
 /* 底色填充(**全像素覆盖** —— 复用缓冲的安全性由"每像素都被写"保证):
    上一帧的任何残留都被这一步抹掉, 之后才跑指令循环。两个公开变体
@@ -280,17 +281,25 @@ static int pip_poly(const float *poly, int n, const int *segs, int nsegs,
     return wind != 0;
 }
 
-static int fb_clip_ok(fb *f, int x, int y) {
+/* 裁剪覆盖(0..1): 顶层圆角裁剪按 SDF 覆盖率混合(边缘像素 4-tap), 内容
+   (头像/圆角卡片 overflow:hidden)的裁边不再是 1px 硬台阶。直边/远端像素
+   与旧二值判定同费用(同一次 sd_rounded); poly 裁剪仍二值(pip 无覆盖)。 */
+static float fb_clip_cov(fb *f, int x, int y) {
     if (x < 0 || y < 0 || x >= f->w || y >= f->h) return 0;
     if (f->clip_n == 0) return 1;
     float cx0 = f->clip[f->clip_n - 1].x0, cy0 = f->clip[f->clip_n - 1].y0;
     float cx1 = f->clip[f->clip_n - 1].x1, cy1 = f->clip[f->clip_n - 1].y1;
     float cr  = f->clip[f->clip_n - 1].r;
     float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
-    if (fx < cx0 || fy < cy0 || fx >= cx1 || fy >= cy1) return 0;
+    if (fx < cx0 - 0.5f || fy < cy0 - 0.5f || fx >= cx1 + 0.5f || fy >= cy1 + 0.5f) return 0;
+    float cov = 1.0f;
     if (cr > 0) {
         float d = sd_rounded(fx, fy, cx0, cy0, cx1 - cx0, cy1 - cy0, cr);
-        if (d > 0) return 0;
+        cov = 0.5f - d;
+        if (cov <= 0) return 0;
+        if (cov > 1) cov = 1;
+        if (cov > 0.02f && cov < 0.98f)
+            cov = sd_rounded_aa4(fx, fy, cx0, cy0, cx1 - cx0, cy1 - cy0, cr);
     }
     if (f->poly_clips > 0) {
         /* 路径裁剪条目逐层判定(bbox 已在 push 时交叠, 只补内外测试) */
@@ -303,11 +312,17 @@ static int fb_clip_ok(fb *f, int x, int y) {
                           f->clip[i].scale, fx, fy)) return 0;
         }
     }
-    return 1;
+    return cov;
+}
+
+static int fb_clip_ok(fb *f, int x, int y) {
+    return fb_clip_cov(f, x, y) > 0.0f;
 }
 
 static void fb_blend(fb *f, int x, int y, fcolor c) {
-    if (!fb_clip_ok(f, x, y)) return;
+    float cc = fb_clip_cov(f, x, y);
+    if (cc <= 0) return;
+    c.a *= cc;
     blend_mode(&f->px[(y * f->w + x) * 4], c, f->blend);
 }
 
@@ -484,6 +499,26 @@ static float sd_rounded_aa4(float fx, float fy, float x, float y, float w, float
     return (c0 + c1 + c2 + c3) * 0.25f;
 }
 
+/* 描边环覆盖(CSS border 语义): 环带 = 盒边内侧 [sd ∈ (-bw, 0)],
+   覆盖 = clamp01(0.5 - sd) - clamp01(0.5 + sd + bw) —— 外缘/内缘各 1px
+   线性过渡。bw = 线宽(物理像素)。 */
+static float sd_ring(float sd, float bw) {
+    float o = 0.5f - sd;
+    float i = 0.5f - sd - bw;
+    if (o < 0) o = 0; else if (o > 1) o = 1;
+    if (i < 0) i = 0; else if (i > 1) i = 1;
+    return o - i;
+}
+
+/* 环覆盖的 4-tap 版本(边缘像素付费, 同 sd_rounded_aa4 的门控纪律) */
+static float sd_ring_aa4(float fx, float fy, float x, float y, float w, float h, float r, float bw) {
+    float c0 = sd_ring(sd_rounded(fx - 0.25f, fy - 0.125f, x, y, w, h, r), bw);
+    float c1 = sd_ring(sd_rounded(fx + 0.25f, fy + 0.125f, x, y, w, h, r), bw);
+    float c2 = sd_ring(sd_rounded(fx - 0.125f, fy + 0.25f, x, y, w, h, r), bw);
+    float c3 = sd_ring(sd_rounded(fx + 0.125f, fy - 0.25f, x, y, w, h, r), bw);
+    return (c0 + c1 + c2 + c3) * 0.25f;
+}
+
 static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, float alpha) {
     float x = (c->x - ox) * scale + ox, y = (c->y - oy) * scale + oy;
     float w = c->w * scale, h = c->h * scale, r = c->radius * scale;
@@ -563,13 +598,21 @@ static void paint_rect(fb *f, const hn_cmd *c, float scale, float ox, float oy, 
             }
             col.a *= cov;
             fb_blend(f, px, py, col);
-            /* 描边: 内外 1px 环(solid 时 do_stroke 恒假, d 即通用路径的 d) */
+            /* 描边(CSS border 语义): 环带 = 盒边内侧 [sd ∈ (-bw, 0)]。
+               覆盖 = clamp01(0.5-sd) - clamp01(0.5+sd+bw), 外缘/内缘各 1px
+               线性; 弯段(圆角/圆)在过渡带内走 4-tap 超采样(同填充纪律)。
+               旧实现的带以盒边为中心(|d|∈[bw/2-0.5, bw/2+0.5])再被内调制
+               因子压成 ~半透明幽灵环 —— 宽边框几乎不可见(实测 2px 边只剩
+               8% 覆盖), 且半透明环自身仍是硬边。 */
             if (do_stroke) {
-                float sd_in = fabsf(d) - c->stroke_w * 0.5f * scale;
-                float scov = 0.5f - sd_in;
-                if (scov > 0) {
-                    fcolor sv = sc; sv.a *= cov * (0.5f - fmaxf(0, -sd_in));
-                    if (sv.a > 0) fb_blend(f, px, py, sv);
+                float bw = c->stroke_w * scale;
+                float ring = sd_ring(d, bw);
+                if (ring > 0.02f && ring < 0.98f)
+                    ring = sd_ring_aa4(fx, fy, x, y, w, h, r, bw);
+                if (ring > 0.004f) {
+                    fcolor sv = sc;
+                    sv.a *= ring;
+                    fb_blend(f, px, py, sv);
                 }
             }
         }
@@ -758,10 +801,14 @@ static void paint_quad(fb *f, const hn_cmd *c, float alpha, float scale) {
         int x0 = (int)floorf(lx), x1 = (int)ceilf(rx);
         for (int px = x0; px <= x1; px++) {
             float fx = px + 0.5f;
-            float cov = 0;
-            if (fx >= lx + 0.5f && fx <= rx - 0.5f) cov = 1.0f;
-            else if (fx > lx - 0.5f && fx < rx + 0.5f) cov = 0.5f;   /* 边缘半覆盖 */
+            /* 边缘覆盖 = 像素域 [fx-0.5, fx+0.5] 与扫描线跨 [lx, rx] 的
+               重叠长(解析, 左右缘各 1px 线性)。旧口径 0/0.5/1 三档 ——
+               3D 面片边缘台阶感即此。 */
+            float lo = fx - 0.5f > lx ? fx - 0.5f : lx;
+            float hi = fx + 0.5f < rx ? fx + 0.5f : rx;
+            float cov = hi - lo;
             if (cov <= 0) continue;
+            if (cov > 1) cov = 1;
             fcolor cc;
             if (grad) {
                 /* 含该像素的三角形内按重心权重插值 t(权重公式与 paint_mesh
