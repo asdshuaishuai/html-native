@@ -214,23 +214,18 @@ el.classList.add / remove / toggle / contains   // 写透 class 属性
 el.dataset.userId = '7'                          // ↔ data-user-id（camel 自动拆线）
 el.style.color = 'red'; el.style.cssText         // ↔ style 属性（setProperty/cssText 同款）
 el.checked / el.disabled / el.hidden             // 布尔属性语义
-el.parentElement / el.children / el.firstElementChild
-el.querySelector(sel) / el.querySelectorAll(sel) // 文档序; 支持组合器/属性选择器/伪类
-el.focus()
-var n = document.createElement('div'); n.id='x'  // id 直接赋值可用
-document.body.appendChild(n); n.remove()         // 移动语义: append 会从旧父摘除
-document.body / document.documentElement
-document.addEventListener / window.addEventListener  // 冒泡链尾
-el.getBoundingClientRect()                            // {left,top,right,bottom,width,height,x,y}
+el.getBoundingClientRect()                       // {left,top,right,bottom,width,height,x,y}
 el.offsetWidth / offsetHeight / offsetLeft / offsetTop
-el.dispatchEvent({type:'custom', detail: 7})           // 合成事件(冒泡链全程)
-el.click()                                             // 合成 click(含原生默认动作)
-addEventListener(type, fn, {once: true})               // once/capture 支持
+el.focus()
+document.addEventListener / window.addEventListener  // 冒泡链尾
+el.dispatchEvent({type:'custom', detail: 7})     // 合成事件(冒泡链全程)
+el.click()                                       // 合成 click(含原生默认动作)
+addEventListener(type, fn, {once: true})         // once/capture 支持
 window.innerWidth / innerHeight / devicePixelRatio
-canvas.width = 300                                     // 属性写 → 位图变化 + 画布清空
+canvas.width = 300                               // 属性写 → 位图变化 + 画布清空
 ```
-(2026-10-17 精简口径: querySelector/classList/dataset/style/createElement 等
-轻能力保留, querySelector/树遍历/scroll 已下线 — 元素定位走 getElementById。)
+(2026-10-17 精简裁决: querySelector/createElement/树遍历/scroll 已下线;
+元素定位走 getElementById。)
 事件对象含 `type/target/currentTarget/clientX/Y/key/code/detail/shift...` +
 `preventDefault/stopPropagation`（与浏览器同签名）。
 
