@@ -93,10 +93,16 @@ myapp/
 | `layer` | 弱存在感小组件(`hn-level="floating"` 悬浮于普通窗口上) | 常驻小组件 |
 
 注: 当前 C99 平台层(`hn_app` + `hnp_*.c`)的开窗能力聚焦"桌宠一组 meta":
-`hn-transparent`(逐像素透明)/`hn-frameless`(无框)/`hn-level=floating|desktop`/
+`hn-transparent`(逐像素透明)/`hn-frameless`(**缺省 1 —— hn 窗口默认无标题栏,
+`"0"` 显式要系统标题栏**)/`hn-level=floating|desktop`/
 `hn-spaces=all`/`hn-shadow=0`/`hn-click-through` —— macOS 已物化, Linux 逐字段
-对齐(`tools/linux_parity_check.sh` 编译级对账, 行为级需真机), Windows/headless
-优雅忽略。`popup`/`layer` 的精细物化(不抢焦点浮层等)在壳层路线图上。
+对齐(`tools/linux_parity_check.sh` 编译级对账), Windows hnwin 已认 frameless
+(WS_POPUP + 背景拖拽), headless 优雅忽略。`popup`/`layer` 的精细物化
+(不抢焦点浮层等)在壳层路线图上。
+
+呈现动画: 透明窗(`hn-transparent="1"`, body 别铺全窗底色)缺省获得
+**画刷铺色入场** —— 内容像颜料沿对角笔锋"画上桌面", 未铺区域透出桌面
+(~480ms; `hn-reveal=fade|none` 换平台淡入/硬出现, `HN_REVEAL_MS` 调时长)。
 
 ## 交互(htmx 风格)
 

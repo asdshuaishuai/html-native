@@ -243,7 +243,7 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         <div class="ico">○</div>
         <h3>可逐层取证</h3>
         <p><code>hncore parse|layout|boxes|paint|verify</code> 逐层看 DOM/盒模型/绘制指令，
-           加 <code>hn dump/text</code> 与 28 个 <code>*_probe.sh</code>（约 1145 项断言）钉住每一层。</p>
+           加 <code>hn dump/text</code> 与 37 个 <code>*_probe.sh</code>（1300+ 项断言）钉住每一层。</p>
       </div>
       <div class="card">
         <div class="ico">▣</div>
@@ -360,7 +360,8 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
       <div class="card">
         <h3>视觉</h3>
         <p>
-          盒模型、圆角（含 <code>50%</code> 画圆）、
+          盒模型、圆角（含 <code>50%</code> 画圆；边缘 4-tap 亚像素抗锯齿，
+          描边环按 CSS border 语义画在盒内带）、
           <code>linear-gradient</code>/径向渐变、<code>box-shadow</code>、<code>text-shadow</code>、
           <code>filter: brightness/contrast/saturate</code>、<code>clip-path: circle/inset</code>、
           opacity、<code>transition</code>/<code>@keyframes</code>（含 spring/bounce 缓动族）、
@@ -422,6 +423,17 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
           <strong>macOS 窗口直呈</strong>：<code>HN_GPU_PRESENT=1</code> 时画面直接画进
           CAMetalLayer 的 drawable 呈现 —— 零 CPU 位图、零回读（实测 presented 帧回读数为 0）。
           <code>grid</code>/<code>svg</code> 等边界如实写在 README。
+        </p>
+      </div>
+      <div class="card">
+        <h3>窗口形态与呈现</h3>
+        <p>
+          <strong>hn 窗口默认无标题栏</strong>（窗口即画布；
+          <code>hn-frameless="0"</code> 才要系统标题栏）。
+          <code>hn-transparent</code> 逐像素透明 + 桌宠一组 meta
+          （悬浮/桌面级/跨空间/穿透/幽灵模式）；<strong>画刷呈现</strong>：
+          透明窗内容沿羽化笔锋"画上桌面"（<code>hn-reveal</code>，
+          未铺区域透出桌面），关闭淡出与入场淡入全窗缺省。
         </p>
       </div>
       <div class="card">
@@ -574,8 +586,8 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
     </p>
     <div class="grid3">
       <div class="card">
-        <div class="metric">~1145</div>
-        <p>探针断言/检查（28 个 <code>tools/*_probe.sh</code>，以 <code>find tools -name '*_probe.sh'</code> 为准；覆盖解析/级联/布局/绘制/交互/直染/媒体/3D/双后端）</p>
+        <div class="metric">1300+</div>
+        <p>探针断言/检查（37 个 <code>tools/*_probe.sh</code>，以 <code>find tools -name '*_probe.sh'</code> 为准；覆盖解析/级联/布局/绘制/交互/直染/媒体/3D/双后端/呈现动效）</p>
       </div>
       <div class="card">
         <div class="metric">5</div>
@@ -595,7 +607,9 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         POSIX 函数依赖 → Windows/严格 C99 下无法编译；
         FMA 融合 → 跨架构布局差 0.1px；
         mesh 竖向 anchor 权重写反 → 立绘摆动方向颠倒；
-        透明背板三个静默失效（底色 alpha 硬编码 255 / blend 只写 RGB / SDF 内部距离塌陷）。
+        透明背板三个静默失效（底色 alpha 硬编码 255 / blend 只写 RGB / SDF 内部距离塌陷）；
+        描边环几何错位 → 边框渲染成半透明幽灵；画刷遮罩原地叠加 →
+        铺色内容几十帧内被乘没（帧代数守卫锚死）。
         <br><br>
         每一个都补了对应的回归断言，防止复发（20 项 CPU 治理与媒体降级线也在
         <code>perf_probe</code>/<code>media_window_probe</code> 里守着）。

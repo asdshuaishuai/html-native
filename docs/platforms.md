@@ -19,7 +19,7 @@ Neb(NO-WEB)的跨平台策略不是"每个平台移植一遍", 而是**契约先
 | · floating(悬浮, `hn-level="floating"`) | ✅ `setLevel:` NSFloatingWindowLevel(`hnp_macos.c:750`) | ✅ `_NET_WM_STATE_ABOVE`(`hnp_linux.c:463`) | ❌ 无物理窗(字段按契约优雅忽略) | ❌ 新架构无 `hnp_win32.c`; 旧壳 hnwin 无层级 |
 | · desktop(桌面级, `hn-level="desktop"`) | ✅ kCGDesktopWindowLevel(`hnp_macos.c:751`) | ✅ `_NET_WM_STATE_BELOW`(同上:464) | ❌ 同上 | ❌ 同上 |
 | · sticky(跨空间, `hn-spaces="all"`) | ✅ `setCollectionBehavior:` CanJoinAllSpaces(`hnp_macos.c:753`) | ✅ `_NET_WM_STATE_STICKY`(`hnp_linux.c:465`) | ❌ 同上 | ❌ 同上 |
-| · borderless(无框, `hn-frameless`) | ✅ styleMask=0(`hnp_macos.c:720` 起) | ✅ `_MOTIF_WM_HINTS`(`hnp_linux.c:475`) | ❌ 同上 | ⚠️ 旧壳仅 WS_EX_LAYERED(透明), 无独立无框位 |
+| · borderless(无框, `hn-frameless`, **缺省 1** — hn 窗口默认无标题栏, "0" 显式要系统标题栏) | ✅ styleMask=0(`hnp_macos.c:742` 起) | ✅ `_MOTIF_WM_HINTS`(`hnp_linux.c:475`) | ❌ 同上 | ✅ WS_POPUP(`tools/hnwin.c`, 含 WM_NCHITTEST 背景拖拽: 非交互内容=HTCAPTION) |
 | · no_shadow(去投影, `hn-shadow="false"`) | ✅ `setHasShadow:NO`(`hnp_macos.c:754`) | ⚠️ EWMH 无标准对应, 显式优雅忽略(`hnp_linux.c:483`) | ❌ 同上 | ❌ 同上 |
 | · click_through(穿透, `hn-click-through`) | ✅ `setIgnoresMouseEvents:` + 运行期切换(`hnp_macos.c:756,981`) | ✅ XShape 输入形 + 运行期切换, Xext 缺席优雅降级(`hnp_linux.c:515,576`) | ❌ 同上 | ❌ 同上 |
 | · transparent(逐像素透明, `hn-transparent`) | ✅ `setOpaque:NO`+clearColor(`hnp_macos.c:742`) | ⚠️ 24 位窗不可 ARGB, 声明被忽略(`hnp_linux.c:433`); 32 位 visual 是路线图 | ⚠️ 字段记账, 无表面可透 | ⚠️ 旧壳 WS_EX_LAYERED 近似 |

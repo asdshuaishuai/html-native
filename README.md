@@ -59,7 +59,7 @@
 | 确定性 | 不承诺跨版本一致 | 跨架构布局逐字节一致(构建门禁守着) |
 | 脚本面 | 完整 DOM/Web API | 小桥(hnSetText / hnGet2D / hnCanvas2D…) |
 | 网络 | 完整栈 + 安全沙箱 | 无(hx-* 注入 transport, sys:// 本地) |
-| 窗口语义 | 平台默认窗 | 一等公民: popup/layer/桌宠/鼠标穿透/幽灵模式/秒开秒毁 |
+| 窗口语义 | 平台默认窗(带标题栏) | 一等公民: **默认无标题栏(窗口即画布)** · popup/layer/桌宠/鼠标穿透/幽灵模式/秒开秒毁/画刷呈现 |
 
 由此两条纪律:
 
@@ -164,7 +164,7 @@ platform/hn_platform.h 平台契约(窗口/媒体/视频图层/~15 函数 + GPU 
   hnp_media_macos.c    macOS 媒体宿主(AVFoundation, 运行期 dlopen)
   hnp_gpu_metal.c      macOS GPU 原语(Metal v1; 运行期 dlopen + MSL 运行期编译)
   hnp_linux.c          Linux: 运行期 dlopen X11/Xext/Xv
-app/hn_app.c           唯一主循环(~120 行): 链接不同 hnp_*.c 即该平台的应用
+app/hn_app.c           唯一主循环: 链接不同 hnp_*.c 即该平台的应用(帧循环/呈现动效/几何记忆)
   hn_media_platform.c  平台媒体宿主装配(hnp_media_* → hn_media_host)
   hn_media_synth.c     合成媒体宿主单一来源(hncore/hnapp 共用)
 tools/hncore.c         引擎 CLI(render/renderc: hnsoft 与 cairo 同一显示列表)
@@ -175,9 +175,10 @@ tools/hn_daemon.c      C99 常驻宿主(Unix socket JSON-lines, agent 入口)
 tools/hn_cli.c         C99 命令行客户端(与 daemon 配对)
 tools/build-multiplatform.sh  交叉构建(zig cc, 三平台产物 + 跨架构确定性门禁)
 tools/build-daemon-cli.sh     daemon/CLI 本机构建
-tools/*_probe.c/.sh    探针(render/alpha/cairo/gpu/mesh/sysbridge + 布局/CSS/HTML/Lottie/GIF/
-                       canvas/timer/fmt/md/stream/anim/quad3d/live2d/media/pet/hidpi/resident/window
-                       /events)
+tools/*_probe.c/.sh    探针 37 族(渲染/AA/描边环/裁剪/透明/dom/css/html/layout/events/canvas/
+                       anim/timer/gif/md/fmt/include/stream/lottie/three/quad3d/mesh/live2d/
+                       cubism/media/media_element/media_window/neb3_fallback/pe_surface/
+                       sysbridge/sysroute/http/window/resident/pet/hidpi/perf/gpu/macos_deep)
 docs/                  校准文档: getting-started(上手) · platforms(平台能力矩阵)
                        · media-design(媒体契约) · threejs-support(3D 支持度)
                        · adr-001-renderer(绘制引擎决策) · roadmap(路线图)
@@ -185,9 +186,9 @@ screenshots/           引擎效果截图
 ```
 
 > 代码地图的行数是历史口径(引擎核心约 10.9k 行的旧快照); 当前实测:
-> `Sources/CHtmlNative/*.c *.h`(含 include/hn.h)约 **2.5 万行**,
-> `platform/` 约 5.2k · `rt/` 约 3.6k · `app/` 约 1.5k · `tools/` 约 2.3 万(含探针脚本)
-> (`wc -l`, 2026-10-15; 活跃开发期数字按日漂移, 精确值以当日 `wc -l` 为准)。
+> `Sources/CHtmlNative/*.c *.h`(含 include/hn.h)约 **2.6 万行**,
+> `platform/` 约 5.5k · `rt/` 约 5.3k · `app/` 约 0.9k · `tools/` 约 2.6 万(含探针脚本)
+> (`wc -l`, 2026-10-17; 活跃开发期数字按日漂移, 精确值以当日 `wc -l` 为准)。
 
 ## 使用
 
@@ -222,7 +223,7 @@ CI/服务器同样可用; 真窗口由平台壳开(见上"快速开始"的 `hnap
   与"Swift 运行时"两条路, 都已删除 —— 现在只有自研 C99 引擎这一条渲染路径,
   平台差异收敛为 `platform/hn_platform.h` 的 ~15 个函数(开窗/blit/事件/时钟/
   光标), 每平台一个 `hnp_*.c`, 全部**运行期 dlopen 系统 API, 编译期零 SDK 依赖**。
-- **新三层(主推)**: `app/hn_app.c` 是唯一主循环(~120 行) + `rt/hn_rt.c`
+- **新三层(主推)**: `app/hn_app.c` 是唯一主循环 + `rt/hn_rt.c`
   公共运行时(文档/htmx/sys:// 桥/QuickJS) + `platform/hnp_{headless,macos,linux}.c`。
   链接哪个 hnp_*.c 就是哪个平台的应用: `hnapp-macos-arm64`(真窗口)、
   `hnapp-macos-headless`(无 GUI 自检/CI)、`hnapp-linux-x86_64`(dlopen X11)。
@@ -265,6 +266,8 @@ CI/服务器同样可用; 真窗口由平台壳开(见上"快速开始"的 `hnap
 <meta name="hn-title"   content="agent · 仓库分析">
 <meta name="hn-theme"   content="dark">            <!-- 或 light: 内置设计令牌基底 -->
 <meta name="hn-applet"  content="clock">          <!-- 轻应用槽位名, 见下 -->
+<meta name="hn-frameless" content="0">            <!-- 缺省 1=无标题栏(窗口即画布) -->
+<meta name="hn-reveal"  content="paint|fade|none"> <!-- 呈现动画: 缺省 paint -->
 ```
 
 引擎只解析声明(C: `hn_doc_manifest`), 由宿主物化成对应表面。
@@ -303,7 +306,7 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 - 运行时 `rt/hn_rt.c`(htmx 执行 / `sys://` 桥 / QuickJS, 均可裁剪)
 - 任一 `platform/hnp_*.c`(或照 `hn_platform.h` 自己写一个, ~15 个函数)
 
-`app/hn_app.c`(~120 行)就是这份契约的参考实现 —— 换掉它的表面物化,
+`app/hn_app.c` 就是这份契约的参考实现 —— 换掉它的表面物化,
 就是你自己的应用容器; `tools/hncore.c` 演示零 GUI 嵌入(离屏渲染出 PNG)。
 
 ## 支持的子集(v1)
@@ -405,7 +408,8 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   **排版精细化**:`margin:0 auto` 居中 / flex `margin-left:auto` 推右(标准优先级压 justify)、
   `min/max-width/height` 约束、**完整 margin 简写正确展开 TRBL**(修复历史越界 bug)、
   `font-family(monospace/serif 系统设计, code 等默认等宽)**、默认行高 1.45、
-  **窗口标题栏无缝**(透明标题条 + 底色跟随 body 背景 + 可拖拽空白区)
+  **边缘抗锯齿**(圆角/圆/描边环的 4-tap 亚像素超采样, 只对边缘像素付费;
+  描边环按 CSS border 语义画在盒内带 —— 旧实现的幽灵环/台阶边已修)
 - **图片**: `<img>`(尺寸回退链: 样式 > 属性 > 固有尺寸), 图片后端注入;
   **`object-fit: contain/cover/fill/none`**(替换元素的内容适配 —— 之前声明了
   不生效也不报错, 所有图一律被拉伸)。固有尺寸优先问图片后端, 未注入时引擎
@@ -431,12 +435,12 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 - **桌宠形态(无背景 + 悬浮桌面)**: 上一条是"不像一个 App", 这一条是"
   **几乎不以窗口存在**"—— 没有标题栏、没有底色、没有投影, 画面上只剩角色与
   气泡, 其余是真实桌面。一组 meta 声明即整个形态(macOS 已物化, 其余平台优雅忽略):
-  `hn-transparent="1"`(逐像素 alpha)、`hn-frameless="1"`(无标题栏无边框, 整窗
-  即内容)、`hn-level="floating|desktop|normal"`(悬浮于普通窗口之上 / 垫到桌面级
+  `hn-transparent="1"`(逐像素 alpha)、`hn-frameless`(**所有 hn 窗口的缺省**,
+  无标题栏无边框——整窗即内容; `hn-frameless="0"` 才给系统标题栏)、`hn-level="floating|desktop|normal"`(悬浮于普通窗口之上 / 垫到桌面级
   —— 值取 `NSFloatingWindowLevel=3` 与 `kCGDesktopWindowLevel`, 逐值抄 SDK 头)、
   `hn-spaces="all"`(跟随所有空间, 含全屏空间旁)、`hn-shadow="0"`、`hn-click-through="1"`
   (初始鼠标穿透)。与 `popup`/`layer` 的区别: 那两者是"存在感低的窗口"(仍有窗口
-  矩形、层级与标题条语义), 桌宠把窗口本体也抹掉 —— 无边框 + 逐像素透明 +
+  矩形与层级语义), 桌宠把窗口本体也抹掉 —— 无边框(hn 缺省) + 逐像素透明 +
   `hn-presence` 不占系统身份, 观感是"桌面上住着一个小东西"而非"开了一个窗口"。
   无边框后内容就是唯一拖动面(壳层覆写 `mouseDownCanMoveWindow`, 立绘/空白均可拖);
   **运行期穿透切换**走 `hnp_window_set_click_through(w, on)`(桌宠"幽灵模式":
@@ -623,6 +627,15 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   `hn-draggable`(空白区拖动开关)。引擎在每次样式重算后都重新剥离 html/body
   底色, 所以 resize 与热更新都不会把底色装回来。适合圆形/HUD/悬浮控件窗口。
   见 `examples/transparent.html`、`examples/lottie.html`
+- **呈现动画(桌面画板)**: 内容像颜料**直接画上桌面** —— 首帧就绪后
+  ~480ms 内沿对角轴以羽化笔锋(波纹摆边)铺开, 未铺区域 alpha=0 透出桌面。
+  **专属逐像素透明窗**(`hn-transparent=1`; 不透明窗缺省只走平台淡入,
+  否则会先出现一块"画板"再画内容)。`hn-reveal=paint|fade|none` 按页声明,
+  环境钮 `HN_REVEAL` 覆盖风格、`HN_REVEAL_MS` 调时长(验收连拍/慢放)。
+  三平台同源(macOS hn_app + Windows hnwin), 遮罩数学单源
+  `hnsoft_paint_mask_cov`; 窗口入场淡入 + 关闭淡出为全窗缺省(透明窗除外)。
+  验收副屏钉位: `HN_WINDOW_POS="X,Y"`(左上原点; 不写几何记忆)。
+  口径由 `tools/anim_probe.sh` E 节 15 断言钉死
 - **动画系统(引擎级, 不是滚动专属)**: `transition` 过渡 + 
   **`animation: up|down|left|fade|scale <时长>` 入场预设**(新内容平滑浮现而非硬闪) +
   **`translate` / `scale` 几何动画**(位移并入滚动偏移、缩放按盒中心换算, 
