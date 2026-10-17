@@ -46,6 +46,7 @@ void hn_context_destroy(hn_context *c) {
 }
 
 void hn_context_set_doc(hn_context *c, hn_doc *doc) {
+    hn_context_clear_exit_ghosts(c);   /* 换文档: ghost 节点指针随旧 arena 悬空 */
     /* 文档替换 = 旧文档的节点指针全部失效, 媒体会话先随旧文档销毁
        (与 Lottie 缓存的清理纪律一致 —— compact 内部也走这里)。
        <canvas> 账本同口径: 账本属于 canvas **元素**生命周期, 元素随
@@ -440,6 +441,18 @@ int hn_context_anim_tick_ex(hn_context *c, float dt_ms, int *cls) {
         if (streams || anchors) inter = 1;   /* 平滑滚动在途 = interactive */
     }
     int act = anim_walk(c, c->doc->root, dt_ms, &amb, &inter);
+    /* exit ghost 推进: 淡出完成后出列(帧循环持续渲染 → 淡出自然可见) */
+    if (c->exit_ghost_n > 0 && dt_ms > 0) {
+        for (int i = c->exit_ghost_n - 1; i >= 0; i--) {
+            c->exit_ghost[i].t_ms += (int)dt_ms;
+            if (c->exit_ghost[i].t_ms >= c->exit_ghost[i].ms) {
+                for (int j = i; j < c->exit_ghost_n - 1; j++)
+                    c->exit_ghost[j] = c->exit_ghost[j + 1];
+                c->exit_ghost_n--;
+            }
+        }
+        if (c->exit_ghost_n > 0) inter = 1;   /* 淡出在途 = interactive */
+    }
     if (cls) *cls = inter ? HN_ANIM_INTERACTIVE
                           : (amb ? HN_ANIM_AMBIENT : HN_ANIM_NONE);
     return act || media || streams || anchors;
@@ -471,6 +484,37 @@ void hn_context_set_pointer_button(hn_context *c, int down) {
 
 float hn_context_viewport_h(hn_context *c) {
     return c ? c->vh : 0.0f;
+}
+
+/* ---- Smart-UX 出现/消失默认动效 ---- */
+
+/* 运行时插入的节点默认播"淡入+上浮"入场(rt 首帧后置位; 首帧文档与
+ * 作者显式 animation 声明不受影响)。off = 回到瞬现(旧口径)。 */
+void hn_context_set_dynamic_enter(hn_context *c, int on) {
+    if (c) c->enter_dynamic_default = on ? 1 : 0;
+}
+
+/* JS 移除带盒子树时投喂 exit ghost: 子树在**原位**(最后布局盒位)淡出
+ * 160ms 后消亡。容量 8(环形丢弃最老); 上下文销毁/换文档/compact 时
+ * 由各清口统一出列(节点指针随 arena 生命周期)。 */
+void hn_context_push_exit_ghost(hn_context *c, hn_node *n) {
+    if (!c || !n || n->kind != HN_ELEM) return;
+    if (n->bw <= 1.0f || n->bh <= 1.0f) return;          /* 无盒(未画过)不 ghost */
+    if (c->exit_ghost_n >= 8) {                           /* 满: 丢最老 */
+        for (int j = 0; j < c->exit_ghost_n - 1; j++)
+            c->exit_ghost[j] = c->exit_ghost[j + 1];
+        c->exit_ghost_n--;
+    }
+    struct hn_exit_ghost *g = &c->exit_ghost[c->exit_ghost_n++];
+    g->node = n;
+    g->x = n->bx;
+    g->y = n->by;
+    g->t_ms = 0;
+    g->ms = 160;
+}
+
+void hn_context_clear_exit_ghosts(hn_context *c) {
+    if (c) c->exit_ghost_n = 0;
 }
 
 
@@ -732,7 +776,7 @@ void hn_node_insert_before(hn_node *parent, hn_node *child, hn_node *ref) {
         else parent->first = child;
         parent->last = child;
     }
-    child->anim.fresh = 1;   /* 新位置播入场动画(同 append 口径) */
+    child->anim.fresh = 2;   /* 运行时插入: Smart-UX 默认入场(fade+rise) */
 }
 
 int hn_node_remove_attr(hn_node *n, const char *name) {
@@ -841,7 +885,7 @@ hn_node *hn_node_append_element(hn_node *parent, const char *tag) {
     el->kind = HN_ELEM;
     el->arena = parent->arena;
     el->tag = hn_arena_strndup(parent->arena, tag, strlen(tag));
-    el->anim.fresh = 1;
+    el->anim.fresh = 2;   /* 运行时插入: Smart-UX 默认入场 */
     el->parent = parent;
     if (parent->last) { parent->last->next = el; el->prev = parent->last; parent->last = el; }
     else { parent->first = parent->last = el; }
@@ -1444,6 +1488,32 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inte
             a->t = a->ms > 0 ? -st->anim_delay / a->ms : 0;
             a->active = 1;
             a->dirty_written = 0;
+            goto children;
+        }
+        if (a->fresh == 2 && c->enter_dynamic_default &&
+            st->anim_enter == HN_ENTER_NONE && st->display != HN_DISP_NONE) {
+            /* Smart-UX 默认入场(仅运行时插入; 首帧文档与显式声明不在此路):
+               淡入 + 上浮 8px, 200ms ease-out —— 内容自然浮现而非硬闪。 */
+            a->fresh = 0;
+            a->inited = 1;
+            a->entering = 1;
+            a->o = 0.0f;  a->o_from = 0.0f;  a->o_to = st->opacity;
+            a->ty = 8.0f; a->ty_from = 8.0f; a->ty_to = st->translate_y;
+            a->tx = a->tx_from = a->tx_to = st->translate_x;
+            a->sc = a->sc_from = a->sc_to = st->scale;
+            a->ms = 200.0f;
+            a->ease = st->anim_ease;            /* 作者缓动优先(transition 同款) */
+            memcpy(a->cb, st->cb, sizeof(a->cb));
+            rgba_of(st->background, a->bg);
+            rgba_of(st->color, a->fg);
+            memcpy(a->bg_from, a->bg, sizeof(a->bg));
+            memcpy(a->fg_from, a->fg, sizeof(a->fg));
+            memcpy(a->bg_to, a->bg, sizeof(a->bg));
+            memcpy(a->fg_to, a->fg, sizeof(a->fg));
+            a->t = 0;
+            a->active = 1;
+            a->dirty_written = 0;
+            *inter = 1;
             goto children;
         }
         if (a->fresh) a->fresh = 0;   /* 无入场声明: 直接以终态出现 */
@@ -2632,6 +2702,7 @@ void hn_context_render(hn_context *c, const char *html_src, size_t len) {
  * 调用方须持有完整的 HTML(将重新解析)。用于流式应用的长期内存控制。 */
 void hn_context_compact(hn_context *c, const char *html, size_t len) {
     if (!c || !c->doc) return;
+    hn_context_clear_exit_ghosts(c);     /* 旧文档节点指针已失效 */
     hn_context_lottie_clear(c);          /* 旧文档的路径键已随 arena 释放 */
     hn_media_sessions_clear(c);          /* 旧文档的节点指针已失效(host.close 全部) */
     hn_canvas_dispose(c);                /* 旧文档的 canvas 元素已销毁 = 账本清空 */

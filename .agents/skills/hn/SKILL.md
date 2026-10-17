@@ -190,6 +190,10 @@ hnMediaVolume('v', .5); // 音量(v<=0 同时静音)
 - `hn-stream` + `hn-stream-loop="14"` — 聊天式流式容器：自动贴底跟随 + 环形缓冲只留最近 N 条（agent 轨迹/日志页标配）
 
 **表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset|range">`、`<textarea>`（多行+光标）、`<button>`、`<progress value max>`（轨道+填充, 无 value = 不定态往复动画）、`<select>`（含弹层: 点击开 → 选项行列表 → 点行选中/点外关闭）开箱可用。
+**Smart-UX 出现/消失**（默认开启, 无需声明）：运行时插入的内容（appendChild /
+insertBefore）自动**淡入 + 上浮 8px**（200ms ease-out）浮现; JS remove 的元素
+在**原位淡出 160ms** 后消亡 —— 内容不再硬闪出现/消失。首屏文档与显式
+`animation:` 声明不受影响; 引擎可经 `hn_context_set_dynamic_enter(c, 0)` 关闭。
 **原生默认动作**（浏览器同序: JS click 派发后、无 preventDefault 才执行）：
 checkbox 点击切换、radio 同名组互斥、range 点击/拖拽设值 + **方向键调值**（聚焦后
 Left/Down = -step, Right/Up = +step; 写回 value 属性）、

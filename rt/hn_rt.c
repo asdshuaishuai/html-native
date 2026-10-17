@@ -753,6 +753,8 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     run_doc_scripts(rt);   /* 文档内联 <script>: canvas 2D 等纯 JS 页面的驱动 */
     run_load_actions(rt);
     rt_render(rt);
+    /* Smart-UX: 首帧完成后, 此后运行时插入的内容默认"淡入+上浮"浮现 */
+    hn_context_set_dynamic_enter(rt->ctx, 1);
     return rt;
 }
 
@@ -2309,6 +2311,9 @@ static JSValue js_hn_append(JSContext *ctx, JSValueConst _, int argc, JSValueCon
 }
 
 static JSValue js_hn_detach(JSContext *ctx, JSValueConst _, int argc, JSValueConst *argv) {
+    js_bridge *b = (js_bridge *)JS_GetContextOpaque(ctx);
+    hn_node *g = bridge_node(ctx, argc, argv, 0);
+    if (b && b->ctx && g) hn_context_push_exit_ghost(b->ctx, g);   /* 原位淡出 */
     hn_node *n = bridge_node(ctx, argc, argv, 0);
     if (!n || !n->parent) return JS_FALSE;
     return hn_node_remove_child(n->parent, n) ? JS_TRUE : JS_FALSE;

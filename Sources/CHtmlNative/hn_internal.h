@@ -634,6 +634,18 @@ void hn_paint_set_ledger_raster(hn_paint_render_fn fn);
 /* ---------- context ---------- */
 struct hn_context {
     hn_doc   *doc;
+    /* ---- Smart-UX 出现/消失默认动效(2026-10-15) ----
+       运行时插入的节点(fresh=2)默认以"淡入+上浮 8px"浮现 —— 内容不再
+       硬闪出现; 首帧文档/作者显式 animation 声明不受影响。
+       exit ghost: JS 移除的带盒子树在**原位淡出**(160ms)后消亡 ——
+       内容不再硬闪消失。rt 侧经 hn_context_push_exit_ghost 投喂。 */
+    int enter_dynamic_default;      /* 1 = 运行时插入播默认入场(rt 首帧后置位) */
+    struct hn_exit_ghost {
+        hn_node *node;              /* 已摘除的子树根(arena 存活期内有效) */
+        float x, y;                 /* 摘除时的最后盒位(paint 按 alpha 衰减) */
+        int t_ms, ms;               /* 已播/总时长(ms; anim tick 推进) */
+    } exit_ghost[8];
+    int exit_ghost_n;
     hn_sheet **sheets; int n_sheets, cap_sheets;
     hn_arena *tmp;                  /* 每次 layout 重建的临时区 */
     hn_cmd   *cmds; int n_cmds, cap_cmds;

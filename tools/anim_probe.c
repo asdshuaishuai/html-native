@@ -22,6 +22,7 @@
 #include <string.h>
 #include "hn.h"
 #include "hn_rt.h"
+#include "hn_internal.h"
 
 static int g_pass = 0, g_fail = 0;
 
@@ -295,11 +296,90 @@ static void test_anchor_scroll(void) {
           "C4: hn_doc_scroll_to 目标存在返回 1(语义不变)");
 }
 
+/* D. Smart-UX 出现/消失默认动效(H5 第四轮):
+ *   - 运行时 appendChild 的新节点: 首帧后半透明+下偏, 若干帧后收敛全亮
+ *     (默认 fade+rise; 显式 animation 声明的节点不受影响);
+ *   - JS remove 的子树: ghost 在原位淡出(显示列表里仍见其文本但 alpha
+ *     递减), 生命周期后从显示列表消失;
+ *   - 首帧文档内容不播默认入场(open 即终态, 不拖慢首屏)。 */
+static void test_smartux_enter_exit(void) {
+    printf("== Smart-UX 出现/消失默认动效 ==\n");
+    const char *html =
+        "<html><head><style>html,body{margin:0}</style></head><body>"
+        "<div id='feed'></div><div id='static'>首屏静态</div></body></html>";
+    hn_rt_desc d = { "smartux", html, strlen(html), NULL, 0, 360, 300 };
+    hn_rt *rt = hn_rt_open(&d);
+    check(rt != NULL, "hn_rt_open");
+    if (!rt) return;
+    hn_context *c = hn_rt_context(rt);
+    /* 运行时插入(不经 JS, 直接引擎 append — 同 hn_node_append_element 口径) */
+    hn_node *feed = hn_doc_find_by_id(hn_rt_doc(rt), "feed");
+    hn_node *msg = hn_node_append_element(feed, "div");
+    hn_node_set_attr(msg, "id", "msg");
+    hn_node_set_text_content(msg, "消息", 6);
+    /* 推 1 帧: 插入后 anim tick 应进入 entering(alpha 从 0 起) */
+    hn_context_layout(c, 360, 300, NULL);
+    hn_context_anim_tick(c, 40);
+    hn_context_anim_tick(c, 0);   /* rt_render 同序: 零步进重采样把入场中间态写入样式 */
+    hn_context_repaint(c);
+    float o1 = msg->style.opacity;
+    check(o1 < 0.9f, "动态插入首帧: 默认入场使 opacity 从 0 起");
+    /* 推进到完成 */
+    for (int i = 0; i < 20; i++) {
+        hn_context_anim_tick(c, 40);
+        hn_context_repaint(c);
+    }
+    float o2 = msg->style.opacity;
+    check(near_f(o2, 1.0f, 0.02f), "入场收敛: opacity → 1");
+    /* ghost: remove 后重绘, 显示列表仍含其文本(淡出中), alpha < 终态 */
+    hn_node *st = hn_doc_find_by_id(hn_rt_doc(rt), "static");
+    hn_node_set_text_content(st, "首屏静态GONE", 16);
+    hn_context_layout(c, 360, 300, NULL);
+    hn_context_repaint(c);
+    hn_context_push_exit_ghost(c, st);
+    hn_node_remove_child(st->parent, st);
+    hn_context_repaint(c);
+    const hn_display_list *dl = hn_context_display_list(c);
+    int ghost_text = 0;
+    for (int i = 0; dl && i < dl->count; i++)
+        if (dl->cmds[i].kind == HN_CMD_TEXT && dl->cmds[i].text &&
+            strstr(dl->cmds[i].text, "GONE"))
+            ghost_text = 1;
+    check(ghost_text, "ghost: 移除的子树仍在显示列表(t=0 原位)");
+    /* 推进半程: 仍在列表但 alpha 已衰减 */
+    hn_context_anim_tick(c, 80);
+    hn_context_repaint(c);
+    dl = hn_context_display_list(c);
+    float ga = 1.0f;
+    int ghost_mid = 0;
+    for (int i = 0; dl && i < dl->count; i++)
+        if (dl->cmds[i].kind == HN_CMD_TEXT && dl->cmds[i].text &&
+            strstr(dl->cmds[i].text, "GONE")) {
+            ghost_mid = 1;
+            ga = (float)((dl->cmds[i].fill & 0xFFu)) / 255.0f;
+        }
+    check(ghost_mid && ga < 0.99f, "ghost: 半程 alpha < 1(淡出进行)");
+    /* 推进 300ms: ghost 出列, 显示列表不再含其文本 */
+    for (int i = 0; i < 8; i++) {
+        hn_context_anim_tick(c, 40);
+        hn_context_repaint(c);
+    }
+    dl = hn_context_display_list(c);
+    int ghost_gone = 1;
+    for (int i = 0; dl && i < dl->count; i++)
+        if (dl->cmds[i].kind == HN_CMD_TEXT && dl->cmds[i].text &&
+            strstr(dl->cmds[i].text, "GONE"))
+            ghost_gone = 0;
+    check(ghost_gone, "ghost 生命周期结束 → 从显示列表消失");
+    hn_rt_close(rt);
+}
+
 int main(void) {
     printf("anim_probe: 动画/交互/流畅性验收\n");
     test_transition();
     test_frame_pacing();
     test_anchor_scroll();
+    test_smartux_enter_exit();
     printf("\nanim_probe: %d 项断言, 失败 %d\n", g_pass + g_fail, g_fail);
     return g_fail ? 1 : 0;
 }

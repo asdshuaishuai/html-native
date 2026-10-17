@@ -2495,6 +2495,20 @@ static void paint_select_popups(hn_context *c);
 void hn_paint_root(hn_context *c) {
     c->n_cmds = 0;
     if (c->doc) paint_walk(c, c->doc->root, NULL, 1.0f, 0, 0);
+    /* exit ghost: 被移除的子树按剩余生命淡出(原位, 不参与命中/布局) */
+    for (int i = 0; i < c->exit_ghost_n; i++) {
+        float a = 1.0f - (float)c->exit_ghost[i].t_ms / (float)c->exit_ghost[i].ms;
+        if (a < 0) a = 0;
+        if (a > 1) a = 1;
+        paint_guard g2;
+        memset(&g2, 0, sizeof(g2));
+        g2.scale = 1.0f; g2.scale_x = 1.0f; g2.scale_y = 1.0f;
+        g2.text_scale = 1.0f;
+        mat_identity(g2.m3d);
+        g2.axx = 1.0f; g2.ayy = 1.0f;
+        g2.fhx = 0.0f; g2.fhy = 0.0f; g2.fhw = 1.0f;
+        paint_walk_g(c, c->exit_ghost[i].node, NULL, a, 0, 0, &g2);
+    }
     paint_select_popups(c);
 }
 

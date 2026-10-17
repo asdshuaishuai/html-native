@@ -511,6 +511,13 @@ void hn_context_set_pointer(hn_context *c, float x, float y);
 void hn_context_set_pointer_button(hn_context *c, int down);
 /* 视口高(CSS px; select 弹层翻边等布局判定用) */
 float hn_context_viewport_h(hn_context *c);
+/* ---- Smart-UX 出现/消失默认动效 ----
+ * 动态插入节点默认"淡入+上浮"(rt 首帧后置位; off 回旧瞬现口径) */
+void hn_context_set_dynamic_enter(hn_context *c, int on);
+/* JS 移除带盒子树时投喂 exit ghost: 子树原位淡出 160ms 后消亡。
+ * 声明 hn_internal.h 的 hn_node_remove_child/insert_before 内部移动不投喂。 */
+void hn_context_push_exit_ghost(hn_context *c, hn_node *n);
+void hn_context_clear_exit_ghosts(hn_context *c);
 /* 焦点元素(:focus 伪类)与插入符可见性。
    set_focus 在已有布局时会**立即重渲染**(样式重算 + 重布局 + 重绘),
    使 :focus 规则与引擎默认焦点环即刻生效; 禁用的控件拒绝聚焦。 */

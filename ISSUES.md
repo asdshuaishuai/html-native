@@ -219,6 +219,26 @@
 - 回归: 全部 16+ 探针家族全绿(render 83/0 · events 72 · css 108 · three ·
   quad3d · perf/anim 门禁通过)。
 
+### 2026-10-15 Smart-UX 出现/消失动效轮(呈现方式优化)
+
+"内容忽然出现/忽然消失"的呈现问题本轮收口(路线图 smart-ux 项):
+
+- **动态插入默认入场**: 运行时 appendChild/insertBefore 的新节点自动
+  **淡入 + 上浮 8px**(200ms, 继承作者 transition 缓动) —— 区别于首帧
+  文档(即终态出现, 不拖慢首屏)与显式 animation 声明(优先级更高)。
+  实现: 节点插入标记 `anim.fresh = 2`(区别解析产物 fresh=1), anim_walk
+  消费 `c->enter_dynamic_default`(rt 首帧后经
+  `hn_context_set_dynamic_enter` 置位)。
+- **退出 ghost 淡出**: JS remove 的带盒子树推入 exit ghost(容量 8,
+  环形丢弃), **原位**(最后布局盒位)以 alpha 1→0 淡出 160ms 后出列;
+  paint_root 尾部统一补画(不参与命中/布局); anim tick 推进并在途时
+  报 interactive(帧节拍正确)。换文档/compact 统一出列(节点指针随
+  arena 悬空)。
+- 探针: anim_probe 新增 D 组 6 断言(动态插入首帧 opacity<0.9 → 收敛 1;
+  ghost t=0 在列表 → 半程 alpha<1 → 生命周期后消失)。
+- 边界如实声明: ghost 只覆盖 JS remove 路径(display:none/visibility
+  切换不淡出); select 弹层暂无渐显。
+
 ### 已知问题(仍开放)
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。
