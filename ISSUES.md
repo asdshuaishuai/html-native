@@ -239,6 +239,25 @@
 - 边界如实声明: ghost 只覆盖 JS remove 路径(display:none/visibility
   切换不淡出); select 弹层暂无渐显。
 
+### 2026-10-17 窗口呈现动效轮(桌面即画板, 已实现)
+
+"窗口突然弹出"的呈现问题收口 —— 窗口被**画**上桌面而不是弹出来:
+
+- **入场渐显**: 开窗即隐(alpha 0, 无白闪), **首帧内容就绪后**淡入 +
+  微缩放浮起(220ms, ease-out, 底边锚定 0.97→1.0)。实现于
+  hnp_macos.c: `reveal_t` 状态机(开窗 -1 → reveal_begin 置 0 → 帧循环
+  window_reveal_step 单调钟步进)。透明窗/桌宠跳过(自身 alpha 语义冲突)。
+- **关闭淡出**: hnp_window_close_faded —— alpha 1→0(150ms)后真正
+  释放; hn_app 退出循环 nanosleep 驱动至完成。
+- **帧节拍联动**: 渐显/淡出在途时宿主帧节拍提到 16ms
+  (`hnp_window_reveal_active` 查询) —— 静态页空闲 250ms 节拍下渐显
+  不变幻灯片。
+- 全平台口径: Linux/headless 空桩(接口齐全); Windows hnwin 未接(下轮)。
+- 顺带修: 早前中断的构建留下 0 字节 hnapp-macos-arm64(检窗先看大小);
+  hnp_linux/hnp_headless 的 reveal 桩曾被插进函数体中部(正则锚定失误)。
+- 视觉验收: HN_REVEAL_TRACE 实测 alpha 斜坡
+  0→0.79→0.92→0.96→0.99→1.00(ease-out)。
+
 ### 已知问题(仍开放)
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。

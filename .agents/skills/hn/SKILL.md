@@ -174,7 +174,7 @@ hnMediaVolume('v', .5); // 音量(v<=0 同时静音)
 
 | meta | 作用 |
 |---|---|
-| `hn-surface` | `window`（普通窗）/ `popup`（不抢焦点, 消息卡）/ `layer`（浮层） |
+| `hn-surface` | `window`（普通窗）/ `popup`（不抢焦点, 消息卡）/ `layer`（浮层）——窗口开/关自带 Smart-UX 动效（首帧就绪后淡入+微缩放浮起 220ms; 关闭淡出 150ms） |
 | `hn-presence` | `ghost` 不占系统身份（不进 Dock）; `app` 驻留 Dock —— 桌宠用 ghost |
 | `hn-lifecycle` | `"launch show hide destroy"` 声明关心的生命周期事件 |
 | `hn-transparent` | 逐像素透明窗口（HUD/圆形控件; html/body 不要设不透明底色） |

@@ -169,3 +169,9 @@ void hnp_video_layer_frame(hnp_window *w, const char *player_id,
 void hnp_video_layer_detach(hnp_window *w, const char *player_id) {
     (void)w; (void)player_id;
 }
+
+/* Smart-UX 出现/消失动效(headless 无窗: 空实现) */
+void hnp_window_reveal_begin(hnp_window *w) { (void)w; }
+int hnp_window_reveal_active(hnp_window *w) { (void)w; return 0; }
+void hnp_window_close_faded(hnp_window *w) { hnp_window_close(w); }
+int hnp_window_close_fade_step(int dt_ms) { (void)dt_ms; return 0; }

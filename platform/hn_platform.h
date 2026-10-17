@@ -110,6 +110,14 @@ typedef struct {
 hnp_window *hnp_window_open(const hnp_window_desc *desc);
 
 /* 关闭并释放窗口。 */
+/* 首帧内容就绪后启动窗口入场渐显(幂等; Smart-UX 出现动效) */
+void hnp_window_reveal_begin(hnp_window *w);
+/* 渐显在途(宿主帧节拍据此提到 16ms) */
+int hnp_window_reveal_active(hnp_window *w);
+/* 关闭淡出: alpha 1→0(150ms)后真正释放; 帧循环驱动 step(dt), 返回在途数 */
+void hnp_window_close_faded(hnp_window *w);
+int hnp_window_close_fade_step(int dt_ms);
+
 void hnp_window_close(hnp_window *w);
 
 /* 内容区尺寸变化后同步(平台已由 hnp_pump 报告 resize 并由 hn_rt 重排,

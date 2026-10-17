@@ -35,6 +35,10 @@ static obj_t (*o_msgSend)(obj_t, sel_t, ...);
     ((RET (*)(obj_t, sel_t, long))o_msgSend)((O), o_sel(NAME), (long)(L))
 #define MSGUL(RET, O, NAME, UL) \
     ((RET (*)(obj_t, sel_t, unsigned long))o_msgSend)((O), o_sel(NAME), (unsigned long)(UL))
+/* float 参数(setAlphaValue: 收 CGFloat=double; 按声明式原型传参,
+   非变参 — 与 MSGI 同理, 类型宽度由原型决定)。 */
+#define MSGF(RET, O, NAME, F) \
+    ((RET (*)(obj_t, sel_t, double))o_msgSend)((O), o_sel(NAME), (double)(F))
 
 typedef struct { double x, y; } CGPoint;
 typedef struct { double w, h; } CGSize;
@@ -169,6 +173,10 @@ struct hnp_window {
 
     /* ---- 显示生命周期(深度 3) ---- */
     float scale;           /* 最近一次读到的 backing scale */
+    /* Smart-UX 窗口入场: -1 = 待首帧触发; >=0 = 渐显已启动(ms 计数);
+       INT_MIN = 已完成/不支持(透明窗)。驱动在 hnp_pump 的帧循环。 */
+    int reveal_t;
+    double reveal_last;  /* 上次步进的单调 ms(dt 实测) */
     int   scale_dirty;     /* 视图报 backing 变化 → pump 发 HNP_EV_SCALE_CHANGED */
     int   screen_dirty;    /* NSScreen 参数通知 → pump 发 HNP_EV_SCREEN_CHANGED */
     int   focus_dirty;     /* 键窗口变化 → pump 发 FOCUS_IN/OUT */
@@ -784,6 +792,14 @@ hnp_window *hnp_window_open(const hnp_window_desc *d) {
         pos.origin.y = hn_primary_screen_height() - (double)d->y - pos.size.h;
     }
     ((void (*)(obj_t, sel_t, CGRect, int))o_msgSend)(win, o_sel("setFrame:display:"), pos, 1);
+    /* Smart-UX 窗口入场: 开窗即隐(alpha 0), 首帧内容就绪后由
+       hnp_window_reveal 渐显(淡入+微缩放) —— 窗口被"画"上桌面而不是
+       硬弹出来, 且首帧前无白闪。透明窗/桌宠跳过(自身 alpha 语义冲突)。 */
+    int reveal = !d->transparent && !d->click_through;
+    if (reveal) {
+        MSGF(void, win, "setAlphaValue:", 0.0f);
+        w->reveal_t = -1;                    /* -1 = 待首帧触发 */
+    }
     MSG1(void, win, "makeKeyAndOrderFront:", (obj_t)1);
     MSG1(void, MSG0(obj_t, o_getClass("NSApplication"), "sharedApplication"),
          "activateIgnoringOtherApps:", (obj_t)1);
@@ -839,6 +855,43 @@ void hnp_window_close(hnp_window *w) {
     if (w->img) MSG0(void, w->img, "release");
     if (w->win) { MSG0(void, w->win, "close"); MSG0(void, w->win, "release"); }
     free(w);
+}
+
+/* ---- Smart-UX 窗口退场: 淡出后再真正关闭 ----
+ * phase: 0 = 淡出中(alpha 每帧递减), 1 = 淡出完成 → 由调用方重调
+ * hnp_window_close 完成资源释放。同步回退路径(无帧循环的宿主)用
+ * hnp_window_close_sync。 */
+static int g_close_fade_n = 0;
+static struct { hnp_window *w; int t_ms; } g_close_fade[8];
+
+int hnp_window_close_fade_step(int dt_ms) {
+    if (g_close_fade_n <= 0) return 0;
+    if (dt_ms < 0) return g_close_fade_n;   /* 查询态(不推进) */
+    for (int i = g_close_fade_n - 1; i >= 0; i--) {
+        hnp_window *w = g_close_fade[i].w;
+        if (!w || !w->win) { g_close_fade[i] = g_close_fade[g_close_fade_n - 1]; g_close_fade_n--; continue; }
+        g_close_fade[i].t_ms += dt_ms;
+        float t = (float)g_close_fade[i].t_ms / 150.0f;
+        if (t >= 1.0f) {
+            MSGF(void, w->win, "setAlphaValue:", 0.0f);
+            hnp_window_close(w);                       /* 真正释放(摘表/摘层/close) */
+            g_close_fade[i] = g_close_fade[g_close_fade_n - 1];
+            g_close_fade_n--;
+            continue;
+        }
+        MSGF(void, w->win, "setAlphaValue:", 1.0f - t);
+    }
+    return g_close_fade_n;
+}
+
+void hnp_window_close_faded(hnp_window *w) {
+    if (!w) return;
+    if (!w->win || w->transparent) { hnp_window_close(w); return; }   /* 透明窗直接关 */
+    if (g_close_fade_n >= 8) { hnp_window_close(w); return; }
+    MSGF(void, w->win, "setAlphaValue:", 1.0f);
+    g_close_fade[g_close_fade_n].w = w;
+    g_close_fade[g_close_fade_n].t_ms = 0;
+    g_close_fade_n++;
 }
 
 void hnp_window_resize(hnp_window *w, int nw, int nh) {
@@ -1254,6 +1307,68 @@ static int ime_trace(void) {
     return t;
 }
 
+/* ---- Smart-UX 窗口入场渐显(帧循环驱动) ----
+ * reveal_t: -1 = 待首帧触发(blit/present 后置 0); >=0 = 已启动, ms 计数。
+ * 时长 220ms: alpha 0→1 + 从 0.97 缩放浮起到终位(原点不动, 底边锚定)。
+ * 每帧由 hnp_pump 驱动(AppKit 定时器不引入 —— 帧循环本来就在跑)。 */
+#define HN_REVEAL_MS 220.0f
+
+/* 首帧内容就绪后调用(blit/present 完成后一次; 幂等): 启动渐显。 */
+void hnp_window_reveal_begin(hnp_window *w) {
+    if (!w || !w->win) return;
+    if (w->reveal_t == -1) w->reveal_t = 0;              /* -1 → 0 = 启动 */
+}
+
+/* 渐显在途(宿主据此把帧节拍提到 16ms —— 静态页 hn_rt_frame 报空闲,
+   250ms 的空闲节拍会让渐显变成 4 帧幻灯片)。 */
+int hnp_window_reveal_active(hnp_window *w) {
+    return w && w->reveal_t >= 0 && w->reveal_t != 2000000000;
+}
+
+/* 单调毫秒(mach_absolute_time 换算省略 —— clock_gettime 够用) */
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static int reveal_trace(void) {
+    static int t = -1;
+    if (t < 0) t = getenv("HN_REVEAL_TRACE") ? 1 : 0;
+    return t;
+}
+
+static void window_reveal_step(hnp_window *w, int dt_ms) {
+    if (w->reveal_t == 2000000000) return;               /* 已完成 */
+    if (!w->win) return;
+    if (w->reveal_t < 0) w->reveal_t = 0;                /* 首帧触发 */
+    if (w->reveal_last == 0) w->reveal_last = now_ms();
+    double now = now_ms();
+    w->reveal_t += (int)(now - w->reveal_last);
+    w->reveal_last = now;
+    float t = (float)w->reveal_t / HN_REVEAL_MS;
+    if (t >= 1.0f) {
+        MSGF(void, w->win, "setAlphaValue:", 1.0f);
+        w->reveal_t = 2000000000;                        /* 完成(不再步进) */
+        w->reveal_last = 0;
+        return;
+    }
+    float e = 1.0f - (1.0f - t) * (1.0f - t);            /* ease-out */
+    if (reveal_trace())
+        fprintf(stderr, "[reveal] t=%.2f alpha=%.2f scale=%.3f\n",
+                (double)t, (double)e, (double)(0.97f + 0.03f * e));
+    MSGF(void, w->win, "setAlphaValue:", e);
+    /* 微缩放: 以底边为锚 0.97→1.0(浮起观感; setFrame 原点下移 (1-s)*h/2) */
+    float sc = 0.97f + 0.03f * e;
+    CGRect f0 = MSG0(CGRect, w->win, "frame");
+    CGRect nf = f0;
+    nf.size.w = f0.size.w / f0.size.w * 0 + w->w * (double)sc;
+    nf.size.h = w->h * (double)sc;
+    nf.origin.x = f0.origin.x + (f0.size.w - nf.size.w) * 0.5;
+    nf.origin.y = f0.origin.y + (f0.size.h - nf.size.h) * 0.5;
+    ((void (*)(obj_t, sel_t, CGRect, int))o_msgSend)(w->win, o_sel("setFrame:display:"), nf, 0);
+}
+
 int hnp_pump(hnp_event *ev, int timeout_ms) {
     if (!ev) return 0;
     ev->kind = HNP_EV_NONE;
@@ -1263,6 +1378,12 @@ int hnp_pump(hnp_event *ev, int timeout_ms) {
     /* 事故②同款修复: 每次泵的 NSDate/NSEvent 及 AppKit 事件分派内部
        autorelease 对象, 落进本次有界池统一回收(无池时逐事件泄漏)。 */
     obj_t pool = pool_push();
+
+    /* Smart-UX 窗口入场步进(超时 0 的忙帧与事件等待帧都推进) */
+    for (int i = 0; i < g_win_map_n; i++)
+        if (g_win_map[i].hw && g_win_map[i].hw->reveal_t != 2000000000)
+            window_reveal_step(g_win_map[i].hw, 0);
+    if (g_close_fade_n > 0) hnp_window_close_fade_step(16);
 
     /* ---- 深度 2/3 的挂起事件优先出队(不占 AppKit 事件泵) ----
        顺序: IME 事件(组字/上屏) → backing scale → 屏幕参数。

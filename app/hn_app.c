@@ -521,6 +521,7 @@ int main(int argc, char **argv) {
         }
     }
     if (!hn_rt_presented(rt)) blit_now(rt, w);
+    hnp_window_reveal_begin(w);   /* Smart-UX: 首帧就绪 → 窗口渐显入场 */
     /* 真实键盘焦点在窗口上: 插入符可见(闪烁时机由引擎动画时钟推进;
        失焦由 HNP_EV_FOCUS_OUT 熄灭 —— 桌宠常驻窗口不闪无谓的 caret)。 */
     hn_context_set_caret_visible(hn_rt_context(rt), 1);
@@ -772,6 +773,7 @@ int main(int argc, char **argv) {
            合并成一次平台拷贝。直呈帧(presented)已由 drawable 出屏,
            跳过 CPU blit。 */
         if ((need_blit || repaint) && !hn_rt_presented(rt)) { blit_now(rt, w); need_blit = 0; }
+        hnp_window_reveal_begin(w);   /* 直呈路径首帧同样触发 */
         /* ---- 视频图层同步(真窗 GPU 合成): <video> 盒跟随布局/滚动/resize,
            首拍 attach(此后该会话 pf_frame 早退, CPU 拉帧归零), 元素消失/
            热重载换文档时 detach。离屏路径(--shot/--advance)不到这里。 ---- */
@@ -804,6 +806,9 @@ int main(int argc, char **argv) {
            只改唤醒节奏, 不改任何渲染语义: 重绘仍只发生在 hn_rt_frame/
            事件处理报告 repaint 时, dt 口径(now-last)与原先一致。 */
         pump_ms = beat < 0 ? HN_IDLE_PUMP_MS : (beat < 1 ? 1 : beat);
+        /* Smart-UX: 窗口入场/退场动效在途 → 16ms 帧节拍(平滑渐变) */
+        if (hnp_window_reveal_active(w) || hnp_window_close_fade_step(-1) > 0)
+            pump_ms = 16;
     }
 
     /* 出口补写: SIGTERM(daemon 收口)/红叉/Esc 都在这里退窗前把最后一次
@@ -819,7 +824,13 @@ int main(int argc, char **argv) {
         printf("[gpu] 退出统计: presented=%lu readback=%lu\n",
                hn_gpu_present_count(), hn_gpu_readback_count());
 
-    hnp_window_close(w);
+    hnp_window_close_faded(w);   /* Smart-UX: 淡出退场(帧循环完成后真正释放) */
+    {   /* 驱动淡出至完成(nanosleep 步进, 与 hn_app 的既有等待同款) */
+        while (hnp_window_close_fade_step(16) > 0) {
+            struct timespec ts = { 0, 16 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+    }
     hnp_shutdown();
     hn_rt_close(rt);
     free(html);
