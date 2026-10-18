@@ -4,13 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<title>html-native — HTML 描述原生界面</title>
-<meta name="description" content="为 AI agent 定制的 HTML 原生渲染引擎。C99 引擎零平台依赖 (Neb = NO-WEB)，自研光栅 + 可选 cairo + GPU 原语契约，人类与 AI 都能直接开发。">
+<title>Neb · html-native — AI 生成界面，桌面直接呈现</title>
+<meta name="description" content="Neb(NO-WEB)：为 AI agent 定制的 C99 原生渲染引擎。agent 产出 HTML/CSS，直接渲染成桌面原生窗——无浏览器内核、无构建链、无运行时依赖。">
 <style>
 :root {
-  --bg: #0b0e13; --bg2: #11151d; --card: #151a24; --line: #232b39;
-  --ink: #e9ecf2; --dim: #8892a6; --dim2: #5d6779;
-  --accent: #4f7cff; --accent2: #8b6bff; --ok: #3ecf6f; --warn: #f5b73d;
+  --bg: #0d0f12; --panel: #14171c; --panel2: #191d24; --line: #262b34;
+  --ink: #eceef2; --dim: #9aa3b2; --faint: #626b7a;
+  --blue: #5a8fd0; --gold: #d0a54f; --ok: #4fc38a;
+  --brush: linear-gradient(115deg, var(--blue), var(--gold));
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
@@ -18,163 +19,166 @@ body {
   margin: 0; background: var(--bg); color: var(--ink);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
                "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  font-size: 16px; line-height: 1.7; -webkit-font-smoothing: antialiased;
+  font-size: 16px; line-height: 1.75; -webkit-font-smoothing: antialiased;
 }
-code, pre, .mono {
-  font-family: "SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Code", monospace;
-}
-a { color: var(--accent); text-decoration: none; }
+code, pre, .mono { font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace; }
+a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
-.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+.wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
 
-/* ---------- 顶栏 ---------- */
+/* ---- 顶栏 ---- */
 header {
-  position: sticky; top: 0; z-index: 20;
-  background: rgba(11, 14, 19, 0.82); backdrop-filter: saturate(180%) blur(14px);
+  position: sticky; top: 0; z-index: 30;
+  background: rgba(13, 15, 18, 0.86); backdrop-filter: blur(12px) saturate(160%);
   border-bottom: 1px solid var(--line);
 }
-.nav { display: flex; align-items: center; gap: 12px; height: 58px; }
-.logo {
-  width: 26px; height: 26px; border-radius: 7px;
-  background: linear-gradient(135deg, var(--accent), var(--accent2));
-  display: grid; place-items: center;
-  font-weight: 800; font-size: 12px; color: #fff; letter-spacing: -0.5px;
+.nav { display: flex; align-items: center; gap: 11px; height: 56px; }
+.mark {
+  width: 25px; height: 25px; border-radius: 7px; background: var(--brush);
+  display: grid; place-items: center; color: #0d0f12; font-weight: 800; font-size: 12px;
 }
-.nav .name { font-weight: 700; letter-spacing: 0.2px; }
-.nav .links { margin-left: auto; display: flex; gap: 20px; font-size: 14px; }
-.nav .links a { color: var(--dim); }
-.nav .links a:hover { color: var(--ink); }
+.name { font-weight: 750; letter-spacing: 0.2px; }
+.name small { color: var(--faint); font-weight: 500; margin-left: 7px; font-size: 12.5px; }
+.links { margin-left: auto; display: flex; gap: 19px; font-size: 13.5px; }
+.links a { color: var(--dim); }
+.links a:hover { color: var(--ink); text-decoration: none; }
 
-/* ---------- Hero ---------- */
-.hero { padding: 84px 0 56px; }
-.badge {
-  display: inline-flex; align-items: center; gap: 7px;
-  border: 1px solid var(--line); border-radius: 999px;
-  padding: 5px 13px; font-size: 12.5px; color: var(--dim);
-  background: var(--bg2);
+/* ---- hero ---- */
+.hero { padding: 88px 0 64px; position: relative; }
+.tagline {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px;
+  color: var(--dim); border: 1px solid var(--line); border-radius: 999px;
+  padding: 5px 14px; background: var(--panel);
 }
-.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.tagline i { width: 7px; height: 7px; border-radius: 50%; background: var(--brush); }
 h1 {
-  font-size: clamp(32px, 5vw, 54px); line-height: 1.15; margin: 22px 0 18px;
-  font-weight: 800; letter-spacing: -1px;
+  font-size: clamp(34px, 5.4vw, 58px); line-height: 1.12; letter-spacing: -1.2px;
+  font-weight: 800; margin: 24px 0 18px;
 }
-h1 .grad {
-  background: linear-gradient(120deg, var(--accent), var(--accent2));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.lede { font-size: clamp(16px, 2vw, 19px); color: var(--dim); max-width: 720px; margin: 0 0 30px; }
-.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+h1 em { font-style: normal; background: var(--brush); -webkit-background-clip: text;
+        background-clip: text; color: transparent; }
+.lede { color: var(--dim); font-size: clamp(16px, 2vw, 18.5px); max-width: 700px; margin: 0 0 32px; }
+.lede b { color: var(--ink); font-weight: 650; }
+.cta { display: flex; flex-wrap: wrap; gap: 11px; align-items: center; }
 .btn {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 11px 20px; border-radius: 10px; font-size: 15px; font-weight: 600;
-  border: 1px solid transparent; transition: 160ms;
+  display: inline-flex; align-items: center; gap: 8px; padding: 10px 19px;
+  border-radius: 10px; font-size: 14.5px; font-weight: 650; border: 1px solid transparent;
+  transition: 150ms;
 }
-.btn.primary { background: var(--accent); color: #fff; }
-.btn.primary:hover { background: #6b8dff; text-decoration: none; }
-.btn.ghost { border-color: var(--line); color: var(--ink); background: var(--bg2); }
-.btn.ghost:hover { border-color: #37455e; text-decoration: none; }
-.install {
-  margin-top: 26px; background: var(--bg2); border: 1px solid var(--line);
-  border-radius: 12px; padding: 15px 18px; font-size: 14px; overflow-x: auto;
+.btn.solid { background: var(--ink); color: #0d0f12; }
+.btn.solid:hover { background: #fff; text-decoration: none; }
+.btn.line { border-color: var(--line); color: var(--ink); background: var(--panel); }
+.btn.line:hover { border-color: #3a4150; text-decoration: none; }
+.shot-cmd {
+  margin-top: 26px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px 17px; font-size: 13.5px; overflow-x: auto; line-height: 1.9;
 }
-.install .cmt { color: var(--dim2); }
-.install .cmd { color: var(--ok); }
+.shot-cmd .c { color: var(--faint); } .shot-cmd .g { color: var(--ok); }
 
-/* ---------- 通用区块 ---------- */
-section { padding: 62px 0; border-top: 1px solid var(--line); }
-h2 { font-size: 27px; margin: 0 0 10px; font-weight: 750; letter-spacing: -0.4px; }
-.sub { color: var(--dim); margin: 0 0 32px; max-width: 780px; }
-h3 { font-size: 17px; margin: 0 0 8px; font-weight: 700; }
+/* hero 画布小景: 纯 CSS 演示"画上桌面" */
+.canvas-strip {
+  margin: 52px 0 0; border: 1px solid var(--line); border-radius: 16px;
+  background: repeating-linear-gradient(45deg, #101318 0 14px, #0f1216 14px 28px);
+  padding: 34px 30px; position: relative; overflow: hidden; min-height: 210px;
+}
+.canvas-strip .hint {
+  position: absolute; right: 16px; top: 12px; font-size: 12px; color: var(--faint);
+}
+.strokes { position: relative; }
+.card-float {
+  border-radius: 14px; padding: 20px 22px; position: absolute; color: #fff;
+}
+.card-float h4 { margin: 0 0 6px; font-size: 16px; letter-spacing: 0.2px; }
+.card-float p { margin: 0; font-size: 13px; opacity: 0.85; }
+.cf-blue {
+  width: 46%; min-width: 260px; left: 4%; top: 8px; background: var(--blue);
+  -webkit-mask-image: linear-gradient(115deg, #000 62%, transparent 88%);
+          mask-image: linear-gradient(115deg, #000 62%, transparent 88%);
+}
+.cf-gold {
+  width: 34%; min-width: 210px; right: 6%; bottom: 10px; background: var(--gold); color: #241d0e;
+  -webkit-mask-image: linear-gradient(115deg, transparent 6%, #000 30%);
+          mask-image: linear-gradient(115deg, transparent 6%, #000 30%);
+}
+.stroke-line {
+  height: 3px; background: var(--brush); border-radius: 2px; opacity: 0.9;
+  -webkit-mask-image: linear-gradient(100deg, #000 55%, transparent 82%);
+          mask-image: linear-gradient(100deg, #000 55%, transparent 82%);
+}
 
-.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 16px; }
-.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+/* ---- 通用 ---- */
+section { padding: 64px 0; border-top: 1px solid var(--line); }
+h2 { font-size: 26px; letter-spacing: -0.4px; font-weight: 760; margin: 0 0 8px; }
+.sub { color: var(--dim); max-width: 760px; margin: 0 0 30px; }
+h3 { font-size: 16.5px; margin: 0 0 7px; font-weight: 700; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 14px; }
 .card {
-  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
-  padding: 22px; transition: 180ms;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 13px;
+  padding: 20px 21px; transition: 170ms;
 }
-.card:hover { border-color: #35425a; transform: translateY(-2px); }
-.card p { color: var(--dim); font-size: 14.5px; margin: 0; }
-.card .ico {
-  width: 34px; height: 34px; border-radius: 9px; margin-bottom: 14px;
-  display: grid; place-items: center; font-size: 17px;
-  background: rgba(79, 124, 255, 0.13); color: var(--accent);
+.card:hover { border-color: #343b47; transform: translateY(-2px); }
+.card p { color: var(--dim); font-size: 14px; margin: 0; }
+.card p b { color: var(--ink); font-weight: 620; }
+.card .k {
+  display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.6px;
+  color: var(--blue); background: rgba(90, 143, 208, 0.13);
+  padding: 2px 8px; border-radius: 5px; margin-bottom: 10px;
 }
-.metric { font-size: 30px; font-weight: 800; letter-spacing: -1px;
-  background: linear-gradient(120deg, var(--accent), var(--accent2));
-  -webkit-background-clip: text; background-clip: text; color: transparent; }
-.metric + p { font-size: 13.5px; color: var(--dim); margin: 4px 0 0; }
+.num { font-size: 29px; font-weight: 800; letter-spacing: -0.8px;
+  background: var(--brush); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.num + p { font-size: 13px; color: var(--dim); margin: 3px 0 0; }
 
-/* ---------- 架构图 ---------- */
-.arch { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
-.layer {
-  border: 1px solid var(--line); border-radius: 12px; padding: 16px 20px;
-  background: var(--card); display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
-}
-.layer .tag {
-  font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 6px;
-  background: rgba(79, 124, 255, 0.14); color: var(--accent); flex-shrink: 0;
-}
-.layer .what { font-weight: 600; }
-.layer .how { color: var(--dim); font-size: 14px; }
-.layer.engine { border-color: rgba(79, 124, 255, 0.4); background: rgba(79, 124, 255, 0.055); }
-.arrow { text-align: center; color: var(--dim2); font-size: 13px; }
-
-/* ---------- 代码块 ---------- */
-pre {
-  background: #0d1117; border: 1px solid var(--line); border-radius: 12px;
-  padding: 18px 20px; overflow-x: auto; font-size: 13.5px; line-height: 1.65; margin: 0;
-}
-pre .k { color: #ff7b72; }
-pre .s { color: #a5d6ff; }
-pre .c { color: var(--dim2); }
-pre .a { color: #ffa657; }
-pre .v { color: #79c0ff; }
-pre .g { color: var(--ok); }
-
-/* ---------- 截图 ---------- */
-.shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
-         gap: 18px; align-items: start; }
-.shot {
-  border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
-  background: var(--card); transition: 200ms;
-  display: flex; flex-direction: column;
-}
-.shot:hover { border-color: #35425a; transform: translateY(-3px); }
-/* 统一图片框比例: 不同尺寸的截图不会撑出高低不齐的卡片 */
-.shot .frame { aspect-ratio: 3 / 2; overflow: hidden; background: #0d1117;
-  display: grid; place-items: center; border-bottom: 1px solid var(--line); }
-.shot img { width: 100%; height: 100%; object-fit: cover; object-position: top center;
-  display: block; }
-/* caption 用 flex 固定结构, 卡片高度完全一致(描述统一 2 行槽位) */
-.shot .cap { padding: 13px 16px; display: flex; flex-direction: column; gap: 3px;
-  flex: 1; }
-.shot .cap strong { font-size: 14.5px; display: block; line-height: 1.45;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.shot .cap span { color: var(--dim); font-size: 13px; line-height: 1.5;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden; min-height: calc(2 * 1.5 * 13px); }
-.shot .cap strong { font-size: 14.5px; display: block; }
-.shot .cap span { color: var(--dim); font-size: 13px; }
-
-/* ---------- 表格 ---------- */
-table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
-th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); }
-th { color: var(--dim); font-weight: 600; font-size: 13px; }
-td code { background: rgba(127, 157, 255, 0.11); color: #9ec1ff;
-  padding: 2px 6px; border-radius: 5px; font-size: 13px; }
+/* 表格 */
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 10px 13px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--dim); font-weight: 620; font-size: 12.5px; }
 tr:last-child td { border-bottom: none; }
-
-footer {
-  padding: 44px 0 60px; border-top: 1px solid var(--line);
-  color: var(--dim); font-size: 14px;
+td code, p code, li code {
+  background: rgba(90, 143, 208, 0.12); color: #a8c6ec;
+  padding: 1.5px 6px; border-radius: 5px; font-size: 12.8px;
 }
-footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
-.note { color: var(--dim2); font-size: 13px; margin-top: 10px; }
+
+/* 代码块 */
+pre {
+  background: #0b0d11; border: 1px solid var(--line); border-radius: 11px;
+  padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.7; margin: 0;
+}
+pre .c { color: var(--faint); } pre .g { color: var(--ok); } pre .y { color: var(--gold); }
+
+/* 截图 */
+.shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.shot { border: 1px solid var(--line); border-radius: 13px; overflow: hidden; background: var(--panel); }
+.shot .frame { aspect-ratio: 3 / 2; background: #0b0d11; border-bottom: 1px solid var(--line); }
+.shot img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
+.shot .cap { padding: 12px 15px; }
+.shot .cap b { font-size: 14px; display: block; }
+.shot .cap span { color: var(--dim); font-size: 12.8px; }
+
+/* 步骤 */
+.steps { display: grid; gap: 14px; counter-reset: step; }
+.step { background: var(--panel); border: 1px solid var(--line); border-radius: 13px; padding: 19px 21px; }
+.step::before {
+  counter-increment: step; content: counter(step, decimal-leading-zero);
+  font-size: 12px; font-weight: 800; color: var(--gold); letter-spacing: 1px;
+}
+.step h3 { margin-top: 4px; }
+
+/* 边界清单 */
+.boundary { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.boundary .card { border-style: dashed; }
+.boundary .card p { font-size: 13.5px; }
+
+footer { padding: 46px 0 60px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13.5px; }
+footer .row { display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+.note { color: var(--faint); font-size: 12.5px; margin-top: 9px; }
 
 @media (max-width: 640px) {
-  .nav .links { display: none; }
-  .hero { padding: 52px 0 36px; }
-  section { padding: 44px 0; }
+  .links { display: none; }
+  .hero { padding: 56px 0 44px; }
+  section { padding: 46px 0; }
+  .cf-blue, .cf-gold { position: static; width: auto; min-width: 0; margin-bottom: 12px;
+    -webkit-mask-image: none; mask-image: none; }
 }
 </style>
 </head>
@@ -182,14 +186,16 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
 
 <header>
   <div class="wrap nav">
-    <div class="logo">hn</div>
-    <span class="name">html-native</span>
+    <div class="mark">N</div>
+    <span class="name">Neb <small>html-native</small></span>
     <nav class="links">
-      <a href="#why">定位</a>
-      <a href="#how">原理</a>
+      <a href="#why">为什么</a>
+      <a href="#canvas">窗口即画布</a>
+      <a href="#engine">引擎</a>
       <a href="#caps">能力</a>
       <a href="#shots">效果</a>
       <a href="#start">上手</a>
+      <a href="#limits">边界</a>
       <a href="https://github.com/asdshuaishuai/html-native">GitHub</a>
     </nav>
   </div>
@@ -197,423 +203,283 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
 
 <div class="wrap">
 
+  <!-- ============ HERO ============ -->
   <div class="hero">
-    <div class="badge"><span class="dot"></span> C99 全自研引擎 Neb (NO-WEB) · 三平台二进制</div>
-    <h1>用 HTML 写界面<br><span class="grad">渲染成原生窗口</span></h1>
+    <div class="tagline"><i></i> Neb = NO-WEB · C99 自研引擎 · 三平台二进制</div>
+    <h1>AI 写完 HTML，<br>界面<em>画上桌面</em>。</h1>
     <p class="lede">
-      为 AI agent 定制的 HTML 原生渲染引擎。
-      没有浏览器、没有 WebView 内核、没有构建步骤。
-      一个 C99 引擎 (Neb = NO-WEB) 把标记算成绘制指令，平台层把它画到屏幕上。
+      Neb 是给 AI agent 用的原生渲染引擎：agent 产出 <b>HTML/CSS</b>，
+      引擎把它直接算成像素、开成<b>桌面原生窗</b>。
+      没有浏览器内核，没有构建链，没有运行时依赖——
+      窗口默认无边框，界面就是画布。
     </p>
     <div class="cta">
-      <a class="btn primary" href="#start">快速上手 →</a>
-      <a class="btn ghost" href="https://github.com/asdshuaishuai/html-native">查看源码</a>
-      <a class="btn ghost" href="https://github.com/asdshuaishuai/html-native/releases">下载发布版</a>
+      <a class="btn solid" href="#start">五分钟开第一个窗 →</a>
+      <a class="btn line" href="https://github.com/asdshuaishuai/html-native">源码</a>
+      <a class="btn line" href="https://github.com/asdshuaishuai/html-native/releases">下载二进制</a>
     </div>
-    <div class="install mono">
-      <span class="cmt"># 构建后：常驻宿主 + 一条命令开原生窗</span><br>
-      <span class="cmd">$</span> bash tools/build-multiplatform.sh &amp;&amp; bash tools/build-daemon-cli.sh<br>
-      <span class="cmd">$</span> dist/hn-daemon &amp; dist/hn open myapp app.html --window
+    <div class="shot-cmd mono">
+      <span class="c"># 只有 bash + zig cc 两条构建依赖</span><br>
+      <span class="g">$</span> ZIG=zig bash tools/build-multiplatform.sh<br>
+      <span class="g">$</span> dist/hnapp-macos-arm64 examples/agent-card.html &nbsp;&nbsp;<span class="c"># 秒开一个原生窗</span>
+    </div>
+
+    <div class="canvas-strip">
+      <span class="hint">↑ 透明窗的画刷呈现：内容沿羽化笔锋铺开，未铺到的地方就是你的桌面</span>
+      <div class="strokes">
+        <div class="stroke-line" style="width: 72%; margin-bottom: 26px;"></div>
+        <div class="card-float cf-blue">
+          <h4>窗口即画布</h4>
+          <p>hn 窗口默认无标题栏。透明窗的每一像素都是桌面上的一笔。</p>
+        </div>
+        <div class="card-float cf-gold">
+          <h4>agent 母语直染</h4>
+          <p>hn-md / hn-json / hn-csv：工具输出装载即界面。</p>
+        </div>
+        <div style="clear: both;"></div>
+      </div>
     </div>
   </div>
 
-  <!-- ================= 为什么 ================= -->
+  <!-- ============ 为什么 ============ -->
   <section id="why">
-    <h2>为什么不是另一个 WebView 壳</h2>
+    <h2>agent 界面交付的第三条路</h2>
     <p class="sub">
-      套 WebView 得到的是网页；自己实现解析、布局、绘制，才谈得上“原生渲染”。
-      代价是一份引擎，收益是从标记到屏幕像素的每一行都在你手里。
+      agent 要把界面送到人眼前，常见两条路都有硬伤：浏览器标签是"网页"不是"应用"；
+      WebView 壳背着几十 MB 内核，启动慢，形态也只是"一个框"。Neb 是第三条：
+      自研引擎直接把标记算成桌面原生窗。
     </p>
-
-    <div class="grid3">
-      <div class="card">
-        <div class="ico">◆</div>
-        <h3>零 WebView 依赖</h3>
-        <p>渲染只有自研 C99 一条路。产物经 <code>otool -L</code> 验证只链接
-           FreeType 与系统 libc —— 不链接 WebKit/WebCore/CoreText；
-           平台差异收敛于运行期 dlopen 的薄胶水层（每平台一个 <code>hnp_*.c</code>）。</p>
-      </div>
-      <div class="card">
-        <div class="ico">◇</div>
-        <h3>引擎平台无关</h3>
-        <p>核心只依赖 ISO C 标准库，显示列表是纯数据。
-           同一份源码交叉编译出 5 个目标产物，跨架构布局输出逐字节一致（构建门禁守着，实测 5 文档一致）。</p>
-      </div>
-      <div class="card">
-        <div class="ico">○</div>
-        <h3>可逐层取证</h3>
-        <p><code>hncore parse|layout|boxes|paint|verify</code> 逐层看 DOM/盒模型/绘制指令，
-           加 <code>hn dump/text</code> 与 37 个 <code>*_probe.sh</code>（1300+ 项断言）钉住每一层。</p>
-      </div>
-      <div class="card">
-        <div class="ico">▣</div>
-        <h3>人类与 AI 双入口</h3>
-        <p>人类写 <code>app.html</code> 开窗、保存热重载（壳内 mtime watch）；
-           agent 现场生成标记推给常驻宿主即刻成窗。两条等价路径，同一引擎。</p>
-      </div>
-      <div class="card">
-        <div class="ico">▤</div>
-        <h3>应用是易变对象</h3>
-        <p>像小程序一样可随时随地生成、销毁、持久化：
-           <code>hn persist</code> 打成 <code>.hnapp</code> 胶囊（含 agent 指令）、
-           同 id 热更新、<code>resident</code> op 注册常驻（宿主重启自动重开）。</p>
-      </div>
-      <div class="card">
-        <div class="ico">▥</div>
-        <h3>系统能力内建</h3>
-        <p><code>sys://</code> 零网络桥直接读 CPU/内存/磁盘/运行时长/主机名、本地 KV、
-           剪贴板、通知、打开 URL，片段自带样式，换入即用。</p>
-      </div>
+    <div class="card" style="padding: 6px 4px;">
+      <table>
+        <tr><th></th><th>浏览器标签</th><th>WebView 壳</th><th>Neb</th></tr>
+        <tr><td><b>产物观感</b></td><td>网页标签页</td><td>一个装网页的框</td><td>无边框原生窗 / 桌宠 / 画上桌面的透明层</td></tr>
+        <tr><td><b>内核体积</b></td><td>浏览器本身</td><td>100MB+ 运行时</td><td>单二进制 ~1.5MB，零外部依赖</td></tr>
+        <tr><td><b>确定性</b></td><td>随浏览器版本漂</td><td>随系统 WebView 漂</td><td>跨架构布局逐字节一致（构建门禁）</td></tr>
+        <tr><td><b>无头 / CI</b></td><td>要浏览器自动化</td><td>要显示环境</td><td>headless 渲染 / 截图 / 事件注入全链路</td></tr>
+        <tr><td><b>agent 驱动</b></td><td>DOM API</td><td>DOM API</td><td>socket 协议 + 1300+ 探针断言即语言规范</td></tr>
+      </table>
     </div>
   </section>
 
-  <!-- ================= 原理 ================= -->
-  <section id="how">
-    <h2>它是怎么工作的</h2>
+  <!-- ============ 窗口即画布 ============ -->
+  <section id="canvas">
+    <h2>窗口即画布</h2>
     <p class="sub">
-      核心思路：把“渲染”拆成“算”和“画”。引擎只负责算出一份纯数据的绘制指令清单，
-      运行时只负责把清单翻译成系统绘图调用 —— 两边通过数据结构解耦。
+      hn 的窗口默认没有标题栏、没有系统边框——窗口表面就是内容本身。
+      形态是一张连续的谱，全部由文档里几行 meta 决定。
     </p>
-
-    <div class="arch">
-      <div class="layer">
-        <span class="tag">你写的</span>
-        <span class="what">app.html + app.css</span>
-        <span class="how">界面的一切。85 行的仪表盘就是这么来的（examples/dashboard.html）</span>
-      </div>
-      <div class="arrow">↓ 装载（自动注入主题令牌 / 展开 include / 内联 link）</div>
-      <div class="layer engine">
-        <span class="tag">C99 引擎</span>
-        <span class="what">解析 → 级联 → 布局 → 绘制指令</span>
-        <span class="how">~20.6k 行（含 include/hn.h），零平台依赖，产出 hn_cmd 数组</span>
-      </div>
-      <div class="arrow">↓ 注入文本/图片/媒体后端（引擎不认识字体，只调用回调）</div>
-      <div class="layer">
-        <span class="tag">平台层</span>
-        <span class="what">hnsoft 软光栅落屏 · 窗口物化（可选 cairo / GPU 原语）</span>
-        <span class="how">薄层：遍历指令数组，翻译成绘制调用；契约单头 hn_platform.h</span>
-      </div>
-      <div class="arrow">↓</div>
-      <div class="layer">
-        <span class="tag">宿主</span>
-        <span class="what">应用生命周期 + Unix socket 协议</span>
-        <span class="how">open / update / close / list / persist / resident / 壳 mtime 热重载</span>
-      </div>
-    </div>
-
-    <div style="margin-top: 26px" class="grid2">
-      <div class="card">
-        <h3>绘制指令共 14 种</h3>
-        <pre><span class="c">// 引擎产出的是纯数据，不是绘图调用</span>
-<span class="k">typedef struct</span> hn_cmd {
-  hn_cmd_kind kind;   <span class="c">// RECT / TEXT / IMAGE / CLIP_PUSH / CLIP_POP /</span>
-                      <span class="c">// CLIP_PATH_PUSH / QUAD / POLYGON / MESH / BITMAP /</span>
-                      <span class="c">// CLEAR_RECT / PDATA / PATTERN / TRIS</span>
-  <span class="k">float</span> x, y, w, h, radius;
-  hn_color fill, stroke;     <span class="c">// 含渐变/阴影</span>
-  <span class="k">const char</span> *text;          <span class="c">// 文本或图片路径</span>
-  <span class="k">float</span> tx, baseline;        <span class="c">// 按基线定位（行内混排对齐）</span>
-  hn_font_desc font;
-} hn_cmd;</pre>
-      </div>
-      <div class="card">
-        <h3>依赖倒置：平台注入能力</h3>
-        <pre><span class="c">// 引擎不知道字体是什么，只拿回调返回值算几何</span>
-<span class="k">typedef struct</span> hn_text_backend {
-  <span class="k">float</span> (*measure)(ctx, font, utf8, len);
-  <span class="k">void</span>  (*metrics)(ctx, font, &amp;asc, &amp;desc);
-} hn_text_backend;
-
-<span class="c">// 同款契约还有：图片后端 / hn_media_host / hnp_gpu_host（GPU 原语）</span>
-<span class="c">// 运行时注入 FreeType 实现；换平台只换这一层</span></pre>
-      </div>
-    </div>
-  </section>
-
-  <!-- ================= 能力 ================= -->
-  <section id="caps">
-    <h2>已实现的能力</h2>
-    <p class="sub">按“网页习惯”书写即可，不需要迁就引擎。</p>
-
     <div class="grid2">
       <div class="card">
-        <h3>布局与排版</h3>
-        <p>
-          block 常规流、flexbox 全套（grow/shrink/basis/justify/align/gap）、
-          行内格式化上下文（文本与 inline 元素共享行盒、CJK 码点硬拆、跨行基线对齐）、
-          <code>inline-flex</code>、<code>margin: 0 auto</code> 居中、
-          flex <code>margin-left: auto</code> 推右、<code>min/max</code> 约束、
-          overflow 裁剪+滚动。
-        </p>
+        <span class="k">默认形态</span>
+        <h3>无边框原生窗</h3>
+        <p>打开就是一个干净的矩形画布。<code>hn-frameless="0"</code> 才会要回
+        系统标题栏——那是例外，不是常态。</p>
       </div>
       <div class="card">
-        <h3>选择器与样式</h3>
-        <p>
-          tag / class / id / 复合 / 后代 / 分组、
-          <code>&gt;</code> 子代、<code>+</code> 相邻、<code>~</code> 通用兄弟、
-          <code>:hover</code> <code>:active</code> <code>:focus</code>
-          <code>:nth-child(odd|even|N|2n)</code> <code>:first-child</code> <code>:last-child</code>；
-          属性选择器 <code>[a=v]</code>、<code>:not()</code>、<code>:nth-of-type</code>、
-          <code>calc()</code>；级联特异性 + 继承 + 行内 style。
-        </p>
+        <span class="k">透明层</span>
+        <h3>画上桌面</h3>
+        <p><code>hn-transparent="1"</code> 让窗口逐像素透明；配合画刷呈现，
+        内容像颜料一样铺在你的桌面壁纸上，未画到的地方就是桌面。</p>
       </div>
       <div class="card">
-        <h3>视觉</h3>
-        <p>
-          盒模型、圆角（含 <code>50%</code> 画圆；边缘 4-tap 亚像素抗锯齿，
-          描边环按 CSS border 语义画在盒内带）、
-          <code>linear-gradient</code>/径向渐变、<code>box-shadow</code>、<code>text-shadow</code>、
-          <code>filter: brightness/contrast/saturate</code>、<code>clip-path: circle/inset</code>、
-          opacity、<code>transition</code>/<code>@keyframes</code>（含 spring/bounce 缓动族）、
-          <code>transform</code> 2D/3D、cursor、<code>text-decoration</code>、<code>list-style</code>。
-        </p>
+        <span class="k">桌宠</span>
+        <h3>几乎不以窗口存在</h3>
+        <p>无底色 + 悬浮层级 + 跨空间 + 鼠标穿透 + 幽灵模式（不进 Dock）。
+        立绘、气泡、网格形变摆动——桌面上住着一个小东西。</p>
       </div>
       <div class="card">
-        <h3>颜色与单位</h3>
-        <p>
-          <code>#hex</code>（3/4/6/8 位）、<code>rgb(a)</code>、<code>hsl(a)</code>、
-          transparent、36+ 命名色（函数式支持含空格写法）；
-          单位 <code>px / pt / % / em / rem / vw / vh</code>。
-        </p>
-      </div>
-      <div class="card">
-        <h3>交互（无 JavaScript）</h3>
-        <p>
-          <code>hx-get/post</code>、<code>hx-target</code>、<code>hx-swap</code>、
-          <code>hx-trigger="click | load | every Ns"</code>、
-          表单参数自动携带、input 回车提交（自动定位载体）；
-          事件统一管道（点击/键盘/滚轮/hover → 冒泡 → hx 消费）。
-        </p>
-      </div>
-      <div class="card">
-        <h3>系统集成 + 网络</h3>
-        <p>
-          <code>sys://cpu|memory|disk|uptime|host</code> 系统数据、
-          <code>sys://store</code> 本地 KV 持久化、剪贴板、系统通知、
-          打开 URL —— 全部本地应答；需要外部数据时 <code>hx-get</code>/<code>hn.fetch</code>
-          走运行时网络层（见下），<code>sys://</code> 依旧零网络。
-        </p>
-      </div>
-      <div class="card">
-        <h3>富媒体与直染（agent 母语）</h3>
-        <p>
-          <code>&lt;div hn-md&gt;</code>/<code>hn-json</code>/<code>hn-csv</code> 源文本装载即变 DOM；
-          GIF 动图、Lottie/<code>.lottie</code> 矢量动画、Live2D motion 驱动 rig、
-          <code>&lt;video&gt;/&lt;audio&gt;</code>（真窗 AVFoundation；video 可走 AVPlayerLayer 图层直通）、
-          <code>&lt;canvas&gt;</code> 2D（QuickJS）、WASM 计算（wasm3）。
-        </p>
-      </div>
-      <div class="card">
-        <h3>组件与主题</h3>
-        <p>
-          <code>&lt;include src&gt;</code> 文件级组件（嵌套/循环检测）；
-          <code>&lt;meta name="hn-theme" content="dark"&gt;</code> 一行注入设计令牌基座
-          —— agent 不写 CSS 也能出精致界面。
-          另有 <code>hn-stream</code> 自动跟随/环形缓冲、<code>hn-mesh</code> 网格形变、
-          <code>hn-presence</code> 弱存在感。
-        </p>
-      </div>
-      <div class="card">
-        <h3>单一渲染路径 + GPU 契约与直呈</h3>
-        <p>
-          渲染只有自研 C99 引擎这一条路径 —— 没有 WebKit 兜底、没有 Swift。
-          后端接缝上是 hnsoft 软件光栅（默认）+ 可选 cairo（同签名换链接）+
-          <strong>GPU 原语契约 <code>hnp_gpu_host</code></strong>（平台出原语、引擎出画法；
-          Metal 已落地，<code>HN_GPU=metal</code> 显式开启，覆盖不了的指令整帧回退 hnsoft）。
-          <strong>macOS 窗口直呈</strong>：<code>HN_GPU_PRESENT=1</code> 时画面直接画进
-          CAMetalLayer 的 drawable 呈现 —— 零 CPU 位图、零回读（实测 presented 帧回读数为 0）。
-          <code>grid</code>/<code>svg</code> 等边界如实写在 README。
-        </p>
-      </div>
-      <div class="card">
-        <h3>窗口形态与呈现</h3>
-        <p>
-          <strong>hn 窗口默认无标题栏</strong>（窗口即画布；
-          <code>hn-frameless="0"</code> 才要系统标题栏）。
-          <code>hn-transparent</code> 逐像素透明 + 桌宠一组 meta
-          （悬浮/桌面级/跨空间/穿透/幽灵模式）；<strong>画刷呈现</strong>：
-          透明窗内容沿羽化笔锋"画上桌面"（<code>hn-reveal</code>，
-          未铺区域透出桌面），关闭淡出与入场淡入全窗缺省。
-        </p>
-      </div>
-      <div class="card">
-        <h3>网络层（2026-10 新增）</h3>
-        <p>
-          <code>hx-get</code>/<code>hx-post</code> 指向 <code>http(s)://</code> 走真实请求（GET 自动拼 query、
-          POST 带 urlencoded 头）；JS 侧 <code>hn.fetch(url, options)</code> 返回 Promise，
-          响应支持 <code>text()/json()</code>，4xx/5xx reject 带 <code>e.status</code>。
-          主机白名单 <code>HN_FETCH_ALLOW</code> 逐跳校验（含重定向），超时可配 ——
-          引擎核心依旧零网络，transport 全在运行时层。
-        </p>
+        <span class="k">轻应用</span>
+        <h3>具名槽位 + 胶囊</h3>
+        <p><code>hn-applet</code> 具名常驻（销毁后回原位）；
+        <code>.hnapp</code> 胶囊把文档/数据/几何/agent 操作指令装进一个
+        可携带的 JSON 文件。</p>
       </div>
     </div>
   </section>
 
-  <!-- ================= 效果 ================= -->
+  <!-- ============ 引擎 ============ -->
+  <section id="engine">
+    <h2>引擎怎么工作</h2>
+    <p class="sub">
+      一条流水线，两段解耦：引擎把标记<b>算</b>成 14 种绘制指令的纯数据清单；
+      平台层把清单<b>画</b>到屏幕。画的方式可以换——软件光栅、cairo、GPU 直呈——
+      清单不变。
+    </p>
+    <div class="grid3">
+      <div class="card">
+        <div class="num">14</div>
+        <p>种绘制指令：RECT / TEXT / IMAGE / CLIP / QUAD / POLYGON / MESH /
+        BITMAP / TRIS…——纯数据，可序列化、可 diff、可离屏重放</p>
+      </div>
+      <div class="card">
+        <div class="num">3</div>
+        <p>个可互换光栅后端（同签名换链接即换）：hnsoft 软件光栅（缺省）·
+        cairo（一份实现喂全平台）· Metal GPU 原语（<code>HN_GPU=metal</code>，
+        支持直呈 drawable，零 CPU 位图零回读）</p>
+      </div>
+      <div class="card">
+        <div class="num">5</div>
+        <p>个交叉编译目标（macOS arm64/x86_64 · Linux x86_64/aarch64 ·
+        Windows x86_64），跨架构布局输出逐字节一致——FMA 融合被显式关掉</p>
+      </div>
+    </div>
+    <div style="margin-top: 14px" class="grid2">
+      <div class="card">
+        <h3>渲染质量是断言守出来的</h3>
+        <p>圆角与圆的边缘走 <b>4-tap 亚像素抗锯齿</b>（只对边缘像素付费）；
+        描边环按 <b>CSS border 语义</b>画在盒内带；裁剪边缘按<b>覆盖率混合</b>，
+        圆形头像的裁边和实心圆一样平滑。</p>
+      </div>
+      <div class="card">
+        <h3>依赖倒置到最后一层</h3>
+        <p>引擎不认识字体、解码器、GPU——文本测量、图片解码、媒体播放、
+        GPU 原语全部是运行期注入的回调表；每平台一个 <code>hnp_*.c</code>，
+        运行期 dlopen 系统 API，编译期零 SDK。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 能力 ============ -->
+  <section id="caps">
+    <h2>能力面</h2>
+    <p class="sub">按网页习惯书写，不需要迁就引擎；免单位数值、标准选择器、标准颜色照单全收。</p>
+    <div class="grid2">
+      <div class="card">
+        <span class="k">排版与布局</span>
+        <h3>网页写法照常工作</h3>
+        <p>block/flex 全套、行内格式化、<code>calc()</code>、
+        属性选择器、<code>:nth-of-type</code>、
+        2D/3D 变换（preserve-3d 真立方体、透视消失点）、
+        <code>@media</code> 响应式、免单位补 px。</p>
+      </div>
+      <div class="card">
+        <span class="k">动效</span>
+        <h3>引擎级动画时钟</h3>
+        <p>transition / @keyframes / spring·bounce·elastic 闭式缓动 /
+        Lottie（含 .lottie 直读）/ GIF 逐帧 disposal / hn-mesh 网格形变
+        （Live2D motion 驱动）/ 帧率无关按 t 求值。</p>
+      </div>
+      <div class="card">
+        <span class="k">内容直染</span>
+        <h3>agent 母语即界面</h3>
+        <p><code>hn-md</code>（含代码高亮/表格/任务清单）、
+        <code>hn-json</code>、<code>hn-csv</code> 源文本装载即变 DOM；
+        截断口径保护巨输出不炸布局——工具输出窗开箱即用。</p>
+      </div>
+      <div class="card">
+        <span class="k">交互与网络</span>
+        <h3>声明式优先，JS 可选</h3>
+        <p><code>hx-get/post/trigger</code> 声明式交互；
+        QuickJS 桥（<code>hnSetText</code>/<code>hnGet2D</code> canvas 2D/
+        <code>hn.fetch</code>）与 wasm3 纯计算模块；运行时网络层带主机白名单
+        <code>HN_FETCH_ALLOW</code>，引擎核心依旧零网络。</p>
+      </div>
+      <div class="card">
+        <span class="k">媒体</span>
+        <h3>解码委托平台</h3>
+        <p>&lt;video&gt;/&lt;audio&gt; 六态状态机；macOS 走 AVFoundation
+        （运行期 dlopen），真窗视频可走 AVPlayerLayer 原生图层直通——
+        像素不过 CPU。无宿主时优雅占位。</p>
+      </div>
+      <div class="card">
+        <span class="k">系统与主题</span>
+        <h3>sys:// 桥 + 设计令牌</h3>
+        <p><code>sys://cpu|memory|disk|store|clipboard|notify|open</code>
+        零网络本地应答；<code>hn-theme</code> 一行注入完整令牌基座；
+        ui-kit 组件预设 include 即得——agent 不写 CSS 也出精致界面。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 数字 ============ -->
+  <section id="num">
+    <div class="grid3">
+      <div class="card"><div class="num">1300+</div><p>探针断言（37 个 <code>tools/*_probe.sh</code>）——"支持的子集"不是文档承诺，是可执行规范</p></div>
+      <div class="card"><div class="num">0</div><p>WebView / WebKit / Electron / Swift 依赖（<code>otool -L</code> 可验证：只链 FreeType 与系统 libc）</p></div>
+      <div class="card"><div class="num">1</div><p>条渲染路径——自研 C99 引擎；历史上"系统 webview 优先"与 Swift 运行时两条路都已删除</p></div>
+    </div>
+  </section>
+
+  <!-- ============ 效果 ============ -->
   <section id="shots">
     <h2>实际渲染效果</h2>
-    <p class="sub">以下均为真实窗口的自绘截图（@2x，无屏幕录制权限依赖），非设计稿。</p>
+    <p class="sub">真实窗口离屏截图（@2x），非设计稿。</p>
     <div class="shots">
-      <div class="shot">
-        <div class="frame"><img src="screenshots/dashboard.png" alt="桌面仪表盘" loading="lazy"></div>
-        <div class="cap"><strong>桌面仪表盘</strong><span>sys:// 实时系统数据 · 阈值色阶进度条 · 本地 KV 备忘 · 条纹列表</span></div>
-      </div>
-      <div class="shot">
-        <div class="frame"><img src="screenshots/webpage.png" alt="网页习惯写法" loading="lazy"></div>
-        <div class="cap"><strong>零迁就的网页写法</strong><span>DOCTYPE · link 外链样式 · hsl/rem/vw · 子选择器 · 圆头像</span></div>
-      </div>
-      <div class="shot">
-        <div class="frame"><img src="screenshots/showcase.png" alt="能力展示" loading="lazy"></div>
-        <div class="cap"><strong>引擎能力展示</strong><span>flexbox · 渐变 · 阴影 · 过渡 · @media 响应式</span></div>
-      </div>
-      <div class="shot">
-        <div class="frame"><img src="screenshots/message-card.png" alt="消息卡片" loading="lazy"></div>
-        <div class="cap"><strong>消息卡片</strong><span>秒开 popup · 同 id 热更新 · daemon 生命周期</span></div>
-      </div>
-      <div class="shot">
-        <div class="frame"><img src="screenshots/dev-app.png" alt="网页式应用" loading="lazy"></div>
-        <div class="cap"><strong>网页式应用</strong><span>include 组件 · 主题令牌 · 保存即热更新</span></div>
-      </div>
-      <div class="shot">
-        <div class="frame"><img src="screenshots/inputs-focus.png" alt="输入控件" loading="lazy"></div>
-        <div class="cap"><strong>输入控件</strong><span>值状态 · 闪烁 caret · Tab 聚焦 · 原生键盘编辑</span></div>
-      </div>
+      <div class="shot"><div class="frame"><img src="screenshots/dashboard.png" alt="桌面仪表盘" loading="lazy"></div>
+        <div class="cap"><b>桌面仪表盘</b><span>sys:// 实时数据 · 进度条 · 本地 KV · 条纹列表</span></div></div>
+      <div class="shot"><div class="frame"><img src="screenshots/showcase.png" alt="能力展示" loading="lazy"></div>
+        <div class="cap"><b>能力展示</b><span>flexbox · 渐变 · 阴影 · 过渡 · @media</span></div></div>
+      <div class="shot"><div class="frame"><img src="screenshots/webpage.png" alt="网页写法" loading="lazy"></div>
+        <div class="cap"><b>零迁就网页写法</b><span>DOCTYPE · 外链样式 · hsl/rem/vw · 圆头像</span></div></div>
+      <div class="shot"><div class="frame"><img src="screenshots/inputs-focus.png" alt="输入控件" loading="lazy"></div>
+        <div class="cap"><b>输入控件</b><span>caret · Tab 聚焦 · 原生键盘编辑</span></div></div>
+      <div class="shot"><div class="frame"><img src="screenshots/message-card.png" alt="消息卡片" loading="lazy"></div>
+        <div class="cap"><b>消息卡片</b><span>秒开 popup · 热更新 · 生命周期</span></div></div>
+      <div class="shot"><div class="frame"><img src="screenshots/dev-app.png" alt="include 组件" loading="lazy"></div>
+        <div class="cap"><b>include 组件</b><span>主题令牌 · 保存即热更新</span></div></div>
     </div>
-    <div class="note">截图由 <code>hnapp-*</code>/<code>hncore render</code> 离屏渲染生成（@2x 真窗 backing）—— 所见即窗口所得；更多效果见仓库 <code>screenshots/</code>（桌宠/媒体/Live2D/3D 大屏）。</div>
+    <p class="note">更多形态（桌宠 / Live2D 数字人 / 3D 大屏 / 媒体窗）见仓库 <code>screenshots/</code> 与 <code>examples/</code>。</p>
   </section>
 
-  <!-- ================= 上手 ================= -->
+  <!-- ============ 上手 ============ -->
   <section id="start">
-    <h2>五分钟做出一个应用</h2>
-    <p class="sub">只需要会 HTML 和 CSS。没有 Node、没有 npm、没有打包器。</p>
-
-    <div class="grid2">
-      <div class="card">
-        <h3>1 · 构建与运行</h3>
-        <pre><span class="c"># 一次性构建（只需 zig cc，无 Xcode 工程）</span>
-<span class="g">$</span> ZIG=zig bash tools/build-multiplatform.sh
-<span class="g">$</span> bash tools/build-daemon-cli.sh  <span class="c"># 产出 dist/hn-daemon + dist/hn</span>
-
-<span class="c"># 打开你的第一个原生窗口（--window = 真桌面窗）</span>
-<span class="g">$</span> dist/hn-daemon &amp;
-<span class="g">$</span> dist/hn open myapp app.html --css app.css --window</pre>
+    <h2>四步上线</h2>
+    <p class="sub">会 HTML 和 CSS 就够了。构建链只有 bash + zig cc。</p>
+    <div class="steps">
+      <div class="step">
+        <h3>构建</h3>
+        <pre><span class="g">$</span> ZIG=zig bash tools/build-multiplatform.sh      <span class="c"># dist/ 全套三平台产物</span>
+<span class="g">$</span> bash tools/build-daemon-cli.sh                <span class="c"># dist/hn-daemon 常驻宿主 + dist/hn CLI</span></pre>
       </div>
-      <div class="card">
-        <h3>2 · 改文件，窗口就变了</h3>
-        <pre><span class="c"># app.html 里改标题，保存</span>
-<span class="k">&lt;h1&gt;</span>myapp<span class="k">&lt;/h1&gt;</span>   <span class="c">→</span>   <span class="k">&lt;h1&gt;</span>我的应用<span class="k">&lt;/h1&gt;</span>
-
-<span class="c"># 真窗壳每 ~300ms watch 文件 mtime，同 id 整文档重载：</span>
-<span class="c"># 窗口与进程不动，界面即刻更新（hn update 走同一通道）</span></pre>
+      <div class="step">
+        <h3>开窗</h3>
+        <pre><span class="g">$</span> dist/hn-daemon &amp;
+<span class="g">$</span> dist/hn open myapp app.html --css app.css --window   <span class="c"># 桌面弹出原生窗</span></pre>
       </div>
-    </div>
-
-    <div style="margin-top: 16px">
-      <div class="card">
-        <h3>3 · 声明式交互与系统能力</h3>
-        <pre><span class="c">&lt;!-- 系统信息：本地应答，零网络 --&gt;</span>
-<span class="k">&lt;div</span> <span class="a">hx-get</span>=<span class="s">"sys://cpu"</span> <span class="a">hx-trigger</span>=<span class="s">"load every 3s"</span><span class="k">&gt;</span>…<span class="k">&lt;/div&gt;</span>
-
-<span class="c">&lt;!-- 本地持久化：重启后仍在 --&gt;</span>
-<span class="k">&lt;input</span> <span class="a">id</span>=<span class="s">"note"</span> <span class="a">name</span>=<span class="s">"value"</span><span class="k">&gt;</span>
-<span class="k">&lt;div</span> <span class="a">hx-post</span>=<span class="s">"sys://store/set?key=note"</span> <span class="a">hx-target</span>=<span class="s">"out"</span><span class="k">&gt;</span>保存<span class="k">&lt;/div&gt;</span>
-
-<span class="c">&lt;!-- 一行主题：注入完整设计令牌基座 --&gt;</span>
-<span class="k">&lt;meta</span> <span class="a">name</span>=<span class="s">"hn-theme"</span> <span class="a">content</span>=<span class="s">"dark"</span><span class="k">&gt;</span></pre>
+      <div class="step">
+        <h3>迭代</h3>
+        <pre><span class="c"># 保存文件 ~300ms 内窗口热更新（进程与窗口表面不动）</span>
+<span class="g">$</span> dist/hn update myapp app.html                  <span class="c"># 同 id 推新文档，走同一通道</span></pre>
       </div>
-    </div>
-
-    <div style="margin-top: 16px">
-      <div class="card">
-        <h3>命令行速查</h3>
-        <table>
-          <tr><th>命令</th><th>作用</th></tr>
-          <tr><td><code>hn open &lt;id&gt; app.html [--css app.css]</code></td><td>打开应用（无头槽位；表面由 meta 决定）</td></tr>
-          <tr><td><code>hn open &lt;id&gt; app.html --window</code></td><td>真桌面窗（daemon spawn 平台壳，每窗一进程）</td></tr>
-          <tr><td><code>hn update &lt;id&gt; app.html</code></td><td>热更新（无头保持文档；窗口应用原子写回源文件）</td></tr>
-          <tr><td><code>hn list</code> / <code>hn close &lt;id&gt;</code></td><td>列出运行中应用 / 销毁</td></tr>
-          <tr><td><code>hn dump &lt;id&gt;</code> / <code>hn text &lt;id&gt; --element x</code></td><td>内省：指令数 / 元素文本</td></tr>
-          <tr><td><code>hn event &lt;id&gt; --kind click --target btn</code></td><td>注入事件驱动 hx（agent 感知+驱动闭环）</td></tr>
-          <tr><td><code>hn shot &lt;id&gt; out.png</code></td><td>无头渲染 PNG</td></tr>
-          <tr><td><code>hncore render|renderc app.html out.png W H</code></td><td>引擎 CLI：hnsoft / cairo 后端同一显示列表</td></tr>
-          <tr><td><code>hnapp-macos-arm64 app.html --shot out.png W H</code></td><td>平台壳离屏渲染（同生产光栅器）</td></tr>
-          <tr><td>socket op <code>persist</code>/<code>restore</code>/<code>resident</code></td><td>胶囊打包/恢复/常驻登记（CLI 未包，任意 socket 客户端可调）</td></tr>
-        </table>
+      <div class="step">
+        <h3>感知与驱动（agent 闭环）</h3>
+        <pre><span class="g">$</span> dist/hn dump myapp                             <span class="c"># 绘制指令数（管线健康）</span>
+<span class="g">$</span> dist/hn text myapp --element title             <span class="c"># 元素文本</span>
+<span class="g">$</span> dist/hn event myapp --kind click --target btn  <span class="c"># 注入事件</span>
+<span class="g">$</span> dist/hn shot myapp out.png                     <span class="c"># 无头渲染 PNG（视觉回归）</span></pre>
       </div>
     </div>
   </section>
 
-  <!-- ================= 三平台 ================= -->
-  <section id="platforms">
-    <h2>引擎核心的三平台二进制</h2>
+  <!-- ============ 边界 ============ -->
+  <section id="limits">
+    <h2>诚实边界</h2>
     <p class="sub">
-      <code>hncore</code> 是引擎核心的无平台 CLI（<code>parse / layout / paint / text / boxes / verify</code>）——
-      它不链接任何系统 UI 框架，因此可交叉编译到三平台，用于验证与集成测试。
+      Neb 不是浏览器，也刻意不做浏览器。"支持的子集 + 探针 = 语言规范"；
+      以下是明说 不做 / 未做 的部分。
     </p>
-
-    <div class="card">
-      <table>
-        <tr><th>目标</th><th>格式</th><th>产物</th></tr>
-        <tr><td>macOS arm64</td><td>Mach-O</td><td><code>hncore-macos-arm64</code>（+可选 cairo: <code>hncore-cairo-macos-arm64</code>）</td></tr>
-        <tr><td>macOS x86_64</td><td>Mach-O</td><td><code>hncore-macos-x86_64</code></td></tr>
-        <tr><td>Linux x86_64</td><td>ELF（musl 静态）</td><td><code>hncore-linux-x86_64</code></td></tr>
-        <tr><td>Linux aarch64</td><td>ELF（musl 静态）</td><td><code>hncore-linux-aarch64</code></td></tr>
-        <tr><td>Windows x86_64</td><td>PE32+</td><td><code>hncore-windows-x86_64.exe</code></td></tr>
-      </table>
-      <div class="note" style="margin-top: 10px">
-        同一条构建还产出：运行时 <code>hnapp-macos-arm64 / hnapp-macos-headless / hnapp-linux-x86_64</code>
-        （新分层架构，GPU 原语仅 macOS 入列）与旧窗口壳 <code>hnweb-*</code>/<code>hnwin-*</code>。
-      </div>
-      <pre style="margin-top: 16px"><span class="c"># 一条命令构建全部（需要 zig 提供三平台 libc）</span>
-<span class="g">$</span> ZIG=zig ./tools/build-multiplatform.sh
-
-<span class="c"># 跨架构确定性：同一文档在两个架构上输出逐字节一致</span>
-<span class="g">$</span> diff &lt;(./hncore-macos-arm64 paint app.html) \
-       &lt;(./hncore-macos-x86_64 paint app.html)   <span class="c"># 无差异</span></pre>
-      <div class="note">
-        布局引擎要求跨平台确定性，因此构建关闭了 FMA 融合（<code>-ffp-contract=off</code>）：
-        arm64 有 FMA 而 x86_64 基线没有，默认融合会让同一文档算出不同的 px 值。
-      </div>
-    </div>
-  </section>
-
-  <!-- ================= 可靠性 ================= -->
-  <section id="quality">
-    <h2>可靠性与验证</h2>
-    <p class="sub">
-      UI 引擎的错误往往表现为“看起来有点不对”，很难靠肉眼发现。
-      这个项目用可执行的断言锁住每一层。
-    </p>
-    <div class="grid3">
+    <div class="boundary">
       <div class="card">
-        <div class="metric">1300+</div>
-        <p>探针断言/检查（37 个 <code>tools/*_probe.sh</code>，以 <code>find tools -name '*_probe.sh'</code> 为准；覆盖解析/级联/布局/绘制/交互/直染/媒体/3D/双后端/呈现动效）</p>
+        <h3>不做：兼容任意网页</h3>
+        <p>目标渲染的是 agent 生成的自定义 hn 子集。服务"渲染真实网页"的特性一律
+        走 <code>sys://open</code> 桥交给系统浏览器，不塞进引擎。</p>
       </div>
       <div class="card">
-        <div class="metric">5</div>
-        <p>文档跨架构逐字节一致（构建门禁：同 HN_NO_TEXT 口径比对布局输出）</p>
+        <h3>不做：完整 Web API</h3>
+        <p>JS 面是刻意的 小桥（hnSetText / hnGet2D / hn.fetch / hnWasmCall…），
+        不是 DOM/WebAPI 兼容层。</p>
       </div>
       <div class="card">
-        <div class="metric">14</div>
-        <p>显示列表指令类（RECT/TEXT/IMAGE/CLIP_PUSH/CLIP_POP/CLIP_PATH_PUSH/QUAD/POLYGON/MESH/BITMAP/CLEAR_RECT/PDATA/PATTERN/TRIS），每类有探针锚</p>
+        <h3>不做：打包解码器</h3>
+        <p>媒体解码委托平台框架（macOS AVFoundation）；引擎只认回调解码器契约。
+        非 FFmpeg 路线。</p>
       </div>
-    </div>
-    <div class="card" style="margin-top: 16px">
-      <h3>开发过程中被断言捕获的真实缺陷</h3>
-      <p>
-        flex 度量阶段误跑真布局 → 文本在原点生成重影副本（表现为界面出现重复文字）；
-        完整 margin 简写的分支判断把 6 字母写成 7 → 外边距只作用于左边；
-        纯色 background 无法覆盖先声明的渐变 → 主题令牌换色失效；
-        POSIX 函数依赖 → Windows/严格 C99 下无法编译；
-        FMA 融合 → 跨架构布局差 0.1px；
-        mesh 竖向 anchor 权重写反 → 立绘摆动方向颠倒；
-        透明背板三个静默失效（底色 alpha 硬编码 255 / blend 只写 RGB / SDF 内部距离塌陷）；
-        描边环几何错位 → 边框渲染成半透明幽灵；画刷遮罩原地叠加 →
-        铺色内容几十帧内被乘没（帧代数守卫锚死）。
-        <br><br>
-        每一个都补了对应的回归断言，防止复发（20 项 CPU 治理与媒体降级线也在
-        <code>perf_probe</code>/<code>media_window_probe</code> 里守着）。
-      </p>
+      <div class="card">
+        <h3>未做 / 部分做</h3>
+        <p>Live2D .moc3 网格渲染依赖官方 Cubism Core（闭源，按授权自行提取）；
+        Linux 透明窗需 32 位 visual（路线图）；grid 布局、select 原生控件、
+        <code>hn new</code> 脚手架在近期路线。</p>
+      </div>
     </div>
   </section>
 
@@ -623,8 +489,8 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
   <div class="wrap">
     <div class="row">
       <div>
-        <div style="font-weight: 700; color: var(--ink)">html-native</div>
-        <div>HTML 描述界面 · 原生渲染 · 无浏览器</div>
+        <div style="font-weight: 750; color: var(--ink)">Neb · html-native</div>
+        <div>HTML 进，原生窗出。为 AI agent 定制的桌面界面引擎。</div>
       </div>
       <div>
         <a href="https://github.com/asdshuaishuai/html-native">GitHub</a> ·
@@ -633,9 +499,7 @@ footer .row { display: flex; justify-content: space-between; gap: 20px; flex-wra
         <a href="https://github.com/asdshuaishuai/html-native/blob/main/README.md">README</a>
       </div>
     </div>
-    <div class="note">
-      MIT License · 这个页面本身也是一个 HTML 文件
-    </div>
+    <div class="note">MIT License · 本页是一个自包含的 HTML 文件——这正是这个项目倡导的界面形态。</div>
   </div>
 </footer>
 
