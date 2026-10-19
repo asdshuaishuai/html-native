@@ -629,12 +629,16 @@ P4 CSS 模块化设计评审(先评审后实施)。
 **第一段 · 眼前**: 演示与提交(按"personal agent 的 Smart-UX"叙事)。
 
 **第二段 · 核心补全**(三主题逐个收口):
-1. **多 HTML 项目模式** —— 项目 = 目录一级实体:
-   `project.json`(入口页/页面列表/共享 styles·scripts·assets, 无清单时
-   index.html 即隐式入口); 引擎内页面导航(`a href` 同窗换装, 走既有
-   hn_doc_swap 通道: 换 DOM/重布局/滚动归零/窗口不动, 页面栈做 back;
-   多窗模式天然并存); 目录递归指纹热重载(任何被 include 片段/共享
-   css/js 变化都触发重装载); `hn new` 脚手架生成项目骨架。
+1. **多 HTML 项目模式** —— 项目 = 目录一级实体。
+   **已落地**(2026-10-19): `hn_app` 接受目录路径(project.json 声明入口,
+   缺省 index.html 隐式项目); 引擎内页面导航(`a href` 指向项目内文件 →
+   同窗换装 hn_rt_navigate/back, 换 DOM/重布局/滚动归零/窗口不动, 页面栈
+   上限 64, 外部地址仍交系统打开; 内联文档(daemon 推流)导航关闭口径不变);
+   目录递归指纹热重载(FNV-1a 折 (路径,mtime_ns,size), 4096 项/深度 8 上限,
+   任何被 include 片段/共享 css 变化都触发重装载; 几何记忆键 = 项目目录
+   basename)。示例 `examples/project-demo/`, 断言 `tools/project_probe.sh`
+   14 项。**余下**: `hn new` 脚手架、project.json 的 pages/app 字段消费
+   (hn build 用)。原文:
 2. **持久化 v2** —— `.hnapp` 从 JSON 升级 ZIP 容器:
    manifest.json + assets/(页面引用的图片/字体/音频, 相对路径不变);
    复用 dotLottie 的最小 ZIP 读取器(零依赖); 老格式照常可读; 附带

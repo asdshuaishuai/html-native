@@ -1,0 +1,5 @@
+{
+  "name": "project-demo",
+  "entry": "index.html",
+  "app": { "title": "项目模式演示", "version": "0.1.0" }
+}

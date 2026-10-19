@@ -39,6 +39,7 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 #include "hn_rt.h"
 #include "hn_platform.h"
@@ -194,20 +195,72 @@ static void advance_media(hn_rt *rt, int ms) {
  * 纳秒口径才能接住 daemon 每几百毫秒一帧的流式推送。 */
 typedef struct { long long mtime_ns; long long size; } file_fp;
 
+static long long mtime_ns_of(const struct stat *st) {
+#if defined(__APPLE__)
+    return (long long)st->st_mtimespec.tv_sec * 1000000000LL
+         + (long long)st->st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+    return (long long)st->st_mtim.tv_sec * 1000000000LL
+         + (long long)st->st_mtim.tv_nsec;
+#else
+    return (long long)st->st_mtime * 1000000000LL;
+#endif
+}
+
 static int file_fp_of(const char *path, file_fp *fp) {
     struct stat st;
     if (stat(path, &st) != 0) return 0;
     fp->size = (long long)st.st_size;
-#if defined(__APPLE__)
-    fp->mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL
-                 + (long long)st.st_mtimespec.tv_nsec;
-#elif defined(__linux__)
-    fp->mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000LL
-                 + (long long)st.st_mtim.tv_nsec;
-#else
-    fp->mtime_ns = (long long)st.st_mtime * 1000000000LL;
-#endif
+    fp->mtime_ns = mtime_ns_of(&st);
     return 1;
+}
+
+/* 项目模式开关与几何键(项目目录 basename, 避免多个项目都叫 index.html
+   互相覆盖几何记忆)。 */
+static int g_is_project = 0;
+static char g_geo_key[256] = "";
+
+/* 目录递归指纹: (相对路径, mtime_ns, size) 折进 FNV-1a —— 项目里任何文件
+   变化都翻转指纹(单文件口径只盯入口页, 改被 include 的片段/共享 css 不
+   会触发重载)。上限 4096 项/深度 8, 跳过点开头条目(.git 等)。 */
+static unsigned long long fp_fnv(unsigned long long h, const void *d, size_t n) {
+    const unsigned char *b = (const unsigned char *)d;
+    while (n--) { h ^= *b++; h *= 1099511628211ULL; }
+    return h;
+}
+static void dir_walk_hash(const char *dir, int depth, unsigned long long *h, int *count) {
+    if (depth > 8 || *count > 4096) return;
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    char path[2048];
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { dir_walk_hash(path, depth + 1, h, count); continue; }
+        if (!S_ISREG(st.st_mode)) continue;
+        (*count)++;
+        *h = fp_fnv(*h, path, strlen(path));
+        *h = fp_fnv(*h, &st.st_size, sizeof(st.st_size));
+        long long m = mtime_ns_of(&st);
+        *h = fp_fnv(*h, &m, sizeof(m));
+    }
+    closedir(d);
+}
+static int dir_fp_of(const char *dir, file_fp *fp) {
+    unsigned long long h = 1469598103934665603ULL;
+    int count = 0;
+    dir_walk_hash(dir, 0, &h, &count);
+    if (count == 0) return 0;
+    fp->mtime_ns = (long long)h;
+    fp->size = count;
+    return 1;
+}
+/* 源指纹统一出口: 项目模式 = 目录递归指纹, 单文件模式 = 入口文件指纹 */
+static int src_fp_of(const char *base, file_fp *fp) {
+    return g_is_project ? dir_fp_of(".", fp) : file_fp_of(base, fp);
 }
 
 /* 整文档换装: 先开新 rt, 成功才关旧的 —— 新装载失败(文件被写劈/解析失败)
@@ -220,7 +273,9 @@ static hn_rt *doc_reload(const char *path, int W, int H) {
     size_t len = 0;
     char *html = read_all(path, &len);
     if (!html) return NULL;   /* 撞上原子替换瞬间(读到旧 inode/半截): 重试 */
-    hn_rt_desc d = { "app", html, len, NULL, 0, W, H };
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;   /* 相对 cwd 的文档名(导航口径) */
+    hn_rt_desc d = { "app", html, len, NULL, 0, W, H, base };
     hn_rt *rt = hn_rt_open(&d);
     free(html);
     /* HiDPI: 新 rt 缺省 1x, 带上解析好的渲染缩放(hn_rt_set_scale 内部
@@ -377,6 +432,46 @@ int main(int argc, char **argv) {
        无缺省探测 —— 见 hn_three.c 头注)。--shot 与真窗共用此结果。 */
     hn_three_backend_probe();
 
+    /* ---- 多 html 项目模式: path 指向目录 → project.json 的 entry(缺省
+       index.html)。cwd 切到项目根(下方 chdir(dirname) 自然做到), 页面导航/
+       资产/热重载全部相对项目根; base = 入口页文件名。 ---- */
+    static char doc_path_buf[2048];
+    {
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            char entry[256] = "index.html";
+            char pj[2048];
+            snprintf(pj, sizeof(pj), "%s/project.json", path);
+            FILE *pf = fopen(pj, "rb");
+            if (pf) {
+                char buf[4096];
+                size_t n = fread(buf, 1, sizeof(buf) - 1, pf);
+                fclose(pf);
+                buf[n] = 0;
+                const char *e = strstr(buf, "\"entry\"");
+                if (e) {
+                    e = strchr(e + 7, ':');
+                    if (e) { e = strchr(e + 1, '"');
+                        if (e) { const char *q = strchr(e + 1, '"');
+                            if (q && (size_t)(q - e - 1) < sizeof(entry)) {
+                                memcpy(entry, e + 1, (size_t)(q - e - 1));
+                                entry[q - e - 1] = 0; } } }
+                }
+            }
+            snprintf(doc_path_buf, sizeof(doc_path_buf), "%s/%s", path, entry);
+            path = doc_path_buf;
+            g_is_project = 1;
+            /* 几何记忆键 = 项目目录 basename(多个项目都用 index.html,
+               位置记忆不能互相覆盖) */
+            char tmp[2048];
+            snprintf(tmp, sizeof(tmp), "%s", doc_path_buf);
+            char *cut = strrchr(tmp, '/');
+            if (cut) { *cut = 0; const char *b2 = strrchr(tmp, '/');
+                       snprintf(g_geo_key, sizeof(g_geo_key), "%s", b2 ? b2 + 1 : tmp); }
+            else snprintf(g_geo_key, sizeof(g_geo_key), "%s", tmp);
+        }
+    }
+
     size_t hlen = 0;
     char *html = read_all(path, &hlen);
     if (!html) { fprintf(stderr, "无法读取 %s\n", path); return 1; }
@@ -397,7 +492,7 @@ int main(int argc, char **argv) {
         base = slash + 1;
     }
 
-    hn_rt_desc d = { "app", html, hlen, NULL, 0, W, H };
+    hn_rt_desc d = { "app", html, hlen, NULL, 0, W, H, base };
     hn_rt *rt = hn_rt_open(&d);
     if (!rt) { fprintf(stderr, "文档初始化失败\n"); free(html); return 1; }
     hn_media_platform_bind(rt);   /* 环境钮(静音/取消静音)在装载后施加 */
@@ -480,7 +575,7 @@ int main(int argc, char **argv) {
        都显式传 W H, 记忆尺寸不掺和)。 */
     {
         char stem[256], gpath[1152];
-        geo_stem(base, stem, sizeof(stem));
+        geo_stem(g_is_project ? g_geo_key : base, stem, sizeof(stem));
         geo_path(stem, gpath, sizeof(gpath));
         geo_rect mem;
         if (man.x != 0 || man.y != 0) {
@@ -567,7 +662,7 @@ int main(int argc, char **argv) {
     char gpath[1152];
     {
         char stem[256];
-        geo_stem(base, stem, sizeof(stem));
+        geo_stem(g_is_project ? g_geo_key : base, stem, sizeof(stem));
         geo_path(stem, gpath, sizeof(gpath));
         int gx, gy;
         if (hnp_window_origin(w, &gx, &gy)) {
@@ -581,7 +676,7 @@ int main(int argc, char **argv) {
 
     /* ---- mtime 热重载 watch: 指纹基线(重载只认它, 与窗口表面无关) ---- */
     file_fp fp = { 0, 0 };
-    int have_fp = file_fp_of(base, &fp);
+    int have_fp = src_fp_of(base, &fp);
     unsigned long last_poll = hnp_now_ms();
     int ww = hn_rt_width(rt), wh = hn_rt_height(rt);   /* 当前窗口表面尺寸 */
 
@@ -761,7 +856,7 @@ int main(int argc, char **argv) {
         if (watch && have_fp && now - last_poll >= HN_WATCH_INTERVAL_MS) {
             last_poll = now;
             file_fp cur;
-            if (file_fp_of(base, &cur) &&
+            if (src_fp_of(base, &cur) &&
                 (cur.mtime_ns != fp.mtime_ns || cur.size != fp.size)) {
                 hn_rt *nr = doc_reload(base, W, H);
                 if (!nr) nr = doc_reload(base, W, H);   /* 重试一次 */

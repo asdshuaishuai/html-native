@@ -81,6 +81,11 @@ struct hn_rt {
     int paint_eligible;
     hn_color paint_bg;
     int reveal_mode;
+    /* 多 html 项目模式: page_path = 当前页相对 cwd 的路径(NULL = 内联文档,
+       导航关闭); back 栈存此前页(hn_rt_back 回退, 上限 64)。 */
+    char *page_path;
+    char **back;
+    int back_n, back_cap;
     /* 遮罩帧代数: rt_raster 每次成功出帧自增; apply 记上次盖遮罩的代数 ——
        同一代数上二次 apply = 原地叠加污染(遮罩乘两次), 守卫强制先重出
        干净帧(静态页壳只强制 blit 不重光栅, 不守卫会在几十拍内把内容
@@ -879,6 +884,8 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
             else rt->reveal_mode = HN_REVEAL_PAINT;
         }
     }
+
+    if (d->path && *d->path) rt->page_path = strdup(d->path);
 
     if (d->css && d->css_len) hn_context_add_sheet(rt->ctx, hn_parse_css(d->css, d->css_len));
     doc_ctx_bind(doc, rt->ctx);
@@ -3216,6 +3223,9 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
 
 void hn_rt_close(hn_rt *rt) {
     if (!rt) return;
+    free(rt->page_path);
+    for (int i = 0; i < rt->back_n; i++) free(rt->back[i]);
+    free(rt->back);
     js_rt_release_timers(rt);   /* 定时器/RAF 持有的 JSValue 先还(上下文仍活着) */
 #ifdef HN_HAVE_QUICKJS
     /* Release pending fetch Promise functions before destroying scope */
@@ -3625,6 +3635,70 @@ static int rt_native_click(hn_rt *rt, hn_node *n, float click_x) {
     return 0;
 }
 
+/* ---------------- 项目内导航(多 html 项目模式) ----------------
+ * 页面读取相对 cwd(壳已 chdir 项目根); 带协议/#锚/不存在的路径都不是
+ * 项目内页面 —— 返回 0, 调用方回落系统打开。换装走 hn_rt_render(整文档
+ * 替换, 与热更新同一通道), 新文档从滚动 0 开始。 */
+static int page_read(const char *rel, char **out, size_t *out_len) {
+    if (!rel || !*rel) return 0;
+    if (strstr(rel, "://")) return 0;                 /* 外部地址 */
+    if (rel[0] == '#') return 0;                      /* 锚点(引擎内滚动) */
+    struct stat st;
+    if (stat(rel, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
+    size_t len = 0;
+    char *html = read_all(rel, &len);
+    if (!html) return 0;
+    *out = html;
+    *out_len = len;
+    return 1;
+}
+
+int hn_rt_navigate(hn_rt *rt, const char *url) {
+    if (!rt || !rt->page_path || !url || !*url) return 0;   /* 内联文档无导航 */
+    if (strstr(url, "://") || url[0] == '#') return 0;
+    char *html = NULL; size_t len = 0;
+    if (!page_read(url, &html, &len)) return 0;
+    if (rt->back_n == rt->back_cap) {
+        int nc = rt->back_cap ? rt->back_cap * 2 : 8;
+        char **nb = (char **)realloc(rt->back, sizeof(char *) * (size_t)nc);
+        if (!nb) { free(html); return 0; }
+        rt->back = nb; rt->back_cap = nc;
+    }
+    if (rt->back_n >= 64) { free(html); return 0; }         /* 栈上限防失控 */
+    rt->back[rt->back_n++] = rt->page_path;                 /* 当前页入栈 */
+    if (hn_rt_render(rt, html, len)) {
+        free(html);
+        rt->page_path = strdup(url);
+        rt_render_trace("navigate");
+        return 1;
+    }
+    free(html);
+    /* 换装失败(半截文件/解析失败): 回滚栈顶, 旧文档原样在屏 */
+    rt->page_path = rt->back[--rt->back_n];
+    return 0;
+}
+
+int hn_rt_back(hn_rt *rt) {
+    if (!rt || rt->back_n == 0 || !rt->page_path) return 0;
+    char *prev = rt->back[--rt->back_n];
+    char *cur = rt->page_path;
+    char *html = NULL; size_t len = 0;
+    if (!page_read(prev, &html, &len)) {
+        rt->back[rt->back_n++] = prev;
+        return 0;
+    }
+    if (hn_rt_render(rt, html, len)) {
+        rt->page_path = prev;
+        free(cur); free(html);
+        rt_render_trace("back");
+        return 1;
+    }
+    free(html);
+    rt->page_path = cur;
+    rt->back[rt->back_n++] = prev;
+    return 0;
+}
+
 int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
     if (!rt) return 0;
     /* 按下态先于早退喂入: up 事件也要清 pointer_down(轨道相机松手进惯性),
@@ -3720,7 +3794,12 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
     if (lk == HN_LINK_EXTERNAL) {
         char url[2048] = { 0 };
         hn_doc_take_pending_link(hn_context_doc(rt->ctx), url, sizeof url);
-        if (url[0]) hn_sys_open_url(url);
+        if (url[0]) {
+            /* 项目内相对路径(cwd 下存在的文件) → 同窗换装(多 html 项目模式);
+               http(s):// 等外部地址照旧交系统打开 */
+            if (hn_rt_navigate(rt, url)) return rt_render(rt);
+            hn_sys_open_url(url);
+        }
         return rt_render(rt);
     }
     return 0;

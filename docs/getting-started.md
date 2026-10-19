@@ -100,6 +100,11 @@ myapp/
 (WS_POPUP + 背景拖拽), headless 优雅忽略。`popup`/`layer` 的精细物化
 (不抢焦点浮层等)在壳层路线图上。
 
+**多 html 项目模式**: 把整个目录当应用 —— `hnapp examples/project-demo`
+(目录路径)即开入口页; `project.json` 可声明 `entry`(缺省 index.html);
+页面之间用普通 `<a href="pages/about.html">` 跳转(同窗换装, 窗口与进程
+不动); 项目里任何文件改动都会触发热重载; 共享样式/资产相对**项目根**。
+
 呈现动画: 透明窗(`hn-transparent="1"`, body 别铺全窗底色)缺省获得
 **画刷铺色入场** —— 内容像颜料沿对角笔锋"画上桌面", 未铺区域透出桌面
 (~480ms; `hn-reveal=fade|none` 换平台淡入/硬出现, `HN_REVEAL_MS` 调时长)。

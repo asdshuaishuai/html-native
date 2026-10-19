@@ -30,6 +30,10 @@ typedef struct {
     const char *css;        /* 附加样式表; NULL 无 */
     size_t css_len;
     int w, h;               /* 初始尺寸(CSS px) */
+    const char *path;       /* 文档源文件路径(相对 cwd; NULL/"" = 内联文档)。
+                               非 NULL 时启用**项目内导航**: a[href] 指向 cwd 下
+                               存在的文件 → 同窗换装(hn_rt_navigate); 页面/资产
+                               全部相对 cwd(壳已 chdir 到项目根)。 */
 } hn_rt_desc;
 
 /* 创建一个应用实例(解析+级联+布局+光栅一次完成)。
@@ -70,6 +74,19 @@ float hn_rt_scale(const hn_rt *rt);
 /* 位图物理尺寸(hn_rt_pixels 的宽高 = 逻辑 × scale, 与 blit stride 配套) */
 int hn_rt_bitmap_width(const hn_rt *rt);
 int hn_rt_bitmap_height(const hn_rt *rt);
+
+/* ---------------- 项目内导航(多 html 项目模式) ----------------
+ * hn_rt_desc.path 非 NULL 时, a[href] 点到 cwd 下真实存在的文件 → 同窗换装
+ * (换 DOM/重布局/滚动归零, 窗口与进程不动); http(s):// 等仍交系统打开。
+ * 换装前的页面进栈, hn_rt_back 回退。壳(hn_app)把入口页路径传进来,
+ * 项目根 = 壳 chdir 的目录。 */
+
+/* 导航到 url(相对 cwd; 指向存在的普通文件)。1 = 已换装;
+   0 = 非项目模式/外部地址/文件不存在(调用方回落系统打开)。 */
+int hn_rt_navigate(hn_rt *rt, const char *url);
+
+/* 页面栈回退。1 = 已回到上一页; 0 = 栈空(已在入口页)。 */
+int hn_rt_back(hn_rt *rt);
 
 /* ---------------- 桌面画板呈现(画刷铺色 reveal) ----------------
  * 形态语义(用户裁决): **画上去 = 逐像素透明窗的呈现** —— 未铺区域

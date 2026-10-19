@@ -1,0 +1,8 @@
+/* 项目共享样式: 所有页面 <link href="styles/shared.css"> 相对项目根 */
+body { margin: 0; background: #101319; color: #e9ecf2; font-family: sans-serif; }
+.card { position: absolute; left: 24px; top: 24px; width: 352px; padding: 20px;
+        background: #1b2029; border-radius: 14px; border: 1px solid #2a313d; }
+.card h2 { margin: 0 0 8px; font-size: 19px; color: #7db2e8; }
+.card p { margin: 0 0 14px; font-size: 13.5px; line-height: 1.7; color: #aab4c4; }
+.card a { color: #e8c886; font-size: 13.5px; }
+.where { position: absolute; left: 24px; bottom: 18px; font-size: 12px; color: #5c6675; }
