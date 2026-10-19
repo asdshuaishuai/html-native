@@ -29,6 +29,6 @@ examples/_live-*.html
 vendor/cubism/include/
 vendor/cubism/lib/
 
-# 参赛材料(本地保留, 不入库)
-docs/oa2026/
+# 参赛/推广材料(本地保留, 不入库)
 docs/oscc-2026/
+promo/
