@@ -27,7 +27,8 @@ hn_sources_full
 CORE_SRC=("${HN_SOURCES[@]}")
 WASM3_SRC=()
 for f in "${HN_WASM3[@]}"; do WASM3_SRC+=("$HN_WASM3_DIR/$f"); done
-SRC=(tools/hncore.c app/hn_media_synth.c "${CORE_SRC[@]}" "${WASM3_SRC[@]}")
+SRC=(tools/hncore.c app/hn_media_synth.c Sources/CHtmlNative/hn_pack.c
+     rt/hn_http.c "${CORE_SRC[@]}" "${WASM3_SRC[@]}")
 CANVAS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/hn-build-canvas-XXXXXX")"
 trap 'rm -rf "$CANVAS_TMP"' EXIT
 canvas_for_target() {
@@ -53,7 +54,7 @@ CAIRO_SRC=(Sources/CHtmlNative/hn_cairo.c)
 FT_INC=""
 if [ -d /opt/homebrew/include/freetype2 ]; then FT_INC="-I/opt/homebrew/include/freetype2"; fi
 CFLAGS=(-std=c99 -O2 -Wall -ffp-contract=off -I Sources/CHtmlNative/include
-        -I Sources/CHtmlNative -I vendor/wasm3 $FT_INC -DHN_VERSION="\"$VERSION\"")
+        -I Sources/CHtmlNative -I rt -I vendor/wasm3 $FT_INC -DHN_VERSION="\"$VERSION\"")
 
 echo "构建 hncore $VERSION (三平台)"
 echo

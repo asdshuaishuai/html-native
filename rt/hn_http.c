@@ -172,6 +172,8 @@ static int curl_load(void) {
     g_curl.tried = 1;
 #if defined(__APPLE__)
     g_curl.lib = dlopen("/usr/lib/libcurl.dylib", RTLD_LAZY | RTLD_LOCAL);
+    if (!g_curl.lib) g_curl.lib = dlopen("/opt/homebrew/lib/libcurl.4.dylib", RTLD_LAZY | RTLD_LOCAL);
+    if (!g_curl.lib) g_curl.lib = dlopen("/opt/homebrew/opt/curl/lib/libcurl.4.dylib", RTLD_LAZY | RTLD_LOCAL);
 #else
     g_curl.lib = dlopen("libcurl.so.4", RTLD_LAZY | RTLD_LOCAL);
     if (!g_curl.lib) g_curl.lib = dlopen("libcurl.so", RTLD_LAZY | RTLD_LOCAL);
@@ -303,6 +305,7 @@ int hn_http_request(const hn_http_request_opts *o, hn_http_response *out) {
 /* WinHTTP declarations. No winhttp.h dependency: only the ABI is declared. */
 typedef void *HN_HINTERNET;
 typedef unsigned short INTERNET_PORT;
+typedef HN_HINTERNET (WINAPI *hn_winhttp_open_fn)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD);
 typedef HN_HINTERNET (WINAPI *hn_winhttp_connect_fn)(HN_HINTERNET, LPCWSTR, INTERNET_PORT, DWORD);
 typedef HN_HINTERNET (WINAPI *hn_winhttp_request_fn)(HN_HINTERNET, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR *, DWORD, DWORD);
 typedef BOOL (WINAPI *hn_winhttp_send_fn)(HN_HINTERNET, LPCWSTR, DWORD, LPVOID, DWORD, DWORD, DWORD_PTR);
@@ -338,9 +341,11 @@ static wchar_t *wide_dup(const char *s) {
 }
 static int wh_query_text(HN_HINTERNET h, DWORD q, wchar_t **out) {
     DWORD n = 0, idx = 0; *out = NULL;
-    g_wh.query(h, q, NULL, NULL, &n, &idx);
+    g_wh.query(h, q, (LPCWSTR)NULL, NULL, &n, &idx);
     if (!n) return 0; *out = (wchar_t *)calloc(n + 2, sizeof(wchar_t));
-    if (!*out) return 0; return g_wh.query(h, q, *out, &n, &idx) ? 1 : 0;
+    if (!*out) return 0;
+    /* WinHttpQueryHeaders(h, level, pwszName=NULL, lpBuffer, lpLen, lpIndex) */
+    return g_wh.query(h, q, (LPCWSTR)NULL, *out, &n, &idx) ? 1 : 0;
 }
 int hn_http_request(const hn_http_request_opts *o, hn_http_response *out) {
     int https; const char *host, *path; size_t host_len; unsigned port;

@@ -215,7 +215,7 @@ static int read_compound(cps *s, hn_compound *cp) {
         if (s->p + 1 < s->end && *s->p == ':' &&
             (s->p + 2 >= s->end || s->p[1] == ':')) {
             const char *save = s->p;
-            s->p += (*s->p + 1 < s->end && s->p[1] == ':') ? 2 : 1;
+            s->p += (s->p + 1 < s->end && s->p[1] == ':') ? 2 : 1;
             char *pse = read_ident(s);
             if (pse) {
                 if (!strcmp(pse, "before")) { cp->pse_elem = 1; any = 1; continue; }

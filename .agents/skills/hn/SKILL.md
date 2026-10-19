@@ -249,6 +249,19 @@ c.filter = 'blur(6px)'（模糊滤镜; 引擎 3-pass 高斯; 浓度衰减在 alp
 边界如实声明：`isPointInPath` 按已渲染像素 alpha 判定（抗锯齿边缘 1px 级差异）；
 `toDataURL` 恒出 PNG；stroke 遇 pattern 回落纯色。
 
+## hn pack（既有 H5 → 桌面轻应用）
+
+```bash
+hncore pack <file.html|dir|https://url> [--out DIR] [--capsule app.hnapp] \
+            [--title T] [--size WxH] [--no-assets]
+```
+- 输入: 本地文件/目录(隐式 index.html)/URL(rt 网络层拉取, 重定向自动跟)
+- 兼容性体检: 静态扫描不支持元素与被忽略 CSS, 报告落 audit.txt(逐项可机检)
+- 资产: img/script/link 引用收集进 assets/ 并改写; data:/锚点原样
+- 产出: 工程化项目目录(project.json + index.html + assets/) 与
+  .hnapp 胶囊 v2 —— daemon restore 即得桌面轻应用
+- 边界: 静态扫描(不执行页面 JS); URL 拉取在无 JS 构建可用
+
 ## 调试纪律（界面不对时不靠肉眼猜）
 
 ```bash

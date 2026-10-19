@@ -31,6 +31,7 @@
 #include <string.h>
 #include "hn.h"
 #include "hnsoft.h"
+#include "hn_pack.h"
 /* 合成媒体宿主: 单一来源在 app/ 下(与 app 壳的回退宿主共用这一份,
  * 见 hn_media_synth.h —— 原先 hncore 里的 g_synth_media 第二份实现已删)。 */
 #include "../app/hn_media_synth.h"
@@ -344,6 +345,44 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *cmd = argv[1];
+    if (!strcmp(cmd, "pack")) {
+        /* hn pack: 既有 H5 文件/目录/URL → 工程化项目目录 + .hnapp 胶囊
+           用法: hncore pack <input> [--out DIR] [--capsule F.hnapp]
+                            [--title T] [--id ID] [--size WxH] [--no-assets] */
+        hn_pack_opts po;
+        memset(&po, 0, sizeof(po));
+        po.input = argc > 2 ? argv[2] : NULL;
+        po.w = 480; po.h = 700;
+        char capsule[512] = "", outdir[512] = "";
+        for (int ai = 3; ai < argc; ai++) {
+            const char *a = argv[ai];
+            if (!strcmp(a, "--out") && ai + 1 < argc) { outdir[0] = 1; snprintf(outdir, sizeof(outdir), "%s", argv[++ai]); }
+            else if (!strcmp(a, "--capsule") && ai + 1 < argc) snprintf(capsule, sizeof(capsule), "%s", argv[++ai]);
+            else if (!strcmp(a, "--title") && ai + 1 < argc) po.title = argv[++ai];
+            else if (!strcmp(a, "--id") && ai + 1 < argc) po.id = argv[++ai];
+            else if (!strcmp(a, "--size") && ai + 1 < argc) {
+                sscanf(argv[++ai], "%dx%d", &po.w, &po.h);
+            }
+            else if (!strcmp(a, "--no-assets")) po.no_assets = 1;
+        }
+        po.out_dir = outdir[0] ? outdir : NULL;
+        po.capsule = capsule[0] ? capsule : NULL;
+        hn_pack_result pr;
+        int rc = hn_pack_run(&po, &pr);
+        printf("%s\n", pr.report);
+        if (rc == 0) {
+            printf("项目目录: %s\n", pr.project_dir ? pr.project_dir : "-");
+            printf("资产: %d 收集 / %d 引用改写\n", pr.n_assets, pr.n_rewritten);
+            printf("胶囊: %s\n", pr.capsule_path ? pr.capsule_path : "(未写)");
+            printf("体检: 不支持元素 ×%d, 被忽略 CSS ×%d\n",
+                   pr.n_unsupported_tags, pr.n_ignored_css);
+        } else {
+            fprintf(stderr, "pack 失败: %s\n", pr.report);
+        }
+        free(pr.project_dir);
+        free(pr.capsule_path);
+        return rc;
+    }
     const char *path = argv[2];
     float W = argc > 3 ? (float)atof(argv[3]) : 460;
     float H = argc > 4 ? (float)atof(argv[4]) : 560;
