@@ -681,6 +681,22 @@ P4 CSS 模块化设计评审(先评审后实施)。
   胶囊签名(ed25519)与跨设备迁移。
 - **远期**: 宿主发现机制、轻应用商店形态、ui-kit 组件生态层。
 
+### 已落地(2026-10-15 渲染与分发批次)
+
+- **`hn build --target macos`**(第三段核心落地): 项目目录 → .hnapp 胶囊 v2
+  → `<Name>.app` 外壳(Info.plist plutil 校验 + Contents/MacOS/hnapp 运行时 +
+  Resources/app.hnapp; 应用名/id/版本取 project.json app 字段)。
+  **运行时入口**: `hn_app --capsule <x.hnapp>` —— 与 daemon restore 同口径解包
+  到 apps/<id>/ 后走项目模式(隐式 index.html), W/H 取 manifest。
+  断言 `tools/capsule_app_probe.sh` 10 项(结构/plutil/PK/unzip/直启解包)。
+- **渲染质量**: box-shadow 真 3-pass 高斯(Kovesi)+ 渐变 bayer 去色带 +
+  three.js Blinn-Phong 双灯(高光/半球环境) —— 绘制画质整体升级。
+- **脱流命中修复**: absolute 元素在无流内容页曾永远命不中(hit 按祖先盒
+  剪枝)—— 根链覆盖画布 + 脱流子级优先命中(浏览器语义)。
+- **visibility 子级复显**: visibility 入继承集, hidden 父下 visible 子级
+  正常绘制(顺带修 goto 越过初始化的深层 bug)。
+- **select 弹层**: 开合/选项行/外点关闭全交互。
+
 ### 已落地(2026-10 中旬批次)
 
 - **窗口默认无标题栏**(窗口即画布; `hn-frameless="0"` 显式要系统标题栏;

@@ -45,6 +45,28 @@
 #include "hn_platform.h"
 #include "hn_media_platform.h"
 #include "hn_internal.h"   /* GPU 出帧统计(hn_gpu_present/readback_count) */
+#include "hn_zip.h"        /* --capsule: .hnapp v2 直启(hn_zip 读写单源) */
+
+/* 极简 "key":"value" 串值读取(与 daemon 的 json_str 同口径; 胶囊
+   manifest 是本程序自产的可信 JSON, 不需要完整解析器) */
+static char *cap_json_str(char *js, const char *key) {
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    char *k = strstr(js, pat);
+    if (!k) return NULL;
+    char *colon = strchr(k + strlen(pat), ':');
+    if (!colon) return NULL;
+    char *q1 = strchr(colon, '\"');
+    if (!q1) return NULL;
+    char *q2 = strchr(q1 + 1, '\"');
+    if (!q2) return NULL;
+    /* 值 = (q1, q2) 开区间: 长度 q2-q1-1(含尾引号是实测踩过的 off-by-one) */
+    char *out = (char *)malloc((size_t)(q2 - q1) + 1);
+    if (!out) return NULL;
+    memcpy(out, q1 + 1, (size_t)(q2 - q1 - 1));
+    out[q2 - q1 - 1] = 0;
+    return out;
+}
 
 static char *read_all(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
@@ -366,9 +388,68 @@ static void geo_store(const char *path, const geo_rect *g) {
 static volatile sig_atomic_t g_app_term = 0;
 static void hn_app_on_term(int sig) { (void)sig; g_app_term = 1; }
 
+/* --capsule <path.hnapp> 的解包(与 daemon restore v2 同一口径):
+   PK 魔数 → manifest(id/w/h/entry) → 条目解到 ~/.html-native/apps/<id>/
+   → *out_path = 应用目录(走项目模式: project.json 缺省 → 隐式 index.html,
+   打包器的 manifest entry 恒为 index.html, 口径一致)。返回 0 = 成功。 */
+static int capsule_restore(const char *cpath, char *out_path, size_t cap,
+                           int *w, int *h) {
+    FILE *f = fopen(cpath, "rb");
+    if (!f) { fprintf(stderr, "capsule: 无法读取 %s\n", cpath); return 1; }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 4) { fclose(f); return 1; }
+    unsigned char *d = (unsigned char *)malloc((size_t)n);
+    if (!d || fread(d, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(d); return 1; }
+    fclose(f);
+    if (d[0] != 'P' || d[1] != 'K') { fprintf(stderr, "capsule: 非 v2 胶囊(PK)\n"); free(d); return 1; }
+    hn_zip z;
+    if (!hn_zip_open(d, (size_t)n, &z)) { fprintf(stderr, "capsule: ZIP 损坏\n"); free(d); return 1; }
+    char rid[256] = "restored", entry[256] = "index.html";
+    hn_zip_entry *me = NULL;
+    if (hn_zip_find(&z, "manifest.json", &me)) {
+        size_t mn = 0;
+        unsigned char *mb = hn_zip_extract(&z, me, &mn);
+        if (mb) {
+            char *mi = cap_json_str((char *)mb, "id");
+            if (mi) { snprintf(rid, sizeof(rid), "%s", mi); free(mi); }
+            { char *mw = cap_json_str((char *)mb, "w"); if (mw) { *w = atoi(mw); free(mw); } }
+            { char *mh2 = cap_json_str((char *)mb, "h"); if (mh2) { *h = atoi(mh2); free(mh2); } }
+            { char *me2 = cap_json_str((char *)mb, "entry");
+              if (me2) { snprintf(entry, sizeof(entry), "%s", me2); free(me2); } }
+            free(mb);
+        }
+    }
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char appdir[1100];
+    snprintf(appdir, sizeof(appdir), "%s/.html-native/apps/%s", home, rid);
+    for (int i = 0; i < z.n_ents; i++) {
+        hn_zip_entry *e = &z.ents[i];
+        if (hn_zip_name_is(e, "manifest.json")) continue;
+        if (memchr(e->name, '.', e->name_len) == NULL) continue;  /* 目录条目粗筛 */
+        char dst[1200];
+        snprintf(dst, sizeof(dst), "%s/%.*s", appdir, (int)e->name_len, (int)e->name_len ? e->name : "");
+        for (char *q = dst + strlen(home) + 1; *q; q++)
+            if (*q == '/') { *q = 0; mkdir(dst, 0755); *q = '/'; }
+        size_t al = 0;
+        unsigned char *ad = hn_zip_extract(&z, e, &al);
+        if (ad) {
+            FILE *af = fopen(dst, "wb");
+            if (af) { fwrite(ad, 1, al, af); fclose(af); }
+            free(ad);
+        }
+    }
+    hn_zip_free(&z);
+    free(d);
+    snprintf(out_path, cap, "%s", appdir);   /* 项目模式: 隐式 index.html */
+    (void)entry;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "用法: hn_app <file.html> [W H] [--watch 0|1] | --probe | --shot <png> [W H] [--advance MS]\n");
+        fprintf(stderr, "用法: hn_app <file.html|project_dir> [W H] [--watch 0|1] | --capsule <x.hnapp> | --probe | --shot <png> [W H] [--advance MS]\n");
         return 2;
     }
     const char *path = argv[1];
@@ -377,6 +458,16 @@ int main(int argc, char **argv) {
     int watch = 1;   /* mtime 热重载缺省开(向后兼容); --watch 0 显式关 */
     int W = 480, H = 700;
     int advance_ms = 0;   /* --shot --advance MS: 落盘前推进媒体到该时刻 */
+
+    /* --capsule <x.hnapp>: 胶囊直启(hn build 产物的运行时入口)。
+       解包后 path 切到应用目录 → 项目模式(隐式 index.html)接管;
+       W/H 取 manifest, 后面的位置参数仍可覆写。 */
+    if (argc >= 3 && !strcmp(argv[1], "--capsule")) {
+        static char cap_entry[1200];
+        if (capsule_restore(argv[2], cap_entry, sizeof(cap_entry), &W, &H) != 0)
+            return 1;
+        path = cap_entry;
+    }
     for (int i = 2; i < argc; i++)
         if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch = atoi(argv[i + 1]);
     for (int i = 2; i < argc; i++)

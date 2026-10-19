@@ -29,9 +29,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include "hn.h"
 #include "hnsoft.h"
 #include "hn_pack.h"
+#include "hn_zip.h"
 /* 合成媒体宿主: 单一来源在 app/ 下(与 app 壳的回退宿主共用这一份,
  * 见 hn_media_synth.h —— 原先 hncore 里的 g_synth_media 第二份实现已删)。 */
 #include "../app/hn_media_synth.h"
@@ -327,6 +330,253 @@ static void media_print_lines(hn_node *n, hn_context *ctx) {
         media_print_lines(c, ctx);
 }
 
+/* ---- hn build: 项目目录 → .hnapp 胶囊 v2 → macOS .app 外壳 ----
+   (roadmap 第三段; 全既有件组装: hn_zip 写 + 平台 hnapp 二进制 + Info.plist。
+    运行时入口 = hn_app --capsule, 资源来源从 daemon 换成 Resources/app.hnapp) */
+
+/* 跨平台 mkdir(Windows _mkdir 单参; POSIX 两参) */
+static void build_mkdir(const char *path) {
+#ifdef _WIN32
+    mkdir(path);
+#else
+    mkdir(path, 0755);
+#endif
+}
+
+/* 本地 strdup(strdup 是 POSIX 非 C99; musl 交叉目标下隐式声明报错) */
+static char *build_strdup(const char *s2) {
+    size_t n = strlen(s2);
+    char *p = (char *)malloc(n + 1);
+    if (p) memcpy(p, s2, n + 1);
+    return p;
+}
+
+/* project.json 的 "key":"value" 极简读取(自产可信 JSON; 单层键) */
+static void pj_str(const char *js, const char *key, char *out, size_t cap) {
+    size_t kl = strlen(key);
+    const char *k = js;
+    while ((k = strchr(k, '"')) != NULL) {
+        if (strncmp(k + 1, key, kl) == 0 && k[1 + kl] == '"') {
+            const char *c2 = strchr(k + 1 + kl, ':');
+            if (c2) {
+                const char *q1 = strchr(c2, '"');
+                if (q1) {
+                    const char *q2 = strchr(q1 + 1, '"');
+                    if (q2) {
+                        size_t L = (size_t)(q2 - q1 - 1);
+                        if (L >= cap) L = cap - 1;
+                        memcpy(out, q1 + 1, L);
+                        out[L] = 0;
+                    }
+                }
+            }
+            return;
+        }
+        k++;
+    }
+}
+
+/* 项目文件递归收集(深度 12/条目 500 上限; 跳过隐藏与 .hnapp) */
+static int build_collect(const char *dir, const char *relbase,
+                         hn_zip_member *m, int nm, int max_m) {
+    DIR *dp = opendir(dir);
+    if (!dp) return nm;
+    struct dirent *de;
+    char path[1024];
+    while ((de = readdir(dp)) != NULL && nm < max_m) {
+        if (de->d_name[0] == '.') continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        char rel[1024];
+        if (relbase[0]) snprintf(rel, sizeof(rel), "%s/%s", relbase, de->d_name);
+        else snprintf(rel, sizeof(rel), "%s", de->d_name);
+        if (S_ISDIR(st.st_mode)) {
+            nm = build_collect(path, rel, m, nm, max_m);
+        } else {
+            size_t len = 0;
+            char *data = read_all(path, &len);
+            if (!data) continue;
+            m[nm].name = build_strdup(rel);
+            m[nm].data = (const unsigned char *)data;
+            m[nm].n = len;
+            nm++;
+        }
+    }
+    closedir(dp);
+    return nm;
+}
+
+
+static int cmd_build(int argc, char **argv) {
+    const char *proj = argc > 2 ? argv[2] : NULL;
+    const char *target = "macos";
+    const char *runtime = NULL;
+    char outdir[512] = "";
+    char name[128] = "", appid[160] = "", ver[32] = "0.1.0";
+    char entry[128] = "index.html";
+    int w = 480, h = 700;
+    if (!proj) { fprintf(stderr, "build: 缺项目目录\n"); return 2; }
+
+    /* project.json: name/entry/w/h + app.title/app.version(缺省容忍) */
+    {
+        char pj[1200];
+        snprintf(pj, sizeof(pj), "%s/project.json", proj);
+        FILE *f = fopen(pj, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (n > 0 && n < (1 << 20)) {
+                char *js = (char *)malloc((size_t)n + 1);
+                if (js && fread(js, 1, (size_t)n, f) == (size_t)n) {
+                    js[n] = 0;
+                    char nm[128] = "", en[128] = "";
+                    char w_s[16] = "", h_s[16] = "";
+                    pj_str(js, "name", nm, sizeof(nm));
+                    pj_str(js, "entry", en, sizeof(en));
+                    pj_str(js, "w", w_s, sizeof(w_s));
+                    pj_str(js, "h", h_s, sizeof(h_s));
+                    /* app.* 嵌套: 以 "app" 对象为界再扫一轮 */
+                    char *appobj = strstr(js, "\"app\"");
+                    if (appobj) {
+                        char ttl[128] = "", vv[32] = "";
+                        char w2[16] = "", h2[16] = "";
+                        pj_str(appobj, "title", ttl, sizeof(ttl));
+                        pj_str(appobj, "version", vv, sizeof(vv));
+                        pj_str(appobj, "w", w2, sizeof(w2));
+                        pj_str(appobj, "h", h2, sizeof(h2));
+                        (void)ttl; (void)vv;
+                        if (w2[0]) w = atoi(w2);
+                        if (h2[0]) h = atoi(h2);
+                    }
+                    if (nm[0]) { snprintf(name, sizeof(name), "%s", nm); }
+                    if (en[0]) snprintf(entry, sizeof(entry), "%s", en);
+                    if (w_s[0]) w = atoi(w_s);
+                    if (h_s[0]) h = atoi(h_s);
+                }
+                free(js);
+            }
+            fclose(f);
+        }
+    }
+    if (!name[0]) {
+        const char *b = strrchr(proj, '/');
+        snprintf(name, sizeof(name), "%s", b ? b + 1 : proj);
+    }
+    for (char *q = name; *q; q++)
+        if (*q == ' ' || *q == '/') *q = '-';
+
+    for (int ai = 3; ai < argc; ai++) {
+        const char *a = argv[ai];
+        if (!strcmp(a, "--target") && ai + 1 < argc) target = argv[++ai];
+        else if (!strcmp(a, "--out") && ai + 1 < argc) snprintf(outdir, sizeof(outdir), "%s", argv[++ai]);
+        else if (!strcmp(a, "--runtime") && ai + 1 < argc) runtime = argv[++ai];
+        else if (!strcmp(a, "--name") && ai + 1 < argc) snprintf(name, sizeof(name), "%s", argv[++ai]);
+        else if (!strcmp(a, "--id") && ai + 1 < argc) snprintf(appid, sizeof(appid), "com.hn.%s", argv[++ai]);
+        else if (!strcmp(a, "--version") && ai + 1 < argc) snprintf(ver, sizeof(ver), "%s", argv[++ai]);
+        else if (!strcmp(a, "--size") && ai + 1 < argc) sscanf(argv[++ai], "%dx%d", &w, &h);
+    }
+    if (!appid[0]) snprintf(appid, sizeof(appid), "com.hn.%s", name);
+    if (strcmp(target, "macos") != 0) {
+        fprintf(stderr, "build: target '%s' 暂未支持(v1: macos)\n", target);
+        return 2;
+    }
+
+    /* 1. 项目文件 → .hnapp 胶囊 v2(manifest.json + 全部文件) */
+    char cap_path[1200];
+    if (outdir[0]) {
+        build_mkdir(outdir);   /* --out 目录可能不存在 */
+        snprintf(cap_path, sizeof(cap_path), "%s/%s.hnapp", outdir, name);
+    }
+    else snprintf(cap_path, sizeof(cap_path), "%s.hnapp", name);
+    hn_zip_member m[512];
+    int nm = 0;
+    char manifest[512];
+    snprintf(manifest, sizeof(manifest),
+             "{\"format\":\"hnapp\",\"version\":2,\"id\":\"%s\",\"w\":%d,"
+             "\"h\":%d,\"entry\":\"%s\"}", appid, w, h, entry);
+    m[nm].name = "manifest.json";
+    m[nm].data = (const unsigned char *)manifest;
+    m[nm].n = strlen(manifest);
+    nm++;
+    nm = build_collect(proj, "", m, nm, 500);
+    if (nm < 2) { fprintf(stderr, "build: 项目无文件\n"); return 1; }
+    FILE *cf = fopen(cap_path, "wb");
+    if (!cf) { fprintf(stderr, "build: 无法写 %s\n", cap_path); return 1; }
+    int zrc = hn_zip_write(cf, m, nm);
+    fclose(cf);
+    for (int i = 1; i < nm; i++) { free((void *)m[i].data); free((void *)m[i].name); }
+    if (zrc != 0) { fprintf(stderr, "build: ZIP 写出失败\n"); return 1; }
+    printf("胶囊: %s (%d 文件)\n", cap_path, nm - 1);
+
+    /* 2. macOS .app 外壳 */
+    char appdir[1200];
+    if (outdir[0]) snprintf(appdir, sizeof(appdir), "%s/%s.app", outdir, name);
+    else snprintf(appdir, sizeof(appdir), "%s.app", name);
+    char sub[1280];
+    build_mkdir(appdir);   /* .app 根目录(Contents 的父) */
+    snprintf(sub, sizeof(sub), "%s/Contents", appdir);
+    build_mkdir(sub);
+    snprintf(sub, sizeof(sub), "%s/Contents/MacOS", appdir);
+    build_mkdir(sub);
+    snprintf(sub, sizeof(sub), "%s/Contents/Resources", appdir);
+    build_mkdir(sub);
+
+    char plist[1600];
+    snprintf(plist, sizeof(plist),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\">\n<dict>\n"
+        "  <key>CFBundleName</key><string>%s</string>\n"
+        "  <key>CFBundleDisplayName</key><string>%s</string>\n"
+        "  <key>CFBundleIdentifier</key><string>%s</string>\n"
+        "  <key>CFBundleShortVersionString</key><string>%s</string>\n"
+        "  <key>CFBundleVersion</key><string>%s</string>\n"
+        "  <key>CFBundleExecutable</key><string>hnapp</string>\n"
+        "  <key>CFBundlePackageType</key><string>APPL</string>\n"
+        "  <key>LSMinimumSystemVersion</key><string>11.0</string>\n"
+        "  <key>NSHighResolutionCapable</key><true/>\n"
+        "</dict>\n</plist>\n",
+        name, name, appid, ver, ver);
+    snprintf(sub, sizeof(sub), "%s/Contents/Info.plist", appdir);
+    FILE *pf = fopen(sub, "wb");
+    if (!pf) { fprintf(stderr, "build: 无法写 Info.plist\n"); return 1; }
+    fwrite(plist, 1, strlen(plist), pf);
+    fclose(pf);
+
+    snprintf(sub, sizeof(sub), "%s/Contents/Resources/app.hnapp", appdir);
+    {
+        FILE *src = fopen(cap_path, "rb");
+        FILE *dst = fopen(sub, "wb");
+        if (!src || !dst) { fprintf(stderr, "build: 资源拷贝失败\n"); if (src) fclose(src); if (dst) fclose(dst); return 1; }
+        char buf[65536];
+        size_t rn;
+        while ((rn = fread(buf, 1, sizeof(buf), src)) > 0) fwrite(buf, 1, rn, dst);
+        fclose(src); fclose(dst);
+    }
+
+    char rtbin[1200];
+    if (runtime) snprintf(rtbin, sizeof(rtbin), "%s", runtime);
+    else snprintf(rtbin, sizeof(rtbin), "dist/hnapp-macos-arm64");
+    snprintf(sub, sizeof(sub), "%s/Contents/MacOS/hnapp", appdir);
+    {
+        FILE *src = fopen(rtbin, "rb");
+        if (!src) { fprintf(stderr, "build: 运行时二进制缺失 %s(--runtime 指定)\n", rtbin); return 1; }
+        FILE *dst = fopen(sub, "wb");
+        if (!dst) { fprintf(stderr, "build: 无法写 %s\n", sub); fclose(src); return 1; }
+        char buf[65536];
+        size_t rn;
+        while ((rn = fread(buf, 1, sizeof(buf), src)) > 0) fwrite(buf, 1, rn, dst);
+        fclose(src); fclose(dst);
+        chmod(sub, 0755);
+    }
+    printf("应用: %s\n", appdir);
+    printf("启动: open %s\n", appdir);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         fputs("hncore — Neb 引擎(NO-WEB)离屏 CLI\n用法: hncore <render|parse|layout|paint|text|boxes|verify> <file.html> [W H|out.png W H]\n"
@@ -341,10 +591,13 @@ int main(int argc, char **argv) {
               "  paint   打印绘制指令(display list)\n"
               "  text    打印文本片段(位置与字节区间)\n"
               "  boxes   打印绝对盒(每行一个元素)\n"
-              "  verify  布局不变量自检\n", stderr);
+              "  verify  布局不变量自检\n"
+              "  pack    既有 H5 → 项目目录 + .hnapp 胶囊\n"
+              "  build   项目目录 → .hnapp → macOS .app 外壳\n", stderr);
         return 2;
     }
     const char *cmd = argv[1];
+    if (!strcmp(cmd, "build")) return cmd_build(argc, argv);
     if (!strcmp(cmd, "pack")) {
         /* hn pack: 既有 H5 文件/目录/URL → 工程化项目目录 + .hnapp 胶囊
            用法: hncore pack <input> [--out DIR] [--capsule F.hnapp]
@@ -383,6 +636,8 @@ int main(int argc, char **argv) {
         free(pr.capsule_path);
         return rc;
     }
+
+
     const char *path = argv[2];
     float W = argc > 3 ? (float)atof(argv[3]) : 460;
     float H = argc > 4 ? (float)atof(argv[4]) : 560;
