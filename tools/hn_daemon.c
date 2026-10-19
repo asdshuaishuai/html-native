@@ -80,6 +80,7 @@
 extern char **environ;
 
 #include "hn.h"
+#include "hn_zip.h"
 #include "hnsoft.h"
 #include "hn_rt.h"
 #include "hn_sys.h"
@@ -925,6 +926,128 @@ static void handle_line(const char *line, char *out, size_t cap) {
         resp_json(out, cap, 1, "");
         return;
     }
+    if (!strcmp(op, "restore")) {
+        free(id);
+        char *p = json_str(line, "path");
+        if (!p) { resp_json(out, cap, 0, "\"error\":\"path required\""); return; }
+        size_t n = 0;
+        char *d = read_all(p, &n);
+        if (!d || n < 4) { free(p); free(d); resp_json(out, cap, 0, "\"error\":\"file not found\""); return; }
+        /* v2 胶囊 = ZIP(PK 魔数): manifest.json 取 id/w/h/entry, 入口页与
+           资产解到 ~/.html-native/apps/<id>/(cwd 相对引用照常工作) */
+        if (d[0] == 'P' && d[1] == 'K') {
+            hn_zip z;
+            if (!hn_zip_open((const unsigned char *)d, n, &z)) {
+                free(d); free(p);
+                resp_json(out, cap, 0, "\"error\":\"bad capsule v2\"");
+                return;
+            }
+            hn_zip_entry *me = NULL;
+            char rid[256] = "restored", entry[256] = "index.html";
+            int w = 480, h = 700;
+            if (hn_zip_find(&z, "manifest.json", &me)) {
+                size_t mn = 0;
+                unsigned char *mb = hn_zip_extract(&z, me, &mn);
+                if (mb) {
+                    char *mi = json_str((char *)mb, "id");
+                    if (mi) { snprintf(rid, sizeof(rid), "%s", mi); free(mi); }
+                    { char *mw = json_str((char *)mb, "w"); if (mw) { w = atoi(mw); free(mw); } }
+                    { char *mh = json_str((char *)mb, "h"); if (mh) { h = atoi(mh); free(mh); } }
+                    { char *me2 = json_str((char *)mb, "entry");
+                      if (me2) { snprintf(entry, sizeof(entry), "%s", me2); free(me2); } }
+                    free(mb);
+                }
+            }
+            hn_zip_entry *ee = NULL;
+            char entry_key[300];
+            snprintf(entry_key, sizeof(entry_key), "%s", entry);
+            char *rhtml = NULL;
+            if (hn_zip_find(&z, entry_key, &ee)) {
+                size_t el = 0;
+                unsigned char *eb = hn_zip_extract(&z, ee, &el);
+                if (eb) { rhtml = (char *)eb; }
+            }
+            /* 资产解包: ~/.html-native/apps/<id>/(保留 zip 内相对路径) */
+            char appdir[1100];
+            const char *home = getenv("HOME") ? getenv("HOME") : ".";
+            snprintf(appdir, sizeof(appdir), "%s/.html-native/apps/%s", home, rid);
+            /* 逐条目落盘(简单 mkdir 单层; 嵌套路径按需建) */
+            for (int i = 0; i < z.n_ents; i++) {
+                hn_zip_entry *e2 = &z.ents[i];
+                if (hn_zip_name_is(e2, "manifest.json")) continue;
+                if (hn_zip_name_is(e2, entry_key)) continue;
+                if (memchr(e2->name, '.', e2->name_len) == NULL) continue;  /* 粗筛目录条目 */
+                char dst[1200];
+                snprintf(dst, sizeof(dst), "%s/%.*s", appdir, (int)e2->name_len, e2->name);
+                /* 逐级建目录 */
+                for (char *q = dst + strlen(home) + 1; *q; q++)
+                    if (*q == '/') { *q = 0; mkdir(dst, 0755); *q = '/'; }
+                size_t al = 0;
+                unsigned char *ad = hn_zip_extract(&z, e2, &al);
+                if (ad) {
+                    FILE *af = fopen(dst, "wb");
+                    if (af) { fwrite(ad, 1, al, af); fclose(af); }
+                    free(ad);
+                }
+            }
+            hn_zip_free(&z);
+            free(d);
+            free(p);
+            if (!rhtml) { resp_json(out, cap, 0, "\"error\":\"bad capsule v2 (no entry)\""); return; }
+            /* 同 id 已存在 = 替换(胶囊内容更新后的再还原语义) */
+            dapp *ex = app_find(rid);
+            if (ex) app_destroy(ex);
+            dapp *ra = app_create(rid, 1);
+            if (ra) {
+                ra->w = w; ra->h = h;
+                /* cwd 切到解包目录: 页面相对引用/项目内导航照常工作 */
+                char prev_cwd[1024] = ".";
+                getcwd(prev_cwd, sizeof(prev_cwd));
+                if (chdir(appdir) == 0) {
+                    hn_rt_desc dd;
+                    memset(&dd, 0, sizeof(dd));
+                    dd.id = ra->id;
+                    dd.html = rhtml;
+                    dd.html_len = strlen(rhtml);
+                    dd.w = ra->w;
+                    dd.h = ra->h;
+                    dd.path = entry;                      /* 项目内导航开启 */
+                    ra->rt = hn_rt_open(&dd);
+                    chdir(prev_cwd);
+                }
+                if (!ra->rt) ra->alive = 0;
+            }
+            free(rhtml);
+            char body[256];
+            snprintf(body, sizeof(body), "\"id\":\"%s\",\"format\":\"hnapp-v2\"", rid);
+            resp_json(out, cap, ra != NULL && ra->alive, ra != NULL && ra->alive ? body : "\"error\":\"restore failed\"");
+            return;
+        }
+        free(p);
+        /* v1 JSON 胶囊(历史格式, 照常可读): 提取 id/html */
+        char *rid = json_str(d, "id");
+        char *rhtml = json_str(d, "html");
+        free(d);
+        if (!rid || !rhtml) { free(rid); free(rhtml); resp_json(out, cap, 0, "\"error\":\"bad capsule\""); return; }
+        dapp *ra = app_create(rid, 1);
+        if (ra) {
+            ra->w = 480; ra->h = 700;
+            /* 恢复同走 hn_rt 装载路径(link 内联/script 执行与 open 一致) */
+            hn_rt_desc d;
+            memset(&d, 0, sizeof(d));
+            d.id = ra->id;
+            d.html = rhtml;
+            d.html_len = strlen(rhtml);
+            d.w = ra->w;
+            d.h = ra->h;
+            ra->rt = hn_rt_open(&d);
+            if (!ra->rt) { ra->alive = 0; }
+        }
+        free(rid); free(rhtml);
+        resp_json(out, cap, ra != NULL, ra ? "" : "\"error\":\"restore failed\"");
+        return;
+    }
+
     if (!a) { free(id); resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
 
     if (!strcmp(op, "dump")) {
@@ -1072,59 +1195,58 @@ static void handle_line(const char *line, char *out, size_t cap) {
                      getenv("HOME") ? getenv("HOME") : ".", a->id);
             p = path_buf;
         }
-        /* 持久化: 把当前 HTML + CSS 写进 JSON 胶囊 */
+        /* 持久化 v2: ZIP 胶囊(manifest.json + 入口页 + DOM 引用的本地资产)。
+           原子写(tmp+rename); 老 JSON 胶囊(¥1)restore 端照常可读。 */
         hn_doc *doc = hn_context_doc(app_ctx(a));
-        FILE *f = fopen(p, "wb");
+        char ptmp[1100];
+        snprintf(ptmp, sizeof(ptmp), "%s.tmp", p);
+        FILE *f = fopen(ptmp, "wb");
         if (!f) { resp_json(out, cap, 0, "\"error\":\"cannot write\""); return; }
-        /* 用 --shot 生成 PNG + JSON 元数据打包(简化为 HTML+meta) */
-        const hn_display_list *dl = hn_context_display_list(app_ctx(a));
-        fprintf(f, "{\"format\":\"hnapp\",\"version\":1,\"id\":\"%s\",\"w\":%d,\"h\":%d,\"html\":\"",
-                a->id, a->w, a->h);
-        {   /* JSON 字符串转义: 只需处理 \ 和 " 和控制字符 */
-            size_t ci;
-            for (ci = 0; ci < a->html_len; ci++) {
-                unsigned char ch = (unsigned char)a->html[ci];
-                if (ch == '"' || ch == 0x5C) fputc(0x5C, f);  /* " or \ */
-                if (ch == '\n') fprintf(f, "\\n");
-                else if (ch == '\t') fprintf(f, "\\t");
-                else if (ch != '\r') fputc(ch, f);
-            }
+        hn_zip_member m[24];
+        int nm = 0;
+        char manifest[1024];
+        snprintf(manifest, sizeof(manifest),
+                 "{\"format\":\"hnapp\",\"version\":2,\"id\":\"%s\",\"w\":%d,\"h\":%d,"
+                 "\"entry\":\"index.html\"}", a->id, a->w, a->h);
+        m[nm].name = "manifest.json"; m[nm].data = (const unsigned char *)manifest;
+        m[nm].n = strlen(manifest); nm++;
+        m[nm].name = "index.html"; m[nm].data = (const unsigned char *)a->html;
+        m[nm].n = a->html_len; nm++;
+        /* 资产收集: 遍历 DOM 的 <img src>(相对 cwd 的本地文件存在才入包;
+           远程 URL 与缺失文件跳过 —— 胶囊不联网, 缺的资产还原端按 img
+           占位语义呈现)。 */
+        hn_node *root = hn_doc_root(doc);
+        hn_node *stack[128];
+        int sp = 0;
+        if (root) stack[sp++] = root;
+        while (sp > 0 && nm < 23) {
+            hn_node *nd = stack[--sp];
+            for (hn_node *ch = hn_node_first_child(nd);
+                 ch && sp < 128; ch = hn_node_next_sibling(ch))
+                stack[sp++] = ch;
+            const char *src = hn_node_attr(nd, "src");
+            if (!src || !*src || strstr(src, "://")) continue;
+            /* 去重 */
+            int dup = 0;
+            for (int k = 0; k < nm; k++)
+                if (!strcmp(m[k].name, src)) { dup = 1; break; }
+            if (dup) continue;
+            size_t alen = 0;
+            char *adata = read_all(src, &alen);
+            if (!adata) continue;
+            m[nm].name = strdup(src);
+            m[nm].data = (const unsigned char *)adata;
+            m[nm].n = alen;
+            nm++;
         }
-        fprintf(f, "\"}");
+        int wr = hn_zip_write(f, m, nm);
+        for (int k = 2; k < nm; k++) { free((void *)m[k].data); free((char *)m[k].name); }
         fclose(f);
+        if (wr != 0) { remove(ptmp); resp_json(out, cap, 0, "\"error\":\"zip write failed\""); return; }
+        if (rename(ptmp, p) != 0) { remove(ptmp); resp_json(out, cap, 0, "\"error\":\"cannot write\""); return; }
         char body[512];
-        snprintf(body, sizeof(body), "\"path\":\"%s\"", p);
+        snprintf(body, sizeof(body), "\"path\":\"%s\",\"format\":\"hnapp-v2\"", p);
         resp_json(out, cap, 1, body);
-        return;
-    }
-    if (!strcmp(op, "restore")) {
-        char *p = json_str(line, "path");
-        if (!p) { resp_json(out, cap, 0, "\"error\":\"path required\""); return; }
-        size_t n = 0;
-        char *d = read_all(p, &n);
-        free(p);
-        if (!d) { resp_json(out, cap, 0, "\"error\":\"file not found\""); return; }
-        /* 解析胶囊 JSON: 提取 id/html */
-        char *rid = json_str(d, "id");
-        char *rhtml = json_str(d, "html");
-        free(d);
-        if (!rid || !rhtml) { free(rid); free(rhtml); resp_json(out, cap, 0, "\"error\":\"bad capsule\""); return; }
-        dapp *ra = app_create(rid, 1);
-        if (ra) {
-            ra->w = 480; ra->h = 700;
-            /* 恢复同走 hn_rt 装载路径(link 内联/script 执行与 open 一致) */
-            hn_rt_desc d;
-            memset(&d, 0, sizeof(d));
-            d.id = ra->id;
-            d.html = rhtml;
-            d.html_len = strlen(rhtml);
-            d.w = ra->w;
-            d.h = ra->h;
-            ra->rt = hn_rt_open(&d);
-            if (!ra->rt) { ra->alive = 0; }
-        }
-        free(rid); free(rhtml);
-        resp_json(out, cap, ra != NULL, ra ? "" : "\"error\":\"restore failed\"");
         return;
     }
     if (!strcmp(op, "eval"))

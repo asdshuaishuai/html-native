@@ -466,14 +466,13 @@ dist/hn shot card out.png                                 # daemon 里的无头�
   quickjs 构建的 `JS_FreeRuntime` 在有 JS 函数定义时会断言 —— runtime 与
   进程同生命周期即可规避(daemon 本就常驻)。
 - **胶囊持久化(一个文件装下全部)**: `.hnapp` 是单个可携带文件, 参照 Capsule
-  "documents that run like apps" 的形态 —— 不再把应用散落在运行时目录里:
-  - **文档** html / css
-  - **数据** 页面自己的 KV(原 `~/.html-native/store/<id>.json`)
-  - **几何** 轻应用槽位位置(原 `~/.html-native/applets/<名>.json`)
-  - **agent 操作指令** + **能力图**(元素 id / 触发器 / 轮询 / 生命周期)
-    + **操作历史**(open/update/event/lifecycle 的可回放轨迹)
-  纯 JSON 文本: 人能直接打开读、能 diff、任何编辑器都能看。实测一个时钟轻应用
-  打出来 5.4 KB。写入走 daemon socket op `{"op":"persist","id":…,"path":…}`,
+  "documents that run like apps" 的形态 —— 不再把应用散落在运行时目录里。
+  **v2 = ZIP 容器**(2026-10-19 落地): `manifest.json`(id/尺寸/入口页) +
+  `index.html` 入口文档 + `assets/`(页面引用的本地图片等, restore 时解包到
+  应用目录, 相对引用与项目内导航照常工作); 老版 JSON 胶囊照常可读。
+  persist 原子写(tmp+rename), restore 同 id 替换语义、无需先 open;
+  产出的包过系统 `unzip -t` 与 python zipfile 双外部校验。
+  规划中的字段(KV/几何/能力图/操作历史/agent 指令)按 v2 容器逐步并入:写入走 daemon socket op `{"op":"persist","id":…,"path":…}`,
   拆胶囊走 `{"op":"restore","path":…}`(数据与几何一并装回), 换个 id 打开同一份
   页面照常还原 —— 这两个 op 尚未包成 `hn` CLI 子命令(CLI 现有 9 个子命令,
   见上文 usage), 任何 socket 客户端都可直接调用。

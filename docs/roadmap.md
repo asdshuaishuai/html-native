@@ -639,10 +639,17 @@ P4 CSS 模块化设计评审(先评审后实施)。
    basename)。示例 `examples/project-demo/`, 断言 `tools/project_probe.sh`
    14 项。**余下**: `hn new` 脚手架、project.json 的 pages/app 字段消费
    (hn build 用)。原文:
-2. **持久化 v2** —— `.hnapp` 从 JSON 升级 ZIP 容器:
-   manifest.json + assets/(页面引用的图片/字体/音频, 相对路径不变);
-   复用 dotLottie 的最小 ZIP 读取器(零依赖); 老格式照常可读; 附带
-   治理: JS scope 关闭回收、资产缓存字节预算、`applet-remove` op。
+2. **持久化 v2** —— `.hnapp` 从 JSON 升级 ZIP 容器。
+   **已落地**(2026-10-19): 引擎级 `hn_zip.h/.c`(读 = EOCD→中央目录→按需
+   取条目, 解压复用 hn_png 的 hn_inflate; 写 = 全存储 + CRC32; .lottie
+   直读改单源同用); daemon persist v2(ZIP: manifest.json + index.html +
+   DOM 遍历收集的本地资产, 原子写 tmp+rename)与 restore v2(PK 魔数识别,
+   资产解到 ~/.html-native/apps/<id>/ 后以项目模式打开 —— 导航/相对引用
+   照常; 同 id 替换语义; **restore 移出统一 app 守卫**, 无需先 open);
+   v1 JSON 胶囊照常可读。端到端: open→persist→restore→text 全通, 产出
+   包过系统 unzip -t 与 python zipfile 双外部校验。断言
+   `tools/capsule_probe.sh` 15 项。**余下**: 胶囊签名(ed25519)、
+   字体/音频类资产、JS scope 回收、`applet-remove` op。原文:
 3. **agent 生态对接** —— 界面交付协议封装成主流 personal agent 框架
    的工具插件(function-call 一发即成窗)。
 4. **`hn pack`: 既有 H5 网页 → .hnapp 轻应用**(依赖持久化 v2 的 ZIP

@@ -41,7 +41,7 @@ HN_WASM3_DIR="$HN_REPO_ROOT/vendor/wasm3"
 HN_ENGINE_CORE=(hn_arena.c hn_html.c hn_md.c hn_css.c hn_style.c hn_layout.c
                 hn_paint.c hn_context.c hn_theme.c hn_canvas.c hn_json.c
                 hn_lottie.c hn_mesh.c hn_png.c hn_gif.c hn_media.c hn_fmt.c
-                hn_pe.c hn_cubism.c hn_three.c neb3_soft.c)
+                hn_zip.c hn_pe.c hn_cubism.c hn_three.c neb3_soft.c)
 HN_ENGINE_SOFT=(hnsoft.c)      # 软渲染宿主(hnsoft 位图后端)
 HN_ENGINE_WASM=(hn_wasm.c)     # WASM 缝(须连 vendor/wasm3 一起链)
 HN_WASM3=(m3_bind.c m3_code.c m3_compile.c m3_core.c m3_env.c m3_exec.c

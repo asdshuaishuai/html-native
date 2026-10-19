@@ -23,6 +23,7 @@
 #include <string.h>
 #include "hn_internal.h"
 #include "hn_json.h"
+#include "hn_zip.h"
 #include "hn_png.h"          /* hn_inflate: ZIP 条目的裸 deflate 解压 */
 
 #ifndef M_PI
@@ -572,133 +573,22 @@ static int parse_items(hn_arena *a, const hn_json *arr, lshape **out) {
 
 /* ---------------- dotLottie(.lottie)ZIP 包 ----------------
  *
- * .lottie 是 ZIP 容器(dotLottie 规范 v1: manifest.json 声明元信息,
- * animations/<id>.json 是各动画本体)。这里做**最小 ZIP 读取**:
- * 不落盘、不建临时文件、零外部依赖 —— 解压复用 hn_png.c 的 hn_inflate
- * (PNG IDAT 与 ZIP method=8 都是 RFC 1951 裸 deflate, 同一份实现)。
- *
- * 结构(APPNOTE.TXT):
- *   [本地文件头 PK\x03\x04 + 数据] ... [中央目录 PK\x01\x02 ...] [EOCD PK\x05\x06]
- * 读取顺序与写入相反: 从尾部扫 EOCD → 拿中央目录位置/条目数 → 遍历中央
- * 目录拿各条目的名字/压缩方法/尺寸/本地头偏移 → 按需从本地头取数据。
- * 不做的(从简且与规范无冲突): ZIP64(单动画 JSON 远小于 4GB)、加密、
- * 分卷、数据描述符依赖(中央目录里的尺寸是权威值)。
+ * ZIP 读写单源在引擎级 hn_zip.h/hn_zip.c(本文件的历史实现已上移):
+ * 读 = EOCD → 中央目录 → 按需取条目(解压复用 hn_png 的 hn_inflate)。
+ * 这里只保留 .lottie 的取片逻辑(manifest.json 的 animations[0] 优先,
+ * 回退 animations/ 下第一个 .json)。
  */
-
-#define HN_ZIP_EOCD_SIG  0x06054b50u
-#define HN_ZIP_CDIR_SIG  0x02014b50u
-#define HN_ZIP_LFH_SIG   0x04034b50u
-
-static unsigned rd_le16(const unsigned char *p) { return p[0] | ((unsigned)p[1] << 8); }
-static unsigned rd_le32(const unsigned char *p) {
-    return p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
-}
-
-/* ZIP 中央目录条目(只留取动画需要的字段) */
-typedef struct {
-    const char *name;        /* 指向包内字节(不 NUL 结尾, 用 name_len) */
-    unsigned    name_len;
-    unsigned    method;      /* 0=存储 8=deflate */
-    unsigned    comp_size;
-    unsigned    lfh_off;     /* 本地文件头在包内的偏移 */
-} zip_entry;
-
-typedef struct {
-    const unsigned char *buf;
-    size_t               n;
-    zip_entry           *ents;      /* malloc 数组, hn_zip_free 释放 */
-    int                  n_ents;
-} zip_file;
-
-/* 释放中央目录条目表。zip_file 本体是调用方的栈变量, 这里只 dispose 它
-   持有的堆数组(不能连 z 一起 free —— 那是栈指针) */
-static void hn_zip_free(zip_file *z) {
-    if (!z) return;
-    free(z->ents);
-    z->ents = NULL;
-    z->n_ents = 0;
-}
-
-/* EOCD 定位: 从尾部倒扫签名(注释区最长 65535, 扫 22+65535 字节足够) */
-static int hn_zip_open(const unsigned char *buf, size_t n, zip_file *z) {
-    memset(z, 0, sizeof(*z));
-    if (n < 22) return 0;
-    size_t scan_max = n - 22;
-    size_t scan_floor = scan_max > 65557 ? scan_max - 65557 : 0;
-    size_t e = scan_max + 1;
-    while (e-- > scan_floor) {
-        if (rd_le32(buf + e) == HN_ZIP_EOCD_SIG) break;
-    }
-    if (e < scan_floor || rd_le32(buf + e) != HN_ZIP_EOCD_SIG) return 0;
-    int total = (int)rd_le16(buf + e + 10);         /* 全部条目数 */
-    size_t cd_off = rd_le32(buf + e + 16);
-    size_t cd_size = rd_le32(buf + e + 12);
-    if (cd_off + (size_t)cd_size > n || total <= 0) return 0;
-    z->buf = buf; z->n = n;
-    z->ents = (zip_entry *)calloc((size_t)total, sizeof(zip_entry));
-    if (!z->ents) return 0;
-    size_t p = cd_off, end = cd_off + cd_size;
-    for (int i = 0; i < total && p + 46 <= end; i++) {
-        if (rd_le32(buf + p) != HN_ZIP_CDIR_SIG) break;
-        zip_entry *e2 = &z->ents[z->n_ents++];
-        e2->method    = rd_le16(buf + p + 10);
-        e2->comp_size = rd_le32(buf + p + 20);
-        e2->lfh_off   = rd_le32(buf + p + 42);
-        e2->name_len  = rd_le16(buf + p + 28);
-        e2->name      = (const char *)buf + p + 46;
-        p += 46 + e2->name_len + rd_le16(buf + p + 30) + rd_le16(buf + p + 32);
-    }
-    return z->n_ents > 0;
-}
-
-static int ent_is(const zip_entry *e, const char *name) {
-    size_t l = strlen(name);
-    return e->name_len == l && !memcmp(e->name, name, l);
-}
-
-/* 提取条目内容(malloc, 调用方 free)。失败返回 NULL。 */
-static unsigned char *hn_zip_extract(const zip_file *z, const zip_entry *e,
-                                     size_t *out_len) {
-    *out_len = 0;
-    if (e->lfh_off + 30 > z->n) return NULL;
-    const unsigned char *lfh = z->buf + e->lfh_off;
-    if (rd_le32(lfh) != HN_ZIP_LFH_SIG) return NULL;
-    /* 数据区 = 本地头 30 + 名字 + 额外字段(本地头的 extra 可能与中央
-       目录不同, 以本地头自己的字段为准) */
-    size_t name_len = rd_le16(lfh + 26), extra_len = rd_le16(lfh + 28);
-    size_t data_off = e->lfh_off + 30 + name_len + extra_len;
-    if (data_off + e->comp_size > z->n) return NULL;
-    const unsigned char *data = z->buf + data_off;
-    if (e->method == 0) {                           /* 存储 */
-        unsigned char *out = (unsigned char *)malloc(e->comp_size + 1);
-        if (!out) return NULL;
-        memcpy(out, data, e->comp_size);
-        out[e->comp_size] = 0;
-        *out_len = e->comp_size;
-        return out;
-    }
-    if (e->method != 8) return NULL;                /* 其它方法不支持 */
-    unsigned char *out = hn_inflate(data, e->comp_size, out_len);
-    if (out) {                                      /* 补 NUL 便于直接当字符串解析 */
-        unsigned char *n2 = (unsigned char *)realloc(out, *out_len + 1);
-        if (!n2) { free(out); *out_len = 0; return NULL; }
-        out = n2;
-        out[*out_len] = 0;
-    }
-    return out;
-}
-
 /* 选出要播的动画 JSON:
    1) 有 manifest.json → 解析, 取 animations[0].id → "animations/<id>.json"
       (dotLottie 规范: manifest.animations[] 的次序就是播放次序, 首个为
       缺省动画; hn-lottie-index 多选一暂不做 —— 最简口径是恒取首个)。
    2) 无 manifest(或解析失败) → 回退为第一个 animations/ 目录下的 .json 条目。 */
-static int hn_zip_pick_animation(const zip_file *z, int *idx_out) {
+static int hn_zip_pick_animation(const hn_zip *z, int *idx_out) {
     *idx_out = -1;
     int fallback = -1;
     for (int i = 0; i < z->n_ents; i++) {
-        const zip_entry *e = &z->ents[i];
-        if (ent_is(e, "manifest.json")) {
+        const hn_zip_entry *e = &z->ents[i];
+        if (hn_zip_name_is(e, "manifest.json")) {
             size_t mn = 0;
             unsigned char *mb = hn_zip_extract(z, e, &mn);
             if (mb) {
@@ -713,7 +603,7 @@ static int hn_zip_pick_animation(const zip_file *z, int *idx_out) {
                         char want[160];
                         snprintf(want, sizeof(want), "animations/%s.json", id);
                         for (int k = 0; k < z->n_ents; k++)
-                            if (ent_is(&z->ents[k], want)) { *idx_out = k; break; }
+                            if (hn_zip_name_is(&z->ents[k], want)) { *idx_out = k; break; }
                     }
                 }
                 hn_json_free(ja);
@@ -734,7 +624,7 @@ static int hn_zip_pick_animation(const zip_file *z, int *idx_out) {
 
 /* .lottie 字节 → 动画 JSON 文本(malloc, 调用方 free)。非 ZIP 返回 NULL。 */
 static char *hn_dotlottie_json(const unsigned char *buf, size_t n, size_t *json_len) {
-    zip_file z;
+    hn_zip z;
     if (!hn_zip_open(buf, n, &z)) return NULL;
     char *json = NULL;
     int idx = -1;
