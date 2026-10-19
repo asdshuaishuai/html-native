@@ -28,3 +28,7 @@ examples/_rec-*.html
 examples/_live-*.html
 vendor/cubism/include/
 vendor/cubism/lib/
+
+# 参赛材料(本地保留, 不入库)
+docs/oa2026/
+docs/oscc-2026/
