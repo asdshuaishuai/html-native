@@ -624,6 +624,39 @@ P4 CSS 模块化设计评审(先评审后实施)。
 
 ---
 
+### 规划梳理(2026-10-19): 三段线路 + 两条路线
+
+**第一段 · 眼前**: 演示与提交(按"personal agent 的 Smart-UX"叙事)。
+
+**第二段 · 核心补全**(三主题逐个收口):
+1. **多 HTML 项目模式** —— 项目 = 目录一级实体:
+   `project.json`(入口页/页面列表/共享 styles·scripts·assets, 无清单时
+   index.html 即隐式入口); 引擎内页面导航(`a href` 同窗换装, 走既有
+   hn_doc_swap 通道: 换 DOM/重布局/滚动归零/窗口不动, 页面栈做 back;
+   多窗模式天然并存); 目录递归指纹热重载(任何被 include 片段/共享
+   css/js 变化都触发重装载); `hn new` 脚手架生成项目骨架。
+2. **持久化 v2** —— `.hnapp` 从 JSON 升级 ZIP 容器:
+   manifest.json + assets/(页面引用的图片/字体/音频, 相对路径不变);
+   复用 dotLottie 的最小 ZIP 读取器(零依赖); 老格式照常可读; 附带
+   治理: JS scope 关闭回收、资产缓存字节预算、`applet-remove` op。
+3. **agent 生态对接** —— 界面交付协议封装成主流 personal agent 框架
+   的工具插件(function-call 一发即成窗)。
+
+**第三段 · 特殊路线 `hn build`(给人类的 Flutter 式编译出口) + 平台深化**:
+- **定位纪律**: 主线(AI 层面) = daemon + socket + 秒开秒毁 + 热推送,
+  无构建、窗口即易变对象 —— 产品本体, 架构决策为它服务; 特殊路线
+  (`hn build`) = 把定稿项目编译成各平台传统可分发形态, 给人类开发者
+  与正式分发场景。两条路共享同一引擎/同一页面代码/同一胶囊格式,
+  build 不引入新运行时语义(同一个 hn_app 壳, 资源来源从 daemon 换成
+  内嵌胶囊)。
+- **机制**(全是既有件组装): 输入项目目录 → ① 项目打 .hnapp 胶囊 v2
+  → ② 选对应平台 hnapp 二进制 → ③ 套外壳: macOS `.app`(Info.plist +
+  icns) / Windows `.exe`(图标+资源) / Linux AppImage。应用名/图标/版本
+  取 project.json 的 app 字段。`hn build --target macos|windows|linux`。
+- **平台深化**(并行): Linux 透明窗 32 位 visual、Windows GPU 路径、
+  胶囊签名(ed25519)与跨设备迁移。
+- **远期**: 宿主发现机制、轻应用商店形态、ui-kit 组件生态层。
+
 ### 已落地(2026-10 中旬批次)
 
 - **窗口默认无标题栏**(窗口即画布; `hn-frameless="0"` 显式要系统标题栏;
