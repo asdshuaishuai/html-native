@@ -542,6 +542,7 @@ int main(void) {
             check(sel->select_open == 0, "弹层行点击 → 收起");
             hn_node *o1 = hn_doc_find_by_id(hn_rt_doc(srt), "o1");
             hn_node *o2 = hn_doc_find_by_id(hn_rt_doc(srt), "o2");
+            hn_node *o3 = hn_doc_find_by_id(hn_rt_doc(srt), "o3");
             check(hn_node_attr(o1, "selected") && !hn_node_attr(o2, "selected"),
                   "selected 属性迁移到所点 option");
             /* 再开 → 点弹层外(x=390) → 仅关闭, 选择不变 */
@@ -551,6 +552,27 @@ int main(void) {
             check(sel->select_open == 0, "弹层外点击 → 仅关闭");
             check(hn_node_attr(o1, "selected") && !hn_node_attr(o2, "selected"),
                   "关闭不改选择");
+            /* 键盘导航: 开 → Down 移高亮 → Enter 提交 */
+            box_center(srt, "sel", &cx, &cy);
+            hn_rt_button(srt, 1, cx, cy, 0);
+            hn_rt_key(srt, 1, HN_KEY_DOWN, NULL);
+            hn_rt_key(srt, 1, HN_KEY_DOWN, NULL);
+            hn_rt_key(srt, 1, HN_KEY_ENTER, NULL);
+            check(hn_node_attr(o3, "selected") && !hn_node_attr(o1, "selected") &&
+                  !hn_node_attr(o2, "selected"),
+                  "键盘 Down×2 + Enter → o3 选中");
+            /* Esc 关闭不改选择 */
+            box_center(srt, "sel", &cx, &cy);
+            hn_rt_button(srt, 1, cx, cy, 0);
+            hn_rt_key(srt, 1, HN_KEY_ESC, NULL);
+            check(sel->select_open == 0, "Esc → 关闭");
+            /* 滚动窗: 3 选项全可见时 row0 = 0(无滚动必要) */
+            box_center(srt, "sel", &cx, &cy);
+            hn_rt_button(srt, 1, cx, cy, 0);
+            check(sel->select_row0 == 0, "少选项 row0=0(无滚动窗)");
+            hn_rt_scroll(srt, 0, -120, 80, 60);
+            check(sel->select_row0 >= 0, "弹层滚轮 → row0 钳制不越界");
+            hn_rt_key(srt, 1, HN_KEY_ESC, NULL);
             hn_rt_close(srt);
         }
     }

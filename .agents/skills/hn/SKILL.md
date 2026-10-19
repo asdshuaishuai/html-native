@@ -108,6 +108,8 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 `min() / max() / clamp()`（绝对单位; 含 % 实参不支持, 如实声明）；
 `visibility: hidden`（保布局不画; **子级 `visibility:visible` 可复显**, 标准继承语义）/
 `pointer-events: none`（子树不参与命中）。
+**伪元素** `::before` / `::after` + `content: "字面"`（装饰文本; 其余声明转节点内联样式;
+`content:none`/`attr()`/计数器未做——如实声明）。
 **没有**：grid / float / 伪元素 / @font-face / calc 里两个以上 % 项 / min·max 含 %（边界如实声明, 路线图上）。
 
 ## 动画（声明式, 引擎插值）
@@ -189,7 +191,9 @@ hnMediaVolume('v', .5); // 音量(v<=0 同时静音)
 - `hn-draggable` — 无边框/透明窗的空白区拖动（**默认开**，`=0` 关闭）
 - `hn-stream` + `hn-stream-loop="14"` — 聊天式流式容器：自动贴底跟随 + 环形缓冲只留最近 N 条（agent 轨迹/日志页标配）
 
-**表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset|range">`、`<textarea>`（多行+光标）、`<button>`、`<progress value max>`（轨道+填充, 无 value = 不定态往复动画）、`<select>`（含弹层: 点击开 → 选项行列表 → 点行选中/点外关闭）开箱可用。
+**表单控件**：`<input type="text|password|checkbox|radio|button|submit|reset|range">`、`<textarea>`（多行+光标）、`<button>`、`<progress value max>`（轨道+填充, 无 value = 不定态往复动画）、`<select>`（含弹层: 点击开 → 选项行列表 → 点行选中/点外关闭; 弹层内
+Up/Down 移高亮、Enter 提交、Esc 关闭、滚轮滚动;
+弹层内 Up/Down 移高亮、Enter 提交、Esc 关闭、滚轮滚动）开箱可用。
 **Smart-UX 出现/消失**（默认开启, 无需声明）：运行时插入的内容（appendChild /
 insertBefore）自动**淡入 + 上浮 8px**（200ms ease-out）浮现; JS remove 的元素
 在**原位淡出 160ms** 后消亡 —— 内容不再硬闪出现/消失。首屏文档与显式

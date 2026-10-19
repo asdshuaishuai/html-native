@@ -651,6 +651,24 @@ r="$(box1 '<html><head><style>html,body{margin:0}
 .nx{width:90;height:30}
 </style></head><body><div class="hid"></div><div class="nx" id="nx"></div></body></html>' nx)"
 ck "visibility:hidden 保布局(兄弟位置不被上提)" "$r" "0 40 90 30"
+
+# ============ 伪元素 ::before/::after(生成内容) ============
+# content 字面文本照画(文档序: before → 内容 → after)
+printf '<html><head><style>html,body{margin:0;background:#000;color:#fff}.tag::after{content:"NEW";font-size:10px;color:#e5484d}.tag::before{content:"[ ";color:#999}</style></head><body><span class="tag">功能名称</span></body></html>' > "$D/gen.html"
+if "$HN" paint "$D/gen.html" 300 100 | grep '^TEXT' | grep -q 'NEW'; then NPASS=$((NPASS+1));
+else hn_fail "::after content 文本绘制" "NEW" "未命中"; fi
+if "$HN" paint "$D/gen.html" 300 100 | grep '^TEXT' | grep -q '\['; then NPASS=$((NPASS+1));
+else hn_fail "::before content 文本绘制" "[ " "未命中"; fi
+# 伪元素声明转内联样式: ::after 的 font-size:10 生效(NEW 用 sz=10 而非继承 16)
+if "$HN" paint "$D/gen.html" 300 100 | grep '^TEXT' | grep 'NEW' | grep -q 'sz=10'; then NPASS=$((NPASS+1));
+else hn_fail "伪元素声明转节点样式(font-size)" "sz=10" "未生效"; fi
+if "$HN" paint "$D/gen.html" 300 100 | grep '^TEXT' | grep 'NEW' | grep -q 'E5484D'; then NPASS=$((NPASS+1));
+else hn_fail "伪元素声明转节点样式(color)" "E5484D" "未生效"; fi
+# content:none / 缺 content = 不生成
+printf '<html><head><style>html,body{margin:0}.n::after{content:none}</style></head><body><span class="n">x</span></body></html>' > "$D/gennone.html"
+_n=$( "$HN" paint "$D/gennone.html" 200 100 | grep -c '^TEXT' || true )
+if [ "$_n" = "1" ]; then NPASS=$((NPASS+1));
+else hn_fail "content:none 不生成(仅元素自身文本 1 条)" "1" "$_n"; fi
 # 子级复显: hidden 父下 visible 子级的文本照画(标准继承语义)
 printf '<html><head><style>html,body{margin:0;background:#000;color:#fff}.h{visibility:hidden}.h .show{visibility:visible}</style></head><body><div class="h">ghost<div class="show">复显</div></div></body></html>' > "$D/vo.html"
 if "$HN" paint "$D/vo.html" 200 100 | grep '^TEXT' | grep -q '复显'; then NPASS=$((NPASS+1));

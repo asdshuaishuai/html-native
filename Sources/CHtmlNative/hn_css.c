@@ -210,6 +210,19 @@ static int read_compound(cps *s, hn_compound *cp) {
             any = 1;
             continue;
         }
+        /* 伪元素 ::before/::after(含旧写法 :before/:after —— CSS2 兼容):
+           记到 pse_elem; 该规则不进常规级联, 由生成内容合成遍历消费 */
+        if (s->p + 1 < s->end && *s->p == ':' &&
+            (s->p + 2 >= s->end || s->p[1] == ':')) {
+            const char *save = s->p;
+            s->p += (*s->p + 1 < s->end && s->p[1] == ':') ? 2 : 1;
+            char *pse = read_ident(s);
+            if (pse) {
+                if (!strcmp(pse, "before")) { cp->pse_elem = 1; any = 1; continue; }
+                if (!strcmp(pse, "after"))  { cp->pse_elem = 2; any = 1; continue; }
+            }
+            s->p = save;
+        }
         /* 伪类: :hover/:active/:focus/:disabled/:enabled/:checked/
            :nth-child(odd|even|N|n 公式) */
         if (s->p + 1 < s->end && *s->p == ':') {
@@ -255,12 +268,43 @@ static void emit_rule(hn_sheet *sh, hn_compound *parts, int n_parts,
                       hn_decl *ds, int nd, int *order, float min_w, float max_w) {
     hn_rule *r = hn_arena_alloc(sh->arena, sizeof(hn_rule));
     memset(r, 0, sizeof(*r));
+    /* 伪元素规则: pse_elem 来自末复合段; content 值剥出(quoted 串原样,
+       含实体已由 HTML 层解码的口径一致 —— CSS content 里为字面); 其余
+       声明留在 decls(合成时转节点内联样式)。非伪元素规则原样。 */
+    {
+        hn_compound *last = &parts[n_parts - 1];
+        r->pse_elem = last->pse_elem;
+    }
     r->sel.parts = hn_arena_alloc(sh->arena, sizeof(hn_compound) * (size_t)n_parts);
     memcpy(r->sel.parts, parts, sizeof(hn_compound) * (size_t)n_parts);
     r->sel.n_parts = n_parts;
     r->decls = hn_arena_alloc(sh->arena, sizeof(hn_decl) * (size_t)nd);
     memcpy(r->decls, ds, sizeof(hn_decl) * (size_t)nd);
     r->n_decls = nd;
+    if (r->pse_elem) {
+        /* content: "字面" / '字面' / none|normal。none/normal = 不生成;
+           其余取去引号字面(转义 \" \\ 处理; v1 不做 CSS 转义全集)。 */
+        for (int di = 0; di < nd; di++) {
+            if (strcasecmp(ds[di].name, "content")) continue;
+            const char *v = ds[di].value;
+            while (*v == ' ') v++;
+            if (!strncasecmp(v, "none", 4) || !strncasecmp(v, "normal", 6)) {
+                r->gen_text = NULL;
+            } else if (*v == '"' || *v == '\'') {
+                char q = *v++;
+                size_t vl = strlen(v);
+                char *out = hn_arena_alloc(sh->arena, vl + 1);
+                size_t oi = 0;
+                for (size_t k = 0; k < vl && v[k] != q; k++) {
+                    if (v[k] == '\\' && k + 1 < vl) { k++; }
+                    out[oi++] = v[k];
+                }
+                out[oi] = 0;
+                r->gen_text = out;
+            }
+            break;
+        }
+    }
     int spec = 0;
     for (int i = 0; i < n_parts; i++) {
         /* 伪类与 :nth-child 按类级特异性计(标准行为)。

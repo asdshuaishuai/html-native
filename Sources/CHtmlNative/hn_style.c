@@ -1728,7 +1728,31 @@ static void apply_decls(hn_style *st, hn_decl *ds, int nd, int phase) {
 }
 
 static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
-    if (n->kind != HN_ELEM) return;
+    /* 伪元素合成文本节点(带内联 style): 继承父级计算样式 + 应用自身
+       内联声明(::after 的 font-size/color 等) —— 普通文本节点无 attrs,
+       直接沿用父样式(既有口径不变)。 */
+    if (n->kind == HN_TEXT) {
+        if (n->n_attrs > 0 && parent && c->tmp) {
+            hn_style st;
+            hn_style_default(&st);
+            hn_style_inherit(&st, &parent->style);
+            const char *inline_style = get_attr(n, "style");
+            if (inline_style && c->tmp) {
+                hn_decl *ds = NULL;
+                int nd = 0;
+                hn_parse_inline_decls(c->tmp, inline_style, strlen(inline_style), &ds, &nd);
+                for (int d = 0; d < nd; d++) {
+                    if (ds[d].name[0] == '-' && ds[d].name[1] == '-') continue;
+                    const char *rv = c->tmp ? resolve_vars(c->tmp, ds[d].value, NULL, 0, 0) : ds[d].value;
+                    hn_decl one = { ds[d].name, rv };
+                    apply_decls(&st, &one, 1, 0);
+                    apply_decls(&st, &one, 1, 1);
+                }
+            }
+            n->style = st;
+        }
+        return;
+    }
 
     /* id 缓存 */
     n->id = get_attr(n, "id");
@@ -1750,6 +1774,7 @@ static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
         hn_sheet *sh = sheets[si];
         for (int ri = 0; ri < sh->n_rules; ri++) {
             hn_rule *r = &sh->rules[ri];
+            if (r->pse_elem) continue;   /* 伪元素规则: 生成内容遍历消费 */
             if (r->media_min_w > 0 && c->vw < r->media_min_w) continue;
             if (r->media_max_w > 0 && c->vw > r->media_max_w) continue;
             if (!selector_matches(&r->sel, n, c)) continue;
@@ -1846,10 +1871,96 @@ static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
     for (hn_node *ch = n->first; ch; ch = ch->next) compute_rec(c, ch, n);
 }
 
+/* ---------------- 伪元素生成内容(::before/::after) ----------------
+ * 一次合成: 首次 compute 前扫全部样式表, 对每条伪元素规则,
+ * 匹配到的元素在 arena 上生成真实文本子节点(before = 前插, after = 追加),
+ * 规则的其余声明转成该文本节点的内联 style —— 之后走常规级联/布局/
+ * 绘制/命中管线, 零特殊路径。幂等: 元素上记 gen_before/gen_after 指针,
+ * 已存在则跳过(hn_node 扩展字段)。content:none/缺 content = 不生成。
+ * 文档换装(新 doc/新 arena)后合成自然重来 —— 指针随旧 arena 悬空但
+ * 不会被读(新 doc 的元素 gen_* 起始为 NULL)。 */
+static void gen_content_apply(hn_context *c) {
+    if (!c->doc || !c->doc->root || c->doc->gen_done) return;
+    c->doc->gen_done = 1;
+    /* 遍历面: 上下文表(UA/主题/外链) + 文档内联 <style> —— 与 compute
+       的收集口径一致(漏内联表则页面 <style> 里的伪元素永不合成)。 */
+    hn_sheet *all[64];
+    int n_all = 0;
+    for (int si = 0; si < c->n_sheets && n_all < 64; si++)
+        all[n_all++] = c->sheets[si];
+    if (c->doc)
+        for (int si = 0; si < c->doc->n_inline && n_all < 64; si++)
+            all[n_all++] = c->doc->inline_sheets[si];
+    for (int si = 0; si < n_all; si++) {
+        hn_sheet *sh = all[si];
+        for (int ri = 0; ri < sh->n_rules; ri++) {
+            hn_rule *r = &sh->rules[ri];
+            if (!r->pse_elem) continue;
+            /* 遍历元素, 匹配该规则选择器 */
+            hn_node *stack[512];
+            int sp = 0;
+            stack[sp++] = c->doc->root;
+            int guard = 0;
+            while (sp > 0 && guard++ < 200000) {
+                hn_node *n = stack[--sp];
+                if (n->kind == HN_ELEM && !n->is_doc_wrapper &&
+                    selector_matches(&r->sel, n, c)) {
+                    hn_node **slot = (r->pse_elem == 1) ? &n->gen_before
+                                                        : &n->gen_after;
+                    if (!*slot) {
+                        /* 生成文本节点(arena = 元素 arena) */
+                        hn_node *t = hn_arena_alloc(n->arena, sizeof(hn_node));
+                        if (t) {
+                            memset(t, 0, sizeof(*t));
+                            t->kind = HN_TEXT;
+                            t->arena = n->arena;
+                            t->parent = n;
+                            t->text = r->gen_text;
+                            t->text_len = r->gen_text ? strlen(r->gen_text) : 0;
+                            t->anim.fresh = 1;
+                            *slot = t;
+                            /* 其余声明 → 内联 style(级联走内联通道) */
+                            {
+                                char sbuf[512];
+                                size_t off = 0;
+                                sbuf[0] = 0;
+                                for (int di = 0; di < r->n_decls && off < sizeof(sbuf); di++) {
+                                    if (!strcasecmp(r->decls[di].name, "content")) continue;
+                                    int w = snprintf(sbuf + off, sizeof(sbuf) - off,
+                                                     "%s%s: %s;", off ? " " : "",
+                                                     r->decls[di].name, r->decls[di].value);
+                                    if (w < 0) break;
+                                    off += (size_t)w;
+                                    if (off >= sizeof(sbuf)) { off = sizeof(sbuf) - 1; sbuf[off] = 0; break; }
+                                }
+                                if (off) hn_node_set_attr(t, "style", sbuf);
+                            }
+                            /* 挂树: before = 前插到最前, after = 追加到最后 */
+                            if (r->pse_elem == 1) {
+                                t->next = n->first;
+                                if (n->first) n->first->prev = t;
+                                else n->last = t;
+                                n->first = t;
+                            } else {
+                                t->prev = n->last;
+                                if (n->last) n->last->next = t;
+                                else n->first = n->last = t;
+                            }
+                        }
+                    }
+                }
+                for (hn_node *ch = n->first; ch; ch = ch->next)
+                    if (ch->kind == HN_ELEM && sp < 512) stack[sp++] = ch;
+            }
+        }
+    }
+}
+
 void hn_style_compute_all(hn_context *c) {
     if (!c->doc) return;
     g_vw = c->vw;
     g_vh = c->vh;
+    gen_content_apply(c);
     compute_rec(c, c->doc->root, NULL);
 }
 

@@ -1532,10 +1532,11 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
     int cp_clip = 0;   /* clip-path 裁剪是否已入栈(所有提前 return 都要补 POP) */
 
     if (n->kind == HN_TEXT) {
-        /* 文本节点不吃级联(compute 只走元素) —— 继承的 visibility 用
-           父级计算样式判(文本在 hidden 父下不画; visible 链上照画) */
-        if (pst->visibility) return;
-        paint_runs(c, n, pst, alpha, sx, sy, g);
+        /* 伪元素合成文本(带 attrs)有自己的计算样式(compute_rec 文本分支);
+           普通文本沿用父样式 pst。 */
+        const hn_style *tst = (n->n_attrs > 0) ? &n->style : pst;
+        if (tst->visibility) return;
+        paint_runs(c, n, tst, alpha, sx, sy, g);
         return;
     }
 
@@ -2536,6 +2537,7 @@ static void paint_select_popups(hn_context *c) {
             }
             if (n_opt <= 0) continue;
             if (sel_i < 0) sel_i = 0;
+            int hi_i = (n->select_hi >= 0 && n->select_hi < n_opt) ? n->select_hi : sel_i;
             float fs = n->style.font_size > 8 ? n->style.font_size : 12;
             float row_h = fs * 1.6f;
             float x0 = n->bx, y0 = n->by + n->bh;
@@ -2549,6 +2551,12 @@ static void paint_select_popups(hn_context *c) {
                     y0 = n->by - row_h * visible;
                 } else if (visible > n_opt) visible = n_opt;
             }
+            /* 滚动窗: row0 钳制并保证高流行可见 */
+            if (n->select_row0 < 0) n->select_row0 = 0;
+            if (n->select_row0 > n_opt - visible) n->select_row0 = n_opt - visible;
+            if (n->select_row0 < 0) n->select_row0 = 0;
+            if (hi_i < n->select_row0) n->select_row0 = hi_i;
+            if (hi_i >= n->select_row0 + visible) n->select_row0 = hi_i - visible + 1;
             float lw = n->bw > 120 ? n->bw : 120;
             hn_cmd cmd;
             memset(&cmd, 0, sizeof(cmd));
@@ -2564,9 +2572,11 @@ static void paint_select_popups(hn_context *c) {
             cmd.stroke = 0xFF7F7F7Fu;
             cmd.stroke_w = 1;
             push_cmd(c, &cmd);
-            for (int i = 0; i < visible; i++) {
-                float ry = y0 + row_h * i;
-                if (i == sel_i) {
+            for (int row = 0; row < visible; row++) {
+                int i = n->select_row0 + row;
+                if (i >= n_opt) break;
+                float ry = y0 + row_h * row;
+                if (i == hi_i) {
                     hn_cmd hl;
                     memset(&hl, 0, sizeof(hl));
                     hl.kind = HN_CMD_RECT;
@@ -2577,7 +2587,7 @@ static void paint_select_popups(hn_context *c) {
                     push_cmd(c, &hl);
                 }
                 static char row_txt[64][96];   /* 弹层行文本(同帧消费; 槽位按行) */
-                char *tb = row_txt[i];
+                char *tb = row_txt[row];
                 hn_node_text_content(opts[i], tb, sizeof(row_txt[0]) - 1);
                 hn_cmd tc;
                 memset(&tc, 0, sizeof(tc));

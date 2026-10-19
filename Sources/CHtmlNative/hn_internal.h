@@ -332,6 +332,9 @@ struct hn_node {
        与 style.text_transform 不一致时才重写文本。set_text_content 等
        文本替换路径须清零本字段。 */
     unsigned char tt_applied;
+    /* 伪元素生成内容(::before/::after 合成的文本节点; arena 指针,
+       随文档 arena 存活)。NULL = 未生成(首次 compute 前合成一次)。 */
+    struct hn_node *gen_before, *gen_after;
     /* text */
     const char *text; size_t text_len;
     /* text-transform 生效前的原字节(文本节点; arena 指针, 无需回收)。
@@ -349,8 +352,12 @@ struct hn_node {
        流式推送"新内容优先贴底"的直觉一致。 */
     int stream_yield;
     /* <select> 弹层开合(仅 open 的 select 会有此标记; 文档替换即消亡)。
-       点击命中: 弹层行 → 选中并关闭; 弹层外 → 仅关闭。 */
+       点击命中: 弹层行 → 选中并关闭; 弹层外 → 仅关闭。
+       select_row0 = 弹层首可见 option 序号(滚动); select_hi = 键盘导航
+       高亮行(绝对 option 序号; -1 = 未导航, 高亮跟随 selected)。 */
     int select_open;
+    int select_row0;
+    int select_hi;
     /* hn-stream 平滑追上: 1 = 跟随动画在途(布局期武装, hn_context_anim_tick
        逐帧向底部指数逼近; gap < 1px 落位即清)。用户让出立即清 —— 动画
        中断, 让出状态机只有 stream_yield 一套。 */
@@ -396,6 +403,7 @@ struct hn_node {
 };
 
 struct hn_doc {
+    int gen_done;          /* 伪元素生成内容已合成(一次; 新 doc 重新合成) */
     hn_arena *arena;
     hn_node  *root;
     struct hn_sheet **inline_sheets;
@@ -476,6 +484,9 @@ typedef struct hn_compound {
     int n_not;
     /* :nth-of-type / :first-of-type / :last-of-type: 同 nth 的编码, 但只数同标签兄弟 */
     int nth_type;
+    /* 伪元素: 0=无 1=::before 2=::after(该复合段是伪元素挂载点 ——
+       规则带伪元素时不参与常规级联, 由生成内容合成遍历消费) */
+    int pse_elem;
 } hn_compound;
 
 typedef struct { hn_compound *parts; int n_parts; } hn_selector;
@@ -500,6 +511,10 @@ typedef struct {
     int spec;    /* id*256 + class*16 + tag */
     int order;   /* 样式表内出现顺序 */
     float media_min_w, media_max_w;  /* @media 条件; -1 = 无约束 */
+    /* 伪元素规则: 0=常规 1=::before 2=::after。content 值(arena 串)与
+       其余声明(转内联样式用)分离存放; 常规级联跳过此类规则。 */
+    int pse_elem;
+    const char *gen_text;
 } hn_rule;
 
 struct hn_sheet {

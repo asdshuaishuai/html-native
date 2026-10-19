@@ -3516,6 +3516,29 @@ int hn_rt_paint_flush(hn_rt *rt) {
 int hn_rt_scroll(hn_rt *rt, float dx, float dy, float x, float y) {
     (void)dx;
     if (!rt) return 0;
+    /* <select> 弹层滚动: (x,y) 在打开的弹层/盒区域时拦截滚轮 = 滚动选项窗 */
+    {
+        hn_node *stack[256];
+        int sp2 = 0, guard2 = 0;
+        stack[sp2++] = hn_context_doc(rt->ctx)->root;
+        while (sp2 > 0 && guard2++ < 100000) {
+            hn_node *it = stack[--sp2];
+            if (it->select_open && it->tag && !strcmp(it->tag, "select") &&
+                x >= it->bx - 2 && x <= it->bx + it->bw + 2 &&
+                y >= it->by - 2 && y <= it->by + it->bh + 200) {
+                int n_opt = 0;
+                for (hn_node *ch = it->first; ch; ch = ch->next)
+                    if (ch->kind == HN_ELEM && ch->tag && !strcmp(ch->tag, "option"))
+                        n_opt++;
+                it->select_row0 += (dy > 0) ? -3 : 3;
+                if (it->select_row0 > n_opt - 1) it->select_row0 = n_opt - 1;
+                if (it->select_row0 < 0) it->select_row0 = 0;
+                return rt_render(rt);
+            }
+            for (hn_node *ch = it->first; ch; ch = ch->next)
+                if (ch->kind == HN_ELEM && sp2 < 256) stack[sp2++] = ch;
+        }
+    }
     hn_node *n = hn_context_hit_node(rt->ctx, x, y);
     if (n && hn_node_scroll_by(n, 0, -dy * 18.0f)) {
         /* JS scroll: 节流每帧至多一次(hn_rt_frame 重臂); 无监听器零成本 */
@@ -3555,13 +3578,34 @@ static void rt_range_set_from_x(hn_rt *rt, hn_node *inp, float x) {
    (el.click()), range 不动滑块。 */
 static int rt_native_click(hn_rt *rt, hn_node *n, float click_x) {
     if (!rt || !n) return 0;
-    /* <select>: 点击开/合弹层(node 标记; 绘制/命中两处消费) */
+    /* <select>: 点击开/合弹层(node 标记; 绘制/命中两处消费)。
+       打开时滚动窗围绕 selected 行初始化(键盘导航的起点)。 */
     {
         hn_node *it = n;
         for (int hop = 0; it && hop < 8; hop++, it = it->parent) {
             const char *t = hn_node_tag(it);
             if (t && !strcmp(t, "select")) {
                 it->select_open = !it->select_open;
+                if (it->select_open) {
+                    int n_opt = 0, sel_i = 0;
+                    for (hn_node *ch = it->first; ch; ch = ch->next) {
+                        if (ch->kind != HN_ELEM || !ch->tag || strcmp(ch->tag, "option")) continue;
+                        if (hn_node_attr(ch, "selected")) sel_i = n_opt;
+                        n_opt++;
+                    }
+                    it->select_hi = -1;
+                    /* v1 简化: 弹层可见行数 ≈ 视口高/行高 - 1, row0 令 selected 居中 */
+                    float rowh = it->style.font_size * 1.6f;
+                    int visible = rowh > 0 ? (int)(hn_context_viewport_h(rt->ctx) / rowh) : n_opt;
+                    if (visible < 1) visible = 1;
+                    int row0 = sel_i - visible / 2;
+                    if (row0 > n_opt - visible) row0 = n_opt - visible;
+                    if (row0 < 0) row0 = 0;
+                    it->select_row0 = row0;
+                } else {
+                    it->select_row0 = 0;
+                    it->select_hi = -1;
+                }
                 return 1;
             }
         }
@@ -3755,21 +3799,28 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
                     y0 = opened->by - row_h * visible;
                 } else if (visible > n_opt) visible = n_opt;
             }
+            /* 滚动窗钳制(与 paint_select_popups 同式) */
+            if (opened->select_row0 < 0) opened->select_row0 = 0;
+            if (opened->select_row0 > n_opt - visible) opened->select_row0 = n_opt - visible;
+            if (opened->select_row0 < 0) opened->select_row0 = 0;
             float lw = opened->bw > 120 ? opened->bw : 120;
             int in_list = (x >= x0 && x <= x0 + lw && y >= y0 && y < y0 + row_h * visible);
             int in_box = (x >= opened->bx && x <= opened->bx + opened->bw &&
                           y >= opened->by && y <= opened->by + opened->bh);
             if (in_list) {
-                int pick = (int)((y - y0) / row_h);
+                int pick = opened->select_row0 + (int)((y - y0) / row_h);
                 if (pick >= 0 && pick < visible && pick < n_opt) {
                     for (int i = 0; i < n_opt; i++)
                         hn_node_remove_attr(opts[i], "selected");
                     hn_node_set_attr(opts[pick], "selected", "");
                 }
                 opened->select_open = 0;
+                opened->select_row0 = 0;
+                opened->select_hi = -1;
                 return rt_render(rt);
             }
-            if (!in_box) { opened->select_open = 0; return rt_render(rt); }
+            if (in_box) { opened->select_open = 0; opened->select_row0 = 0; opened->select_hi = -1; return rt_render(rt); }
+            if (!in_box) { opened->select_open = 0; opened->select_row0 = 0; opened->select_hi = -1; return rt_render(rt); }
             /* 点在盒上 = 收起(切换) */
             opened->select_open = 0;
             return rt_render(rt);
@@ -4017,6 +4068,55 @@ int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8) {
     hn_node *target = rt->focus ? rt->focus : hn_doc_root(hn_context_doc(rt->ctx));
     if (!down) {
         /* 松开方向键: 无动作(与既有口径一致, 按下才处理) */
+    }
+    /* <select> 弹层键盘导航(优先于一切聚焦逻辑): Up/Down 移高亮行,
+       Enter 提交(迁移 selected), Esc 关闭。 */
+    if (down && (key == HN_KEY_UP || key == HN_KEY_DOWN ||
+                 key == HN_KEY_ENTER || key == HN_KEY_ESC)) {
+        hn_node *opened = NULL;
+        hn_node *stack[256];
+        int sp2 = 0, guard2 = 0;
+        stack[sp2++] = hn_context_doc(rt->ctx)->root;
+        while (sp2 > 0 && guard2++ < 100000) {
+            hn_node *it = stack[--sp2];
+            if (it->select_open && it->tag && !strcmp(it->tag, "select")) { opened = it; break; }
+            for (hn_node *ch = it->first; ch; ch = ch->next)
+                if (ch->kind == HN_ELEM && sp2 < 256) stack[sp2++] = ch;
+        }
+        if (opened) {
+            hn_node *opts[64];
+            int n_opt = 0, sel_i = 0;
+            for (hn_node *ch = opened->first; ch; ch = ch->next) {
+                if (ch->kind != HN_ELEM || !ch->tag || strcmp(ch->tag, "option")) continue;
+                if (n_opt < 64) opts[n_opt++] = ch;
+                if (hn_node_attr(ch, "selected")) sel_i = n_opt - 1;
+            }
+            int hi = (opened->select_hi >= 0) ? opened->select_hi : sel_i;
+            if (key == HN_KEY_UP && hi > 0) hi--;
+            if (key == HN_KEY_DOWN && hi < n_opt - 1) hi++;
+            if (key == HN_KEY_ENTER) {
+                for (int i = 0; i < n_opt; i++) hn_node_remove_attr(opts[i], "selected");
+                hn_node_set_attr(opts[hi], "selected", "");
+                opened->select_open = 0;
+                opened->select_row0 = 0;
+                opened->select_hi = -1;
+                return rt_render(rt);
+            }
+            if (key == HN_KEY_ESC) {
+                opened->select_open = 0;
+                opened->select_row0 = 0;
+                opened->select_hi = -1;
+                return rt_render(rt);
+            }
+            opened->select_hi = hi;
+            /* 高亮行滚入可见窗(行高与 paint 同式) */
+            float rowh = opened->style.font_size * 1.6f;
+            int visible = rowh > 0 ? (int)(hn_context_viewport_h(rt->ctx) / rowh) : n_opt;
+            if (visible < 1) visible = 1;
+            if (hi < opened->select_row0) opened->select_row0 = hi;
+            if (hi >= opened->select_row0 + visible) opened->select_row0 = hi - visible + 1;
+            return rt_render(rt);
+        }
     }
     if (down && rt->focus &&
         hn_node_input_kind(rt->focus) == HN_IN_RANGE &&

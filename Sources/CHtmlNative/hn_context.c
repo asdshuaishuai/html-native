@@ -819,7 +819,9 @@ int hn_doc_query_selector(hn_doc *doc, const char *sel, hn_context *c,
 }
 
 int hn_node_set_attr(hn_node *n, const char *name, const char *value) {
-    if (!n || n->kind != HN_ELEM || !name || !n->arena) return 0;
+    /* 伪元素合成文本节点也带内联 style 标记(HN_TEXT 有 arena) ——
+       kind 不再限定 ELEM; 其余读口(get_attr/hn_node_attr)本就通用。 */
+    if (!n || !name || !n->arena) return 0;
     /* 已存在则原地改值(值在 arena 上重新分配, 旧值不回收) */
     for (int i = 0; i < n->n_attrs; i++) {
         if (!strcmp(n->attrs[i].name, name)) {
