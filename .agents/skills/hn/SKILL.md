@@ -124,6 +124,9 @@ flex（方向/对齐/gap/grow）/ block / inline-block / absolute+z-index / over
 3D：`transform: rotate(45deg) scale(1.2)` + `perspective: 400`（父或自身）。
 box-shadow 模糊为**真高斯**（3-pass box 逼近, 无光环）; three.js 子集为
 Blinn-Phong 双灯着色（高光 + 半球环境光）。
+**冻结指令片段**（渲染加速）: 静态子树的绘制指令按指纹缓存, 命中帧整块
+回放 —— 模板/静态区块的每帧绘制成本近零; 样式/文本/结构一变自动重录
+（HN_FRAGMENT=0 关闭）。
 
 ## 富媒体（agent 母语）
 
