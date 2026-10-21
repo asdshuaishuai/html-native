@@ -78,6 +78,10 @@ static char *build_doc(int n_para) {
         ".d{font-size:12px;font-weight:700}"
         ".clamp{font-size:14px;line-clamp:2;height:44px;overflow:hidden}"
         ".row{display:flex;gap:6;width:380}"
+        /* 多行内组容器(文本/块/文本混排): 同帧两个 IFC 组先后省略号截断,
+           组间 runs 不得互毁(wipe-once 帧代数的审查修复锚) */
+        ".mg{font-size:14px;line-clamp:1;height:22px;overflow:hidden;width:380}"
+        ".blk{width:40;height:18;background:#345}"
         "</style></head><body>");
     for (i = 0; i < n_para; i++) {
         const char *cls = g_classes[i % 4];
@@ -86,12 +90,16 @@ static char *build_doc(int n_para) {
             "<p class=\"%s\" id=\"p%d\">%s #%d</p>", cls, i, txt, i);
     }
     off += (size_t)snprintf(buf + off, cap - off,
+        "<div class=\"mg\">%s"
+        "<div class=\"blk\"></div>"
+        "%s</div>"
         "<div class=\"clamp\" id=\"clamp\">%s%s%s</div>"
         "<div class=\"row\">"
         "<span class=\"a\">甲</span><span class=\"b\">乙</span>"
         "<span class=\"c\">丙</span><span class=\"d\">丁</span>"
         "<span class=\"a\">戊</span><span class=\"b\">己</span>"
         "</div></body></html>",
+        g_sentences[2], g_sentences[3],
         g_sentences[0], g_sentences[1], g_sentences[2]);
     return buf;
 }

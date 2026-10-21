@@ -398,6 +398,11 @@ struct hn_node {
     unsigned long long cs_in;
     unsigned long long style_hash;
     unsigned char cs_valid;
+    /* 行内 runs 的帧代数(布局层 g_lgen): "谁重建谁清"的清理点全部走
+       wipe-once —— 同一容器的多个行内组/多个 flex 文本子项在一帧内
+       先后重建时, 后到的清理不得销毁先到组已铺的 runs(省略号挂容器,
+       旧口径帧首只清一次、组间累加, wipe-once 与之逐位同构)。 */
+    unsigned wipe_gen;
     /* 输入控件状态 */
     char  *value; size_t value_len, value_cap;  /* 可编辑当前值(arena) */
     int    caret;                                /* 字节偏移 */

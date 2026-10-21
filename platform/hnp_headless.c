@@ -139,6 +139,14 @@ unsigned long hnp_now_ms(void) {
     return (unsigned long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000) + g_now_offset;
 }
 
+double hnp_now_ms_f(void) {
+    /* 亚毫秒单调钟(纳秒精度): 帧时间戳先量化到 1/64ms 栅格再做差
+       (handwired host-timing 同法); g_now_offset 与 hnp_now_ms 同一口径。 */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0 + g_now_offset;
+}
+
 void hnp_set_cursor(hnp_window *w, hnp_cursor c) { (void)w; (void)c; }
 
 /* ---------------- 媒体 ABI 留位(docs/media-design.md §2) ----------------

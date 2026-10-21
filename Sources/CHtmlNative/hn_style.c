@@ -1903,7 +1903,14 @@ static void compute_rec(hn_context *c, hn_node *n, hn_node *parent,
         unsigned long long pre = 0;
         int idx = 0;
         for (hn_node *ch = n->first; ch; ch = ch->next) {
-            if (ch->kind != HN_ELEM) continue;
+            if (ch->kind != HN_ELEM) {
+                /* TEXT 子级也要下钻: 伪元素合成文本节点带内联 style,
+                   其样式通道在 compute_rec 文本分支(漏下钻 = 伪元素
+                   声明全部失效, css_probe 实测)。普通文本节点该分支
+                   直接返回, 零成本。 */
+                compute_rec(c, ch, n, ctx_out, 0, 0, 0, 0);
+                continue;
+            }
             idx++;
             compute_rec(c, ch, n, ctx_out, pre, full, idx, el_cnt);
             if (ch->tag) pre = cs_mix(pre, ch->tag, strlen(ch->tag));

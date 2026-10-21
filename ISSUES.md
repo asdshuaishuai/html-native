@@ -333,6 +333,39 @@
 
 ---
 
+### 全域审查轮(2026-10-22)发现与修复
+
+- ~~hnapp headless/linux 目标链接失败(undefined symbol: hnp_now_ms_f)~~
+  **已修**(2026-10-22): `fc03a46`(handwired #1)给平台契约加了
+  `hnp_now_ms_f()`(1/64ms 栅格量化的亚毫秒单调钟)但只实现了 macOS
+  平台层 —— headless/linux 自 10-21 起链接失败, zig cc 失败残留
+  **0 字节 dist 产物**(可执行位还在, 探针放行后执行失败 —— pet 探针
+  2 项 / media_window 4 项 / hidpi 1 项派生失败同源)。补齐
+  hnp_headless.c / hnp_linux.c 实现(与各自 hnp_now_ms 同口径, headless
+  含 g_now_offset), build-multiplatform 全目标恢复。
+- ~~L1 冻结片段登记指针跨子树悬空~~ **已修**(2026-10-22): `frag_rec`
+  指向 `c->frags` 数组槽位, 子级登记走 `frag_store` → realloc 数组,
+  祖先回读即踩野指针(three_probe ASan/UBSan 实测 misaligned 0x1,
+  abort)。修复: 登记标记不跨子树持有槽位指针, 消费点直接用节点本身
+  (frag_store 内部按节点重查); three_probe 738 断言 ASan/UBSan 双跑
+  全绿。
+- ~~runs 清理的多行内组分歧~~ **已修**(2026-10-22): `ifc_wipe` 每次清
+  容器自身 runs, 同一容器"文本/块/文本"混排时第二组会销毁第一组已铺
+  的省略号 runs(旧口径帧首清一次、组间累加)。修复: 全部清理点统一
+  **wipe-once 帧代数**(`g_lgen`/`runs_wipe`), 同帧至多真清一次 —— 与
+  旧口径逐位同构, 冻结跳过子树 runs 原样保留的前提不变。freeze_l2_probe
+  文档新增多行内组容器用例(双臂 cmp 锚定)。
+- **[间歇] media_window ⑪ 视频两帧 diff=0**(真窗时序): 视频图层帧推进
+  断言偶发拿到同帧(忙机解码慢); 单跑复绿。与探针时序预算相关, 非引擎
+  语义回归 —— 观察项。
+- **[活跃] gpu_probe rect 页 Metal parity 回归**(确定性, 非环境):
+  rect 页(纯色/半透明/描边)Metal vs hnsoft 最大色差 245/255, 同跑的
+  渐变/文本页 ≤1/255 —— 仅 rect 变体断裂。stash A/B 排除冻结线三轮
+  改动; 根因指向 hnsoft 侧 rect/描边语义演进(97014fb RGSS AA4 +
+  f2757f9 描边环 CSS 内带语义)后, Metal 翻译未跟进部分 rect 变体。
+  需 Metal 专项收口(hn_gpu.c/hnp_gpu_metal.c 对齐新语义), 修复前
+  GPU 路径对描边 rect 页不可信。
+
 ## 附: 存量简化(散落多处, 排期防漏)
 
 - Cubism 混合观感精修(对照官方 Web runtime, 见 hn_cubism.c 头注)。

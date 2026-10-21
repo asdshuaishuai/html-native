@@ -796,6 +796,14 @@ unsigned long hnp_now_ms(void) {
     return (unsigned long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+double hnp_now_ms_f(void) {
+    /* 亚毫秒单调钟(纳秒精度): 帧时间戳先量化到 1/64ms 栅格再做差,
+       动画时钟跨帧率逐位一致(handwired host-timing 同法, 平台契约同款)。 */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
 void hnp_set_cursor(hnp_window *w, hnp_cursor c) { (void)w; (void)c; /* M1: 未接 XCreateFontCursor */ }
 
 /* ---------------- 媒体 ABI 留位(docs/media-design.md §2) ----------------

@@ -272,6 +272,7 @@ static float layout_box_inner(hn_context *c, hn_node *n, float x, float y,
                               float forced_w);
 /* 子树布局记忆辅助(lskip 块; IFC 落盘点调用) */
 static void ifc_wipe(hn_node *container, hn_node *start, hn_node *stop);
+static void runs_wipe(hn_node *n);
 
 static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_backend *tb,
                            float avail_w, int measuring) {
@@ -1650,8 +1651,8 @@ static float layout_box_inner(hn_context *c, hn_node *n, float x, float y,
            点 —— 度量遍不得销毁 runs; 容器自带 runs 仅来自省略号挂载, 一并
            翻新(旧 clear_runs(root) 的职责随重建走, 见 lskip 块注)。 */
         if (!measuring) {
-            n->n_runs = 0;
-            if (n->parent) n->parent->n_runs = 0;
+            runs_wipe(n);
+            if (n->parent) runs_wipe(n->parent);
         }
         float h = layout_ifc(c, n->parent, n, n->next, x, y, avail_w, tb, measuring, &pref);
         n->pref_w = pref;
@@ -1827,7 +1828,7 @@ static float layout_box_inner(hn_context *c, hn_node *n, float x, float y,
     if (hn_node_is_input(n)) {
         /* 控件 runs 的每帧一次清理(旧根清职责; 控件在 bail 清单里必走
            重建 —— 布点内两次 layout_input 的追加语义保持原样) */
-        n->n_runs = 0;
+        runs_wipe(n);
         if (hn_node_input_kind(n) == HN_IN_BUTTON && st->width_u == HN_U_AUTO) {
             /* 按钮按标签收缩(浏览器 shrink-to-fit): 两遍布局 —— 先量标签
                pref(给大宽度, IFC 不折行量出单行宽; -1 会被 content_w>0
@@ -1994,18 +1995,29 @@ static void ls_refresh(hn_node *n) {
     n->lf_bail = (unsigned char)(bail ? 1 : 0);
 }
 
+/* 行内 runs 的 wipe-once 清理: 每帧每节点至多真清一次, 同帧后续调用
+   是无操作 —— 多行内组容器(文本/块/文本混排)的第二组不得销毁第一组
+   已铺的省略号 runs(旧 clear_runs(root) 帧首清一次、组间累加, 本函数
+   与之逐位同构), 而上一帧的陈旧 runs 又必然被清(代数必不同)。 */
+static unsigned g_lgen;
+static void runs_wipe(hn_node *n) {
+    if (n->wipe_gen == g_lgen) return;
+    n->wipe_gen = g_lgen;
+    n->n_runs = 0;
+}
+
 /* IFC 落盘前的 runs 清理(旧 clear_runs(root) 的"随重建走"替代):
-   容器自身 runs(省略号挂载) + [start,stop) 链上将被 flatten 的文本节点。
-   跳过子树不经过此处 —— runs 原样保留正是命中的意义。 */
+   容器自身 runs(省略号挂载) + [start,stop) 链上将被 flatten 的文本节点,
+   均 wipe-once。跳过子树不经过此处 —— runs 原样保留正是命中的意义。 */
 static void ifc_wipe_walk(hn_node *n) {
-    if (n->kind == HN_TEXT) { n->n_runs = 0; return; }
+    if (n->kind == HN_TEXT) { runs_wipe(n); return; }
     for (hn_node *ch = n->first; ch; ch = ch->next)
         if (!(ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE))
             ifc_wipe_walk(ch);
 }
 
 static void ifc_wipe(hn_node *container, hn_node *start, hn_node *stop) {
-    container->n_runs = 0;
+    runs_wipe(container);
     for (hn_node *ch = start; ch && ch != stop; ch = ch->next)
         if (!(ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE))
             ifc_wipe_walk(ch);
@@ -2035,6 +2047,7 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
         return n->lf_h;
     }
     g_ls.miss++;
+    runs_wipe(n);   /* 重建子树: 自身陈旧 runs 清(容器省略号挂载; wipe-once) */
     {
         float h = layout_box_inner(c, n, x, y, avail_w, avail_h, tb, measuring,
                                    forced_h, forced_w);
@@ -2070,6 +2083,7 @@ void hn_layout_root(hn_context *c) {
         g_ls.inited = 1;
     }
     g_ls.hit = g_ls.moved = g_ls.miss = g_ls.bail = 0;
+    g_lgen++;                         /* wipe-once 帧代数推进 */
     if (g_ls.on) ls_refresh(root);    /* 整树键刷新: 键恒反映当前内容 */
     else clear_runs(root);            /* 机制关: 旧口径(根清) */
     float forced = (root->style.height_u == HN_U_AUTO) ? c->vh : -1;

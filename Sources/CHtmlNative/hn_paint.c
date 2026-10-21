@@ -2057,7 +2057,8 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 }
                 return;   /* 整个子树已回放 */
             }
-            frag_rec = frag_find(c, n);   /* 旧条目则原地重录 */
+            frag_rec = frag_find(c, n);   /* 旧条目则原地重录(只作标记; 槽位
+                                             指针不跨子树持有, 见登记点块注) */
             frag_start = c->n_cmds;
             if (frag_trace())
                 fprintf(stderr, "[frag] miss <%s> (recording)\n", n->tag ? n->tag : "?");
@@ -2545,14 +2546,18 @@ clip_done:
         push_cmd(c, &cp);
     }
     /* 冻结片段登记: 本帧窗口 [frag_start, n_cmds) 深拷贝入缓存。
-       (下一帧指纹一致 → 整块回放, 跳过本函数全部自绘/子级遍历。) */
+       (下一帧指纹一致 → 整块回放, 跳过本函数全部自绘/子级遍历。)
+       注意: frag_rec 指向 c->frags 数组槽位, 而子级登记会 frag_store
+       → realloc 该数组 —— 跨子树遍历后 frag_rec 可能悬空(three_probe
+       ASan/UBSan 实测 misaligned 0x1)。此处只信任节点本身: frag_store
+       内部按节点重查条目, 不复用旧指针。 */
     if (frag_rec) {
         int cnt = c->n_cmds - frag_start;
         if (cnt > 0 && cnt <= FRAG_MAX_CMDS)
-            frag_store(c, frag_rec->node, frag_fp, sx, c->cmds, frag_start, cnt);
+            frag_store(c, n, frag_fp, sx, c->cmds, frag_start, cnt);
         else if (frag_trace())
             fprintf(stderr, "[frag] skip-store <%s> cnt=%d\n",
-                    frag_rec->node->tag ? frag_rec->node->tag : "?", cnt);
+                    n->tag ? n->tag : "?", cnt);
     }
 }
 
