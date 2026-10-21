@@ -37,11 +37,164 @@ static float size_of(float v, int u, float base, float font_px) {
     }
 }
 
+/* ---------- 文本测量缓存(freeze L2 前置: "从缓存盒恢复"的第一步) ----------
+ * 布局每遍 clear_runs 后从头测量全部文本; 流式应用(聊天/日志)与重复
+ * 重排(hover/焦点/热更新)场景下, 旧文本的测量全是重复功(2000 卡文档
+ * layout 实测 ~14ms, 测量是其中大头)。measure 是纯函数: 字体五元组
+ * (size_px/weight/italic/letter_spacing/family)+ 文本字节 → 宽度浮点,
+ * 在此做记忆化。键逐字段逐位比较(不做 struct memcmp —— 初始化式不保证
+ * padding 字节), 命中返回的浮点与重测严格相等 → 缓存开/关布局结果逐位
+ * 一致(freeze_l2_probe 锚定)。
+ * 纪律:
+ *   - 每上下文一份(hn_context.mcache); hn_layout_root 入口 sync 文本
+ *     后端, 后端换人即整表清空(测量语义跟随当前后端);
+ *   - 条目上限满即整表清空(简单可预期, 不做 LRU —— 热文本下一遍自会
+ *     重建; 溢出即说明文档文本面已超预算, 缓存收益归零不如归零开销);
+ *   - HN_MEASURE_CACHE=0 全局关闭; HN_MEASURE_TRACE=1 每遍布局出口打
+ *     命中统计(与 L1 的 HN_FRAGMENT_TRACE 同手法)。 */
+typedef struct hn_ment {
+    struct hn_ment *next;
+    unsigned long long hash;    /* 全键 FNV-1a 64(链内快筛; 逐字段比较兜底) */
+    float w;
+    hn_font_desc font;          /* 五元组(逐字段比较) */
+    unsigned len;
+    char text[];                /* 文本字节副本(len 字节; C99 弹性数组成员) */
+} hn_ment;
+
+#define MC_BUCKETS     4096u    /* 2 的幂(hash 按位取桶) */
+#define MC_MAX_ENTRIES 16384
+
+typedef struct hn_mcache {
+    hn_ment *b[MC_BUCKETS];
+    long entries;
+    long hits, misses;          /* 累计统计(TRACE / freeze_l2_probe 读) */
+    hn_text_backend tb;         /* sync 时换人(memcmp 字段)即全清 */
+    int tb_valid, on, trace;
+} hn_mcache;
+
+/* 当前布局的测量缓存(hn_layout_root 进出设置/清空; 布局不重入, 单指针
+   即可 —— measure_run 的全部调用点都在布局栈内)。 */
+static hn_mcache *g_mc;
+
+static unsigned long long mc_mix(unsigned long long h, const void *p, size_t n) {
+    const unsigned char *b = (const unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+static unsigned long long mc_hash(const hn_font_desc *f, const char *s,
+                                  unsigned n) {
+    unsigned long long h = 1469598103934665603ull;   /* FNV-1a 64 偏移基 */
+    h = mc_mix(h, &f->size_px, sizeof f->size_px);
+    h = mc_mix(h, &f->weight, sizeof f->weight);
+    h = mc_mix(h, &f->italic, sizeof f->italic);
+    h = mc_mix(h, &f->letter_spacing, sizeof f->letter_spacing);
+    h = mc_mix(h, &f->family, sizeof f->family);
+    return mc_mix(h, s, n);
+}
+
+static int mc_font_eq(const hn_font_desc *a, const hn_font_desc *b) {
+    return a->size_px == b->size_px && a->weight == b->weight &&
+           a->italic == b->italic &&
+           a->letter_spacing == b->letter_spacing && a->family == b->family;
+}
+
+static hn_ment *mc_find(hn_mcache *mc, const hn_font_desc *f, const char *s,
+                        unsigned n, unsigned long long h) {
+    hn_ment *e = mc->b[h & (MC_BUCKETS - 1)];
+    for (; e; e = e->next) {
+        if (e->hash != h || e->len != n || !mc_font_eq(&e->font, f)) continue;
+        if (n && memcmp(e->text, s, n) != 0) continue;
+        return e;
+    }
+    return NULL;
+}
+
+static void mc_clear(hn_mcache *mc) {
+    unsigned i;
+    for (i = 0; i < MC_BUCKETS; i++) {
+        hn_ment *e = mc->b[i];
+        while (e) { hn_ment *nx = e->next; free(e); e = nx; }
+        mc->b[i] = NULL;
+    }
+    mc->entries = 0;
+}
+
+static void mc_put(hn_mcache *mc, const hn_font_desc *f, const char *s,
+                   unsigned n, unsigned long long h, float w) {
+    hn_ment *e;
+    if (mc->entries >= MC_MAX_ENTRIES) mc_clear(mc);   /* 满即整表清空(见头注) */
+    e = (hn_ment *)malloc(sizeof(hn_ment) + (size_t)n);
+    if (!e) return;                     /* 分配失败: 本条不缓存, 直测兜底 */
+    e->next = mc->b[h & (MC_BUCKETS - 1)];
+    mc->b[h & (MC_BUCKETS - 1)] = e;
+    e->hash = h;
+    e->w = w;
+    e->font = *f;
+    e->len = n;
+    if (n) memcpy(e->text, s, n);
+    mc->entries++;
+}
+
+void *hn_layout_mcache_create(void) {
+    hn_mcache *mc = (hn_mcache *)calloc(1, sizeof *mc);
+    const char *env;
+    if (!mc) return NULL;
+    env = getenv("HN_MEASURE_CACHE");
+    mc->on = !(env && *env && strcmp(env, "0") == 0);
+    env = getenv("HN_MEASURE_TRACE");
+    mc->trace = (env && *env && strcmp(env, "0") != 0);
+    return mc;
+}
+
+void hn_layout_mcache_free(void *p) {
+    hn_mcache *mc = (hn_mcache *)p;
+    if (!mc) return;
+    mc_clear(mc);
+    if (g_mc == mc) g_mc = NULL;    /* 防御: 布局栈外销毁不留悬空当前指针 */
+    free(mc);
+}
+
+void hn_layout_mcache_sync(void *p, const hn_text_backend *tb, int tb_valid) {
+    hn_mcache *mc = (hn_mcache *)p;
+    int changed;
+    if (!mc) return;
+    changed = (mc->tb_valid != tb_valid) ||
+              (tb_valid && (mc->tb.ctx != tb->ctx ||
+                            mc->tb.measure != tb->measure ||
+                            mc->tb.metrics != tb->metrics));
+    if (!changed) return;
+    mc_clear(mc);                   /* 后端换人: 测量语义可能整体不同, 全清 */
+    if (tb_valid) mc->tb = *tb;
+    mc->tb_valid = tb_valid;
+}
+
+void hn_layout_mcache_stats(const void *p, long *hits, long *misses,
+                            long *entries) {
+    const hn_mcache *mc = (const hn_mcache *)p;
+    if (hits) *hits = mc ? mc->hits : 0;
+    if (misses) *misses = mc ? mc->misses : 0;
+    if (entries) *entries = mc ? mc->entries : 0;
+}
+
 static float measure_run(const hn_text_backend *tb, const hn_style *st,
                          const char *s, size_t n) {
     if (!n) return 0;
     if (tb && tb->measure) {
         hn_font_desc f = { st->font_size, st->font_weight, st->font_italic, st->letter_spacing, st->font_family };
+        if (g_mc && g_mc->on) {
+            unsigned len = (unsigned)n;
+            unsigned long long h = mc_hash(&f, s, len);
+            hn_ment *e = mc_find(g_mc, &f, s, len, h);
+            if (e) { g_mc->hits++; return e->w; }
+            g_mc->misses++;
+            {
+                float w = tb->measure(tb->ctx, &f, s, n);
+                mc_put(g_mc, &f, s, len, h, w);
+                return w;
+            }
+        }
         return tb->measure(tb->ctx, &f, s, n);
     }
     return (float)n * st->font_size * 0.55f; /* 无文本后端时的粗略回退 */
@@ -1731,7 +1884,13 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
 void hn_layout_root(hn_context *c) {
     const hn_text_backend *tb = c->tb_valid ? &c->tb : NULL;
     hn_node *root = c->doc->root;
+    g_mc = (hn_mcache *)c->mcache;
+    hn_layout_mcache_sync(c->mcache, tb, c->tb_valid);
     clear_runs(root);
     float forced = (root->style.height_u == HN_U_AUTO) ? c->vh : -1;
     layout_box(c, root, 0, 0, c->vw, c->vh, tb, 0, forced, -1);
+    if (g_mc && g_mc->trace)
+        fprintf(stderr, "[mcache] hits=%ld misses=%ld entries=%ld\n",
+                g_mc->hits, g_mc->misses, g_mc->entries);
+    g_mc = NULL;
 }

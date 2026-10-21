@@ -20,6 +20,7 @@ hn_context *hn_context_create(void) {
     hn_context *c = calloc(1, sizeof(hn_context));
     if (!c) abort();
     c->tmp = hn_arena_create();
+    c->mcache = hn_layout_mcache_create();   /* 文本测量缓存(freeze L2 前置) */
     /* UA 样式表永远排在最前(最低优先级) */
     const char *ua = hn_ua_css();
     hn_sheet *sh = hn_parse_css(ua, strlen(ua));
@@ -38,6 +39,7 @@ void hn_context_destroy(hn_context *c) {
     free(c->med_sessions);
     hn_canvas_dispose(c);
     hn_paint_frag_clear(c);         /* <canvas> op 账本持堆顶点/字符串, 随上下文销毁 */
+    hn_layout_mcache_free(c->mcache);   /* 测量缓存持堆键副本, 随上下文销毁 */
     for (int i = 0; i < c->n_sheets; i++) hn_sheet_free(c->sheets[i]);
     free(c->sheets);
     hn_doc_free(c->doc);

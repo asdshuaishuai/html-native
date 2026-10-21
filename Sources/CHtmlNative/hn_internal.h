@@ -646,6 +646,16 @@ void hn_canvas_dispose(hn_context *c);
 /* 冻结片段全清(文档替换/compact/销毁; hn_paint.c 实现) */
 void hn_paint_frag_clear(hn_context *c);
 
+/* 文本测量缓存(hn_layout.c 实现; freeze L2 前置)。
+   create/destroy 跟随 hn_context 生命周期; sync 在每遍 hn_layout_root
+   入口调用 —— 文本后端换人(memcmp)即整表清空, 测量语义跟随当前后端;
+   stats 供探针读命中统计(HN_MEASURE_TRACE 同源)。 */
+void *hn_layout_mcache_create(void);
+void  hn_layout_mcache_free(void *mc);
+void  hn_layout_mcache_sync(void *mc, const hn_text_backend *tb, int tb_valid);
+void  hn_layout_mcache_stats(const void *mc, long *hits, long *misses,
+                             long *entries);
+
 /* getImageData 的栅格化核心(hn_paint.c 实现 —— 账本重放是它的地盘):
    把账本按 canvas 属性坐标 1:1 重放到一张临时显示列表, 交注入的渲染
    后端渲成 w×h 的 RGBA8 非预乘位图(malloc, 调用方 free)。失败返回 NULL。 */
@@ -736,6 +746,12 @@ struct hn_context {
        指纹 = 子树全量哈希(标签/属性/文本/计算后样式/布局盒/滚动);
        动画中/动态元素(canvas/lottie/three/...)子树不缓存。 */
     hn_frag *frags; int n_frags, cap_frags;
+    /* 文本测量缓存(hn_layout.c; freeze L2 前置"text runs 缓存"的第一步):
+       measure(字体五元组+文本字节 → 宽度)的记忆化 —— 布局每遍都从头测量
+       全部文本, 流式应用每帧只有少量新文本, 旧文本全是重复功。键逐字段
+       逐位比较, 命中浮点与重测严格相等(缓存开/关布局逐位一致,
+       freeze_l2_probe 锚定); 生命周期同 context。 */
+    void *mcache;
     /* 帧循环活跃标志: anim_tick 收到过 dt>0 即置位(不复位)。布局期锚定
        据此分流 —— 有帧循环的窗口走"平滑追上"动画(逐帧推进, 需要 dt);
        无帧循环的管线(离屏 shot/dump, 无从推进动画)保持"直接贴底"的旧
