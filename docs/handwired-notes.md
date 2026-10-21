@@ -100,7 +100,18 @@ Sklansky/Brent-Kung 前缀和把"每行顶边"这类链式依赖从 n 层压到 
 - **训练/可微**: 有趣但离渲染引擎远; 若未来 hn-anim 要"学习缓动",
   reglu 网络可微是个参考。
 
-## 六、原始文档索引(快照 /tmp/handwired, 上游同路径)
+## 六、本轮实测与验证(2026-10-21 复核)
+
+- `bun test tests/runtime`(Bun 1.3.14): **174 pass / 0 fail**, 155,853
+  个 expect —— 参考求值器与编译求值器对随机程序的逐位一致性有实测覆盖。
+- `bun lab/runtime-cost/report.ts`(M 系列 CPU): window manager
+  **234 cell / 4,646 live ops / 130 层 / 9,909 权重, 每帧求值 42.86µs**
+  (最快后端); candidate gallery 3.07µs; 小变换 0.03µs。即: 一个完整
+  桌面交互模型的数值求值开销远低于 1 帧预算 —— "程序每帧全量跑"的
+  可行性是有实测背书的。
+- 本地快照 /tmp/handwired(与上游同结构); 测试与成本报告均可本地复跑。
+
+## 七、原始文档索引(快照 /tmp/handwired, 上游同路径)
 
 - docs/execution-model.md — 4 指令/FP32 舍入/层编译/声明协议
 - docs/patterns.md — 循环的电路化改写(树/表/前缀网络, 含成本表)
