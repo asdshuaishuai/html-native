@@ -34,6 +34,7 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -974,7 +975,17 @@ int main(int argc, char **argv) {
             }
         }
         int repaint = 0;
-        int beat = hn_rt_frame(rt, (float)(now - last), &repaint);
+        /* handwired host-timing 手法: 帧时间戳先量化到 1/64ms 栅格再做差
+           —— 任意拆分的时间跨度相加严格相等, 动画时钟跨帧率逐位一致。
+           (整毫秒 now 的余数由双精度 now_f 携带。) */
+        double now_f = hnp_now_ms_f();
+        double now_q = floor(now_f * 64.0) / 64.0;
+        static double last_q = 0; static int last_q_have = 0;
+        double dt_q = last_q_have ? now_q - last_q : 16.0;
+        if (dt_q < 0) dt_q = 0;
+        if (dt_q > 250) dt_q = 250;   /* 长眠限步(与 daemon 同口径) */
+        last_q = now_q;
+        int beat = hn_rt_frame(rt, (float)dt_q, &repaint);
         last = now;
         /* 桌面画板呈现(画刷铺色)在途: 每拍强制重出新帧 + blit 前盖遮罩 ——
            遮罩只画在**当帧**位图上(apply 内有 raster_gen 守卫兜底), 不存在

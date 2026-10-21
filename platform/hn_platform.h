@@ -318,6 +318,9 @@ hnp_key hnp_key_from_native(unsigned long native_code);
 
 /* 毫秒级单调时钟(动画/轮询的时基; 平台实现选各自的高精度源) */
 unsigned long hnp_now_ms(void);
+/* 亚毫秒单调钟(双精度 ms): 帧时间戳量化到 1/64ms 栅格后做差,
+   动画时钟跨帧率逐位一致(handwired host-timing 手法)。 */
+double hnp_now_ms_f(void);
 
 /* ---------------- 光标 ---------------- */
 

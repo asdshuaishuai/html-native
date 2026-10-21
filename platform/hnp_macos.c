@@ -1561,6 +1561,14 @@ unsigned long hnp_now_ms(void) {
     return (unsigned long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+double hnp_now_ms_f(void) {
+    /* 亚毫秒单调钟(纳秒精度): 帧时间戳先量化到 1/64ms 栅格再做差,
+       动画时钟在任意帧率下逐位一致(handwired host-timing 同法)。 */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
 void hnp_set_cursor(hnp_window *w, hnp_cursor c) {
     (void)w;
     const char *sel = c == HNP_CURSOR_POINTER ? "pointingHandCursor"

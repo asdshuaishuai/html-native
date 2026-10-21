@@ -74,6 +74,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <math.h>
 #include <sys/wait.h>
 #include <sys/select.h>
 
@@ -207,13 +208,18 @@ static void daemon_frame_apps(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     float dt = 0.0f;
+    /* handwired host-timing 手法: 时间戳量化到 1/64ms 栅格(double)再做差
+       —— 任意帧率拆分的 dt 相加严格相等, 动画时钟跨帧率逐位一致。 */
+    double now_q = floor(((double)now.tv_sec * 1000.0
+                          + (double)now.tv_nsec / 1000000.0) * 64.0) / 64.0;
+    static double last_q = 0;
     if (have_last) {
-        long dms = (now.tv_sec - last.tv_sec) * 1000L
-                 + (now.tv_nsec - last.tv_nsec) / 1000000L;
+        double dms = now_q - last_q;
         if (dms < 0) dms = 0;
         if (dms > 250) dms = 250;   /* 长眠醒来限步(与 rt 定时器同款防大跳) */
         dt = (float)dms;
     }
+    last_q = now_q;
     last = now;
     have_last = 1;
     for (int i = 0; i < g_app_n; i++) {
