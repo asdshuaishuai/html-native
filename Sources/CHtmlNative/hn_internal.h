@@ -373,6 +373,22 @@ struct hn_node {
     float pref_w, pref_h;
     /* 行内排版结果(每次 layout 重建; 元素节点也会持有 — 输入控件用) */
     hn_run *runs; int n_runs;
+    /* 子树布局记忆(freeze L2 本体第一刀; 语义归 hn_layout.c):
+       lf_key = 子树"内容+计算样式"的当前 Merkle 键 —— 每遍 hn_layout_root
+       前自底向上整树刷新(O(N) 纯哈希: 自身输入哈希 ⊕ 子级当前键),
+       因此外部突变(set_text/attr/anim 样式写)当帧即被父层感知;
+       lf_rec_key = 几何记录时的键。命中判据 = lf_valid && lf_rec_key ==
+       lf_key && 布局输入(可用宽高/强制宽高/度量模式)逐项相等 → 整子树
+       跳过重排(runs/盒/content_h 原样保留), 原点变了只 translate_subtree。
+       lf_bail = 自身或子树含不可缓存节点(替换元素/输入控件/脱离流/动态
+       表现型, 见 hn_layout.c lskip 注), 向祖先传播。 */
+    unsigned long long lf_key;
+    unsigned long long lf_rec_key;
+    float lf_ox, lf_oy, lf_h;
+    float lf_aw, lf_ah, lf_fh, lf_fw;
+    unsigned char lf_meas;
+    unsigned char lf_valid;
+    unsigned char lf_bail;
     /* 输入控件状态 */
     char  *value; size_t value_len, value_cap;  /* 可编辑当前值(arena) */
     int    caret;                                /* 字节偏移 */
@@ -655,6 +671,9 @@ void  hn_layout_mcache_free(void *mc);
 void  hn_layout_mcache_sync(void *mc, const hn_text_backend *tb, int tb_valid);
 void  hn_layout_mcache_stats(const void *mc, long *hits, long *misses,
                              long *entries);
+/* 子树布局记忆统计(自最近一次 hn_layout_root 起累计; freeze_l2_probe 读;
+   HN_LAYOUT_SKIP_TRACE 同源) */
+void  hn_layout_lskip_stats(long *hit, long *moved, long *miss, long *bail);
 
 /* getImageData 的栅格化核心(hn_paint.c 实现 —— 账本重放是它的地盘):
    把账本按 canvas 属性坐标 1:1 重放到一张临时显示列表, 交注入的渲染

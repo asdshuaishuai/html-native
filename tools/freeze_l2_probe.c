@@ -1,21 +1,19 @@
-/* freeze_l2_probe.c — 冻结布局 L2 前置(文本测量缓存)探针
+/* freeze_l2_probe.c — 冻结布局(L2)探针: 文本测量缓存 + 子树布局记忆
  *
- * 口径(freeze-design.md §三): L2 = 布局只重排脏子树, 前置是"从缓存盒
- * 恢复"路径; 文本测量缓存是它的第一步 —— measure(字体五元组+文本字节 →
- * 宽度)是纯函数, 记忆化的命中浮点与重测严格相等。本探针钉住三条:
- *   A. 逐位一致: 同一文档 + 同一布局序列(初次 / 改宽重排 / 改一处文本
- *      再重排), 缓存关(HN_MEASURE_CACHE=0)与开(缺省)的布局结果转储
- *      逐字节相同 —— 元素盒 / 文本 runs / 显示列表全部按位(hex)打印,
- *      由 freeze_l2_probe.sh 对两份转储做 cmp。
- *   B. 命中: 第二遍起 hits>0; 改一处文本后的那遍布局, 旧文本仍然命中
- *      (hits 相比上一遍净增) —— "改一处, 其余零测量成本"的 L2 主张。
- *   C. 提速(信息值, 不做硬线 —— CPU 硬线归 perf_probe): 固定文档 300
- *      遍全量重排的开关计时对比(bench 模式)。
- *
+ * 口径(freeze-design.md §三): L2 = 布局只重排脏子树。两层机制:
+ *   - 文本测量缓存(L2 前置): measure(字体五元组+文本字节→宽度)记忆化;
+ *   - 子树布局记忆(L2 本体第一刀): 子树 Merkle 键+布局输入全中 → 跳过
+ *     重排(原点变只平移)。
+ * 断言面:
+ *   A. 逐位一致: 机制全关(HN_MEASURE_CACHE=0 HN_LAYOUT_SKIP=0)与全开
+ *      (缺省)的同序列布局转储 cmp 逐字节相同 —— 盒/runs/显示列表按位。
+ *   B. 测量缓存命中: 第二遍起 hits>0; 改一处文本那遍 hits 净增。
+ *   C. 布局记忆命中: 同输入第二遍 hit>0 且 moved==0; 改一处文本后
+ *      前方兄弟 hit、后方兄弟 moved>0(平移回放)。
+ *   D. 提速(信息值, 不做硬线): 三种负载 300 遍纯布局重排的开关计时 ——
+ *      static(全同输入)/stream(单点文本逐遍变更)/resize(逐遍改宽,
+ *      布局记忆的最坏情形: 键全失配只付哈希)。
  * 用法: freeze_l2_probe [dump|bench]
- *   dump(缺省): 布局序列 → stdout 转储(两模式必须逐字节一致) + stderr
- *               统计; 缓存应开而命中为 0 → 退出码 1。
- *   bench:      300 遍重排计时, stdout 一行 "bench ms=<毫秒>"。
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +29,11 @@ static void check(int cond, const char *label) {
     /* 断言结果走 stderr: stdout 必须是纯转储(两模式 cmp 逐字节可比) */
     fprintf(stderr, "%s %s\n", cond ? "  ✔" : "  ✘", label);
     if (cond) g_pass++; else g_fail++;
+}
+
+static int env_off(const char *name) {
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0") == 0;
 }
 
 static float measure_cb(void *ctx, const hn_font_desc *font,
@@ -102,12 +105,25 @@ static hn_node *find_id(hn_node *n, const char *id) {
     return NULL;
 }
 
-/* ---- 转储(逐字节可比): 浮点一律按位打印, 不经十进制往返 ---- */
+/* ---- 转储: exact 模式浮点按位打印(命中路径必须逐位一致);
+   approx 模式十进制打印(突变序列含平移回放 —— 与全新布局存在
+   浮点结合序差 ~1ulp, 数学等价, 由 .sh 按 ≤0.01px 容差逐 token 对照) */
+
+static int g_approx = 0;
 
 static void pbits(FILE *f, float v) {
+    if (g_approx) {
+        fprintf(f, " %.6f", (double)v);
+        return;
+    }
     unsigned u;
     memcpy(&u, &v, 4);
     fprintf(f, " %08x", u);
+}
+
+static void pcolor(FILE *f, unsigned c) {
+    if (g_approx) { fprintf(f, " %u", c); return; }
+    fprintf(f, " %08x", c);
 }
 
 static void dump_node(hn_node *n, FILE *f) {
@@ -139,7 +155,7 @@ static void dump_dl(const hn_display_list *dl, FILE *f) {
         fprintf(f, "C %d", (int)m->kind);
         pbits(f, m->x); pbits(f, m->y); pbits(f, m->w); pbits(f, m->h);
         pbits(f, m->radius); pbits(f, m->stroke_w);
-        fprintf(f, " %08x %08x", m->fill, m->stroke);
+        pcolor(f, m->fill); pcolor(f, m->stroke);
         pbits(f, m->tx); pbits(f, m->baseline);
         fprintf(f, " fz"); pbits(f, m->font.size_px);
         fprintf(f, " fw=%d fi=%d ff=%d", m->font.weight, m->font.italic,
@@ -152,54 +168,74 @@ static void dump_dl(const hn_display_list *dl, FILE *f) {
 
 int main(int argc, char **argv) {
     const char *mode = (argc > 1) ? argv[1] : "dump";
-    /* 与 hn_layout_mcache_create 同一判据: HN_MEASURE_CACHE=0 = 关 */
-    const char *env = getenv("HN_MEASURE_CACHE");
-    int cache_on = !(env && *env && strcmp(env, "0") == 0);
+    int cache_on = !env_off("HN_MEASURE_CACHE");
+    int lskip_on = !env_off("HN_LAYOUT_SKIP");
     int N_PARA = 96;
 
     if (!strcmp(mode, "bench")) {
-        /* C. 提速口径(信息值): 固定文档 300 遍全量重排(宽在 420/421 间
-           交替 —— 布局输入真实变化, 文本面不变 → 开缓存应全命中)。
-           用 layout_nopaint 隔离**纯布局**(L2 的目标面; 带 paint 的话
-           L1 片段回放在两模式下同价, 会稀释比值)。 */
+        /* D. 三种负载(信息值): layout_nopaint 隔离纯布局(L2 目标面)。
+           static: 全同输入(布局记忆全命中);
+           stream: 单点文本逐遍变更(脏链重排, 后方兄弟平移回放);
+           resize: 逐遍改宽(布局记忆最坏情形: 键全失配只付哈希)。 */
         int iters = 300, i;
-        char *html = build_doc(N_PARA);
-        struct timeval t0, t1;
-        hn_doc *doc = hn_parse_html(html, strlen(html));
-        hn_context *ctx = hn_context_create();
-        hn_text_backend tb;
-        long hits = 0, misses = 0, entries = 0;
-        double ms;
-        memset(&tb, 0, sizeof tb);
-        tb.measure = measure_cb;
-        tb.metrics = metrics_cb;
-        if (!doc || !ctx) return 2;
-        hn_context_set_doc(ctx, doc);
-        hn_context_layout(ctx, 420, 640, &tb);   /* 预热(首轮不计时) */
-        gettimeofday(&t0, NULL);
-        for (i = 0; i < iters; i++)
-            hn_context_layout_nopaint(ctx, i % 2 ? 421.0f : 420.0f, 640.0f, &tb);
-        gettimeofday(&t1, NULL);
-        ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
-             (double)(t1.tv_usec - t0.tv_usec) / 1000.0;
-        hn_layout_mcache_stats(ctx->mcache, &hits, &misses, &entries);
-        printf("bench ms=%.1f iters=%d\n", ms, iters);
-        fprintf(stderr, "stats hits=%ld misses=%ld entries=%ld\n",
-                hits, misses, entries);
-        hn_context_destroy(ctx);
-        free(html);
+        static const char *names[3] = { "static", "stream", "resize" };
+        for (int w = 0; w < 3; w++) {
+            char *html = build_doc(N_PARA);
+            struct timeval t0, t1;
+            hn_doc *doc = hn_parse_html(html, strlen(html));
+            hn_context *ctx = hn_context_create();
+            hn_text_backend tb;
+            long hit = 0, moved = 0, miss = 0, bail = 0;
+            double ms;
+            char buf[256];
+            memset(&tb, 0, sizeof tb);
+            tb.measure = measure_cb;
+            tb.metrics = metrics_cb;
+            if (!doc || !ctx) return 2;
+            hn_context_set_doc(ctx, doc);
+            hn_context_layout(ctx, 420, 640, &tb);   /* 预热(首轮不计时) */
+            gettimeofday(&t0, NULL);
+            for (i = 0; i < iters; i++) {
+                if (w == 1) {
+                    hn_node *mut = find_id(hn_doc_root(doc), "p7");
+                    const char *txt = (i % 2) ? "流式负载甲: 单点文本逐遍变更, "
+                        "脏链重排, 后方兄弟整树平移回放。" :
+                        "流式负载乙: 与甲互斥 —— 每一遍都让 p7 子树失配, "
+                        "其余子树要么命中要么平移。";
+                    hn_node_set_text_content(mut, txt, strlen(txt));
+                    hn_context_layout_nopaint(ctx, 420, 640, &tb);
+                } else {
+                    hn_context_layout_nopaint(ctx,
+                        (w == 2 && i % 2) ? 421.0f : 420.0f, 640.0f, &tb);
+                }
+            }
+            gettimeofday(&t1, NULL);
+            ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
+                 (double)(t1.tv_usec - t0.tv_usec) / 1000.0;
+            hn_layout_lskip_stats(&hit, &moved, &miss, &bail);
+            snprintf(buf, sizeof buf, "bench-%s ms=%.1f iters=%d "
+                     "[hit=%ld moved=%ld miss=%ld bail=%ld]\n",
+                     names[w], ms, iters, hit, moved, miss, bail);
+            fputs(buf, stdout);
+            hn_context_destroy(ctx);
+            free(html);
+        }
         return 0;
     }
 
-    /* A+B. dump 模式: 初次布局 → 改宽重排 → 改一处文本再重排 → 转储。 */
+    /* A+B+C. dump: argv[2]=exact(同输入双遍 → 命中路径逐位锚) |
+       approx(突变遍 → 平移回放, 容差对照)。 */
     {
+        int approx = (argc > 2 && !strcmp(argv[2], "approx"));
         char *html = build_doc(N_PARA);
         hn_doc *doc = hn_parse_html(html, strlen(html));
         hn_context *ctx = hn_context_create();
         hn_text_backend tb;
         hn_node *mut, *root;
-        long h0 = 0, m0 = 0, e0 = 0;      /* 两遍后的统计 */
-        long h1 = 0, m1 = 0, e1 = 0;      /* 突变遍后的统计 */
+        long h0 = 0, m0 = 0, e0 = 0;      /* 测量缓存: 同输入遍后 */
+        long h1 = 0, m1 = 0, e1 = 0;      /* 测量缓存: 突变遍后 */
+        long k1h = 0, k1m = 0, k1x = 0, k1b = 0;   /* 布局记忆: 同输入遍 */
+        long k2h = 0, k2m = 0, k2x = 0, k2b = 0;   /* 布局记忆: 突变遍 */
         const char *mut_txt = "突变句: 改一处文本, 其余子树的测量应全部命中缓存"
                               " —— mutation replaces the whole paragraph text.";
         memset(&tb, 0, sizeof tb);
@@ -208,25 +244,45 @@ int main(int argc, char **argv) {
         if (!doc || !ctx) return 2;
         hn_context_set_doc(ctx, doc);
         hn_context_layout(ctx, 420, 640, &tb);
-        hn_context_layout(ctx, 421, 640, &tb);
+        hn_context_layout(ctx, 420, 640, &tb);          /* 同输入: 布局记忆应全中 */
+        hn_layout_lskip_stats(&k1h, &k1m, &k1x, &k1b);
         hn_layout_mcache_stats(ctx->mcache, &h0, &m0, &e0);
         mut = find_id(hn_doc_root(doc), "p7");
         root = hn_doc_root(doc);
         check(root != NULL, "文档根存在");
         check(mut != NULL, "突变目标 p7 存在");
-        check(hn_node_set_text_content(mut, mut_txt, strlen(mut_txt)) == 1,
-              "set_text_content 成功");
-        hn_context_layout(ctx, 420, 640, &tb);
-        hn_layout_mcache_stats(ctx->mcache, &h1, &m1, &e1);
-        fprintf(stderr, "stats@2 hits=%ld misses=%ld entries=%ld\n", h0, m0, e0);
-        fprintf(stderr, "stats@3 hits=%ld misses=%ld entries=%ld\n", h1, m1, e1);
+        if (approx) {
+            check(hn_node_set_text_content(mut, mut_txt, strlen(mut_txt)) == 1,
+                  "set_text_content 成功");
+            hn_context_layout(ctx, 420, 640, &tb);      /* 突变遍 */
+            hn_layout_lskip_stats(&k2h, &k2m, &k2x, &k2b);
+            hn_layout_mcache_stats(ctx->mcache, &h1, &m1, &e1);
+            fprintf(stderr, "lskip@mut  hit=%ld moved=%ld miss=%ld bail=%ld\n",
+                    k2h, k2m, k2x, k2b);
+            fprintf(stderr, "mcache@3 hits=%ld misses=%ld entries=%ld\n",
+                    h1, m1, e1);
+        }
+        fprintf(stderr, "lskip@same hit=%ld moved=%ld miss=%ld bail=%ld\n",
+                k1h, k1m, k1x, k1b);
+        fprintf(stderr, "mcache@2 hits=%ld misses=%ld entries=%ld\n", h0, m0, e0);
+        if (lskip_on) {
+            check(k1h > 0, "同输入遍整子树命中(hit>0)");
+            check(k1m == 0, "同输入遍无平移(moved==0)");
+        }
+        if (approx && lskip_on) {
+            check(k2h > 0, "突变遍前方兄弟仍命中(hit>0)");
+            check(k2m > 0, "突变遍后方兄弟平移回放(moved>0)");
+        }
         if (cache_on) {
-            check(e0 > 0, "缓存有条目(entries>0)");
+            check(e0 > 0, "测量缓存有条目(entries>0)");
             check(h0 > 0, "第二遍起命中(hits>0)");
+        }
+        if (approx && cache_on) {
             check(h1 > h0, "突变遍旧文本仍命中(hits 净增)");
             check(m1 > m0, "突变遍新文本计入 miss");
         }
         check(hn_doc_validate(doc, 0) == 0, "结构自检通过");
+        g_approx = approx;
         dump_node(root, stdout);
         dump_dl(hn_context_display_list(ctx), stdout);
         hn_context_destroy(ctx);

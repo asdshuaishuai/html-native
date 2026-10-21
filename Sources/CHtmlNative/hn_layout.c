@@ -266,6 +266,12 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
                         float avail_w, float avail_h,
                         const hn_text_backend *tb, int measuring, float forced_h,
                         float forced_w);
+static float layout_box_inner(hn_context *c, hn_node *n, float x, float y,
+                              float avail_w, float avail_h,
+                              const hn_text_backend *tb, int measuring, float forced_h,
+                              float forced_w);
+/* 子树布局记忆辅助(lskip 块; IFC 落盘点调用) */
+static void ifc_wipe(hn_node *container, hn_node *start, hn_node *stop);
 
 static void flatten_inline(hn_context *c, hn_node *n, ivec *iv, const hn_text_backend *tb,
                            float avail_w, int measuring) {
@@ -1091,10 +1097,14 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
                         float forced_w);
 
 /* 整棵子树水平平移(含 runs), 用于 margin:auto 居中 */
-/* 整棵子树平移(dx, dy): 盒坐标 + run 的横纵位置都要跟上 */
+/* 整棵子树平移(dx, dy): 盒坐标 + run 的横纵位置都要跟上。
+   子树布局记忆的记录原点(lf_ox/oy)同步跟进 —— 它必须永远镜像子树的
+   真实位置, 否则后续命中帧的平移量会算错(调用方含 margin:auto 居中、
+   脱离流摆放与 lskip 命中平移, 三处共用同一不变量)。 */
 static void translate_subtree(hn_node *n, float dx, float dy) {
     n->bx += dx;
     n->by += dy;
+    if (n->lf_valid) { n->lf_ox += dx; n->lf_oy += dy; }
     for (int i = 0; i < n->n_runs; i++) {
         n->runs[i].x += dx;
         n->runs[i].baseline += dy;
@@ -1129,6 +1139,7 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
                 last = nx;
             }
             float pref = 0;
+            ifc_wipe(n, ch, last->next);   /* 本次 IFC 将重建链上文本 runs(旧根清职责随重建走) */
             float h = layout_ifc(c, n, ch, last->next, cx, cy + cur_y, cw, tb, measuring, &pref);
             cur_y += h;
             if (pref > max_w) max_w = pref;
@@ -1629,12 +1640,19 @@ static float layout_flex(hn_context *c, hn_node *n, const hn_style *st,
     return r;
 }
 
-static float layout_box(hn_context *c, hn_node *n, float x, float y,
-                        float avail_w, float avail_h,
-                        const hn_text_backend *tb, int measuring, float forced_h,
-                        float forced_w) {
+static float layout_box_inner(hn_context *c, hn_node *n, float x, float y,
+                              float avail_w, float avail_h,
+                              const hn_text_backend *tb, int measuring, float forced_h,
+                              float forced_w) {
     if (n->kind == HN_TEXT) {
         float pref = 0;
+        /* 文本独立成盒(flex 匿名子项等): 终排(非度量)是本节点 runs 的重建
+           点 —— 度量遍不得销毁 runs; 容器自带 runs 仅来自省略号挂载, 一并
+           翻新(旧 clear_runs(root) 的职责随重建走, 见 lskip 块注)。 */
+        if (!measuring) {
+            n->n_runs = 0;
+            if (n->parent) n->parent->n_runs = 0;
+        }
         float h = layout_ifc(c, n->parent, n, n->next, x, y, avail_w, tb, measuring, &pref);
         n->pref_w = pref;
         n->bw = measuring ? pref : (avail_w > 0 ? avail_w : pref);
@@ -1807,6 +1825,9 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
 
     /* 输入控件: 值文本走自身 IFC */
     if (hn_node_is_input(n)) {
+        /* 控件 runs 的每帧一次清理(旧根清职责; 控件在 bail 清单里必走
+           重建 —— 布点内两次 layout_input 的追加语义保持原样) */
+        n->n_runs = 0;
         if (hn_node_input_kind(n) == HN_IN_BUTTON && st->width_u == HN_U_AUTO) {
             /* 按钮按标签收缩(浏览器 shrink-to-fit): 两遍布局 —— 先量标签
                pref(给大宽度, IFC 不折行量出单行宽; -1 会被 content_w>0
@@ -1881,16 +1902,183 @@ static float layout_box(hn_context *c, hn_node *n, float x, float y,
     return n->bh;
 }
 
+/* ---------------- 子树布局记忆(freeze L2 本体第一刀) ----------------
+ * 现状: 任何变化触发全文档重排(2000 卡文档 layout ~14ms/帧; 1.2 节
+ * "增量渲染/惰性布局"缺口)。本机制把重排收敛到脏分支:
+ *
+ *   lf_key(node) = own_hash(node) ⊕ Σ child_lf_key        —— Merkle 键
+ *   own_hash     = FNV-1a(kind/tag/attrs/文本字节/计算样式字节)
+ *
+ * 每帧 O(子数) 增量维护(子级键已在, 不做 O(子树) 全量哈希)。
+ * layout_box 入口: 键 + 布局输入(可用宽高/强制宽高/度量模式)全部命中
+ * → 整子树跳过重排(runs/盒/content_h 原样保留); 原点不同只
+ * translate_subtree —— 排版对绝对原点平移不变(盒/runs 全是相对同一
+ * 原点的输出)。未命中 → 正常布局, 尾部用刚布局好的子级键重算自身键
+ * (递归自底向上自然成立)。布局输入变化(容器宽/伸缩结果)照常使键失配。
+ *
+ * bail(不缓存不跳过, 键在 ls_own_hash 内判定并向祖先传播):
+ *   - 替换元素与输入控件(img/video/audio/canvas/progress/select/button/
+ *     input/textarea): layout 期把解析尺寸写回计算样式, 尺寸链依赖外部
+ *     状态(图片固有尺寸/媒体会话 meta/JS 值) —— 键抓不到;
+ *   - 脱离流(position:absolute/fixed): 摆放依赖子树外的祖先盒
+ *     (containing_block/视口), 自身键不完整;
+ *   - 动态表现型(hn-lottie/three/cubism/mesh/live/stream/gif): 每帧
+ *     数值变, 与 L1 片段同一清单。
+ *   含 bail 子级的容器同样不可跳(子级布局必须每帧重跑) —— v1 边界,
+ *   收益主体是文本/盒型子树(段落/卡片文字区/聊天行)。
+ * display:none 子树: lskip_hide 使键失效(隐藏期变更不追踪), 显形帧整树
+ * 重排; 父键对隐藏子级折"浅哈希"(显隐翻转即键变)。脱离流子级折全量
+ * 深哈希(摆放随祖先盒变, 键必须每帧可信)。
+ * runs 清理: 旧 clear_runs(root) 与跳过不兼容(命中帧 runs 必须原样),
+ * 改"谁重建谁清理": IFC 落盘点 ifc_wipe + 文本/控件终排自带清 —— 重建
+ * 子树每帧与旧口径同构, 跳过子树 runs 原样保留。
+ * 观测: HN_LAYOUT_SKIP=0 关闭; HN_LAYOUT_SKIP_TRACE=1 每遍布局出口打
+ * 统计。正确性锚: tools/freeze_l2_probe.sh(命中路径按位 cmp 一致 +
+ * 突变序列 ≤0.01px 容差对照 + 命中/平移断言)。 */
+static struct {
+    long hit, moved, miss, bail;
+    unsigned char on, trace, inited;
+} g_ls;
+
+static unsigned long long ls_mix(unsigned long long h, const void *p, size_t n) {
+    const unsigned char *b = (const unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+/* 整树键刷新(每遍布局前; 自底向上, O(N) 纯哈希): 键恒反映当前内容,
+   外部突变与 anim 样式写当帧即被父层感知(教训: 曾按"父折子级已存键"
+   增量维护, 子级未被重排前键是旧的, 父层误命中吞掉突变 —— anim_probe
+   ghost 与最小复现实测后改整树刷新)。 */
+static unsigned long long ls_own_hash(hn_node *n, int *bail) {
+    unsigned long long h = 1469598103934665603ull;   /* FNV-1a 64 偏移基 */
+    int i;
+    h = ls_mix(h, &n->kind, sizeof n->kind);
+    if (n->tag) {
+        h = ls_mix(h, n->tag, strlen(n->tag));
+        if (hn_node_is_input(n) ||
+            !strcmp(n->tag, "img") || !strcmp(n->tag, "video") ||
+            !strcmp(n->tag, "audio") || !strcmp(n->tag, "canvas") ||
+            !strcmp(n->tag, "progress") || !strcmp(n->tag, "select") ||
+            !strcmp(n->tag, "button") ||
+            hn_node_attr(n, "hn-lottie") || hn_node_attr(n, "hn-three") ||
+            hn_node_attr(n, "hn-cubism") || hn_node_attr(n, "hn-mesh") ||
+            hn_node_attr(n, "hn-live") || hn_node_attr(n, "hn-stream") ||
+            hn_node_gif_src(n))
+            *bail = 1;
+    }
+    h = ls_mix(h, &n->n_attrs, sizeof n->n_attrs);
+    for (i = 0; i < n->n_attrs; i++) {
+        h = ls_mix(h, n->attrs[i].name, strlen(n->attrs[i].name));
+        h = ls_mix(h, n->attrs[i].value, strlen(n->attrs[i].value));
+    }
+    if (n->text && n->text_len) h = ls_mix(h, n->text, n->text_len);
+    h = ls_mix(h, &n->style, sizeof n->style);
+    if (n->style.position == HN_POS_ABSOLUTE || n->style.position == HN_POS_FIXED)
+        *bail = 1;
+    return h;
+}
+
+static void ls_refresh(hn_node *n) {
+    int bail = 0;
+    unsigned long long h = ls_own_hash(n, &bail);
+    int idx = 0;
+    for (hn_node *ch = n->first; ch; ch = ch->next, idx++) {
+        ls_refresh(ch);
+        h = ls_mix(h, &idx, sizeof idx);   /* 顺序敏感 */
+        h = ls_mix(h, &ch->lf_key, sizeof ch->lf_key);
+        if (ch->lf_bail) bail = 1;
+    }
+    n->lf_key = h;
+    n->lf_bail = (unsigned char)(bail ? 1 : 0);
+}
+
+/* IFC 落盘前的 runs 清理(旧 clear_runs(root) 的"随重建走"替代):
+   容器自身 runs(省略号挂载) + [start,stop) 链上将被 flatten 的文本节点。
+   跳过子树不经过此处 —— runs 原样保留正是命中的意义。 */
+static void ifc_wipe_walk(hn_node *n) {
+    if (n->kind == HN_TEXT) { n->n_runs = 0; return; }
+    for (hn_node *ch = n->first; ch; ch = ch->next)
+        if (!(ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE))
+            ifc_wipe_walk(ch);
+}
+
+static void ifc_wipe(hn_node *container, hn_node *start, hn_node *stop) {
+    container->n_runs = 0;
+    for (hn_node *ch = start; ch && ch != stop; ch = ch->next)
+        if (!(ch->kind == HN_ELEM && ch->style.display == HN_DISP_NONE))
+            ifc_wipe_walk(ch);
+}
+
+/* 包装: 入口查记忆(记录键==当前键 + 布局输入全中 → 跳过/平移),
+   未中走 inner 并记录几何与当时的键(键已由 ls_refresh 与内容同步)。 */
+static float layout_box(hn_context *c, hn_node *n, float x, float y,
+                        float avail_w, float avail_h,
+                        const hn_text_backend *tb, int measuring, float forced_h,
+                        float forced_w) {
+    if (!g_ls.on || n->kind != HN_ELEM || n->lf_bail)
+        return layout_box_inner(c, n, x, y, avail_w, avail_h, tb, measuring,
+                                forced_h, forced_w);
+    if (n->lf_valid && n->lf_rec_key == n->lf_key &&
+        n->lf_aw == avail_w && n->lf_ah == avail_h &&
+        n->lf_fh == forced_h && n->lf_fw == forced_w &&
+        n->lf_meas == (unsigned char)(measuring != 0)) {
+        float dx = x - n->lf_ox, dy = y - n->lf_oy;
+        if (dx != 0 || dy != 0) {
+            n->lf_ox = x; n->lf_oy = y;   /* translate_subtree 同步子树 lf 原点 */
+            translate_subtree(n, dx, dy);
+            g_ls.moved++;
+        } else {
+            g_ls.hit++;
+        }
+        return n->lf_h;
+    }
+    g_ls.miss++;
+    {
+        float h = layout_box_inner(c, n, x, y, avail_w, avail_h, tb, measuring,
+                                   forced_h, forced_w);
+        if (!n->lf_bail) {   /* bail 候选: 只布局不记录(替换元素链还会写样式) */
+            n->lf_rec_key = n->lf_key;
+            n->lf_valid = 1;
+            n->lf_ox = x; n->lf_oy = y; n->lf_h = h;
+            n->lf_aw = avail_w; n->lf_ah = avail_h;
+            n->lf_fh = forced_h; n->lf_fw = forced_w;
+            n->lf_meas = (unsigned char)(measuring != 0);
+        }
+        return h;
+    }
+}
+
+void hn_layout_lskip_stats(long *hit, long *moved, long *miss, long *bail) {
+    if (hit) *hit = g_ls.hit;
+    if (moved) *moved = g_ls.moved;
+    if (miss) *miss = g_ls.miss;
+    if (bail) *bail = g_ls.bail;
+}
+
 void hn_layout_root(hn_context *c) {
     const hn_text_backend *tb = c->tb_valid ? &c->tb : NULL;
     hn_node *root = c->doc->root;
     g_mc = (hn_mcache *)c->mcache;
     hn_layout_mcache_sync(c->mcache, tb, c->tb_valid);
-    clear_runs(root);
+    if (!g_ls.inited) {
+        const char *env = getenv("HN_LAYOUT_SKIP");
+        g_ls.on = !(env && *env && strcmp(env, "0") == 0);
+        env = getenv("HN_LAYOUT_SKIP_TRACE");
+        g_ls.trace = (env && *env && strcmp(env, "0") != 0);
+        g_ls.inited = 1;
+    }
+    g_ls.hit = g_ls.moved = g_ls.miss = g_ls.bail = 0;
+    if (g_ls.on) ls_refresh(root);    /* 整树键刷新: 键恒反映当前内容 */
+    else clear_runs(root);            /* 机制关: 旧口径(根清) */
     float forced = (root->style.height_u == HN_U_AUTO) ? c->vh : -1;
     layout_box(c, root, 0, 0, c->vw, c->vh, tb, 0, forced, -1);
     if (g_mc && g_mc->trace)
         fprintf(stderr, "[mcache] hits=%ld misses=%ld entries=%ld\n",
                 g_mc->hits, g_mc->misses, g_mc->entries);
+    if (g_ls.trace)
+        fprintf(stderr, "[lskip] hit=%ld moved=%ld miss=%ld bail=%ld\n",
+                g_ls.hit, g_ls.moved, g_ls.miss, g_ls.bail);
     g_mc = NULL;
 }
