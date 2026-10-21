@@ -1727,11 +1727,96 @@ static void apply_decls(hn_style *st, hn_decl *ds, int nd, int phase) {
     }
 }
 
-static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
+/* ---------------- 级联记忆化(freeze L2 级联差分第一步) ----------------
+ * 现状: 每帧级联对每个元素重跑 default+inherit+规则匹配+apply(规则数 ×
+ * 节点数)。记忆化后输入未变的节点逐位复用上帧计算样式 —— 匹配 machinery
+ * 整段跳过。输入面与失效纪律见 compute_rec 头部块注。
+ * 观测: HN_STYLE_MEMO=0 关闭; HN_STYLE_MEMO_TRACE=1 每遍级联出口打
+ * hit/miss/bypass 统计。 */
+static struct {
+    long hit, miss, bypass;
+    unsigned char on, trace, inited;
+} g_sm;
+
+static unsigned long long cs_mix(unsigned long long h, const void *p, size_t n) {
+    const unsigned char *b = (const unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+/* 属性全量哈希(选择器可见面: id/class/style/disabled/checked/... ) */
+static unsigned long long cs_attrs_hash(hn_node *n) {
+    unsigned long long h = 1469598103934665603ull;
+    int i;
+    h = cs_mix(h, &n->n_attrs, sizeof n->n_attrs);
+    for (i = 0; i < n->n_attrs; i++) {
+        h = cs_mix(h, n->attrs[i].name, strlen(n->attrs[i].name));
+        h = cs_mix(h, n->attrs[i].value, strlen(n->attrs[i].value));
+    }
+    return h;
+}
+
+/* 强制重算清单(不参与记忆化, 每帧全量级联):
+   - 动画进行中: anim_tick 在级联之后把插值叠加进 style, 复用会把上一帧
+     叠加值当基数(收敛值逐帧漂移);
+   - 替换元素与输入控件: layout 期把解析尺寸写回样式, 复用会让"样式重置
+     → 重新解析"链条失效(图片加载后的尺寸刷新就靠它)。 */
+static int cs_bypass(hn_node *n) {
+    if (n->anim.slot_active || n->anim.entering) return 1;
+    if (!n->tag) return 0;
+    return hn_node_is_input(n) ||
+           !strcmp(n->tag, "img") || !strcmp(n->tag, "video") ||
+           !strcmp(n->tag, "audio") || !strcmp(n->tag, "canvas") ||
+           !strcmp(n->tag, "progress") || !strcmp(n->tag, "select") ||
+           !strcmp(n->tag, "button");
+}
+
+/* 计算样式输入哈希(见 compute_rec 头部块注) */
+static unsigned long long cs_input_hash(hn_context *c, hn_node *n, hn_node *parent,
+                                        unsigned long long ctx_in,
+                                        unsigned long long sib_pre,
+                                        unsigned long long sib_full,
+                                        int sib_idx, int sib_cnt,
+                                        unsigned long long ah_own) {
+    unsigned long long h = 1469598103934665603ull;
+    unsigned bits = (unsigned)((n == c->hover_node) |
+                               ((n == c->active_node) << 1) |
+                               ((n == c->focus_node) << 2) |
+                               ((parent && parent->is_doc_wrapper) << 3) |
+                               ((n->anim.slot_active || n->anim.entering) << 4) |
+                               ((unsigned)(n->is_doc_wrapper) << 5));
+    h = cs_mix(h, &bits, sizeof bits);
+    if (n->tag) h = cs_mix(h, n->tag, strlen(n->tag));
+    h = cs_mix(h, &ah_own, sizeof ah_own);
+    h = cs_mix(h, &sib_idx, sizeof sib_idx);
+    h = cs_mix(h, &sib_cnt, sizeof sib_cnt);
+    h = cs_mix(h, &sib_pre, sizeof sib_pre);
+    h = cs_mix(h, &sib_full, sizeof sib_full);
+    h = cs_mix(h, &ctx_in, sizeof ctx_in);
+    if (parent) h = cs_mix(h, &parent->style_hash, sizeof parent->style_hash);
+    h = cs_mix(h, &c->style_serial, sizeof c->style_serial);
+    h = cs_mix(h, &c->vw, sizeof c->vw);
+    h = cs_mix(h, &c->vh, sizeof c->vh);
+    h = cs_mix(h, &c->transparent, sizeof c->transparent);
+    return h;
+}
+
+void hn_style_memo_stats(long *hits, long *misses) {
+    if (hits) *hits = g_sm.hit;
+    if (misses) *misses = g_sm.miss;
+}
+
+static void cs_compute_full(hn_context *c, hn_node *n, hn_node *parent,
+                            unsigned long long in);
+static void compute_rec(hn_context *c, hn_node *n, hn_node *parent,
+                        unsigned long long ctx_in, unsigned long long sib_pre,
+                        unsigned long long sib_full, int sib_idx, int sib_cnt) {
     /* 伪元素合成文本节点(带内联 style): 继承父级计算样式 + 应用自身
        内联声明(::after 的 font-size/color 等) —— 普通文本节点无 attrs,
-       直接沿用父样式(既有口径不变)。 */
+       直接沿用父样式(既有口径不变; 数量少, 不参与级联记忆化)。 */
     if (n->kind == HN_TEXT) {
+        (void)ctx_in; (void)sib_pre; (void)sib_full; (void)sib_idx; (void)sib_cnt;
         if (n->n_attrs > 0 && parent && c->tmp) {
             hn_style st;
             hn_style_default(&st);
@@ -1757,6 +1842,82 @@ static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
     /* id 缓存 */
     n->id = get_attr(n, "id");
 
+    /* ---- 级联记忆化(freeze L2 级联差分第一步) ----
+     * 输入哈希覆盖选择器可见的全部状态: 自身(tag/id/属性全量/伪类位/
+     * 父是否包裹根/动画态) + 祖先选择器上下文(自顶向下传播, 覆盖后代
+     * 组合符) + 兄弟前缀与全序哈希(nth-of-type/:first/last-child/相邻与
+     * 通用兄弟组合符的精确失效面) + 父样式哈希(继承/变量) + 表集 serial
+     * /视口(媒体查询)/透明背板开关。命中 → 逐位复用上帧计算样式, 只需
+     * 把 vars 数组重挂当前 tmp(旧数组随 tmp 每帧销毁)并刷新全局 rem
+     * 基准。强制重算(bypass): 动画进行中的节点(anim_tick 在级联之后
+     * 叠加动画值, 复用会把上一帧叠加值当基数)与替换元素/输入控件
+     * (layout 期解析尺寸写回样式, 复用会让图片加载后的重解析失效)。
+     * HN_STYLE_MEMO=0 关闭。 */
+    int bypass = cs_bypass(n);
+    unsigned long long in = 0;
+    unsigned long long ah_own = cs_attrs_hash(n);
+    int memo_hit = 0;
+    if (g_sm.on && !bypass) {
+        in = cs_input_hash(c, n, parent, ctx_in, sib_pre, sib_full,
+                           sib_idx, sib_cnt, ah_own);
+        if (n->cs_valid && n->cs_in == in) {
+            if (n->style.n_vars == 0 || !c->tmp) {
+                memo_hit = 1;
+            } else {
+                hn_var *nv = hn_arena_alloc(c->tmp, sizeof(hn_var) * (size_t)n->style.n_vars);
+                if (nv) {
+                    memcpy(nv, n->style.vars, sizeof(hn_var) * (size_t)n->style.n_vars);
+                    n->style.vars = nv;
+                    memo_hit = 1;
+                }
+            }
+        }
+    }
+    if (memo_hit) {
+        g_sm.hit++;
+        /* rem 基准跟随真实 <html>: 全局可能被其它上下文的级联改写 */
+        if (n->parent && n->parent->is_doc_wrapper)
+            g_root_font = n->style.font_size;
+    } else {
+        if (bypass) g_sm.bypass++; else g_sm.miss++;
+        cs_compute_full(c, n, parent, in);
+    }
+
+    /* 子级递归: 先扫元素子级数与全序哈希(兄弟选择器的精确失效面),
+       再逐个携带(祖先上下文/前缀哈希/序号/计数)下钻。TEXT 子级不参与
+       选择器可见面(compound_matches 只看元素兄弟)。 */
+    {
+        int el_cnt = 0;
+        for (hn_node *ch = n->first; ch; ch = ch->next)
+            if (ch->kind == HN_ELEM) el_cnt++;
+        unsigned long long full = 0;
+        for (hn_node *ch = n->first; ch; ch = ch->next)
+            if (ch->kind == HN_ELEM) {
+                unsigned long long ah = cs_attrs_hash(ch);
+                if (ch->tag) full = cs_mix(full, ch->tag, strlen(ch->tag));
+                full = cs_mix(full, &ah, sizeof ah);
+            }
+        unsigned long long ctx_out = ctx_in;
+        if (n->tag) ctx_out = cs_mix(ctx_out, n->tag, strlen(n->tag));
+        ctx_out = cs_mix(ctx_out, &ah_own, sizeof ah_own);
+        unsigned long long pre = 0;
+        int idx = 0;
+        for (hn_node *ch = n->first; ch; ch = ch->next) {
+            if (ch->kind != HN_ELEM) continue;
+            idx++;
+            compute_rec(c, ch, n, ctx_out, pre, full, idx, el_cnt);
+            if (ch->tag) pre = cs_mix(pre, ch->tag, strlen(ch->tag));
+            {
+                unsigned long long ah = cs_attrs_hash(ch);
+                pre = cs_mix(pre, &ah, sizeof ah);
+            }
+        }
+    }
+}
+
+/* 级联全量计算(记忆未中路径; 从 compute_rec 抽出, 语义逐行不动) */
+static void cs_compute_full(hn_context *c, hn_node *n, hn_node *parent,
+                            unsigned long long in) {
     hn_style st;
     hn_style_default(&st);
     if (parent) hn_style_inherit(&st, &parent->style);
@@ -1868,7 +2029,9 @@ static void compute_rec(hn_context *c, hn_node *n, hn_node *parent) {
         }
         n->tt_applied = tt;
     }
-    for (hn_node *ch = n->first; ch; ch = ch->next) compute_rec(c, ch, n);
+    n->cs_in = in;
+    n->cs_valid = 1;
+    n->style_hash = cs_mix(1469598103934665603ull, &n->style, sizeof n->style);
 }
 
 /* ---------------- 伪元素生成内容(::before/::after) ----------------
@@ -1958,10 +2121,21 @@ static void gen_content_apply(hn_context *c) {
 
 void hn_style_compute_all(hn_context *c) {
     if (!c->doc) return;
+    if (!g_sm.inited) {
+        const char *env = getenv("HN_STYLE_MEMO");
+        g_sm.on = !(env && *env && strcmp(env, "0") == 0);
+        env = getenv("HN_STYLE_MEMO_TRACE");
+        g_sm.trace = (env && *env && strcmp(env, "0") != 0);
+        g_sm.inited = 1;
+    }
+    g_sm.hit = g_sm.miss = g_sm.bypass = 0;
     g_vw = c->vw;
     g_vh = c->vh;
     gen_content_apply(c);
-    compute_rec(c, c->doc->root, NULL);
+    compute_rec(c, c->doc->root, NULL, 0, 0, 0, 1, 1);
+    if (g_sm.trace)
+        fprintf(stderr, "[smemo] hit=%ld miss=%ld bypass=%ld\n",
+                g_sm.hit, g_sm.miss, g_sm.bypass);
 }
 
 /* ---------- 内联 style 属性声明解析 ---------- */

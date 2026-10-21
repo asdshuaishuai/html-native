@@ -82,6 +82,7 @@ void hn_context_add_sheet(hn_context *c, hn_sheet *sheet) {
         c->cap_sheets = nc;
     }
     c->sheets[c->n_sheets++] = sheet;
+    c->style_serial++;   /* 表集变更: 级联记忆化全文档失配(下一遍整树重算) */
 }
 
 /* 一遍布局: 临时区/显示列表重建 → 级联 → 布局根。

@@ -389,6 +389,15 @@ struct hn_node {
     unsigned char lf_meas;
     unsigned char lf_valid;
     unsigned char lf_bail;
+    /* 级联记忆化(hn_style.c; freeze L2 级联差分第一步): cs_in = 该节点
+       计算样式的全部输入哈希(tag/id/属性全量/伪类位/祖先选择器上下文/
+       兄弟前缀与全序/父样式哈希/serial/vw/vh), 输入未变即逐位复用上帧
+       计算样式(跳过 default+inherit+规则匹配+apply)。style_hash =
+       计算样式字节的内容哈希(重算时刷新; 命中帧沿用 —— 子级的
+       "父样式哈希"输入与 L2 排期的增量级联都消费它)。 */
+    unsigned long long cs_in;
+    unsigned long long style_hash;
+    unsigned char cs_valid;
     /* 输入控件状态 */
     char  *value; size_t value_len, value_cap;  /* 可编辑当前值(arena) */
     int    caret;                                /* 字节偏移 */
@@ -674,6 +683,9 @@ void  hn_layout_mcache_stats(const void *mc, long *hits, long *misses,
 /* 子树布局记忆统计(自最近一次 hn_layout_root 起累计; freeze_l2_probe 读;
    HN_LAYOUT_SKIP_TRACE 同源) */
 void  hn_layout_lskip_stats(long *hit, long *moved, long *miss, long *bail);
+/* 级联记忆化统计(自最近一次 hn_style_compute_all 起累计; HN_STYLE_MEMO
+   _TRACE 同源) */
+void  hn_style_memo_stats(long *hits, long *misses);
 
 /* getImageData 的栅格化核心(hn_paint.c 实现 —— 账本重放是它的地盘):
    把账本按 canvas 属性坐标 1:1 重放到一张临时显示列表, 交注入的渲染
@@ -765,6 +777,9 @@ struct hn_context {
        指纹 = 子树全量哈希(标签/属性/文本/计算后样式/布局盒/滚动);
        动画中/动态元素(canvas/lottie/three/...)子树不缓存。 */
     hn_frag *frags; int n_frags, cap_frags;
+    /* 样式表登记序号(hn_context_add_sheet 递增): 级联记忆化输入的一部分
+       —— 表集变了全文档样式输入失配, 下一遍级联整树重算。 */
+    unsigned style_serial;
     /* 文本测量缓存(hn_layout.c; freeze L2 前置"text runs 缓存"的第一步):
        measure(字体五元组+文本字节 → 宽度)的记忆化 —— 布局每遍都从头测量
        全部文本, 流式应用每帧只有少量新文本, 旧文本全是重复功。键逐字段

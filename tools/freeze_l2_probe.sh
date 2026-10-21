@@ -34,8 +34,8 @@ hn_probe_compile "$LABEL" "$BIN"
 # exact(同输入双遍 → 命中路径): 两臂逐字节 cmp;
 # approx(突变遍 → 含平移回放): 浮点与全新布局存在 ~1ulp 结合序差
 #   (数学等价、像素不可见), 按 ≤0.01px 容差逐 token 对照。
-HN_MEASURE_CACHE=0 HN_LAYOUT_SKIP=0 "$BIN" dump exact > "$D/off_exact.dump" 2> "$D/off.err"
-HN_MEASURE_CACHE=0 HN_LAYOUT_SKIP=0 "$BIN" dump approx > "$D/off_approx.dump" 2>> "$D/off.err"
+HN_MEASURE_CACHE=0 HN_LAYOUT_SKIP=0 HN_STYLE_MEMO=0 "$BIN" dump exact > "$D/off_exact.dump" 2> "$D/off.err"
+HN_MEASURE_CACHE=0 HN_LAYOUT_SKIP=0 HN_STYLE_MEMO=0 "$BIN" dump approx > "$D/off_approx.dump" 2>> "$D/off.err"
 "$BIN" dump exact > "$D/on_exact.dump" 2> "$D/on.err"
 "$BIN" dump approx > "$D/on_approx.dump" 2>> "$D/on.err"
 
@@ -82,7 +82,7 @@ fi
 
 # ---- D. 提速口径(信息值): 三种负载各 300 遍纯布局 ----
 for w in static stream resize; do
-  ms_off="$(HN_MEASURE_CACHE=0 HN_LAYOUT_SKIP=0 "$BIN" bench 2>/dev/null | grep "bench-$w" | awk '{print $2}' | cut -d= -f2)"
+  ms_off="$(HN_MEASURE_CACHE=0 HN_LAYOUT_SKIP=0 HN_STYLE_MEMO=0 "$BIN" bench 2>/dev/null | grep "bench-$w" | awk '{print $2}' | cut -d= -f2)"
   ms_on="$("$BIN" bench 2>/dev/null | grep "bench-$w" | awk '{print $2}' | cut -d= -f2)"
   ratio="$(awk -v a="$ms_off" -v b="$ms_on" 'BEGIN { if (b > 0) printf "%.2f", a / b; else print "?" }')"
   echo "  ℹ bench-$w 300 遍纯布局: 关=${ms_off}ms 开=${ms_on}ms (提速 ${ratio}x, 信息值)"

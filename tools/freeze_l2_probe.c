@@ -170,6 +170,7 @@ int main(int argc, char **argv) {
     const char *mode = (argc > 1) ? argv[1] : "dump";
     int cache_on = !env_off("HN_MEASURE_CACHE");
     int lskip_on = !env_off("HN_LAYOUT_SKIP");
+    int smemo_on = !env_off("HN_STYLE_MEMO");
     int N_PARA = 96;
 
     if (!strcmp(mode, "bench")) {
@@ -236,6 +237,7 @@ int main(int argc, char **argv) {
         long h1 = 0, m1 = 0, e1 = 0;      /* 测量缓存: 突变遍后 */
         long k1h = 0, k1m = 0, k1x = 0, k1b = 0;   /* 布局记忆: 同输入遍 */
         long k2h = 0, k2m = 0, k2x = 0, k2b = 0;   /* 布局记忆: 突变遍 */
+        long s0h = 0, s0m = 0, s1h = 0, s1m = 0;   /* 级联记忆: 同输入遍/突变遍 */
         const char *mut_txt = "突变句: 改一处文本, 其余子树的测量应全部命中缓存"
                               " —— mutation replaces the whole paragraph text.";
         memset(&tb, 0, sizeof tb);
@@ -246,6 +248,7 @@ int main(int argc, char **argv) {
         hn_context_layout(ctx, 420, 640, &tb);
         hn_context_layout(ctx, 420, 640, &tb);          /* 同输入: 布局记忆应全中 */
         hn_layout_lskip_stats(&k1h, &k1m, &k1x, &k1b);
+        hn_style_memo_stats(&s0h, &s0m);
         hn_layout_mcache_stats(ctx->mcache, &h0, &m0, &e0);
         mut = find_id(hn_doc_root(doc), "p7");
         root = hn_doc_root(doc);
@@ -255,15 +258,18 @@ int main(int argc, char **argv) {
             check(hn_node_set_text_content(mut, mut_txt, strlen(mut_txt)) == 1,
                   "set_text_content 成功");
             hn_context_layout(ctx, 420, 640, &tb);      /* 突变遍 */
+            hn_style_memo_stats(&s1h, &s1m);
             hn_layout_lskip_stats(&k2h, &k2m, &k2x, &k2b);
             hn_layout_mcache_stats(ctx->mcache, &h1, &m1, &e1);
             fprintf(stderr, "lskip@mut  hit=%ld moved=%ld miss=%ld bail=%ld\n",
                     k2h, k2m, k2x, k2b);
+            fprintf(stderr, "smemo@mut  hits=%ld miss=%ld\n", s1h, s1m);
             fprintf(stderr, "mcache@3 hits=%ld misses=%ld entries=%ld\n",
                     h1, m1, e1);
         }
         fprintf(stderr, "lskip@same hit=%ld moved=%ld miss=%ld bail=%ld\n",
                 k1h, k1m, k1x, k1b);
+        fprintf(stderr, "smemo@same hits=%ld miss=%ld\n", s0h, s0m);
         fprintf(stderr, "mcache@2 hits=%ld misses=%ld entries=%ld\n", h0, m0, e0);
         if (lskip_on) {
             check(k1h > 0, "同输入遍整子树命中(hit>0)");
@@ -272,6 +278,12 @@ int main(int argc, char **argv) {
         if (approx && lskip_on) {
             check(k2h > 0, "突变遍前方兄弟仍命中(hit>0)");
             check(k2m > 0, "突变遍后方兄弟平移回放(moved>0)");
+        }
+        if (smemo_on) {
+            check(s0h > 0, "级联记忆: 同输入遍命中(hits>0)");
+        }
+        if (approx && smemo_on) {
+            check(s1h > 0, "突变遍未变节点仍命中(hits>0)");
         }
         if (cache_on) {
             check(e0 > 0, "测量缓存有条目(entries>0)");
