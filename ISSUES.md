@@ -219,6 +219,36 @@
 - 回归: 全部 16+ 探针家族全绿(render 83/0 · events 72 · css 108 · three ·
   quad3d · perf/anim 门禁通过)。
 
+### 2026-10-15 handwired 研究与时间栅格轮(已落地)
+
+- **chenglou/handwired 研究**: "冻结 UI" —— UI 编译为冻结 FP32 运算
+  列表(affine/reglu/boolean/indexRead 四指令), 无训练、精确、可微;
+  HandwiredOS(4,646 运算驱动 3 窗口桌面)。完整笔记
+  `docs/handwired-notes.md`(执行模型/行为选择/host-timing/patterns
+  + 对 hn 的采纳映射: ✅ 已落地 / 📋 排期 / ❌ 不采纳)。
+- **动画时钟 1/64ms 栅格量化**(host-timing 手法落地): 帧时间戳先量化
+  到 1/64ms 栅格再做差 —— 任意拆分的时间跨度严格相等, 过渡/关键帧/
+  平滑滚动采样点跨帧率(10/30/60/120fps)落在同一条缓动曲线上。
+  daemon 与 hn_app 双端同改。复核实测: runtime 174 测试全过,
+  HandwiredOS 求值 42.86µs/帧。
+
+### 2026-10-15 冻结指令片段轮(handwired 思想落地, 已实现+锚定)
+
+- **L1 冻结绘制片段**: 静态子树 hn_cmd 序列按全量指纹缓存(FNV-1a:
+  标签/属性/文本/计算后样式/布局盒/滚动/select_open), 命中帧 memcpy
+  整块回放跳过 paint walk。失效: 指纹/继承偏移变化自动重录; 动画中/
+  聚焦/动态元素(canvas/lottie/three/video/gif/progress/stream)不缓存;
+  上限 256 条目 × 8192 cmd; HN_FRAGMENT=0 关闭。
+- 正确性锚: 缓存开/关渲染**逐位一致**(showcase/three 几何/visibility
+  复显页/控件页 cmp 通过); 动画子树自动走 miss(无动画回归)。
+- 顺带修: `rt->range_drag/range_id` 曾落进 QuickJS #ifdef, 无 JS 构建
+  编译失败(孤立复现工具撞上); hoist 到 struct 公共区。
+- **canvas filter blur "0.39 饱和度"复核结案**: 非缺陷 —— 引擎
+  getImageData 是非预乘 RGBA, RGB 直通, 浓度衰减在 alpha 通道
+  (A 实测 0..253 单调)。dom_probe 两断言钉住(A 口径)。
+- 设计文档 `docs/freeze-design.md`: L1 已实现 / L2 冻结布局 /
+  L3 槽位 / L4 组件模板(模板类行为=冻结一次填逻辑)路线。
+
 ### 2026-10-15 Smart-UX 出现/消失动效轮(呈现方式优化)
 
 "内容忽然出现/忽然消失"的呈现问题本轮收口(路线图 smart-ux 项):
