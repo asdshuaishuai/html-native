@@ -88,6 +88,8 @@ typedef struct {
     float ayx, ayy, aty;  /*             v = ayx*x + ayy*y + aty */
     float fhx, fhy, fhw;  /* 摊平射影分母: w = fhx*x + fhy*y + fhw
                              (缺省 0/0/1 = 仿射; install_flatten 装单应) */
+    int anc_anim;         /* 祖先链上有动画进行中(>0): 冻结片段停用 ——
+                             祖先每帧数值变, 片段必然过期(hn_paint freeze) */
 } paint_guard;
 
 /* ---- 4x4 矩阵(preserve-3d 层级栈的最小算术) ----
@@ -1420,9 +1422,23 @@ unsigned char *hn_paint_raster_ledger(hn_context *c, hn_canvas_ledger *l,
    两个维度都要防: 只看深度防不了兄弟链成环(那是同层无限循环)。 */
 #define HN_PAINT_MAX_DEPTH 256
 #define HN_PAINT_MAX_NODES 200000
+/* 冻结片段上限(与尾部的 freeze 基础设施同口径; clip_done 处先用到) */
+#define FRAG_MAX_ENTRIES 256
+#define FRAG_MAX_CMDS    8192
+#define FRAG_MAX_NODES   4096
+#define FRAG_MAX_DEPTH   64
 
 static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                          float alpha, float sx, float sy, paint_guard *g);
+
+/* 冻结片段(hn_paint.c 尾部"冻结指令片段"一节): 命中/登记的前置声明 */
+static int frag_on(void);
+static int frag_trace(void);
+static hn_frag *frag_find(hn_context *c, hn_node *n);
+static unsigned long long frag_hash_walk(hn_node *n, hn_context *c, int depth,
+                                         int *bail, int *count);
+static void frag_store(hn_context *c, hn_node *n, unsigned long long fp, float sx,
+                       const hn_cmd *src, int start, int cnt);
 
 static void paint_walk(hn_context *c, hn_node *n, const hn_style *pst,
                        float alpha, float sx, float sy) {
@@ -2011,6 +2027,43 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
        成为不确定值 —— 子级在 alpha 守卫处全被杀(实测复现)。 */
     float csx = sx + n->scroll_x, csy = sy + n->scroll_y;
     float child_alpha = alpha * st->opacity;
+
+    /* ---- 冻结片段命中/登记(handwired "冻结"落地) ----
+       祖先动画中(anc_anim>0)不缓存 —— 祖先每帧数值变, 片段必过期;
+       sx(继承偏移)一致 + 子树指纹一致 → 整块回放。 */
+    hn_frag *frag_rec = NULL;
+    int frag_start = 0;
+    unsigned long long frag_fp = 0;
+    if (frag_on() && g->anc_anim == 0) {
+        int bail = 0, count = 0;
+        frag_fp = frag_hash_walk(n, c, 0, &bail, &count);
+        if (!bail) {
+            hn_frag *fr = frag_find(c, n);
+            if (fr && fr->fp == frag_fp && fr->sx == sx) {
+                if (frag_trace())
+                    fprintf(stderr, "[frag] hit <%s> cmds=%d\n",
+                            n->tag ? n->tag : "?", fr->n);
+                if (fr->n > 0) {
+                    if (c->n_cmds + fr->n > c->cap_cmds) {
+                        int nc = c->cap_cmds ? c->cap_cmds : 64;
+                        while (nc < c->n_cmds + fr->n) nc *= 2;
+                        hn_cmd *nv = (hn_cmd *)realloc(c->cmds, sizeof(hn_cmd) * (size_t)nc);
+                        if (!nv) return;
+                        c->cmds = nv;
+                        c->cap_cmds = nc;
+                    }
+                    memcpy(c->cmds + c->n_cmds, fr->cmds, sizeof(hn_cmd) * (size_t)fr->n);
+                    c->n_cmds += fr->n;
+                }
+                return;   /* 整个子树已回放 */
+            }
+            frag_rec = frag_find(c, n);   /* 旧条目则原地重录 */
+            frag_start = c->n_cmds;
+            if (frag_trace())
+                fprintf(stderr, "[frag] miss <%s> (recording)\n", n->tag ? n->tag : "?");
+        }
+    }
+
     if (vis_hidden) {
         if (getenv("HN_VIS_TRACE")) fprintf(stderr, "[vis] %s hidden -> children_only\n", n->tag ? n->tag : "?");
         clipped = 0;
@@ -2424,6 +2477,8 @@ children_only:
        遮挡由深度决定, CSS 同款语义 —— z-index 在 3D 上下文里让位);
        其余按 z-index 非零的定位元素排后(覆盖常规流内容)。
        两种排序都稳定: 同键/同深保持文档顺序。 */
+    int self_anim = (n->anim.slot_active != 0 || n->anim.entering != 0);
+    if (self_anim) g->anc_anim++;
     if (st->transform_style == 1) {
         paint_children_depth_sorted(c, n, st, child_alpha, csx, csy, g);
     } else if (has_positioned_children(n)) {
@@ -2436,6 +2491,7 @@ children_only:
             g->depth--;
         }
     }
+    if (self_anim) g->anc_anim--;
     /* 容器自身的行内片段(目前仅 text-overflow 的省略号):
        在子节点之后绘制, 使其覆盖在被截断的文本之上 */
     if (!vis_hidden && n->n_runs > 0 && st->display != HN_DISP_INLINE && !hn_node_is_input(n)) {
@@ -2488,6 +2544,16 @@ clip_done:
         cp.kind = HN_CMD_CLIP_POP;
         push_cmd(c, &cp);
     }
+    /* 冻结片段登记: 本帧窗口 [frag_start, n_cmds) 深拷贝入缓存。
+       (下一帧指纹一致 → 整块回放, 跳过本函数全部自绘/子级遍历。) */
+    if (frag_rec) {
+        int cnt = c->n_cmds - frag_start;
+        if (cnt > 0 && cnt <= FRAG_MAX_CMDS)
+            frag_store(c, frag_rec->node, frag_fp, sx, c->cmds, frag_start, cnt);
+        else if (frag_trace())
+            fprintf(stderr, "[frag] skip-store <%s> cnt=%d\n",
+                    frag_rec->node->tag ? frag_rec->node->tag : "?", cnt);
+    }
 }
 
 static void paint_select_popups(hn_context *c);
@@ -2510,6 +2576,179 @@ void hn_paint_root(hn_context *c) {
         paint_walk_g(c, c->exit_ghost[i].node, NULL, a, 0, 0, &g2);
     }
     paint_select_popups(c);
+}
+
+/* ---------------- 冻结指令片段(handwired "冻结"思想的 hn 落地) ----------------
+ * 静态子树的显示列表按指纹缓存: 命中帧把片段 cmds 整块 memcpy 回显示
+ * 列表, 跳过该子树的 paint walk(级联/布局不受影响 —— 那是 L2)。
+ *
+ * 指纹 = 子树全量 FNV-1a(标签/属性/文本/计算后样式/布局盒/滚动/
+ * select_open)。任何级联变化(hover/继承/样式改)自动失效; 动画中
+ * (slot_active/entering)、动态元素(canvas/lottie/three/video/gif/
+ * progress/stream)、聚焦元素(焦点环/caret)不缓存。
+ * 片段 cmds 深拷贝归片段所有; 失效即 free(绘制与重放同帧配对, 单线程,
+ * 无悬挂窗口)。HN_FRAGMENT=0 关闭; HN_FRAGMENT_TRACE=1 打命中/未命中。 */
+static int frag_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("HN_FRAGMENT");
+        on = !(e && *e && (!strcmp(e, "0") || !strcmp(e, "false")));
+    }
+    return on;
+}
+
+static int frag_trace(void) {
+    static int t = -1;
+    if (t < 0) t = getenv("HN_FRAGMENT_TRACE") ? 1 : 0;
+    return t;
+}
+
+#define FRAG_FNV0 1469598103934665603ULL
+static unsigned long long frag_hmix(unsigned long long h, const void *p, size_t n) {
+    const unsigned char *b = (const unsigned char *)p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
+    return h;
+}
+static unsigned long long frag_hmixu(unsigned long long h, unsigned long v) {
+    return frag_hmix(h, &v, sizeof v);
+}
+static unsigned long long frag_hmixf(unsigned long long h, float f) {
+    unsigned v;
+    memcpy(&v, &f, sizeof v);
+    return frag_hmix(h, &v, sizeof v);
+}
+
+/* 深拷贝一条 cmd 的指针字段(text/poly/segs/verts/uv/pdata); 失败返回 0 */
+static int frag_dup_cmd(hn_cmd *d, const hn_cmd *s) {
+    *d = *s;
+    if (s->text && s->text_len) {
+        d->text = (const char *)malloc(s->text_len);
+        if (!d->text) return 0;
+        memcpy((void *)d->text, s->text, s->text_len);
+    }
+    if (s->poly && s->poly_n) {
+        d->poly = (float *)malloc(sizeof(float) * (size_t)s->poly_n * 2);
+        if (!d->poly) return 0;
+        memcpy((void *)d->poly, s->poly, sizeof(float) * (size_t)s->poly_n * 2);
+        if (s->clip_segs && s->clip_nsegs) {
+            int *sg = (int *)malloc(sizeof(int) * (size_t)s->clip_nsegs);
+            if (!sg) return 0;
+            memcpy(sg, s->clip_segs, sizeof(int) * (size_t)s->clip_nsegs);
+            d->clip_segs = sg;
+        }
+    }
+    if (s->mesh_verts && s->mesh_cols) {
+        size_t nb = sizeof(float) * (size_t)s->mesh_cols * 6;
+        d->mesh_verts = (float *)malloc(nb);
+        d->mesh_uv = (float *)malloc(nb);
+        if (!d->mesh_verts || !d->mesh_uv) return 0;
+        memcpy((void *)d->mesh_verts, s->mesh_verts, nb);
+        memcpy((void *)d->mesh_uv, s->mesh_uv, nb);
+    }
+    return 1;
+}
+
+static void frag_free_cmds(hn_cmd *cmds, int n) {
+    for (int i = 0; i < n; i++) {
+        free((void *)cmds[i].text);
+        free((void *)cmds[i].poly);
+        free((void *)cmds[i].clip_segs);
+        free((void *)cmds[i].mesh_verts);
+        free((void *)cmds[i].mesh_uv);
+    }
+    free(cmds);
+}
+
+void hn_paint_frag_clear(hn_context *c) {
+    if (!c) return;
+    for (int i = 0; i < c->n_frags; i++) frag_free_cmds(c->frags[i].cmds, c->frags[i].n);
+    free(c->frags);
+    c->frags = NULL;
+    c->n_frags = c->cap_frags = 0;
+}
+
+static hn_frag *frag_find(hn_context *c, hn_node *n) {
+    for (int i = 0; i < c->n_frags; i++)
+        if (c->frags[i].node == n) return &c->frags[i];
+    return NULL;
+}
+
+static void frag_store(hn_context *c, hn_node *n, unsigned long long fp, float sx,
+                       const hn_cmd *src, int start, int cnt) {
+    if (cnt <= 0 || cnt > FRAG_MAX_CMDS) return;
+    hn_frag *fr = frag_find(c, n);
+    if (!fr) {
+        if (c->n_frags >= FRAG_MAX_ENTRIES) {
+            /* LRU 简化: 满则淘汰最旧(槽 0)并整组前移 —— 条目数有界, 搬移可控 */
+            frag_free_cmds(c->frags[0].cmds, c->frags[0].n);
+            memmove(c->frags, c->frags + 1, sizeof(hn_frag) * (size_t)(c->n_frags - 1));
+            c->n_frags--;
+        }
+        if (c->n_frags >= c->cap_frags) {
+            int nc = c->cap_frags ? c->cap_frags * 2 : 16;
+            hn_frag *nf = (hn_frag *)realloc(c->frags, sizeof(hn_frag) * (size_t)nc);
+            if (!nf) return;
+            c->frags = nf;
+            c->cap_frags = nc;
+        }
+        fr = &c->frags[c->n_frags++];
+        memset(fr, 0, sizeof(*fr));
+        fr->node = n;
+    }
+    frag_free_cmds(fr->cmds, fr->n);
+    fr->cmds = (hn_cmd *)malloc(sizeof(hn_cmd) * (size_t)cnt);
+    if (!fr->cmds) { fr->n = fr->cap = 0; return; }
+    fr->cap = cnt;
+    for (int i = 0; i < cnt; i++)
+        if (!frag_dup_cmd(&fr->cmds[i], &src[start + i])) {
+            frag_free_cmds(fr->cmds, i);
+            fr->cmds = NULL; fr->n = fr->cap = 0;
+            return;
+        }
+    fr->n = cnt;
+    fr->fp = fp;
+    fr->sx = sx;
+}
+
+/* 子树指纹: 全量 FNV-1a。bail = 有不缓存的构成(动态元素/动画中/聚焦)。 */
+static unsigned long long frag_hash_walk(hn_node *n, hn_context *c, int depth,
+                                         int *bail, int *count) {
+    if (*bail || depth > FRAG_MAX_DEPTH) { *bail = 1; return 0; }
+    if (++*count > FRAG_MAX_NODES) { *bail = 1; return 0; }
+    unsigned long long h = FRAG_FNV0;
+    h = frag_hmixu(h, (unsigned)n->kind);
+    if (n->tag) h = frag_hmix(h, n->tag, strlen(n->tag));
+    h = frag_hmixu(h, (unsigned)n->n_attrs);
+    for (int i = 0; i < n->n_attrs; i++) {
+        h = frag_hmix(h, n->attrs[i].name, strlen(n->attrs[i].name));
+        h = frag_hmix(h, n->attrs[i].value, strlen(n->attrs[i].value));
+    }
+    if (n->text && n->text_len) h = frag_hmix(h, n->text, n->text_len);
+    h = frag_hmix(h, &n->style, sizeof(n->style));
+    float boxf[4] = { n->bx, n->by, n->bw, n->bh };
+    h = frag_hmix(h, boxf, sizeof boxf);
+    h = frag_hmixf(h, n->scroll_x);
+    h = frag_hmixf(h, n->scroll_y);
+    h = frag_hmixu(h, (unsigned)(n->select_open ? 1 : 0));
+    /* 动画中: 每帧数值变化, 片段必然过期 → 不缓存 */
+    if (n->anim.slot_active || n->anim.entering) *bail = 1;
+    if (n == c->focus_node) *bail = 1;   /* 焦点环/caret 每拍变 */
+    if (n->tag) {
+        if (!strcmp(n->tag, "canvas") || !strcmp(n->tag, "video") ||
+            !strcmp(n->tag, "audio") || !strcmp(n->tag, "progress") ||
+            !strcmp(n->tag, "select"))
+            *bail = 1;
+        if (hn_node_attr(n, "hn-lottie") || hn_node_attr(n, "hn-three") ||
+            hn_node_attr(n, "hn-cubism") || hn_node_attr(n, "hn-mesh") ||
+            hn_node_attr(n, "hn-live") || hn_node_attr(n, "hn-stream") ||
+            hn_node_gif_src(n))
+            *bail = 1;
+    }
+    for (hn_node *ch = n->first; ch; ch = ch->next) {
+        h = frag_hmixu(h, 0x9E3779B9u);   /* 顺序敏感 */
+        h = frag_hash_walk(ch, c, depth + 1, bail, count);
+    }
+    return h;
 }
 
 /* ---------------- <select> 弹层(文档序尾部统一补画) ----------------

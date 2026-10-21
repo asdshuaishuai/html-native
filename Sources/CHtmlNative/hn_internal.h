@@ -621,6 +621,16 @@ typedef struct hn_canvas_ledger {
                               并改位图尺寸 —— 变了即清账重开, 见 hn_canvas.c) */
 } hn_canvas_ledger;
 
+/* 冻结指令片段(单条): 某元素子树的显示列表快照。
+   cmds 深拷贝归片段所有(text/poly/verts 等指针字段随片段生命周期);
+   sx = 冻结时的继承偏移链(滚动/位移), 回放要求一致。 */
+typedef struct hn_frag {
+    hn_node *node;
+    unsigned long long fp;      /* 子树指纹(FNV-1a 64) */
+    float sx;                   /* 冻结时传入 paint_walk 的继承偏移 */
+    hn_cmd *cmds; int n, cap;
+} hn_frag;
+
 /* 每块画布账本的 op 上限(给足; 满则丢弃并置溢出标志) */
 #define HN_CANVAS_MAX_OPS 4096
 
@@ -633,6 +643,8 @@ void hn_canvas_sync_element_size(hn_context *c, hn_canvas_ledger *l,
                                  const char *cv_id);
 /* 释放全部账本(文档替换 = 元素销毁 / context 销毁时调) */
 void hn_canvas_dispose(hn_context *c);
+/* 冻结片段全清(文档替换/compact/销毁; hn_paint.c 实现) */
+void hn_paint_frag_clear(hn_context *c);
 
 /* getImageData 的栅格化核心(hn_paint.c 实现 —— 账本重放是它的地盘):
    把账本按 canvas 属性坐标 1:1 重放到一张临时显示列表, 交注入的渲染
@@ -719,6 +731,11 @@ struct hn_context {
     hn_media_session *med_sessions; int n_med, cap_med;
     /* <canvas> op 账本表(hn_canvas.c 持有; 按 canvas id 寻址) */
     hn_canvas_ledger *canvases; int n_canvases, cap_canvases;
+    /* 冻结指令片段缓存(hn_paint.c; handwired "冻结"思想的 hn 落地):
+       静态子树的 hn_cmd 序列按指纹缓存, 命中帧整块回放跳过 paint walk。
+       指纹 = 子树全量哈希(标签/属性/文本/计算后样式/布局盒/滚动);
+       动画中/动态元素(canvas/lottie/three/...)子树不缓存。 */
+    hn_frag *frags; int n_frags, cap_frags;
     /* 帧循环活跃标志: anim_tick 收到过 dt>0 即置位(不复位)。布局期锚定
        据此分流 —— 有帧循环的窗口走"平滑追上"动画(逐帧推进, 需要 dt);
        无帧循环的管线(离屏 shot/dump, 无从推进动画)保持"直接贴底"的旧
