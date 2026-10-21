@@ -14,7 +14,10 @@
 > dlopen 系统 API, 编译期零 SDK 依赖。
 > **人类和 AI 都能直接开发**：会 HTML/CSS 就能出原生窗口，无构建、无
 > 依赖；目标是把应用开发的技术成本压到最低。
-> 人类开发者上手 → [docs/getting-started.md](docs/getting-started.md)。
+> 人类开发者上手 → [docs/getting-started.md](docs/getting-started.md) ·
+> 完整手册 → [docs/manual.md](docs/manual.md) · 架构 →
+> [docs/architecture.md](docs/architecture.md) · Wiki →
+> [docs/wiki/Home.md](docs/wiki/Home.md)。
 
 ## 定位
 
@@ -175,13 +178,17 @@ tools/hn_daemon.c      C99 常驻宿主(Unix socket JSON-lines, agent 入口)
 tools/hn_cli.c         C99 命令行客户端(与 daemon 配对)
 tools/build-multiplatform.sh  交叉构建(zig cc, 三平台产物 + 跨架构确定性门禁)
 tools/build-daemon-cli.sh     daemon/CLI 本机构建
-tools/*_probe.c/.sh    探针 37 族(渲染/AA/描边环/裁剪/透明/dom/css/html/layout/events/canvas/
+tools/*_probe.c/.sh    探针 42 族(渲染/AA/描边环/裁剪/透明/dom/css/html/layout/events/canvas/
                        anim/timer/gif/md/fmt/include/stream/lottie/three/quad3d/mesh/live2d/
                        cubism/media/media_element/media_window/neb3_fallback/pe_surface/
-                       sysbridge/sysroute/http/window/resident/pet/hidpi/perf/gpu/macos_deep)
-docs/                  校准文档: getting-started(上手) · platforms(平台能力矩阵)
+                       sysbridge/sysroute/http/window/resident/pet/hidpi/perf/gpu/macos_deep/
+                       project/pack/capsule/capsule_app/wasm/freeze_l2)
+docs/                  校准文档: getting-started(上手) · manual(完整使用手册)
+                       · architecture(架构) · platforms(平台能力矩阵)
                        · media-design(媒体契约) · threejs-support(3D 支持度)
                        · adr-001-renderer(绘制引擎决策) · roadmap(路线图)
+                       · freeze-design(冻结设计) · handwired-notes(handwired 研究)
+docs/wiki/             Wiki(导航首页 Home.md + 9 主题页)
 screenshots/           引擎效果截图
 ```
 
@@ -913,6 +920,10 @@ dist/hn shot card out.png                                 # daemon 里的无头�
 
 ## 已知简化与路线图
 
+- ~~增量渲染/惰性布局~~ **冻结三层已落地**(2026-10-21/22): 文本测量缓存
+  + 子树布局记忆(键中跳过, 原点变只平移) + 级联记忆化(输入未变节点跳过
+  整段样式计算) —— 重复重排负载纯布局 4-5x(设计/边界/实测:
+  docs/freeze-design.md); 余下排期(替换元素版本号/平移逐位化)见该文
 - 片段热更新走 arena, 旧节点不回收; class/id 选择器统一小写
 - 近期: select、grid 布局、多屏/多表面组合、`hn new` 脚手架;
   **mtime 热重载已落地**(`hn_app --watch`, 缺省开 —— update 热推送
