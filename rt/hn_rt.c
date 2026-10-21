@@ -36,7 +36,14 @@ struct hn_rt {
        守卫之外 —— 字段必须对所有构建可见) */
     int range_drag;
     char range_id[64];
-    hn_context *ctx;
+    /* handwired #1 事件时间戳(所有构建可见):
+       mono_last_q = 已消费到的单调钟位置(1/64ms 栅格, 输入与帧共享同一条链);
+       ev_consumed_ms = 自上帧以来**事件已推进**的动画时长 —— 帧调度扣除,
+       防止同一真实跨度被事件+帧各推进一次(handwired "状态只在事件/整定点
+       写回"的 hn 落地)。 */
+    double mono_last_q;
+    int mono_have;
+    double ev_consumed_ms;    hn_context *ctx;
     int w, h;
     float scale;                /* HiDPI 设备缩放(位图 = 逻辑 × scale; 布局/
                                    命中/窗口表面恒逻辑 px; 缺省 1.0 —— 不设置
@@ -359,6 +366,41 @@ static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
                           float x, float y, const char *utf8, int key, int detail);
 static void rt_range_set_from_x(hn_rt *rt, hn_node *inp, float x);
 static int rt_native_click(hn_rt *rt, hn_node *n, float click_x);
+
+/* ---- handwired #1: 事件在时间戳处应用 ----
+ * 单调钟读数(1/64ms 栅格量化, 与帧时间戳同一手势)。Windows 走 QPC,
+ * POSIX 走 CLOCK_MONOTONIC —— 自包含, 不拉平台层依赖。 */
+static double rt_mono_q(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER f, c2;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c2);
+    double ms = (double)c2.QuadPart * 1000.0 / (double)f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double ms = (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#endif
+    return floor(ms * 64.0) / 64.0;
+}
+
+/* 每个输入入口先调: 把动画钟推进到**事件到达时刻**(而非等下帧), 消耗量
+   记入 ev_consumed_ms 供帧调度扣除(同一真实跨度不双推进)。返回推进档位
+   (HN_ANIM_*, 0 = 无动画可推进); 调用方据此决定是否即时重渲染。 */
+static int rt_events_advance(hn_rt *rt) {
+    if (!rt || !rt->ctx) return 0;
+    double q = rt_mono_q();
+    double dt = rt->mono_have ? q - rt->mono_last_q : 0.0;
+    rt->mono_last_q = q;
+    rt->mono_have = 1;
+    if (dt < 0.0) dt = 0.0;
+    if (dt > 250.0) dt = 250.0;                 /* 长眠限步(与帧同口径) */
+    if (dt < 1.0 / 64.0) return 0;              /* 不足一个栅格步: 不推进 */
+    int cls = 0;
+    if (hn_context_anim_tick_ex(rt->ctx, (float)dt, &cls))
+        rt->ev_consumed_ms += dt;
+    return cls;
+}
 
 static int rt_sys_store_get(void *ctx, const char *key, char *out, size_t cap) {
     return hn_rt_store_get((const char *)ctx, key, out, cap);
@@ -3324,9 +3366,15 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
     /* hx 轮询域虚拟钟(与 QuickJS 构建里 clock_ms 同一手势, 但**不受**构建
        开关门控 —— 轮询在无 JS 构建同样存在): 每帧 += dt。真窗壳喂真实间隔
        ⇒ 与墙钟一致; 探针/--advance 喂虚拟步进 ⇒ 轮询确定性到期。 */
-    rt->poll_clock_ms += dt_ms > 0 ? (double)dt_ms : 0;
+    rt->poll_clock_ms += dt_ms > 0 ? (double)dt_ms : 0;   /* 轮询/hx: 墙钟语义 */
+    /* handwired #1: 事件已在各自时间戳推进过动画的部分从帧推进中扣除
+       —— 同一真实跨度恰被推进一次(事件时刻 + 帧尾余量), 任何帧率下
+       动画总进度 = 真实流逝。 */
+    float dt_anim = dt_ms - (float)rt->ev_consumed_ms;
+    if (dt_anim < 0) dt_anim = 0;
+    rt->ev_consumed_ms = 0;
 #ifdef HN_HAVE_QUICKJS
-    rt->clock_ms += dt_ms > 0 ? (double)dt_ms : 0;   /* 虚拟单调钟: 随帧步进 */
+    rt->clock_ms += dt_anim > 0 ? (double)dt_anim : 0;   /* 虚拟单调钟: 随帧步进 */
 #endif
     /* JS 定时器与 RAF 先行(帧开头语义): 到期回调、画布/文本改动在此
        生效。回调是否真的跑过由返回值给出 —— 渲染合并进帧尾一次
@@ -3359,7 +3407,7 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
        媒体-only 在播(interactive 且无首帧几何待落位)同走轻路径:
        视频帧推进不改样式/几何, relayout 是纯浪费(事故③的 CPU 大头之一)。 */
     int anim_cls = HN_ANIM_NONE;
-    int anim = hn_context_anim_tick_ex(rt->ctx, dt_ms, &anim_cls);
+    int anim = hn_context_anim_tick_ex(rt->ctx, dt_anim, &anim_cls);
     if (anim) {
         if (anim_cls == HN_ANIM_AMBIENT ||
             (anim_cls == HN_ANIM_INTERACTIVE && hn_media_light_render_ok(rt->ctx))) {
@@ -3454,6 +3502,7 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
 }
 
 int hn_rt_pointer_move(hn_rt *rt, float x, float y) {
+    int ev_cls = rt_events_advance(rt);
     if (!rt) return 0;
     /* input[type=range] 拖拽: 按住期间持续按 x 设值(松手/命中漂移出
        元素则结束 —— id 重查不到也算结束, 文档替换安全)。 */
@@ -3744,6 +3793,7 @@ int hn_rt_back(hn_rt *rt) {
 }
 
 int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
+    int ev_cls = rt_events_advance(rt);
     if (!rt) return 0;
     /* 按下态先于早退喂入: up 事件也要清 pointer_down(轨道相机松手进惯性),
        但 click 管线仍只在 down 跑(原语义, 不双发)。 */
@@ -3828,7 +3878,14 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
     }
     /* 点击派发(监听器 → _pd → 原生默认动作, 全在 dispatch 内完成):
        返回非 0 = 有 JS 消费或原生动作已执行 —— 重渲染, hx/链接跳过。 */
+    int had_listeners = rt_js_has_listener(rt, "click");
     if (rt_js_dispatch(rt, "click", n, x, y, NULL, 0, 1))
+        return rt_render(rt);
+    if (had_listeners)
+        /* 监听器跑过且未 preventDefault: 可能已改样式/文档 —— 全路径重算。
+           handwired #1: 新目的地(过渡目标)在事件时刻启动, 不等下帧。
+           (无 hx 载体时旧口径在这里 return 0, 过渡晚一拍才启动 —— 实测
+           事件后 500ms 步进只走到 ~0。) */
         return rt_render(rt);
     hn_node *carrier = hx_carrier(n);
     if (carrier) {
@@ -4064,6 +4121,7 @@ static hn_node *rt_focus_next(hn_rt *rt, int back) {
 }
 
 int hn_rt_key(hn_rt *rt, int down, int key, const char *utf8) {
+    int ev_cls = rt_events_advance(rt);
     if (!rt) return 0;
     hn_node *target = rt->focus ? rt->focus : hn_doc_root(hn_context_doc(rt->ctx));
     if (!down) {

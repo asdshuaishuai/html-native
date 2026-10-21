@@ -33,6 +33,7 @@
 #include "hn.h"
 #include "hn_rt.h"
 #include "hn_internal.h"
+#include "../Sources/CHtmlNative/hnsoft.h"
 
 static int g_pass = 0, g_fail = 0;
 
@@ -574,6 +575,63 @@ int main(void) {
             check(sel->select_row0 >= 0, "弹层滚轮 → row0 钳制不越界");
             hn_rt_key(srt, 1, HN_KEY_ESC, NULL);
             hn_rt_close(srt);
+        }
+    }
+
+    /* == 14. 事件时间戳(handwired #1): 动画钟推进总量 = 虚拟步进 ==
+       事件到达时先把动画推进到事件时刻(真实钟, 进程内 ≈0), 消耗量从
+       帧调度扣除 —— 总量恰为各帧虚拟步进之和, 任何帧率/输入序列下
+       逐位一致。像素判据: 1s 线性变色的过渡, 500ms 步进到中点色,
+       1000ms 完全到位, 超步进不回退(事件推进不双计)。 */
+    printf("== 事件时间戳(handwired #1): 总量=虚拟步进 ==\n");
+    {
+        const char *tr_html =
+            "<html><head><style>html,body{margin:0}"
+            "#m{width:40px;height:40px;background:rgb(0,200,0);"
+            "transition:background-color 1s linear}"
+            "</style></head><body>"
+            "<div id='m'></div>"
+            "<button id='go'>go</button>"
+            "</body></html>";
+        hn_rt_desc td = { "events-ts", tr_html, strlen(tr_html), NULL, 0, 300, 200 };
+        hn_rt *trt = hn_rt_open(&td);
+        check(trt != NULL, "过渡页 hn_rt_open");
+        if (trt) {
+            hn_context *tc = hn_rt_context(trt);
+            /* 点击 #go: JS 监听器把 #m 背景改成红(过渡启动; 事件时刻启动) */
+            eval_str(trt, "events-ts",
+                "document.getElementById('go').addEventListener('click',function(){"
+                "document.getElementById('m').style.background='rgb(255,0,0)';}); 1");
+            float gx, gy;
+            box_center(trt, "go", &gx, &gy);
+            hn_rt_button(trt, 1, gx, gy, 0);   /* 事件: 真实钟推进 ≈0 */
+            /* 采样辅助 lambda(宏): 渲染当前帧, 读 #m 中心像素 G 分量 */
+            #define TSAMPLE_G() do { \
+                hn_context_repaint(tc); \
+                const hn_display_list *tdl = hn_context_display_list(tc); \
+                unsigned char *tp = tdl ? hnsoft_render(tdl, 300, 200, 0xFF202020u) : NULL; \
+                if (tp) { g_now = tp[((20*300)+20)*4+1]; g_r = tp[((20*300)+20)*4+0]; free(tp); } \
+            } while (0)
+            int g_now = -1, g_r = -1, g_g = -1;
+            hn_rt_frame(trt, 500.0f, &(int){0});   /* 500ms */
+            TSAMPLE_G();
+            printf("  [ts] 500ms G=%d\n", g_now);
+            check(g_now > 80 && g_now < 130,
+                  "500ms 步进 → 过渡中点色(总消耗=虚拟步进)");
+            g_now = -1;
+            hn_rt_frame(trt, 499.0f, &(int){0});
+            TSAMPLE_G();
+            check(g_now < 30, "999ms → 接近终态(未超步进)");
+            g_now = -1;
+            hn_rt_frame(trt, 1.0f, &(int){0});
+            TSAMPLE_G();
+            check(g_now < 8, "1000ms → 完全到位(线性 1s 精确)");
+            g_now = -1;
+            hn_rt_frame(trt, 300.0f, &(int){0});
+            TSAMPLE_G();
+            check(g_now < 8, "超步进不回退(事件推进不双计)");
+            #undef TSAMPLE_G
+            hn_rt_close(trt);
         }
     }
 

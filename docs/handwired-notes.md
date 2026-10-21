@@ -51,15 +51,23 @@ hn 的 dt 上限 250ms 保留(手=handwired 的 snap 语义变体: 超预算不�
 
 ## 四、📋 可采纳(排期, 按价值排序)
 
-### 1. 事件在时间戳处应用, 状态只在事件/整定点写回
+### ✅ 1. 事件在时间戳处应用, 状态只在事件/整定点写回(2026-10-21 落地)
 handwired: 一帧内每个不同时间戳的事件各做一次求值(弹簧先步进到该
 时间戳再应用事件); 状态写回只发生在事件与 settle 整定点, 帧尾求值跑
 在表格**副本**上。收益: 新目的地在事件后 ≤4ms 就开始拉动(而非等到下
 帧), 且存档逐位可重放。
-hn 映射: rt pump 已是事件驱动(daemon select 唤醒即处理), 差的是
-**事件不带时间戳**——pointer/key 到达即按当帧 dt 处理。排期: 输入
-事件带 CLOCK_MONOTONIC 时间戳进 hn_rt_frame 的帧调度(先 anim_tick 到
-事件时刻再派发)。收益在快速连点 + 弹簧类交互的可重放性。
+
+hn 落地(rt/hn_rt.c):
+- `rt_mono_q()`: 单调钟 1/64ms 栅格量化(与帧时间戳同一手势; Win=QPC,
+  POSIX=CLOCK_MONOTONIC, 自包含不拉平台层)。
+- 四个输入入口(button/pointer_move/key/scroll)先调 `rt_events_advance`:
+  动画钟推进到**事件到达时刻**, 消耗量记 `ev_consumed_ms`。
+- `hn_rt_frame`: 动画钟推进扣除 `ev_consumed_ms`(同一真实跨度恰推进一次:
+  事件时刻 + 帧尾余量; poll_clock 保持墙钟全量)。**实测判据**: 1s 线性
+  变色, 事件后 500ms 虚拟步进 → 精确中点色 G=100; 999ms → G≈0.2;
+  1000ms → 终态; 超步进不回退(events_probe §14, 81 断言全绿)。
+- 无 pd 的 click 监听器跑过后补**全路径重算** —— 过渡目标(新目的地)在
+  事件时刻启动, 不等下帧(旧口径 return 0, 过渡晚一拍, 实测 500ms 只走 ~0)。
 
 ### 2. settle check + 固定模拟时间整定点
 handwired: 弹簧每 64ms 模拟时间做一次 settle 检查(0.01px 内且速度
