@@ -157,6 +157,10 @@ typedef int (*t3_neb3_scene_set_depth)(void *scene, int enabled);
 typedef int (*t3_neb3_render)(void *scene, float time_ms, const neb3_color *clear,
                               const unsigned char **rgba, size_t *bytes,
                               neb3_render_info *info);
+/* 可选符号(2026-10-22 起后端提供; 旧后端 NULL → 读回路径):
+   原生纹理直入(macOS IOSurface 互操作, 零 CPU 回读)。 */
+typedef int (*t3_neb3_render_native)(void *scene, float time_ms,
+                                     const neb3_color *clear, neb3_native *out);
 typedef void (*t3_neb3_release_frame)(void *scene);
 typedef const char *(*t3_neb3_last_error)(void *rt);
 
@@ -175,6 +179,7 @@ struct t3_neb3_api {
     t3_neb3_scene_set_depth        scene_set_depth;
     t3_neb3_render                 render;
     t3_neb3_release_frame          release_frame;
+    t3_neb3_render_native          render_native;   /* 可选; NULL = 旧后端 */
     t3_neb3_last_error             last_error;
 };
 
@@ -246,6 +251,9 @@ static void t3_neb3_load(void) {
            装载手法; 直接 cast 在 ISO C 是约束违例, memcpy 无警告) */
         memcpy((char *)&g_neb3 + T3_NEB3_SYMS[i].off, &sym, sizeof(sym));
     }
+
+    /* 可选符号: 旧后端(原生纹理直入之前)没有 → NULL = 读回路径 */
+    g_neb3.render_native = (t3_neb3_render_native)dlsym(h, "neb3_render_native");
     g_neb3_state = 1;
     fprintf(stderr, "[neb3] backend: %s\n", path);
 #endif
@@ -403,6 +411,40 @@ static int t3_paint_backend(hn_context *c, hn_node *n,
         clear.g = (float)((bg >> 16) & 0xFF) / 255.0f;
         clear.b = (float)((bg >> 8) & 0xFF) / 255.0f;
         clear.a = 1.0f;
+    }
+
+    /* 原生纹理直入(macOS IOSurface 互操作): GPU 合成可用(host 支持
+       IOSurface 包裹)时零回读 —— BITMAP 只携带 IOSurface 句柄, Metal
+       合成器包同表面消费(生产者 wgpu 已把帧写入, 预乘域, 与合成器
+       口径一致); hnsoft 消费场景不进此路(hn_gpu_native_surface_ok
+       为 false → 走下方读回路径)。失败回落读回, 不回退整链。 */
+    if (g_neb3.render_native && hn_gpu_native_surface_ok()) {
+        neb3_native nat;
+        memset(&nat, 0, sizeof(nat));
+        if (g_neb3.render_native(g_neb3_slots[slot].scene, n->ext_clock,
+                                 &clear, &nat) == 1 &&
+            nat.iosurface && nat.width > 0 && nat.height > 0) {
+            hn_cmd cmd;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.kind = HN_CMD_BITMAP;
+            cmd.x = sx;
+            cmd.y = sy;
+            cmd.w = bw;
+            cmd.h = bh;
+            /* bitmap = NULL: 软件回退帧跳过此框(v1 边界, roadmap 已档);
+               GPU 合成是本路的唯一消费方。 */
+            cmd.bitmap_w = nat.width;
+            cmd.bitmap_h = nat.height;
+            cmd.bitmap_stride = nat.width * 4;
+            cmd.native_surface = nat.iosurface;
+            cmd.bitmap_pts = (double)n->ext_clock / 1000.0;
+            cmd.fill = 0xFFFFFF00u
+                     | (unsigned char)((alpha >= 1.0f ? 1.0f
+                                                       : (alpha < 0.0f ? 0.0f : alpha))
+                                           * 255.0f + 0.5f);
+            hn_paint_push(c, &cmd);
+            return 1;
+        }
     }
 
     const unsigned char *rgba = NULL;

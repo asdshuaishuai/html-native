@@ -20,7 +20,7 @@ hn_sources_check "${HN_SOURCES[@]+"${HN_SOURCES[@]}"}" || exit 1
 
 HN_CFLAGS=(-std=c99 -O2 -Wall -ffp-contract=off)
 HN_DEFS=(-DHN_HAVE_QUICKJS)
-HN_INCS=(-I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_RT_DIR" -I "$HN_WASM3_DIR"
+HN_INCS=(-I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" -I "$HN_RT_DIR" -I "$HN_WASM3_DIR"
          -I "$HN_QUICKJS_INC" -I /opt/homebrew/include/freetype2)
 HN_LIBS=("$HN_QUICKJS_A" -L/opt/homebrew/lib -lfreetype -lm)
 

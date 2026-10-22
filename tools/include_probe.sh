@@ -24,8 +24,8 @@ hn_sources_core
 HN_SOURCES=("$HN_TOOLS_DIR/include_probe.c" ${HN_SOURCES[@]+"${HN_SOURCES[@]}"})
 
 HN_CFLAGS=(-std=c99 -O2 -Wall)
-HN_INCS=(-I "$HN_ENG/include" -I "$HN_ENG")
-HN_LIBS=(-lm)
+HN_INCS=(-I "$HN_ENG/include" -I "$HN_ENG" -I /opt/homebrew/include/freetype2)
+HN_LIBS=(-L/opt/homebrew/lib -lfreetype -lm)
 
 hn_sources_check ${HN_SOURCES[@]+"${HN_SOURCES[@]}"} || exit 1
 

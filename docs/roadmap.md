@@ -698,9 +698,19 @@ neb3(wgpu 后端)的帧此前每帧 GPU→CPU 回读 → 引擎再上传纹理 �
 - **探针 `tools/neb3_surface_probe.sh`(18 断言)**: 原生路径与 CPU 回读
   路径对同一确定性场景**逐位一致**(互操作无语义漂移) + generation 递增
   + NULL 健壮性; c_abi 回归(1)与 neb3_fallback/three 探针全绿。
-- **余下**: hn_three/hn_gpu 消费接线(原生纹理挂进显示列表, 跳过
-  BITMAP 上传; hnsoft 消费时自动回落 readback 路径) + MSAA resolve
-  之外的路径润色。完成后 three 的 GPU 帧零 CPU 往返。
+- ✅ **消费接线已落地**(同日第二轮): `hn_cmd.native_surface` 字段
+  (BITMAP 携带 IOSurface, 字节可空) + 原语表 `tex_from_native`
+  (hnp_gpu_metal 实现: newTextureWithDescriptor:iosurface:plane:, 零
+  上传) + `hn_gpu_native_surface_ok()` 路由判定 + hn_three 原路
+  (可选符号 dlsym, 旧后端/无 GPU host 自动回落读回)。hn_gpu 的位图
+  缓存按 surface 指针命中即零操作(生产者已写入同表面)。**端到端探针
+  `neb3_gpu_probe.sh`**: 同页双上下文(GPU=原生路由 / hnsoft=读回)对照
+  —— 原生路由触发断言(防失败静默回落假绿) + 盒区内容双路一致
+  (内容采样 84=84) + 框外恒背景。GPU 帧的三维内容零 CPU 往返达成。
+  语义要点: 原生 IOSurface 内容为**预乘域**(管线预乘变体 +
+  LoadOp::Clear 预乘清屏), 与 Metal 合成器口径一致; 不透明片元的
+  预乘(a=1)≡直读(MSAA resolve 逐位同值, surface 探针逐位锚)。
+  v1 边界: 整帧回退 hnsoft 的罕见场景下原生框跳过一帧(roadmap 已档)。
 
 ### 已落地(2026-10-15 渲染与分发批次)
 

@@ -164,6 +164,12 @@ typedef struct hn_cmd {
     const unsigned char *bitmap;
     int    bitmap_stride, bitmap_w, bitmap_h;
     double bitmap_pts;
+    /* ---- 原生纹理直入(neb3 IOSurface 互操作; 可为 NULL) ----
+       非 NULL 时 bitmap 为 NULL(无 CPU 字节): GPU 合成器把该 IOSurface
+       包成自己的 MTLTexture 直接绘制(生产者 wgpu 已写入, 零上传零回读);
+       软件光栅器不消费此字段 —— 该路 BITMAP 只在 GPU 合成活跃时由
+       hn_three 产出(否则走既有读回字节路径)。 */
+    void  *native_surface;
     /* ---- 源子矩形(IMAGE/PDATA 消费; has_isrc=0 时为整图, 行为不变) ----
        源图像素坐标(sx,sy 起的 sw×sh 子区)贴到目标 rect(9 参 drawImage /
        putImageData 脏矩形都在记录侧裁好装进这里)。 */

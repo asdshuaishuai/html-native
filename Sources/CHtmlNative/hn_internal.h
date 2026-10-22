@@ -983,6 +983,9 @@ void hn_gpu_set_host(const void *host);
    + 细粒度条件: 圆角/阴影/文字阴影/图片解码等, 见 hn_gpu.c 头注 6)。
    O(n) 便宜; 每帧渲染前调一次。 */
 int  hn_gpu_available(const hn_display_list *dl);
+/* 原生纹理直入就绪判定(GPU host 在位 + 平台支持 IOSurface 包裹;
+   呼出方 hn_three 用它路由 读回字节 vs IOSurface 直入) */
+int  hn_gpu_native_surface_ok(void);
 /* GPU 光栅一帧: 等价于 hnsoft_render_scaled 的 GPU 版, 但直接产出**预乘
    BGRA**(Metal readback 原样, 与 rt_raster 的 CPU 路径产物同口径, blit 直用;
    与 hnsoft 非预乘 RGBA 的换算推导见 hn_gpu.c 头注 1)。缓冲 malloc(调用方

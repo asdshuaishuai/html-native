@@ -54,7 +54,7 @@ CAIRO_SRC=(Sources/CHtmlNative/hn_cairo.c)
 FT_INC=""
 if [ -d /opt/homebrew/include/freetype2 ]; then FT_INC="-I/opt/homebrew/include/freetype2"; fi
 CFLAGS=(-std=c99 -O2 -Wall -ffp-contract=off -I Sources/CHtmlNative/include
-        -I Sources/CHtmlNative -I rt -I vendor/wasm3 $FT_INC -DHN_VERSION="\"$VERSION\"")
+        -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3 $FT_INC -DHN_VERSION="\"$VERSION\"")
 
 echo "构建 hncore $VERSION (三平台)"
 echo
@@ -174,13 +174,15 @@ build "hnweb-macos-arm64" "aarch64-macos" "" "text" "" "${MAC_RT[@]}"
 # app/hn_app.c 是唯一主循环; 链接不同平台实现 = 该平台的应用。
 # headless 在本机可跑(CI/agent 无显示环境), macOS 同样可跑。
 RT_SRC="rt/hn_rt.c rt/hn_sys.c rt/hn_http.c"
-# GPU 渲染后端引擎侧翻译器(hn_gpu.c): 只入 hnapp 的引擎数组 —— 它经宿主
+# GPU 渲染后端引擎侧翻译器(hn_gpu.c): 入核心清单(2026-10-22 —— hn_three
+# 的原生纹理路由引用它; 无 host 时惰性返回 0, hncore 平台零依赖不变)。
+# 此前只入 hnapp 的引擎数组 ——
 # 槽(const void*)接收平台原语表, 不引用 hnp_gpu_host() 函数本身, 因此
 # hncore(无平台文件)等目标不需要它; hn_rt.c 里是弱桩, 不链本文件的构建
 # (probe 现场编译)自动恒回退 hnsoft。平台实现(hnp_gpu_metal.c)只入列
 # macos 目标(纯 dlopen Metal, 链接期零 framework; headless/linux 的
 # hnp_gpu_host() 返回 NULL —— 与 hnp_media_supported 留位同一口径)。
-ENGINE_SRC=("${CORE_SRC[@]}" "$HN_ENG/hn_gpu.c" "${WASM3_SRC[@]}")
+ENGINE_SRC=("${CORE_SRC[@]}" "${WASM3_SRC[@]}")
 RT_INC="-I Sources/CHtmlNative/include -I Sources/CHtmlNative -I rt -I platform -I vendor/wasm3 $FT_INC"
 
 # 媒体宿主装配(app/hn_media_platform.c): 三个 hnapp 目标统一入列 ——

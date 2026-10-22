@@ -38,10 +38,13 @@ HN_WASM3_DIR="$HN_REPO_ROOT/vendor/wasm3"
 # 所有 build*.sh 与探针共用的必需 C99 引擎清单。
 # hn_paint 硬引用 pe/cubism/three; 无 SDK 宏时对应模块安全降级。
 # Canvas C++ 后端是可选项，由 hn_canvas_build 独立编译并配套定义宏。
+# hn_gpu.c 亦属核心(2026-10-22): hn_three 的原生纹理路由引用
+# hn_gpu_native_surface_ok —— 拆链会让 hncore/探针链接失败。无 host 时
+# 全部查询返回 0(惰性, 平台零依赖不变)。
 HN_ENGINE_CORE=(hn_arena.c hn_html.c hn_md.c hn_css.c hn_style.c hn_layout.c
-                hn_paint.c hn_context.c hn_theme.c hn_canvas.c hn_json.c
-                hn_lottie.c hn_mesh.c hn_png.c hn_gif.c hn_media.c hn_fmt.c
-                hn_zip.c hn_pe.c hn_cubism.c hn_three.c neb3_soft.c)
+                hn_paint.c hn_context.c hn_theme.c hn_canvas.c hn_gpu.c
+                hn_json.c hn_lottie.c hn_mesh.c hn_png.c hn_gif.c hn_media.c
+                hn_fmt.c hn_zip.c hn_pe.c hn_cubism.c hn_three.c neb3_soft.c)
 HN_ENGINE_SOFT=(hnsoft.c)      # 软渲染宿主(hnsoft 位图后端)
 HN_ENGINE_WASM=(hn_wasm.c)     # WASM 缝(须连 vendor/wasm3 一起链)
 HN_WASM3=(m3_bind.c m3_code.c m3_compile.c m3_core.c m3_env.c m3_exec.c
@@ -157,6 +160,8 @@ hn_up_to_date() {
 # 时 16 份探针只各编一次)。
 hn_probe_compile() {
   local label="$1" out="$2"
+  # hn_gpu.c 入核心清单后, 探针编译统一需要 hn_platform.h —— 单点补齐
+  HN_INCS+=(-I "$HN_REPO_ROOT/platform")
   if [ "${HN_CANVAS_ITY:-0}:${HN_CANVAS_CG:-0}" = 0:0 ] && \
      hn_up_to_date "$out" "$HN_TOOLS_DIR/_engine_sources.sh" ${HN_SOURCES[@]+"${HN_SOURCES[@]}"}; then
     echo "$label: 缓存命中(产物比全部源新), 跳过编译: $out"

@@ -999,7 +999,7 @@ int main(int argc, char **argv) {
 CEOF
 
 hn_sources_soft   # 引擎核心 + hnsoft(HN_SOURCES)
-HN_SOURCES=("$SRC_C" "$HN_ENG/hn_gpu.c" "$HN_REPO_ROOT/platform/hnp_gpu_metal.c"
+HN_SOURCES=("$SRC_C" "$HN_REPO_ROOT/platform/hnp_gpu_metal.c"
             ${HN_SOURCES[@]+"${HN_SOURCES[@]}"})
 hn_sources_check ${HN_SOURCES[@]+"${HN_SOURCES[@]}"} || exit 1
 

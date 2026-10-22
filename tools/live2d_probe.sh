@@ -46,7 +46,7 @@ compile() {
        "$*" ${HN_SOURCES[@]+"${HN_SOURCES[@]}"} -lm -o "$OUT"
   local errlog
   errlog="$(mktemp "${TMPDIR:-/tmp}/hncc-XXXXXX")"
-  if "$HN_CC" -O2 -std=c99 -I "$HN_ENG/include" -I "$HN_ENG" "$@" \
+  if "$HN_CC" -O2 -std=c99 -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" "$@" \
        ${HN_SOURCES[@]+"${HN_SOURCES[@]}"} -lm -o "$OUT" 2>"$errlog"; then
     rm -f "$errlog"
     return 0

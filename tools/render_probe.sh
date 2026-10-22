@@ -26,7 +26,7 @@ fi
 OUT="${TMPDIR:-/tmp}/hn_render_probe_bin"
 echo "$LABEL: compile"
 "$HN_CC" -std=c99 -O2 -Wall -ffp-contract=off \
-    -I "$HN_ENG/include" -I "$HN_ENG" \
+    -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" \
     ${FT_INC:+"$FT_INC"} \
     "${HN_SOURCES[@]}" \
     ${FT_LIB[@]+"${FT_LIB[@]}"} -lm -o "$OUT"

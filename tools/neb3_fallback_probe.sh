@@ -50,7 +50,7 @@ compile_and_run() {
       "$HN_TOOLS_DIR/fake_neb3.c" -o "$dylib"
 
   echo "neb3_fallback_probe.sh: compile probe ($flavor)"
-  "$HN_CC" "${cflags[@]}" ${san[@]+"${san[@]}"} -I "$HN_ENG/include" -I "$HN_ENG" \
+  "$HN_CC" "${cflags[@]}" ${san[@]+"${san[@]}"} -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" \
       "${HN_SOURCES[@]}" ${ft[@]+"${ft[@]}"} -lm -o "$out"
 
   echo "neb3_fallback_probe.sh: run $flavor"

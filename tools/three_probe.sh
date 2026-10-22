@@ -33,7 +33,7 @@ compile_and_run() {
   local ft=()
   if [ -n "$FT_INC" ]; then ft=("$FT_INC" "${FT_LIB[@]}"); fi
   echo "three_probe.sh: compile $flavor"
-  "$HN_CC" "${cflags[@]}" ${san[@]+"${san[@]}"} -I "$HN_ENG/include" -I "$HN_ENG" \
+  "$HN_CC" "${cflags[@]}" ${san[@]+"${san[@]}"} -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" \
       "${HN_SOURCES[@]}" ${ft[@]+"${ft[@]}"} -lm -o "$out"
   echo "three_probe.sh: run $flavor"
   # macOS ASan 不支持 detect_leaks(abort trap 6), 按平台取值。

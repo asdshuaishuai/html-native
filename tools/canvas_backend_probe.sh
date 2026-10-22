@@ -12,7 +12,7 @@ if [ "$(uname -s)" = Darwin ] && [ "${HN_CANVAS_PROBE_NO_CG:-0}" != 1 ]; then
     DEFS+=(-DHN_HAVE_CANVAS_CG)
     BACKENDS+=(hn_canvas_cg.cpp)
 fi
-INCS=(-I "$HN_ENG" -I "$HN_ENG/include" -I "$ROOT/vendor/canvas_ity")
+INCS=(-I "$HN_ENG" -I "$HN_ENG/include" -I "$HN_REPO_ROOT/platform" -I "$ROOT/vendor/canvas_ity")
 SAN=(-fno-omit-frame-pointer)
 if [ "${HN_CANVAS_PROBE_SANITIZE:-0}" = 1 ]; then
     SAN=(-fsanitize=address,undefined -fno-omit-frame-pointer)

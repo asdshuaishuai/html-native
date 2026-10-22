@@ -65,11 +65,11 @@ hn_quad_compile() {
     local args=()
     if [ "$pass" = 1 ] && [ -n "$FT_INC" ]; then
       tag="(带 FreeType)"
-      args=(-O2 -std=c99 -I "$HN_ENG/include" -I "$HN_ENG" "$FT_INC"
+      args=(-O2 -std=c99 -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" "$FT_INC"
             ${FT_LIB[@]+"${FT_LIB[@]}"})
     else
       tag="(HN_NO_TEXT)"
-      args=(-O2 -std=c99 -I "$HN_ENG/include" -I "$HN_ENG" -DHN_NO_TEXT)
+      args=(-O2 -std=c99 -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" -DHN_NO_TEXT)
     fi
     echo "$LABEL: 编译: $HN_CC ${args[*]} ${HN_SOURCES[*]} ${extra[*]+"${extra[*]}"} -lm -o $out"
     local errlog

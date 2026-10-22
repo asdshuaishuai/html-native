@@ -40,7 +40,7 @@ if [ "${PE_PROBE_ASAN:-0}" = "1" ]; then
 fi
 
 echo "$LABEL: compile"
-"$HN_CC" "${CFLAGS[@]}" ${SAN[@]+"${SAN[@]}"} -DHN_HAVE_PE -I "$HN_ENG/include" -I "$HN_ENG" \
+"$HN_CC" "${CFLAGS[@]}" ${SAN[@]+"${SAN[@]}"} -DHN_HAVE_PE -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" \
     -I "$PE" -I "$PE/core" ${FT_INC:+"$FT_INC"} \
     "${HN_SOURCES[@]}" "$PE/core/"*.c \
     ${FT_LIB[@]+"${FT_LIB[@]}"} -lm -o "$OUT"

@@ -76,6 +76,9 @@ static obj_t (*o_msgSend)(obj_t, sel_t, ...);
 #define MSGULL(RET, O, NAME, A1, A2) \
     ((RET (*)(obj_t, sel_t, unsigned long, unsigned long))o_msgSend) \
         ((O), o_sel(NAME), (unsigned long)(A1), (unsigned long)(A2))
+#define MSGSEL3(RET, O, NAME, A1, A2, A3) \
+    ((RET (*)(obj_t, sel_t, obj_t, obj_t, unsigned long))o_msgSend) \
+        ((O), o_sel(NAME), (obj_t)(A1), (obj_t)(A2), (unsigned long)(A3))
 
 /* ---- Metal C/ObjC 类型镜像(逐值抄自 SDK 头, 不凭记忆) ---- */
 
@@ -544,6 +547,34 @@ static hnp_gpu_tex mtl_tex_create(int w, int h, const unsigned char *rgba) {
     return (hnp_gpu_tex)(slot + 1);   /* 句柄 = 下标+1(0 保留为无效) */
 }
 
+/* 原生纹理直入(neb3 IOSurface 互操作): surface 由生产者(wgpu 后端)
+   写入, 这里只在**本设备**上包一个 IOSurface 背书的 MTLTexture 视图 ——
+   零上传零回读。内容为预乘 RGBA8(生产者预乘输出), 与既有纹理上传后
+   的预乘口径一致; Shared 存储(Apple Silicon 同支持)。 */
+static hnp_gpu_tex mtl_tex_from_native(void *iosurface, int w, int h) {
+    if (!g_ready || !iosurface || w <= 0 || h <= 0 || w > 16384 || h > 16384)
+        return 0;
+    int slot = -1;
+    for (int i = 0; i < g_tex_n; i++)
+        if (!g_tex[i].tex) { slot = i; break; }
+    if (slot < 0) {
+        if (g_tex_n >= TEX_CAP) return 0;
+        slot = g_tex_n++;
+    }
+    obj_t td = make_tex_desc(MTL_PF_RGBA8, (unsigned long)w, (unsigned long)h,
+                             MTL_TU_SHREAD);
+    if (!td) return 0;
+    obj_t t = MSGSEL3(obj_t, g_device,
+                      "newTextureWithDescriptor:iosurface:plane:",
+                      td, (obj_t)iosurface, 0UL);
+    MSG0(void, td, "release");
+    if (!t) return 0;
+    g_tex[slot].tex = t;
+    g_tex[slot].w = w;
+    g_tex[slot].h = h;
+    return (hnp_gpu_tex)(slot + 1);
+}
+
 static void mtl_tex_update(hnp_gpu_tex t, const unsigned char *rgba) {
     int i = (int)t - 1;
     if (!g_ready || t == 0 || i < 0 || i >= g_tex_n || !g_tex[i].tex || !rgba) return;
@@ -959,6 +990,7 @@ static const hnp_gpu_host g_metal_host = {
     mtl_clip_mask_push,
     mtl_begin_present,
     mtl_end_present,
+    mtl_tex_from_native,
 };
 
 const hnp_gpu_host *hnp_gpu_backend(void) {

@@ -27,7 +27,7 @@ fi
 OUT="${TMPDIR:-/tmp}/hn_capsule_probe_bin"
 echo "$LABEL: compile"
 "$HN_CC" -std=c99 -O2 -Wall -ffp-contract=off \
-    -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_WASM3_DIR" \
+    -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" -I "$HN_WASM3_DIR" \
     ${FT_INC:+"$FT_INC"} \
     "${HN_SOURCES[@]}" "$HN_QUICKJS_A" \
     ${FT_LIB[@]+"${FT_LIB[@]}"} -lm -o "$OUT"

@@ -38,7 +38,7 @@ fi
 OUT="${TMPDIR:-/tmp}/hn_cubism_mask_probe_bin"
 echo "$LABEL: compile"
 "$HN_CC" -std=c99 -O2 -ffp-contract=off -DHN_HAVE_CUBISM \
-    -I "$HN_ENG/include" -I "$HN_ENG" -I "$ROOT/vendor/cubism/include" \
+    -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_REPO_ROOT/platform" -I "$ROOT/vendor/cubism/include" \
     ${FT_INC:+"$FT_INC"} \
     "${HN_SOURCES[@]}" "$CORE_LIB" \
     ${FT_LIB[@]+"${FT_LIB[@]}"} -lm -o "$OUT"

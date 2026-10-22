@@ -502,6 +502,12 @@ struct hnp_gpu_host {
        环形缓冲), 呼出方无需额外围栏。 */
     int  (*begin_present)(void *ca_metal_layer, int w, int h, unsigned bg);
     int  (*end_present)(void);
+    /* ── v2 契约扩展: 原生纹理直入(macOS IOSurface 互操作; 可选, NULL=不支持) ──
+       surface 为 IOSurfaceRef(void* 跨语言)。返回包着**同一 IOSurface**
+       的平台 MTLTexture 视图 —— 生产者(wgpu 后端)已把帧直接渲进该表面,
+       合成器零上传零回读消费; 句柄生命周期归引擎(LRU 持有, 同既有
+       tex_*)。NULL = 平台不支持(呼出方不产原生 BITMAP, 其余路径不变)。 */
+    hnp_gpu_tex (*tex_from_native)(void *iosurface, int w, int h);
 };
 
 /* 平台装配: 返回平台 GPU 原语表; 无 GPU 后端返回 NULL(呼出方回退 hnsoft)。

@@ -237,7 +237,11 @@ static int g_img_n;
 /* 媒体帧缓存: 按位图指针(引擎会话双缓冲的两块缓冲交替)。内容每帧可能
    变化 → 命中即整幅 tex_update(replaceRegion 上传 ≈ hnsoft 每帧 blend 的
    同量级带宽)。上限 16, LRU 逐出。 */
-typedef struct { const unsigned char *ptr; int w, h, stride; hnp_gpu_tex tex; unsigned used; } bmp_ent;
+typedef struct {
+    const unsigned char *ptr; int w, h, stride;
+    hnp_gpu_tex tex; unsigned used;
+    int native;   /* 1 = ptr 是 IOSurface(零上传直入), 非 CPU 字节指针 */
+} bmp_ent;
 static bmp_ent g_bmps[16];
 static int g_bmp_n;
 
@@ -348,6 +352,39 @@ static int g_glyph_oom;              /* glyph_get 资源失败(区别于缺字�
 /* ---------------- 媒体帧纹理(按指针缓存, 命中即整幅更新) ---------------- */
 
 static hnp_gpu_tex bmp_tex(const hn_cmd *c) {
+    /* 原生纹理直入(neb3 IOSurface 互操作): 缓存键 = IOSurface 指针
+       (跨帧稳定), 命中即零操作 —— 生产者(wgpu)已把新帧写入同一
+       IOSurface, 平台纹理是同表面视图, 内容天然最新(零上传零回读)。
+       新 surface 指针自动开新缓存项, 旧项走既有 LRU 逐出。 */
+    if (c->native_surface) {
+        for (int i = 0; i < g_bmp_n; i++) {
+            if (g_bmps[i].native && g_bmps[i].ptr == c->native_surface) {
+                g_bmps[i].used = ++g_frame_clock;
+                return g_bmps[i].tex;
+            }
+        }
+        hnp_gpu_tex tex = g_gpu->tex_from_native
+            ? g_gpu->tex_from_native(c->native_surface, c->bitmap_w, c->bitmap_h)
+            : 0;
+        if (!tex) { g_failed = 1; return 0; }
+        if (g_bmp_n >= (int)(sizeof(g_bmps) / sizeof(g_bmps[0]))) {
+            int old = 0;
+            for (int i = 1; i < g_bmp_n; i++)
+                if (g_bmps[i].used < g_bmps[old].used) old = i;
+            g_gpu->tex_free(g_bmps[old].tex);
+            g_bmps[old] = g_bmps[g_bmp_n - 1];
+            g_bmp_n--;
+        }
+        g_bmps[g_bmp_n].ptr = (const unsigned char *)c->native_surface;
+        g_bmps[g_bmp_n].w = c->bitmap_w;
+        g_bmps[g_bmp_n].h = c->bitmap_h;
+        g_bmps[g_bmp_n].stride = 0;
+        g_bmps[g_bmp_n].tex = tex;
+        g_bmps[g_bmp_n].used = ++g_frame_clock;
+        g_bmps[g_bmp_n].native = 1;
+        g_bmp_n++;
+        return tex;
+    }
     const unsigned char *ptr = c->bitmap;
     for (int i = 0; i < g_bmp_n; i++) {
         if (g_bmps[i].ptr == ptr && g_bmps[i].w == c->bitmap_w &&
@@ -976,6 +1013,13 @@ static void emit_pattern(const hn_cmd *c, float scale, int vw, int vh, int *ok) 
 
 /* ---------------- 可用性(hn_gpu_available, 契约"呼出方整帧回退") ---------------- */
 
+/* 原生纹理直入的就绪判定(呼出方 hn_three 路由用): GPU host 在位且
+   平台支持 IOSurface 纹理包裹。与 hn_gpu_available 的逐 cmd 判定共同
+   保证原生 BITMAP 只在可被 GPU 消费时产出。 */
+int hn_gpu_native_surface_ok(void) {
+    return host_ready() && g_gpu->tex_from_native != NULL;
+}
+
 int hn_gpu_available(const hn_display_list *dl) {
     if (!dl || !host_ready()) return 0;
     /* 路径裁剪开合栈(位 + 计数): 单掩码槽 —— "路径内再入路径"与"ppath
@@ -988,6 +1032,12 @@ int hn_gpu_available(const hn_display_list *dl) {
         if ((unsigned)c->kind > 13) return 0;
         if (!(g_gpu->caps.supported_cmds & (1u << c->kind))) return 0;
         switch (c->kind) {
+        case HN_CMD_BITMAP:
+            /* 原生 BITMAP(无字节, IOSurface 直入): 仅平台支持时可用;
+               有字节的既有路径不受影响。 */
+            if (c->native_surface && !g_gpu->tex_from_native) return 0;
+            if (!c->native_surface && !c->bitmap) return 0;
+            break;
         case HN_CMD_RECT:
             if (c->shadow) return 0;                    /* box-shadow: 四边形原语无模糊 */
             if (c->radius > 0.5f) return 0;             /* 圆角: 无 SDF(v1 回退, 头注 10) */

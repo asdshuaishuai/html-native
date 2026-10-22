@@ -17,8 +17,8 @@ hn_sources_check "${HN_SOURCES[@]+"${HN_SOURCES[@]}"}" || exit 1
 
 OUT="${TMPDIR:-/tmp}/hn_pack_probe_bin"
 echo "$LABEL: compile"
-$HN_CC -std=c99 -O2 -Wall -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_RT_DIR" \
-    "${HN_SOURCES[@]}" -lm -o "$OUT"
+$HN_CC -std=c99 -O2 -Wall -I "$HN_ENG/include" -I "$HN_ENG" -I "$HN_RT_DIR" -I "$HN_REPO_ROOT/platform" -I /opt/homebrew/include/freetype2 \
+    "${HN_SOURCES[@]}" -L/opt/homebrew/lib -lfreetype -lm -o "$OUT"
 
 echo "$LABEL: run"
 "$OUT"

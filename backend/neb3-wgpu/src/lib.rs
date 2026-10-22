@@ -135,6 +135,46 @@ fn fs_main(in : VSOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// 原生(预乘输出)变体: 片元先预乘, 混合 One/OneMinusSrcAlpha ——
+/// IOSurface 内容 = 预乘域, 与 Metal 合成器的混合口径一致。
+const SHADER_PREMULT: &str = r#"
+struct Uniforms {
+    view_proj : mat4x4<f32>,
+    model     : mat4x4<f32>,
+    color     : vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> u : Uniforms;
+
+struct VSOut {
+    @builtin(position) pos : vec4<f32>,
+    @location(0) n : vec3<f32>,
+};
+
+@vertex
+fn vs_main(@location(0) pos : vec3<f32>, @location(1) nrm : vec3<f32>) -> VSOut {
+    var out : VSOut;
+    out.pos = u.view_proj * (u.model * vec4<f32>(pos, 1.0));
+    out.n = (u.model * vec4<f32>(nrm, 0.0)).xyz;
+    return out;
+}
+
+@fragment
+fn fs_main(in : VSOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.n);
+    let a = abs(n);
+    var shade : f32;
+    if (a.y >= a.x && a.y >= a.z) {
+        shade = select(0.55, 1.0, n.y > 0.0);
+    } else if (a.x >= a.z) {
+        shade = select(0.70, 0.88, n.x > 0.0);
+    } else {
+        shade = select(0.62, 0.80, n.z > 0.0);
+    }
+    let rgba = vec4<f32>(u.color.rgb * shade, u.color.a);
+    return vec4<f32>(rgba.rgb * rgba.a, rgba.a);
+}
+"#;
+
 // ---------------------------------------------------------------------------
 // GPU context
 // ---------------------------------------------------------------------------
@@ -146,6 +186,12 @@ struct GpuCtx {
     bgl: wgpu::BindGroupLayout,
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_nodepth: wgpu::RenderPipeline,
+    /// 原生纹理直入路径专用: 输出**预乘** alpha(IOSurface 的消费方
+    /// —— Metal 合成器在预乘域做 src-over); 读回路径契约是非预乘,
+    /// 两条管线并存, 语义各自成立(neb3_surface_probe 双路径对照
+    /// 相应地做预乘换算后 ±2 容差对照)。
+    pipeline_native_depth: wgpu::RenderPipeline,
+    pipeline_native_nodepth: wgpu::RenderPipeline,
     sample_count: u32,
 }
 
@@ -194,16 +240,29 @@ impl GpuCtx {
             label: Some("neb3-unlit"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER)),
         });
+        let module_premult = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("neb3-unlit-premult"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_PREMULT)),
+        });
         let pipeline_depth = make_pipeline(
-            &device, &bgl, &module, sample_count, Some(wgpu::TextureFormat::Depth24Plus),
+            &device, &bgl, &module, sample_count, Some(wgpu::TextureFormat::Depth24Plus), false,
         );
-        let pipeline_nodepth = make_pipeline(&device, &bgl, &module, sample_count, None);
+        let pipeline_nodepth =
+            make_pipeline(&device, &bgl, &module, sample_count, None, false);
+        let pipeline_native_depth = make_pipeline(
+            &device, &bgl, &module_premult, sample_count,
+            Some(wgpu::TextureFormat::Depth24Plus), true,
+        );
+        let pipeline_native_nodepth =
+            make_pipeline(&device, &bgl, &module_premult, sample_count, None, true);
         Ok(GpuCtx {
             device,
             queue,
             bgl,
             pipeline_depth,
             pipeline_nodepth,
+            pipeline_native_depth,
+            pipeline_native_nodepth,
             sample_count,
         })
     }
@@ -238,6 +297,7 @@ fn make_pipeline(
     module: &wgpu::ShaderModule,
     sample_count: u32,
     depth_format: Option<wgpu::TextureFormat>,
+    premult_output: bool,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("neb3-layout"),
@@ -293,8 +353,24 @@ fn make_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                // Straight (non-premultiplied) src-over.
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                // 读回路径: straight(非预乘) src-over; 原生路径: 预乘输出
+                // (One/OneMinusSrcAlpha —— IOSurface 的消费方在预乘域合成)。
+                blend: Some(if premult_output {
+                    wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }
+                } else {
+                    wgpu::BlendState::ALPHA_BLENDING
+                }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -855,9 +931,10 @@ fn encode_pass(
     encoder: &mut wgpu::CommandEncoder,
     color: &wgpu::TextureView, resolve: Option<&wgpu::TextureView>,
     depth: Option<&wgpu::TextureView>, clear_color: wgpu::Color,
+    premult_output: bool,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("neb3-pass"),
+        label: Some(if premult_output { "neb3-pass-native" } else { "neb3-pass" }),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: color,
             depth_slice: None,
@@ -879,7 +956,12 @@ fn encode_pass(
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    let pipeline = if depth.is_some() { &gpu.pipeline_depth } else { &gpu.pipeline_nodepth };
+    let pipeline = match (depth.is_some(), premult_output) {
+        (true, false) => &gpu.pipeline_depth,
+        (false, false) => &gpu.pipeline_nodepth,
+        (true, true) => &gpu.pipeline_native_depth,
+        (false, true) => &gpu.pipeline_native_nodepth,
+    };
     pass.set_pipeline(pipeline);
     for (i, inst) in instances.iter().enumerate() {
         pass.set_bind_group(0, &uniforms.bind_groups[i], &[(i as u32 * 256)]);
@@ -940,7 +1022,7 @@ fn render_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(), String
         (&targets.resolve_view, None)
     };
     let depth = if s.depth { Some(&targets.depth_view) } else { None };
-    encode_pass(ctx, uniforms, &s.instances, &mut encoder, color, resolve, depth, clear_color);
+    encode_pass(ctx, uniforms, &s.instances, &mut encoder, color, resolve, depth, clear_color, false);
 
     // ---- copy resolve -> readback buffer (256B row padding handled above) ----
     encoder.copy_texture_to_buffer(
@@ -1001,6 +1083,15 @@ fn render_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(), String
 
 /// 原生纹理直入合成器: 渲进 IOSurface(零 CPU 回读; sync = poll(Wait))。
 fn render_native_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(), String> {
+    // 预乘域清屏: LoadOp::Clear 写入字面色(不走混合), 而 IOSurface 的
+    // 消费方在预乘域合成 —— 透明页的清屏色必须预乘(半透明底色同理),
+    // 否则 a=0 的背景像素携带非零 RGB 污染预乘表面(实测对照超差)。
+    let clear_color = wgpu::Color {
+        r: clear_color.r * clear_color.a,
+        g: clear_color.g * clear_color.a,
+        b: clear_color.b * clear_color.a,
+        a: clear_color.a,
+    };
     if s.native.is_none() {
         let n = native_surface::SurfaceNative::create(&s.gpu, s.width, s.height)?;
         s.native = Some(n);
@@ -1038,7 +1129,7 @@ fn render_native_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(),
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("neb3-native-encoder"),
         });
-        encode_pass(gpu, uniforms, instances, &mut encoder, color, resolve, depth, clear_color);
+        encode_pass(gpu, uniforms, instances, &mut encoder, color, resolve, depth, clear_color, true);
         gpu.queue.submit([encoder.finish()]);
         // 同步纪律: 等 GPU 完成写 IOSurface 后才交还调用方(宿主其后消费)。
         device
