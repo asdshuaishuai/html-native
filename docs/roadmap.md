@@ -681,6 +681,27 @@ P4 CSS 模块化设计评审(先评审后实施)。
   胶囊签名(ed25519)与跨设备迁移。
 - **远期**: 宿主发现机制、轻应用商店形态、ui-kit 组件生态层。
 
+### neb3 原生纹理直入合成器(2026-10-22 第一步落地)
+
+neb3(wgpu 后端)的帧此前每帧 GPU→CPU 回读 → 引擎再上传纹理 —— 一个
+完整的 GPU 往返。第一步已落地**跨设备互操作桥**:
+
+- wgpu 把 resolve 结果**直接渲进 IOSurface 背书的 MTLTexture**
+  (MtlDevice.newTextureWithDescriptor:iosurface:plane:, objc2-metal
+  绑定, 无链接期 IOSurface 符号依赖 —— 现代 macOS 的 IOSurface C 函数
+  不再从框架导出, ObjC 类 alloc/initWithProperties 走运行时解析);
+- 合成器侧在同一 IOSurface 上包自己的 MTLTexture 消费(IOSurface 是
+  Apple 跨 MTLDevice 共享的标准机制); 同步纪律 = render 返回前
+  `device.poll(Wait)`, 宿主同帧在其后消费(MTLSharedEvent 为升级项);
+- 新 C ABI: `neb3_render_native` / `neb3_native_info` /
+  `neb3_native_read_rgba`(读回助手, 锁 IOSurface 去行距拷出);
+- **探针 `tools/neb3_surface_probe.sh`(18 断言)**: 原生路径与 CPU 回读
+  路径对同一确定性场景**逐位一致**(互操作无语义漂移) + generation 递增
+  + NULL 健壮性; c_abi 回归(1)与 neb3_fallback/three 探针全绿。
+- **余下**: hn_three/hn_gpu 消费接线(原生纹理挂进显示列表, 跳过
+  BITMAP 上传; hnsoft 消费时自动回落 readback 路径) + MSAA resolve
+  之外的路径润色。完成后 three 的 GPU 帧零 CPU 往返。
+
 ### 已落地(2026-10-15 渲染与分发批次)
 
 - **`hn build --target macos`**(第三段核心落地): 项目目录 → .hnapp 胶囊 v2

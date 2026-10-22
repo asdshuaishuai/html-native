@@ -315,7 +315,13 @@
   ctx.filter/letterSpacing/reset 等与本裁决无关, 均保留。
 
 - GPU multiply/screen 在半透明目标上与 hnsoft 结构性不等价(契约已声明; 直呈 v1 限不透明窗, 该域逐位等价由探针锚定)。
-- neb3 原生纹理直入合成器(免 CPU 回读)为下一阶段: 需要 wgpu↔Metal 设备互操作与跨队列同步设计, 计划独立推进。
+- neb3 原生纹理直入合成器(免 CPU 回读): **第一步已落地**(2026-10-22)
+  —— wgpu 直渲 IOSurface(跨 MTLDevice 共享), 新 ABI
+  `neb3_render_native/native_info/native_read_rgba`, 探针
+  `neb3_surface_probe.sh` 18 断言(与 readback 路径逐位一致); 同步纪律
+  = poll(Wait) + 同帧后消费。**余下**: hn_three/hn_gpu 消费接线(显示
+  列表挂原生纹理, hnsoft 自动回落)。详见 roadmap「neb3 原生纹理直入
+  合成器」节。
 - ~~hn_find_hn 回退 `/tmp/hncore` 可能选中陈旧二进制~~ **已修**(2026-10-15): 缺省优先 `dist/hncore-<os>-<arch>`, 落 `/tmp` 时打带 mtime 的醒目告警(详见 ISSUES-1.md C1)。
 - text-transform 仅 ASCII 范围(多字节 UTF-8 原样保留); aspect-ratio 按盒尺寸近似(未做 padding/border 参与的替换尺寸模型); overflow-x/-y 与 overflow 同轴(引擎单轴裁剪模型)—— 均为如实声明的能力边界, 非缺陷。
 

@@ -18,3 +18,11 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 wgpu = "30.0.1"
 # glam: view/proj/model matrices for the unlit box pipeline.
 glam = "0.34.1"
+
+# 原生纹理直入合成器(macOS): IOSurface 互操作(wgpu ↔ Metal 跨设备共享)
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu-hal = "30.0.1"
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-io-surface = { version = "0.3.2", features = ["objc2-foundation"] }
+objc2-metal = "0.3.2"

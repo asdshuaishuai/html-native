@@ -11,10 +11,13 @@
 //! - transparent clear (alpha = 0) when `neb3_desc.transparent != 0`;
 //! - straight (non-premultiplied) RGBA8 readback into `neb3_render` output.
 
+pub mod native_surface;
 pub mod png;
 
 use std::borrow::Cow;
 use std::ffi::{c_char, c_float, c_int, c_uchar, c_void, CString};
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::{Arc, Condvar, Mutex};
@@ -48,6 +51,15 @@ pub struct Neb3RenderInfo {
     pub msaa_samples: c_int,
     pub depth_enabled: c_int,
     pub gpu: c_int,
+}
+
+/// 原生纹理直入合成器的出参(macOS; 镜像 include/neb3.h 的 neb3_native)。
+#[repr(C)]
+pub struct Neb3NativeInfo {
+    pub iosurface: *mut c_void,
+    pub width: c_int,
+    pub height: c_int,
+    pub generation: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +381,8 @@ pub struct Neb3Scene {
     frame: Vec<u8>,
     targets: Option<FrameTargets>,
     uniforms: Option<SceneUniforms>,
+    /// 原生纹理直入合成器(macOS IOSurface 互操作; native_surface 模块)
+    native: Option<native_surface::SurfaceNative>,
 }
 
 struct Instance {
@@ -483,6 +497,7 @@ pub unsafe extern "C" fn neb3_scene_create(rt: *mut Neb3Runtime) -> *mut Neb3Sce
         frame: Vec::new(),
         targets: None,
         uniforms: None,
+        native: None,
     }))
 }
 
@@ -803,29 +818,98 @@ impl Neb3Scene {
         self.uniforms = Some(SceneUniforms { buffer, bind_groups });
     }
 
-    fn view_proj(&self) -> Mat4 {
-        let aspect = if self.aspect > 0.0 {
-            self.aspect
-        } else {
-            self.width as f32 / self.height as f32
-        };
-        let fov_y = self.fov_deg.to_radians();
-        let ext = self
-            .instances
-            .iter()
-            .map(|i| i.mesh.size[0].max(i.mesh.size[1]).max(i.mesh.size[2]))
-            .fold(1.0f32, f32::max);
-        let eye = Vec3::new(0.0, 0.6 * ext, 2.9 * ext);
-        let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, Vec3::Y);
-        // WebGPU NDC: Z in [0, 1], Y-up (glam "directx" convention).
-        let proj = glam::camera::rh::proj::directx::perspective(
-            fov_y,
-            aspect,
-            self.near_z,
-            self.far_z,
-        );
-        proj * view
+}
+
+/// 均匀上传(读回/原生两路共用)。
+fn upload_uniforms(
+    gpu: &GpuCtx, uniforms: &SceneUniforms, instances: &[Instance], rotation: f32,
+    fov_deg: f32, aspect_set: f32, near_z: f32, far_z: f32, width: u32, height: u32,
+) {
+    let view_proj = view_proj_for(
+        instances, fov_deg, aspect_set, near_z, far_z, width, height,
+    );
+    let slot_count = instances.len().max(1);
+    let mut data = Vec::with_capacity(UNIFORM_SLOT as usize * slot_count);
+    for (i, inst) in instances.iter().enumerate() {
+        let sz = inst.mesh.size;
+        let model = Mat4::from_rotation_y(rotation)
+            * Mat4::from_rotation_x(0.45)
+            * Mat4::from_scale(Vec3::new(sz[0], sz[1], sz[2]));
+        push_mat(&mut data, &view_proj);
+        push_mat(&mut data, &model);
+        for c in inst.color {
+            data.extend_from_slice(&c.to_le_bytes());
+        }
+        let slot_end = (i + 1) * UNIFORM_SLOT as usize;
+        data.resize(slot_end, 0);
     }
+    if data.len() < UNIFORM_SLOT as usize {
+        data.resize(UNIFORM_SLOT as usize, 0);
+    }
+    gpu.queue.write_buffer(&uniforms.buffer, 0, &data);
+}
+
+/// 绘制编码(读回/原生两路共用): MSAA/1x 与深度开合由 (color, resolve, depth) 表达。
+fn encode_pass(
+    gpu: &GpuCtx, uniforms: &SceneUniforms, instances: &[Instance],
+    encoder: &mut wgpu::CommandEncoder,
+    color: &wgpu::TextureView, resolve: Option<&wgpu::TextureView>,
+    depth: Option<&wgpu::TextureView>, clear_color: wgpu::Color,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("neb3-pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: color,
+            depth_slice: None,
+            resolve_target: resolve,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(clear_color),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: depth.map(|view| wgpu::RenderPassDepthStencilAttachment {
+            view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let pipeline = if depth.is_some() { &gpu.pipeline_depth } else { &gpu.pipeline_nodepth };
+    pass.set_pipeline(pipeline);
+    for (i, inst) in instances.iter().enumerate() {
+        pass.set_bind_group(0, &uniforms.bind_groups[i], &[(i as u32 * 256)]);
+        pass.set_vertex_buffer(0, inst.mesh.vertex_buf.slice(..));
+        pass.set_index_buffer(inst.mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..inst.mesh.index_count, 0, 0..1);
+    }
+}
+
+/// 相机矩阵(原 Neb3Scene::view_proj, 自由函数化供两路共用)。
+fn view_proj_for(
+    instances: &[Instance],
+    fov_deg: f32, aspect_set: f32, near_z: f32, far_z: f32,
+    width: u32, height: u32,
+) -> Mat4 {
+    let aspect = if aspect_set > 0.0 {
+        aspect_set
+    } else {
+        width as f32 / height as f32
+    };
+    let fov_y = fov_deg.to_radians();
+    let ext = instances
+        .iter()
+        .map(|i| i.mesh.size[0].max(i.mesh.size[1]).max(i.mesh.size[2]))
+        .fold(1.0f32, f32::max);
+    let eye = Vec3::new(0.0, 0.6 * ext, 2.9 * ext);
+    let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, Vec3::Y);
+    // WebGPU NDC: Z in [0, 1], Y-up (glam "directx" convention).
+    let proj = glam::camera::rh::proj::directx::perspective(fov_y, aspect, near_z, far_z);
+    proj * view
 }
 
 fn render_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(), String> {
@@ -841,81 +925,22 @@ fn render_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(), String
     let device = &ctx.device;
 
     // ---- uniform upload: one 256-byte slot per instance ----
-    let view_proj = s.view_proj();
-    let slot_count = s.instances.len().max(1);
-    let mut data = Vec::with_capacity(UNIFORM_SLOT as usize * slot_count);
-    for (i, inst) in s.instances.iter().enumerate() {
-        let sz = inst.mesh.size;
-        let model = Mat4::from_rotation_y(s.rotation)
-            * Mat4::from_rotation_x(0.45)
-            * Mat4::from_scale(Vec3::new(sz[0], sz[1], sz[2]));
-        push_mat(&mut data, &view_proj);
-        push_mat(&mut data, &model);
-        for c in inst.color {
-            data.extend_from_slice(&c.to_le_bytes());
-        }
-        let slot_end = (i + 1) * UNIFORM_SLOT as usize;
-        data.resize(slot_end, 0);
-    }
-    if data.len() < UNIFORM_SLOT as usize {
-        data.resize(UNIFORM_SLOT as usize, 0);
-    }
-    ctx.queue.write_buffer(&uniforms.buffer, 0, &data);
+    upload_uniforms(
+        ctx, uniforms, &s.instances, s.rotation,
+        s.fov_deg, s.aspect, s.near_z, s.far_z, s.width, s.height,
+    );
 
     // ---- encode: MSAA pass (+resolve, +depth24) ----
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("neb3-encoder"),
     });
-    let use_depth = s.depth;
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("neb3-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: if ctx.sample_count > 1 {
-                    &targets.msaa_view
-                } else {
-                    &targets.resolve_view
-                },
-                depth_slice: None,
-                resolve_target: if ctx.sample_count > 1 {
-                    Some(&targets.resolve_view)
-                } else {
-                    None
-                },
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear_color),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: if use_depth {
-                Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &targets.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                })
-            } else {
-                None
-            },
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        let pipeline = if use_depth {
-            &ctx.pipeline_depth
-        } else {
-            &ctx.pipeline_nodepth
-        };
-        pass.set_pipeline(pipeline);
-        for (i, inst) in s.instances.iter().enumerate() {
-            pass.set_bind_group(0, &uniforms.bind_groups[i], &[(i as u32 * 256)]);
-            pass.set_vertex_buffer(0, inst.mesh.vertex_buf.slice(..));
-            pass.set_index_buffer(inst.mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..inst.mesh.index_count, 0, 0..1);
-        }
-    }
+    let (color, resolve) = if ctx.sample_count > 1 {
+        (&targets.msaa_view, Some(&targets.resolve_view))
+    } else {
+        (&targets.resolve_view, None)
+    };
+    let depth = if s.depth { Some(&targets.depth_view) } else { None };
+    encode_pass(ctx, uniforms, &s.instances, &mut encoder, color, resolve, depth, clear_color);
 
     // ---- copy resolve -> readback buffer (256B row padding handled above) ----
     encoder.copy_texture_to_buffer(
@@ -974,6 +999,59 @@ fn render_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(), String
     Ok(())
 }
 
+/// 原生纹理直入合成器: 渲进 IOSurface(零 CPU 回读; sync = poll(Wait))。
+fn render_native_pass(s: &mut Neb3Scene, clear_color: wgpu::Color) -> Result<(), String> {
+    if s.native.is_none() {
+        let n = native_surface::SurfaceNative::create(&s.gpu, s.width, s.height)?;
+        s.native = Some(n);
+    }
+    s.ensure_uniforms();
+
+    #[cfg(target_os = "macos")]
+    {
+        let Neb3Scene {
+            gpu,
+            uniforms,
+            native,
+            instances,
+            depth: use_depth,
+            rotation,
+            fov_deg,
+            aspect,
+            near_z,
+            far_z,
+            width,
+            height,
+            transparent: _,
+            frame: _,
+            targets: _,
+        } = s;
+        let n = native.as_mut().ok_or("native surface unavailable")?;
+        let uniforms = uniforms.as_ref().ok_or("uniforms unavailable")?;
+        upload_uniforms(
+            gpu, uniforms, instances, *rotation,
+            *fov_deg, *aspect, *near_z, *far_z, *width, *height,
+        );
+        let (color, resolve) = n.color_and_resolve();
+        let depth = if *use_depth { Some(&n.depth_view) } else { None };
+        let device = &gpu.device;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("neb3-native-encoder"),
+        });
+        encode_pass(gpu, uniforms, instances, &mut encoder, color, resolve, depth, clear_color);
+        gpu.queue.submit([encoder.finish()]);
+        // 同步纪律: 等 GPU 完成写 IOSurface 后才交还调用方(宿主其后消费)。
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("native poll failed: {e:?}"))?;
+        n.generation += 1;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("native surface 仅 macOS(wgpu↔Metal IOSurface 互操作)".to_string())
+    }
+}
 /// # Safety
 /// `scene` must be a live handle matching the last neb3_render.
 #[no_mangle]
@@ -981,6 +1059,135 @@ pub unsafe extern "C" fn neb3_release_frame(scene: *mut Neb3Scene) {
     if !scene.is_null() {
         (*scene).frame.clear();
     }
+}
+
+/// 原生纹理直入合成器(macOS): 渲进 IOSurface, 零 CPU 回读。
+///
+/// # Safety
+/// `scene` must be a live handle; `out` must be writable.
+/// 返回的 IOSurfaceRef 由 scene 持有(调用方不得释放), 到下一次
+/// render_native/scene 销毁为止。
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn neb3_render_native(
+    scene: *mut Neb3Scene,
+    _time_ms: c_float,
+    clear: *const Neb3Color,
+    out: *mut Neb3NativeInfo,
+) -> c_int {
+    if scene.is_null() || out.is_null() {
+        return 0;
+    }
+    let s = &mut *scene;
+    let (w, h) = (s.width, s.height);
+    if w == 0 || h == 0 {
+        return 0;
+    }
+    let (cr, cg, cb) = if clear.is_null() {
+        (0.0, 0.0, 0.0)
+    } else {
+        let c = &*clear;
+        (c.r as f64, c.g as f64, c.b as f64)
+    };
+    let clear_color = wgpu::Color {
+        r: cr,
+        g: cg,
+        b: cb,
+        a: if s.transparent { 0.0 } else { 1.0 },
+    };
+    if let Err(e) = render_native_pass(s, clear_color) {
+        eprintln!("neb3-wgpu: render_native failed: {e}");
+        return 0;
+    }
+    if let Some(n) = &s.native {
+        let o = &mut *out;
+        o.iosurface = Retained::as_ptr(&n.iosurface) as *mut c_void;
+        o.width = n.width as c_int;
+        o.height = n.height as c_int;
+        o.generation = n.generation;
+    }
+    1
+}
+
+/// # Safety
+/// `scene` must be a live handle; `out` must be writable.
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn neb3_native_info(
+    scene: *mut Neb3Scene, out: *mut Neb3NativeInfo,
+) -> c_int {
+    if scene.is_null() || out.is_null() {
+        return 0;
+    }
+    match &(*scene).native {
+        Some(n) => {
+            let o = &mut *out;
+            o.iosurface = Retained::as_ptr(&n.iosurface) as *mut c_void;
+            o.width = n.width as c_int;
+            o.height = n.height as c_int;
+            o.generation = n.generation;
+            1
+        }
+        None => 0,
+    }
+}
+
+/// 非 macOS: 原生表面路径不可用(wgpu↔Metal 互操作仅 Apple)。
+#[no_mangle]
+#[cfg(not(target_os = "macos"))]
+pub unsafe extern "C" fn neb3_render_native(
+    _scene: *mut Neb3Scene, _time_ms: c_float, _clear: *const Neb3Color,
+    _out: *mut Neb3NativeInfo,
+) -> c_int {
+    0
+}
+
+/// 读出原生表面的当前内容(锁 IOSurface, 去行距, w×h×4 字节)。
+/// GPU 写入可见性由 render_native 的 poll(Wait) 纪律保证。
+///
+/// # Safety
+/// `scene` must be a live handle; `buf`/`cap` describe a writable buffer.
+#[no_mangle]
+#[cfg(target_os = "macos")]
+pub unsafe extern "C" fn neb3_native_read_rgba(
+    scene: *mut Neb3Scene, buf: *mut c_uchar, cap: usize,
+) -> c_int {
+    if scene.is_null() || buf.is_null() {
+        return 0;   /* 无场景/无缓冲 = 无数据(非错误) */
+    }
+    match &(*scene).native {
+        Some(n) => match n.read_rgba() {
+            Ok(frame) => {
+                let n_bytes = frame.len().min(cap);
+                if n_bytes == 0 {
+                    return 0;
+                }
+                std::ptr::copy_nonoverlapping(frame.as_ptr(), buf, n_bytes);
+                n_bytes as c_int
+            }
+            Err(_) => -2,
+        },
+        None => 0,
+    }
+}
+
+/// 非 macOS: 不可用。
+#[no_mangle]
+#[cfg(not(target_os = "macos"))]
+pub unsafe extern "C" fn neb3_native_read_rgba(
+    _scene: *mut Neb3Scene, _buf: *mut c_uchar, _cap: usize,
+) -> c_int {
+    -1
+}
+
+/// # Safety
+/// `scene` must be a live handle; `out` must be writable.
+#[no_mangle]
+#[cfg(not(target_os = "macos"))]
+pub unsafe extern "C" fn neb3_native_info(
+    _scene: *mut Neb3Scene, _out: *mut Neb3NativeInfo,
+) -> c_int {
+    0
 }
 
 /// # Safety
