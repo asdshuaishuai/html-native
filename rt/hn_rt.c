@@ -977,7 +977,20 @@ static int rt_raster(hn_rt *rt) {
     unsigned char *bgra = NULL;
     if (hn_gpu_available(dl))
         hn_gpu_render_scaled(dl, bw, bh, bg, scale, &bgra);
+    if (!bgra && hn_context_native_suppressed(rt->ctx) == 0) {
+        /* 原生 BITMAP(IOSurface 直入)在 CPU 路径无字节 —— GPU 中途失败
+           回退 hnsoft 前先压制原生路由并重出显示列表(重走 paint, neb3
+           换回读回字节), hnsoft 拿到完整帧; 随后 GPU 重试一次(压制态
+           仍可 GPU, 只是该帧不带原生框)。双失败才落 hnsoft(此时字节
+           完整, 无洞)。 */
+        hn_context_native_suppress(rt->ctx);
+        hn_context_repaint(rt->ctx);
+        dl = hn_context_display_list(rt->ctx);
+        if (hn_gpu_available(dl))
+            hn_gpu_render_scaled(dl, bw, bh, bg, scale, &bgra);
+    }
     if (bgra) {
+        hn_context_native_resume(rt->ctx);   /* GPU 恢复: 下一帧重新启用原生路由 */
         /* GPU 产出直接接管(旧口径; GPU 是显式选配路径, 不在本 churn 治理
            面 —— CPU 稳态不走此支)。 */
         free(rt->bgra);
@@ -4739,6 +4752,28 @@ int hn_rt_shot(hn_rt *rt, const char *path) {
                 }
             }
             free(bgra);
+        } else if (hn_context_native_suppressed(rt->ctx) == 0) {
+            /* 原生 BITMAP 无字节: 压制原生路由重出显示列表再试 GPU
+               (与 rt_raster 回退纪律一致 —— shot 拿完整帧) */
+            hn_context_native_suppress(rt->ctx);
+            hn_context_repaint(rt->ctx);
+            dl = hn_context_display_list(rt->ctx);
+            if (hn_gpu_available(dl)) {
+                unsigned char *bgra2 = NULL;
+                if (hn_gpu_render_scaled(dl, bw, bh, bg, rt_scale(rt), &bgra2) && bgra2) {
+                    rgba = (unsigned char *)malloc((size_t)bw * bh * 4);
+                    if (rgba) {
+                        for (int i = 0; i < bw * bh; i++) {
+                            unsigned a = bgra2[i * 4 + 3];
+                            rgba[i * 4 + 0] = a ? (unsigned char)((bgra2[i * 4 + 2] * 255 + a / 2) / a) : 0;
+                            rgba[i * 4 + 1] = a ? (unsigned char)((bgra2[i * 4 + 1] * 255 + a / 2) / a) : 0;
+                            rgba[i * 4 + 2] = a ? (unsigned char)((bgra2[i * 4 + 0] * 255 + a / 2) / a) : 0;
+                            rgba[i * 4 + 3] = (unsigned char)a;
+                        }
+                    }
+                    free(bgra2);
+                }
+            }
         }
     }
     if (!rgba)

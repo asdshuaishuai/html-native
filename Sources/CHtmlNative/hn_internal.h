@@ -796,6 +796,10 @@ struct hn_context {
        无帧循环的管线(离屏 shot/dump, 无从推进动画)保持"直接贴底"的旧
        口径, 单帧出图仍是终态。 */
     int live_frame;
+    /* 原生纹理直入压制(neb3 IOSurface 路由): GPU 合成中途失败回退
+       hnsoft 时置位 —— 原生 BITMAP 在 CPU 路径无字节, 压制后重出显示
+       列表换回读回字节(hn_three 路由条件消费)。GPU 渲染成功即清除。 */
+    unsigned char native_suppressed;
 };
 
 /* ---------- 共享工具 ---------- */
@@ -986,6 +990,11 @@ int  hn_gpu_available(const hn_display_list *dl);
 /* 原生纹理直入就绪判定(GPU host 在位 + 平台支持 IOSurface 包裹;
    呼出方 hn_three 用它路由 读回字节 vs IOSurface 直入) */
 int  hn_gpu_native_surface_ok(void);
+/* 原生路由压制/恢复(hn_rt 的 GPU 失败回退路径用): 压制 = 置位 +
+   清 L1 片段缓存(路由变化改变 cmds, 缓存必须重出); 恢复 = 清标志。 */
+void hn_context_native_suppress(hn_context *c);
+void hn_context_native_resume(hn_context *c);
+int  hn_context_native_suppressed(const hn_context *c);
 /* GPU 光栅一帧: 等价于 hnsoft_render_scaled 的 GPU 版, 但直接产出**预乘
    BGRA**(Metal readback 原样, 与 rt_raster 的 CPU 路径产物同口径, blit 直用;
    与 hnsoft 非预乘 RGBA 的换算推导见 hn_gpu.c 头注 1)。缓冲 malloc(调用方

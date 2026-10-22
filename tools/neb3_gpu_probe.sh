@@ -159,6 +159,27 @@ int main(void) {
     ck(outside[0] == 0x0B && outside[1] == 0x0E && outside[2] == 0x13,
        "框外采样点恒背景(GPU)");
 
+    /* E. 压制/恢复机制(rt 回退纪律的引擎侧地基): 压制 → 重出为读回
+       字节 BITMAP(GPU 仍可渲, 无原生框); 恢复 → 原生路由回归 */
+    hn_context_native_suppress(ca);
+    const hn_display_list *dls = hn_context_display_list(ca);
+    hn_context_repaint(ca);
+    dls = hn_context_display_list(ca);
+    int sn_native = 0, sn_byte = 0;
+    for (int i = 0; i < dls->count; i++) {
+        if (dls->cmds[i].kind != HN_CMD_BITMAP) continue;
+        if (dls->cmds[i].native_surface) sn_native++;
+        else if (dls->cmds[i].bitmap) sn_byte++;
+    }
+    ck(sn_native == 0 && sn_byte >= 1, "压制: 重出换回读回字节 BITMAP");
+    hn_context_native_resume(ca);
+    hn_context_repaint(ca);
+    dls = hn_context_display_list(ca);
+    int rs_native = 0;
+    for (int i = 0; i < dls->count; i++)
+        if (dls->cmds[i].kind == HN_CMD_BITMAP && dls->cmds[i].native_surface) rs_native++;
+    ck(rs_native >= 1, "恢复: 原生路由回归");
+
     /* 信息值: 两路盒区内容量(GPU 采样 vs 软件逐像素, 结构性差异不判) */
     printf("  [info] 盒区内容采样 GPU=%d hnsoft=%d\n", in_content, sw_in);
 

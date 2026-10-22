@@ -73,6 +73,20 @@ void hn_context_set_doc(hn_context *c, hn_doc *doc) {
 
 hn_doc *hn_context_doc(hn_context *c) { return c->doc; }
 
+void hn_context_native_suppress(hn_context *c) {
+    if (!c || c->native_suppressed) return;
+    c->native_suppressed = 1;
+    hn_paint_frag_clear(c);   /* 路由变化改变 cmds: L1 片段缓存必须重出 */
+}
+
+void hn_context_native_resume(hn_context *c) {
+    if (c) c->native_suppressed = 0;
+}
+
+int hn_context_native_suppressed(const hn_context *c) {
+    return c ? c->native_suppressed : 0;
+}
+
 void hn_context_add_sheet(hn_context *c, hn_sheet *sheet) {
     if (c->n_sheets == c->cap_sheets) {
         int nc = c->cap_sheets ? c->cap_sheets * 2 : 8;

@@ -418,7 +418,8 @@ static int t3_paint_backend(hn_context *c, hn_node *n,
        合成器包同表面消费(生产者 wgpu 已把帧写入, 预乘域, 与合成器
        口径一致); hnsoft 消费场景不进此路(hn_gpu_native_surface_ok
        为 false → 走下方读回路径)。失败回落读回, 不回退整链。 */
-    if (g_neb3.render_native && hn_gpu_native_surface_ok()) {
+    if (g_neb3.render_native && hn_gpu_native_surface_ok() &&
+        !hn_context_native_suppressed(c)) {
         neb3_native nat;
         memset(&nat, 0, sizeof(nat));
         if (g_neb3.render_native(g_neb3_slots[slot].scene, n->ext_clock,

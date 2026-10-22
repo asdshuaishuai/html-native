@@ -710,7 +710,11 @@ neb3(wgpu 后端)的帧此前每帧 GPU→CPU 回读 → 引擎再上传纹理 �
   语义要点: 原生 IOSurface 内容为**预乘域**(管线预乘变体 +
   LoadOp::Clear 预乘清屏), 与 Metal 合成器口径一致; 不透明片元的
   预乘(a=1)≡直读(MSAA resolve 逐位同值, surface 探针逐位锚)。
-  v1 边界: 整帧回退 hnsoft 的罕见场景下原生框跳过一帧(roadmap 已档)。
+  回退洞已闭(同日第三轮): GPU 中途失败回退 hnsoft 时压制原生路由并
+  重出显示列表(重走 paint 换回读回字节, hnsoft 拿到完整帧), 随后 GPU
+  重试一次; GPU 成功即自动恢复原生路由( hn_context_native_suppress/
+  resume, 压制同时清 L1 片段缓存 —— 路由变化改变 cmds)。neb3_gpu_probe
+  补压制/恢复机制断言。
 
 ### 已落地(2026-10-15 渲染与分发批次)
 
