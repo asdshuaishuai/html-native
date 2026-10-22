@@ -417,12 +417,35 @@ char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *sto
 }
 
 
+/* htmx 方法词表: 属性名 → HTTP 动词(查询/载荷口径见 hx_perform)。
+   2026-10-22 起全五动词(get/post/put/delete/patch —— put/delete/patch
+   为本轮 parity 补齐)。 */
+static const char *const HX_METHOD_ATTRS[] = {
+    "hx-get", "hx-post", "hx-put", "hx-delete", "hx-patch"
+};
+static const char *const HX_METHOD_VERBS[] = {
+    "GET", "POST", "PUT", "DELETE", "PATCH"
+};
+
 static hn_node *hx_carrier(hn_node *n) {
     if (!n) return NULL;
-    if (hn_node_attr(n, "hx-get") || hn_node_attr(n, "hx-post")) return n;
-    hn_node *a = hn_node_ancestor_with_attr(n, "hx-get");
-    hn_node *b = hn_node_ancestor_with_attr(n, "hx-post");
-    return a ? a : b;
+    for (int i = 0; i < 5; i++)
+        if (hn_node_attr(n, HX_METHOD_ATTRS[i])) return n;
+    for (int i = 0; i < 5; i++) {
+        hn_node *a = hn_node_ancestor_with_attr(n, HX_METHOD_ATTRS[i]);
+        if (a) return a;
+    }
+    return NULL;
+}
+
+/* 载体上的 (动词, URL): 按词表序取第一个声明的属性 */
+static void hx_method_of(hn_node *carrier, const char **verb, const char **url) {
+    *verb = "GET";
+    *url = NULL;
+    for (int i = 0; i < 5; i++) {
+        const char *u = hn_node_attr(carrier, HX_METHOD_ATTRS[i]);
+        if (u) { *url = u; *verb = HX_METHOD_VERBS[i]; return; }
+    }
 }
 
 /* ---- htmx 兼容语义(2026-10-15 htmx 轮) ----
@@ -648,7 +671,7 @@ static int hx_vals_append(char *body, size_t cap, const char *json, size_t jlen,
 }
 
 /* hx-trigger 事件语义: 值变化后(change 触发器)是否执行 hx 请求。
- * - 载体(自身或祖先)有 hx-get/post 且 hx-trigger 含 "change" → 检查
+ * - 载体(自身或祖先)有 hx-get/post/put/delete/patch 且 hx-trigger 含 "change" → 检查
  * - changed 修饰符: 请求体与上次相同 → 跳过(last 存于 rt->hx_sched)
  * - delay:N[ms|s]: 到期前不执行(重触发刷新到期 = 防抖)
  * 返回 1 = 已(延迟)执行调度, 调用方应重渲染。 */
@@ -664,10 +687,10 @@ struct {
 } hx_sched_tab[HN_HX_SCHED_MAX];
 
 static int hx_perform(hn_rt *rt, hn_node *carrier) {
-    const char *post = hn_node_attr(carrier, "hx-post");
-    const char *get = hn_node_attr(carrier, "hx-get");
-    const char *url = post ? post : get;
+    const char *verb = "GET", *url = NULL;
+    hx_method_of(carrier, &verb, &url);
     if (!url) return 0;
+    int is_get = (verb[0] == 'G');
     hn_doc *doc = hn_context_doc(rt->ctx);
     char form[4096];
     form[0] = 0;
@@ -678,8 +701,19 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
         if (vals && *vals && vals[0] != 'j' && vals[0] != 'J')   /* "js:" 前缀不支持, 如实忽略 */
             hx_vals_append(form, sizeof(form), vals, strlen(vals), NULL, NULL);
     }
-    /* htmx:beforeRequest: pd → 取消(浏览器同序: 事件先于网络) */
-    if (rt_js_dispatch(rt, "htmx:beforeRequest", carrier, 0, 0, NULL, 0, 0))
+    /* hx-confirm: htmx:confirm 事件(preventDefault 取消), 问题串走
+       utf8 载荷。引擎无 window.confirm —— 对话框形态归平台层(与
+       sys://notify 同级); 无 JS 监听 = 直接放行(与 beforeRequest 的
+       无监听者语义一致)。 */
+    {
+        const char *confirm_q = hn_node_attr(carrier, "hx-confirm");
+        if (confirm_q && *confirm_q &&
+            rt_js_dispatch(rt, "htmx:confirm", carrier, 0, 0, confirm_q, 0, 0))
+            return 0;
+    }
+    /* htmx:beforeRequest: pd → 取消(浏览器同序: 事件先于网络);
+       payload = HTTP 动词(JS 可按方法分流) */
+    if (rt_js_dispatch(rt, "htmx:beforeRequest", carrier, 0, 0, verb, 0, 0))
         return 0;
     /* sys:// remains the local routing boundary. HTTP uses the optional
        runtime transport; unsupported schemes retain hn_sys diagnostics. */
@@ -688,10 +722,11 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
     int is_http = 0;
     if (url && (strncasecmp(url, "http://", 7) == 0 || strncasecmp(url, "https://", 8) == 0)) {
         is_http = 1;
-        /* htmx 语义: GET 把表单拼进 query(?/& 接续), POST 带 urlencoded 头 */
+        /* htmx 语义: GET 把表单拼进 query(?/& 接续), 其余动词带
+           urlencoded 体(表单+hx-vals 合并) */
         const char *req_url = url;
         char url_q[8192];
-        if (!post && form[0]) {
+        if (is_get && form[0]) {
             snprintf(url_q, sizeof(url_q), "%s%s%s", url,
                      strchr(url, '?') ? "&" : "?", form);
             req_url = url_q;
@@ -699,12 +734,12 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
         hn_http_request_opts opts;
         memset(&opts, 0, sizeof(opts));
         opts.url = req_url;
-        opts.method = post ? "POST" : "GET";
-        opts.body = post ? form : NULL;
-        opts.body_len = post ? strlen(form) : 0;
+        opts.method = verb;
+        opts.body = (!is_get && form[0]) ? form : NULL;
+        opts.body_len = (!is_get && form[0]) ? strlen(form) : 0;
         hn_http_header hdr[9];
         int nhdr = 0;
-        if (post && form[0]) {
+        if (!is_get && form[0]) {
             hdr[nhdr].name = "Content-Type";
             hdr[nhdr].value = "application/x-www-form-urlencoded";
             nhdr++;
@@ -2987,6 +3022,8 @@ static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
             kt_code_name(key, utf8, code, sizeof(code));
             JS_SetPropertyStr(ctx, ev, "code", JS_NewString(ctx, code));
             JS_SetPropertyStr(ctx, ev, "detail", JS_NewInt32(ctx, detail));
+            if (utf8 && utf8[0] && strncmp(type, "htmx:", 5) == 0)
+                JS_SetPropertyStr(ctx, ev, "payload", JS_NewString(ctx, utf8));
             if (utf8 && utf8[0] && utf8[1] == 0 &&
                 utf8[0] >= 'A' && utf8[0] <= 'Z')
                 JS_SetPropertyStr(ctx, ev, "shift", JS_TRUE);
@@ -4246,9 +4283,9 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
         if (trig && *trig && !hx_trigger_has(trig, "click")) {
             /* 非 click 触发器的载体: 点击不触发请求 */
         } else {
-            const char *url = hn_node_attr(carrier, "hx-post") ? hn_node_attr(carrier, "hx-post")
-                                                              : hn_node_attr(carrier, "hx-get");
-            printf("[hx] %s\n", url ? url : "?");
+            const char *verb = "GET", *url = NULL;
+            hx_method_of(carrier, &verb, &url);
+            printf("[hx] %s %s\n", verb, url ? url : "?");
             fflush(stdout);
             if (hx_perform(rt, carrier)) return rt_render(rt);
         }

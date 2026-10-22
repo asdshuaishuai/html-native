@@ -56,10 +56,19 @@
 <div hx-get="sys://cpu" hx-target="#out" hx-trigger="click">刷新</div>
 <span hx-get="sys://uptime" hx-trigger="load every 2s">…</span>
 <form hx-post="sys://notify" hx-target="#tip"><input name="msg"></form>
+<div hx-put="https://api/x" hx-confirm="确定提交?">…</div>
 ```
 
-- `hx-get` / `hx-post`(url-encoded 收集)、`hx-target`、`hx-swap`、
-  `hx-trigger`(click/load/`every Ns`/hover…); input 回车沿
+- **方法词表**: `hx-get`/`hx-post`/`hx-put`/`hx-delete`/`hx-patch`
+  (GET 表单拼 query, 其余 urlencoded 体)。
+- `hx-target`(`this`/CSS/`closest`/`find`/`next`/`previous`)、
+  `hx-swap`(innerHTML/outerHTML/beforeend/afterbegin/afterend/delete/
+  none)、`hx-trigger`(click/load/`every Ns`/`change`/hover… +
+  `delay:N` 防抖 + `changed`)、`hx-vals`/`hx-headers`(JSON)。
+- `hx-confirm="问题"`: 触发 `htmx:confirm` 事件(`e.payload` = 问题),
+  JS preventDefault 取消请求; 无 JS 监听 = 放行(对话框形态归平台层)。
+- `htmx:beforeRequest`(载荷=HTTP 动词, preventDefault 取消)/
+  `htmx:afterRequest`/`htmx:afterSwap` 事件可监听; input 回车沿
   自身→祖先→最近载体提交。
 - 目标地址两类: `sys://` 系统桥(§6)与注入的 HTTP transport
   (运行时 `hn.fetch` 同源, `HN_FETCH_ALLOW` 白名单)。

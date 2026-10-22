@@ -379,6 +379,76 @@ int main(void) {
         }
     }
 
+    /* == 7b. htmx parity: hx-put/delete/patch 方法词表 + hx-confirm == */
+    printf("== htmx parity: 方法词表与 confirm 事件 ==\n");
+    {
+        static const char *PARITY_HTML =
+            "<html><body>"
+            "<div id=\"putbox\" hx-put=\"sys://store/count\" hx-target=\"putbox\" "
+            "style=\"width:60;height:30\">init</div>"
+            "<div id=\"delbox\" hx-delete=\"sys://store/count\" hx-target=\"delbox\" "
+            "style=\"width:60;height:30\">init</div>"
+            "<div id=\"patchbox\" hx-patch=\"sys://store/count\" hx-target=\"patchbox\" "
+            "style=\"width:60;height:30\">init</div>"
+            "<div id=\"cfbox\" hx-confirm=\"确定吗?\" hx-get=\"sys://store/count\" "
+            "hx-target=\"cfbox\" style=\"width:60;height:30\">init</div>"
+            "</body></html>";
+        hn_rt_desc hd = { "events-probe-parity", PARITY_HTML, strlen(PARITY_HTML), NULL, 0, 300, 260 };
+        hn_rt *prt = hn_rt_open(&hd);
+        check(prt != NULL, "hn_rt_open(parity 页)");
+        if (prt) {
+            /* 方法词表: 三新动词载体点击 → beforeRequest(载荷=动词) + swap */
+            hn_rt_eval("globalThis.methods = [];"
+                       "document.addEventListener('htmx:beforeRequest', function(e){"
+                       "  globalThis.methods.push(e.payload); });"
+                       "document.body.addEventListener('htmx:afterRequest', function(e){"
+                       "  globalThis.after = (globalThis.after || 0) + 1; });",
+                       "events-probe-parity", hn_rt_doc(prt));
+            float cx, cy;
+            box_center(prt, "putbox", &cx, &cy);
+            hn_rt_button(prt, 1, cx, cy, 0);
+            box_center(prt, "delbox", &cx, &cy);
+            hn_rt_button(prt, 1, cx, cy, 0);
+            box_center(prt, "patchbox", &cx, &cy);
+            hn_rt_button(prt, 1, cx, cy, 0);
+            char *r = hn_rt_eval("globalThis.methods.join(',')", "events-probe-parity", hn_rt_doc(prt));
+            check_str(r ? r : "", "PUT,DELETE,PATCH", "beforeRequest 载荷 = 动词序列");
+            free(r);
+            char *t = hn_rt_text(prt, "putbox");
+            check(t && strcmp(t, "1") == 0, "hx-put 载体 swap 执行(putbox='1')");
+            free(t);
+            t = hn_rt_text(prt, "delbox");
+            check(t && strcmp(t, "1") == 0, "hx-delete 载体 swap 执行(delbox='1')");
+            free(t);
+            t = hn_rt_text(prt, "patchbox");
+            check(t && strcmp(t, "1") == 0, "hx-patch 载体 swap 执行(patchbox='1')");
+            free(t);
+
+            /* hx-confirm: 无监听 → 放行; preventDefault → 取消 + 载荷=问题串 */
+            box_center(prt, "cfbox", &cx, &cy);
+            hn_rt_button(prt, 1, cx, cy, 0);
+            char *t0 = hn_rt_text(prt, "cfbox");
+            check(t0 && strcmp(t0, "1") == 0,
+                  "无监听: hx-confirm 放行(请求执行, cfbox='1')");
+            free(t0);
+            hn_rt_eval("globalThis.cfQ = ''; globalThis.cfHit = 0; globalThis.req2 = 0;"
+                       "document.getElementById('cfbox').addEventListener('htmx:confirm', function(e){"
+                       "  e.preventDefault(); globalThis.cfQ = e.payload; globalThis.cfHit = 1; });"
+                       "document.getElementById('cfbox').addEventListener('htmx:beforeRequest', function(e){"
+                       "  globalThis.req2 = 1; });",
+                       "events-probe-parity", hn_rt_doc(prt));
+            hn_rt_button(prt, 1, cx, cy, 0);
+            check_int(eval_int(prt, "events-probe-parity", "globalThis.cfHit"), 1,
+                      "htmx:confirm 监听器触发");
+            char *q = hn_rt_eval("globalThis.cfQ", "events-probe-parity", hn_rt_doc(prt));
+            check_str(q ? q : "", "确定吗?", "confirm 载荷 = 问题串(e.payload)");
+            free(q);
+            check_int(eval_int(prt, "events-probe-parity", "globalThis.req2"), 0,
+                      "preventDefault → 请求不执行(beforeRequest 不触发)");
+            hn_rt_close(prt);
+        }
+    }
+
     /* == 8. 文档换装: 监听器清空 + 新文档脚本重注册 == */
     printf("== 文档换装(hn_rt_render)与二次 open ==\n");
     {
