@@ -363,10 +363,17 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
   HTTP 自定义头(上限 8)。`js:` 前缀不支持 —— 如实声明。
 - **htmx 事件**: `htmx:beforeRequest`(preventDefault 取消)/
   `htmx:afterRequest`/`htmx:afterSwap`(el.dispatchEvent 可监听)。
+- **方法词表补齐**(同日第二轮): `hx-put/delete/patch` —— 动词直传
+  (GET 拼 query, 其余 urlencoded 体), `htmx:beforeRequest` 载荷 = 动词
+  (JS 可按方法分流); **hx-confirm**: `htmx:confirm` 事件(preventDefault
+  取消, `e.payload` = 问题串) —— 引擎无 window.confirm, 对话框形态归
+  平台层(与 sys://notify 同级), 无 JS 监听 = 放行(与 beforeRequest
+  无监听者语义一致)。
 - 边界如实声明: `hx-push-url`/`hx-include`/`hx-select`/SSE/WS 触发、
   swap 修饰符(`swap:100ms`)、`js:` 前缀 —— 未做。
-- 探针: events_probe 72→87(+15: closest/next 换入、delete/none swap、
-  change 触发器编辑即请求)。
+- 探针: events_probe 72→87→**96**(+9: 三动词方法分发/beforeRequest
+  载荷/confirm 放行·取消·问题串; 冒泡链监听器须挂 document —— body
+  无 id 不入命中链, 首跑实测)。
 
 ### 全域审查轮(2026-10-22)发现与修复
 
