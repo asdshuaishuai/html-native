@@ -322,9 +322,10 @@
   = poll(Wait) + 同帧后消费。消费接线**已落地**(同日第二轮): hn_cmd.native_surface 字段 + 原语表
   tex_from_native + hn_gpu_native_surface_ok 路由 + hn_three 原路(可选
   符号), 端到端探针 neb3_gpu_probe.sh(原生路由触发/盒区内容双路一致
-  84=84/框外恒背景)。**余下**: 整帧回退 hnsoft 场景的原生框跳帧边界
-  (已档)与 MTLSharedEvent 严格同步。详见 roadmap「neb3 原生纹理直入
-  合成器」节。
+  84=84/框外恒背景)。回退洞已闭(2026-10-22 第三轮): GPU 中途失败回退 hnsoft 前压制原生
+  路由并重出显示列表(换回读回字节), GPU 随后重试, 成功自动恢复。
+  **余下**: MTLSharedEvent 严格跨设备同步。详见 roadmap「neb3 原生
+  纹理直入合成器」节。
 - ~~hn_find_hn 回退 `/tmp/hncore` 可能选中陈旧二进制~~ **已修**(2026-10-15): 缺省优先 `dist/hncore-<os>-<arch>`, 落 `/tmp` 时打带 mtime 的醒目告警(详见 ISSUES-1.md C1)。
 - text-transform 仅 ASCII 范围(多字节 UTF-8 原样保留); aspect-ratio 按盒尺寸近似(未做 padding/border 参与的替换尺寸模型); overflow-x/-y 与 overflow 同轴(引擎单轴裁剪模型)—— 均为如实声明的能力边界, 非缺陷。
 
