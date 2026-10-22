@@ -75,7 +75,29 @@ hn dump myapp                    # 绘制指令数（管线健康自检）
 </body></html>
 ```
 
-## 数据获取
+## 数据获取（htmx 语义）
+
+```html
+<!-- hx-* 属性 = htmx 语义子集(引擎原生实现, 零 JS 依赖) -->
+<div hx-get="sys://cpu" hx-trigger="every 2s" hx-target="#out">…</div>
+<form hx-post="/api/save" hx-target="#result" hx-swap="outerHTML">…</form>
+<input hx-get="/search" hx-trigger="change delay:300ms" hx-target="find .result">
+<button hx-get="/x" hx-vals='{"extra":"v"}' hx-headers='{"X-Token":"t"}'>…</button>
+```
+- `hx-target`：`this`（缺省）/ CSS 选择器 / `closest <sel>` / `find <sel>` /
+  `next [sel]` / `previous [sel]`
+- `hx-swap`：`innerHTML`（缺省）/ `outerHTML` / `beforeend` / `afterbegin` /
+  `afterend` / `delete` / `none`
+- `hx-trigger`：`click`（按钮/链接缺省）/ `change`（输入值变化, 编辑与
+  原生控件值变更都触发）/ `load` / `every Ns`；修饰符 `delay:N[ms|s]`（防抖）、
+  `changed`（值未变跳过）
+- `hx-vals`/`hx-headers`：JSON 对象（合并进请求体 / 自定义头；`js:` 前缀不支持）
+- 事件：`htmx:beforeRequest`（preventDefault 可取消）/ `htmx:afterRequest` /
+  `htmx:afterSwap`（el.dispatchEvent 同样可监听）
+- URL：`sys://` 本地路由（零网络）+ `http(s)://` 走运行时传输；
+  GET 表单拼 query，POST 带 urlencoded 头
+
+## 数据获取（原生）
 
 **本地系统数据（sys:// 桥, 零网络）**：`sys://cpu memory disk uptime host battery info`
 `sys://store/get?key=k` / `hx-post="sys://store/set?key=k"`（本地 KV 持久化）

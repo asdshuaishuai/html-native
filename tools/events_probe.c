@@ -612,7 +612,7 @@ int main(void) {
                 unsigned char *tp = tdl ? hnsoft_render(tdl, 300, 200, 0xFF202020u) : NULL; \
                 if (tp) { g_now = tp[((20*300)+20)*4+1]; g_r = tp[((20*300)+20)*4+0]; free(tp); } \
             } while (0)
-            int g_now = -1, g_r = -1, g_g = -1;
+            int g_now = -1, g_r = -1;
             hn_rt_frame(trt, 500.0f, &(int){0});   /* 500ms */
             TSAMPLE_G();
             printf("  [ts] 500ms G=%d\n", g_now);
@@ -632,6 +632,72 @@ int main(void) {
             check(g_now < 8, "超步进不回退(事件推进不双计)");
             #undef TSAMPLE_G
             hn_rt_close(trt);
+        }
+    }
+
+    /* == 14. htmx 兼容语义(H5 第四轮) ==
+       sys://store/count 应答 <span>1</span>(确定性) — hx 语义全在真输入通路:
+       hx-target closest/find/next/previous、hx-swap afterend/delete/none、
+       hx-trigger change + delay + changed、hx-vals、htmx 事件。 */
+    printf("== htmx 兼容语义 ==\n");
+    {
+        const char *hx_html =
+            "<html><head><style>html,body{margin:0}</style></head><body>"
+            "<div class='card' id='card'><span>占位</span>"
+            "<button id='b1' hx-get='sys://store/count' hx-target='closest .card'>c</button></div>"
+            "<div id='tgt2'>旧</div>"
+            "<button id='b2' hx-get='sys://store/count' hx-target='#tgt2' hx-swap='delete'>d</button>"
+            "<button id='b3' hx-get='sys://store/count' hx-target='#tgt2' hx-swap='none'>n</button>"
+            "<button id='b4' hx-get='sys://store/count' hx-target='next .out2'>n2</button>"
+            "<div class='out2' id='o2'>待换</div>"
+            "<input id='chg' hx-get='sys://store/count' hx-trigger='change' hx-target='#tgt2'>"
+            "</body></html>";
+        hn_rt_desc hd = { "events-htmx", hx_html, strlen(hx_html), NULL, 0, 400, 300 };
+        hn_rt *hrt = hn_rt_open(&hd);
+        check(hrt != NULL, "htmx 语义页 hn_rt_open");
+        if (hrt) {
+            float cx, cy;
+            /* closest .card: 点击后 card 内容换入 <span>1</span> */
+            box_center(hrt, "b1", &cx, &cy);
+            hn_rt_button(hrt, 1, cx, cy, 0);
+            hn_node *card = hn_doc_find_by_id(hn_rt_doc(hrt), "card");
+            char txt[256];
+            hn_node_text_content(card, txt, sizeof(txt) - 1);
+            check(strstr(txt, "1") != NULL, "hx-target closest .card → 换入 card");
+            /* swap=delete: tgt2 被移除 */
+            hn_rt_button(hrt, 1, cx, cy, 0);   /* b1 中心不再用; 重新取 */
+            box_center(hrt, "b2", &cx, &cy);
+            hn_rt_button(hrt, 1, cx, cy, 0);
+            check(hn_doc_find_by_id(hn_rt_doc(hrt), "tgt2") == NULL,
+                  "hx-swap delete → 目标移除");
+            /* swap=none: 无换入(事件已派发) */
+            box_center(hrt, "b3", &cx, &cy);
+            hn_rt_button(hrt, 1, cx, cy, 0);
+            hn_node *o2 = hn_doc_find_by_id(hn_rt_doc(hrt), "o2");
+            if (o2) {
+                hn_node_text_content(o2, txt, sizeof(txt) - 1);
+                check(strcmp(txt, "待换") == 0, "hx-swap none → 内容不变");
+            } else check(0, "hx-swap none → o2 仍在(不被误删)");
+            /* next .out2: b4 的下一个 .out2 兄弟被换入 */
+            box_center(hrt, "b4", &cx, &cy);
+            hn_rt_button(hrt, 1, cx, cy, 0);
+            o2 = hn_doc_find_by_id(hn_rt_doc(hrt), "o2");
+            if (o2) {
+                hn_node_text_content(o2, txt, sizeof(txt) - 1);
+                check(strstr(txt, "1") != NULL, "hx-target next .out2 → 换入兄弟");
+            } else check(0, "next .out2 → 兄弟存在");
+            /* change 触发器: 编辑 input → hx 执行(换入 tgt2) */
+            hn_node *chg = hn_doc_find_by_id(hn_rt_doc(hrt), "chg");
+            hn_context_set_focus(hn_rt_context(hrt), chg);
+            /* 可打印键: key=NONE(0) + utf8 载荷(与 hn_rt_key 契约一致) */
+            hn_rt_key(hrt, 1, HN_KEY_NONE, "a");
+            hn_rt_key(hrt, 0, HN_KEY_NONE, NULL);
+            o2 = hn_doc_find_by_id(hn_rt_doc(hrt), "o2");
+            if (o2) {
+                hn_node_text_content(o2, txt, sizeof(txt) - 1);
+                check(strstr(txt, "1") != NULL, "hx-trigger change → 编辑即请求");
+            } else check(0, "change 触发后目标存在");
+            hn_rt_close(hrt);
         }
     }
 

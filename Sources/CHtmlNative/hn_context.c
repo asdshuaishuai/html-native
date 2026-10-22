@@ -2660,7 +2660,21 @@ static void splice_children(hn_doc *doc, hn_node *frag, hn_node *target, hn_swap
             target->last = fl;
         }
         break;
-    }    case HN_SWAP_OUTER: {
+    }
+    case HN_SWAP_AFTEREND: {
+        /* 插到 target 之后(target 的父级内; afterend 语义) */
+        hn_node *p = target->parent;
+        if (!p) break;
+        hn_node *after = target->next;
+        for (hn_node *ch = ff; ch; ch = ch->next) ch->parent = p;
+        if (after) after->prev = fl; else p->last = fl;
+        target->next = ff;
+        ff->prev = target;
+        fl->next = after;
+        if (after) after->prev = fl;
+        break;
+    }
+    case HN_SWAP_OUTER: {
         hn_node *p = target->parent;
         if (!p) break; /* 根不可替换 */
         hn_node *before = target->prev, *after = target->next;
@@ -2676,13 +2690,20 @@ static void splice_children(hn_doc *doc, hn_node *frag, hn_node *target, hn_swap
     }
 }
 
-int hn_doc_swap(hn_doc *doc, const char *target_id, hn_swap_mode mode,
-                const char *html_src, size_t len) {
-    if (!doc || !doc->root || !target_id) return 0;
-    hn_node *target = find_by_id_rec(doc->root, target_id);
-    if (!target) return 0;
+int hn_doc_swap_node(hn_doc *doc, hn_node *target, hn_swap_mode mode,
+                     const char *html_src, size_t len) {
+    if (!doc || !doc->root || !target) return 0;
+    if (mode == HN_SWAP_NONE) return 1;                 /* 事件已派发, 不换入 */
+    if (mode == HN_SWAP_DELETE) {
+        if (target->parent) {
+            hn_node_remove_child(target->parent, target);
+            return 1;
+        }
+        return 0;
+    }
     hn_node *frag = hn_arena_alloc(doc->arena, sizeof(hn_node));
-    memset(frag, 0, sizeof(hn_node));
+    if (!frag) return 0;
+    memset(frag, 0, sizeof(*frag));
     frag->kind = HN_ELEM;
     frag->tag = "fragment";
     if (html_src && len) hn_parse_into(doc, frag, html_src, len);
@@ -2690,6 +2711,23 @@ int hn_doc_swap(hn_doc *doc, const char *target_id, hn_swap_mode mode,
     hn_md_apply(doc);   /* 片段里带入的 hn-md 同样先变成普通 DOM */
     hn_fmt_apply(doc);  /* 片段里带入的 hn-json/hn-csv 同批转换 */
     return 1;
+}
+
+int hn_doc_swap(hn_doc *doc, const char *target_id, hn_swap_mode mode,
+                const char *html_src, size_t len) {
+    if (!doc || !doc->root || !target_id) return 0;
+    hn_node *target = find_by_id_rec(doc->root, target_id);
+    if (!target) return 0;
+    return hn_doc_swap_node(doc, target, mode, html_src, len);
+}
+
+int hn_node_matches_selector(hn_doc *doc, hn_node *n, const char *sel, hn_context *c) {
+    if (!doc || !n || !sel) return 0;
+    hn_selgroup *g = hn_css_parse_selgroup(sel, strlen(sel));
+    if (!g) return 0;
+    int hit = (n->kind == HN_ELEM && !n->is_doc_wrapper && hn_style_selgroup_match(g, n, c));
+    hn_css_selgroup_free(g);
+    return hit;
 }
 
 /* 热渲染: 用新 HTML 整体替换文档内容(保留样式表) — agent 直接推送 UI 的原语 */

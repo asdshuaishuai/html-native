@@ -25,6 +25,7 @@
    hn_context_anim_tick_ex 的类别出口与 hn_context_repaint_light ——
    这两个钩子是引擎专为帧节拍分级开的缝, 不触及其他内部结构。 */
 #include "hn_internal.h"
+#include "hn_json.h"   /* hx-vals/hx-headers 的 JSON 解析 */
 #ifdef HN_HAVE_QUICKJS
 #include <quickjs.h>
 #endif
@@ -424,6 +425,244 @@ static hn_node *hx_carrier(hn_node *n) {
     return a ? a : b;
 }
 
+/* ---- htmx 兼容语义(2026-10-15 htmx 轮) ----
+ * hx-target: "this"/"" = 载体; "closest <sel>" / "find <sel>" /
+ *   "next [sel]" / "previous [sel]"; 其余按 CSS 选择器查(兼容旧 id 直查)。
+ * hx-swap: innerHTML(缺省)/outerHTML/beforeend/afterbegin/afterend/
+ *   delete/none。
+ * hx-trigger: 事件名逗号列表(click 缺省; change = 值变化触发;
+ *   load/every 已有), 修饰符 delay:N[ms|s](防抖) / changed(值未变跳过)。
+ * hx-vals / hx-headers: JSON 对象(合并进表单体 / HTTP 头; "js:" 前缀不支持)。
+ * 事件: htmx:beforeRequest(pd 可取消) / htmx:afterRequest / htmx:afterSwap。 */
+
+/* hx-trigger 串里是否含事件名 token(逗号分隔; 忽略修饰符) */
+static int hx_trigger_has(const char *trig, const char *name) {
+    if (!trig) return 0;
+    size_t nl = strlen(name);
+    for (const char *p = trig; *p;) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        const char *st = p;
+        while (*p && *p != ',') p++;
+        const char *en = p;
+        while (en > st && (en[-1] == ' ' || en[-1] == '\t')) en--;
+        /* token 首词(去修饰符): 与 name 比较大小写不敏感 */
+        const char *w = st;
+        while (w < en && *w != ' ' && *w != '\t') w++;
+        size_t wl = (size_t)(w - st);
+        if (wl == nl) {
+            int same = 1;
+            for (size_t i = 0; i < nl; i++)
+                if (tolower((unsigned char)st[i]) != tolower((unsigned char)name[i])) { same = 0; break; }
+            if (same) return 1;
+        }
+    }
+    return 0;
+}
+
+/* hx-trigger 的 delay:N[ms|s] 修饰符 → 毫秒; 无则 0 */
+static int hx_trigger_delay(const char *trig, const char *event) {
+    if (!trig || !event) return 0;
+    size_t el = strlen(event);
+    for (const char *p = trig; *p;) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        const char *st = p;
+        while (*p && *p != ',') p++;
+        const char *en = p;
+        while (en > st && (en[-1] == ' ' || en[-1] == '\t')) en--;
+        /* token 以事件名开头(词边界)? */
+        if ((size_t)(en - st) > el &&
+            strncasecmp(st, event, el) == 0 &&
+            (st[el] == ' ' || st[el] == '\t')) {
+            /* 找 delay: */
+            for (const char *q = st + el; q < en; q++) {
+                if (strncasecmp(q, "delay:", 6) == 0) {
+                    double v = strtod(q + 6, NULL);
+                    if (v <= 0) return 0;
+                    int ms = (strstr(q + 6, "ms") && strncmp(q + 6 + (strstr(q+6,"ms")-(q+6)) - 2, "s", 1) != 0)
+                             ? (int)v : (int)(v * 1000.0);
+                    if (strstr(q + 6, "ms")) {
+                        const char *u = strstr(q + 6, "ms");
+                        if (u > q + 6 && u[-1] != 's') ms = (int)v;
+                        else ms = (int)(v * 1000.0);
+                    }
+                    if (ms < 10) ms = 10;
+                    if (ms > 60000) ms = 60000;
+                    return ms;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* hx-trigger 含 changed 修饰符(针对 event)? */
+static int hx_trigger_changed(const char *trig, const char *event) {
+    if (!trig || !event) return 0;
+    size_t el = strlen(event);
+    for (const char *p = trig; *p;) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        const char *st = p;
+        while (*p && *p != ',') p++;
+        const char *en = p;
+        while (en > st && (en[-1] == ' ' || en[-1] == '\t')) en--;
+        if ((size_t)(en - st) > el &&
+            strncasecmp(st, event, el) == 0 &&
+            (st[el] == ' ' || st[el] == '\t')) {
+            for (const char *q = st + el; q + 7 <= en; q++) {
+                if (strncasecmp(q, "changed", 7) == 0 &&
+                    (q + 7 == en || q[7] == ' ' || q[7] == '\t'))
+                    return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* hx-target 解析(htmx 语法)。命中返回节点并置 *mode_out 的目标修正为 NULL;
+ * 未命中返回 NULL。 */
+static hn_node *hx_resolve_target(hn_rt *rt, hn_node *carrier) {
+    hn_doc *doc = hn_context_doc(rt->ctx);
+    const char *tid = hn_node_attr(carrier, "hx-target");
+    if (!tid || !tid[0] || !strcmp(tid, "this")) return carrier;
+    hn_context *c = rt->ctx;
+    if (!strncmp(tid, "closest ", 8)) {
+        for (hn_node *it = carrier; it; it = it->parent)
+            if (hn_node_matches_selector(doc, it, tid + 8, c)) return it;
+        return carrier;
+    }
+    if (!strncmp(tid, "find ", 5)) {
+        hn_node *hits[8];
+        char scoped[512];
+        const char *id = hn_node_attr(carrier, "id");
+        if (id && *id) {
+            snprintf(scoped, sizeof(scoped), "#%s %s", id, tid + 5);
+            /* id 含特殊字符的页面少见; 查询失败回退载体 */
+            int n = hn_doc_query_selector(doc, scoped, c, hits, 8);
+            if (n > 0) return hits[0];
+        }
+        /* 无 id 载体: 遍历子树找首个命中 */
+        hn_node *stack[256];
+        int sp = 0, guard = 0;
+        stack[sp++] = carrier;
+        while (sp > 0 && guard++ < 100000) {
+            hn_node *it = stack[--sp];
+            if (it != carrier && hn_node_matches_selector(doc, it, tid + 5, c)) return it;
+            for (hn_node *ch = it->first; ch; ch = ch->next)
+                if (ch->kind == HN_ELEM && sp < 256) stack[sp++] = ch;
+        }
+        return carrier;
+    }
+    if (!strncmp(tid, "next", 4) && (tid[4] == 0 || tid[4] == ' ')) {
+        hn_node *sib = carrier->next;
+        const char *want = tid[4] == ' ' ? tid + 5 : NULL;
+        for (; sib; sib = sib->next) {
+            if (sib->kind != HN_ELEM) continue;
+            if (!want || hn_node_matches_selector(doc, sib, want, c)) return sib;
+        }
+        return carrier;
+    }
+    if (!strncmp(tid, "previous", 8) && (tid[8] == 0 || tid[8] == ' ')) {
+        hn_node *sib = carrier->prev;
+        const char *want = tid[8] == ' ' ? tid + 9 : NULL;
+        for (; sib; sib = sib->prev) {
+            if (sib->kind != HN_ELEM) continue;
+            if (!want || hn_node_matches_selector(doc, sib, want, c)) return sib;
+        }
+        return carrier;
+    }
+    /* CSS 选择器(兼容旧"id 直查": 先选择器, 无命中回退 id) */
+    hn_node *hits[4];
+    int n = hn_doc_query_selector(doc, tid, c, hits, 4);
+    if (n > 0) return hits[0];
+    return hn_doc_find_by_id(doc, tid);
+}
+
+/* hx-swap 名 → 模式(含 htmx 全名与别名) */
+static hn_swap_mode hx_swap_parse(const char *sm) {
+    hn_swap_mode m = HN_SWAP_INNER;
+    if (sm) {
+        if (!strcmp(sm, "outerHTML")) m = HN_SWAP_OUTER;
+        else if (!strcmp(sm, "afterend")) m = HN_SWAP_AFTEREND;
+        else if (!strcmp(sm, "beforeend")) m = HN_SWAP_APPEND;
+        else if (!strcmp(sm, "afterbegin")) m = HN_SWAP_PREPEND;
+        else if (!strcmp(sm, "append")) m = HN_SWAP_APPEND;
+        else if (!strcmp(sm, "prepend")) m = HN_SWAP_PREPEND;
+        else if (!strcmp(sm, "delete")) m = HN_SWAP_DELETE;
+        else if (!strcmp(sm, "none")) m = HN_SWAP_NONE;
+    }
+    return m;
+}
+
+/* hx-vals/hx-headers 的 JSON 对象 → "k=urlencode(v)" 追加到 body。
+   返回追加后的长度; 非对象/解析失败返回 0(不追加)。嵌套值按 hn_json_str
+   字符串化; 数字/布尔按标准序列化。 */
+static int hx_vals_append(char *body, size_t cap, const char *json, size_t jlen,
+                          int *first_out, int *n_added) {
+    if (!json || !jlen) return 0;
+    char *buf = (char *)malloc(jlen + 1);
+    if (!buf) return 0;
+    memcpy(buf, json, jlen);
+    buf[jlen] = 0;
+    void *arena = NULL;
+    hn_json *root = hn_json_parse(buf, jlen, &arena);
+    if (!root || root->kind != HN_JSON_OBJ) { hn_json_free(arena); free(buf); return 0; }
+    int used = (int)strlen(body);
+    int added = 0;
+    for (int i = 0; i < root->count; i++) {
+        hn_json *it = root->items[i];
+        if (!it || !it->key) continue;
+        char vbuf[256];
+        if (it->kind == HN_JSON_STR) snprintf(vbuf, sizeof(vbuf), "%s", it->str ? it->str : "");
+        else if (it->kind == HN_JSON_NUM) snprintf(vbuf, sizeof(vbuf), "%g", it->num);
+        else if (it->kind == HN_JSON_BOOL) snprintf(vbuf, sizeof(vbuf), it->boolean ? "true" : "false");
+        else continue;   /* 嵌套对象/数组: v1 不支持(如实截断) */
+        /* k=v(&k=v): k/v 做 percent-encode(保留字母数字与 -_.,~) */
+        char enc_k[128], enc_v[512];
+        size_t ek = 0;
+        for (const char *q = it->key; *q && ek + 3 < sizeof(enc_k); q++) {
+            unsigned char ch = (unsigned char)*q;
+            if (isalnum(ch) || strchr("-_.~", ch)) enc_k[ek++] = (char)ch;
+            else ek += (size_t)snprintf(enc_k + ek, 4, "%%%02X", ch);
+        }
+        enc_k[ek] = 0;
+        size_t ev = 0;
+        for (const char *q = vbuf; *q && ev + 3 < sizeof(enc_v); q++) {
+            unsigned char ch = (unsigned char)*q;
+            if (isalnum(ch) || strchr("-_.~", ch)) enc_v[ev++] = (char)ch;
+            else ev += (size_t)snprintf(enc_v + ev, 4, "%%%02X", ch);
+        }
+        enc_v[ev] = 0;
+        int n = snprintf(body + used, cap > (size_t)used ? cap - (size_t)used : 0,
+                         "%s%s=%s", (used > 0 || added > 0) ? "&" : "", enc_k, enc_v);
+        if (n < 0 || (size_t)(used + n) >= cap) break;
+        used += n;
+        added++;
+    }
+    hn_json_free(arena);
+    free(buf);
+    if (n_added) *n_added = added;
+    return used;
+}
+
+/* hx-trigger 事件语义: 值变化后(change 触发器)是否执行 hx 请求。
+ * - 载体(自身或祖先)有 hx-get/post 且 hx-trigger 含 "change" → 检查
+ * - changed 修饰符: 请求体与上次相同 → 跳过(last 存于 rt->hx_sched)
+ * - delay:N[ms|s]: 到期前不执行(重触发刷新到期 = 防抖)
+ * 返回 1 = 已(延迟)执行调度, 调用方应重渲染。 */
+static void hx_change_maybe(hn_rt *rt, hn_node *n);
+
+/* 触发表(每载体一槽; delay/changed 状态) */
+#define HN_HX_SCHED_MAX 16
+struct {
+    char id[64];
+    double due;          /* poll_clock 域(0 = 无挂起) */
+    char last[128];
+    int has_last;
+} hx_sched_tab[HN_HX_SCHED_MAX];
+
 static int hx_perform(hn_rt *rt, hn_node *carrier) {
     const char *post = hn_node_attr(carrier, "hx-post");
     const char *get = hn_node_attr(carrier, "hx-get");
@@ -433,6 +672,15 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
     char form[4096];
     form[0] = 0;
     hn_doc_form_encode(doc, form, sizeof(form));
+    /* hx-vals: JSON 对象合并进请求体(htmx 语义) */
+    {
+        const char *vals = hn_node_attr(carrier, "hx-vals");
+        if (vals && *vals && vals[0] != 'j' && vals[0] != 'J')   /* "js:" 前缀不支持, 如实忽略 */
+            hx_vals_append(form, sizeof(form), vals, strlen(vals), NULL, NULL);
+    }
+    /* htmx:beforeRequest: pd → 取消(浏览器同序: 事件先于网络) */
+    if (rt_js_dispatch(rt, "htmx:beforeRequest", carrier, 0, 0, NULL, 0, 0))
+        return 0;
     /* sys:// remains the local routing boundary. HTTP uses the optional
        runtime transport; unsupported schemes retain hn_sys diagnostics. */
     char *frag = NULL;
@@ -454,13 +702,38 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
         opts.method = post ? "POST" : "GET";
         opts.body = post ? form : NULL;
         opts.body_len = post ? strlen(form) : 0;
-        hn_http_header hdr;
+        hn_http_header hdr[9];
+        int nhdr = 0;
         if (post && form[0]) {
-            hdr.name = "Content-Type";
-            hdr.value = "application/x-www-form-urlencoded";
-            opts.headers = &hdr;
-            opts.header_count = 1;
+            hdr[nhdr].name = "Content-Type";
+            hdr[nhdr].value = "application/x-www-form-urlencoded";
+            nhdr++;
         }
+        /* hx-headers: JSON 对象 → 自定义头(htmx 语义; 上限 8) */
+        {
+            const char *hj = hn_node_attr(carrier, "hx-headers");
+            if (hj && *hj && hj[0] != 'j' && hj[0] != 'J') {
+                char *hbuf = (char *)malloc(strlen(hj) + 1);
+                if (hbuf) {
+                    memcpy(hbuf, hj, strlen(hj) + 1);
+                    void *arena = NULL;
+                    hn_json *root = hn_json_parse(hbuf, strlen(hbuf), &arena);
+                    if (root && root->kind == HN_JSON_OBJ)
+                        for (int i = 0; i < root->count && nhdr < 8; i++) {
+                            hn_json *it = root->items[i];
+                            if (it && it->key && it->kind == HN_JSON_STR) {
+                                hdr[nhdr].name = it->key;
+                                hdr[nhdr].value = it->str ? it->str : "";
+                                nhdr++;
+                            }
+                        }
+                    hn_json_free(arena);
+                    free(hbuf);
+                }
+            }
+        }
+        opts.headers = nhdr ? hdr : NULL;
+        opts.header_count = nhdr;
         if (hn_http_request(&opts, &http)) {
             if (http.status >= 400) {
                 fprintf(stderr, "[hx] http 失败: %s: HTTP %ld\n", url, http.status);
@@ -487,20 +760,74 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
         }
         return 0;
     }
-    const char *tid = hn_node_attr(carrier, "hx-target");
-    if (!tid || !tid[0] || !strcmp(tid, "this")) tid = hn_node_attr(carrier, "id");
-    if (!tid || !tid[0]) { free(frag); return 0; }
-    const char *sm = hn_node_attr(carrier, "hx-swap");
-    hn_swap_mode m = HN_SWAP_INNER;
-    if (sm) {
-        if (!strcmp(sm, "outerHTML")) m = HN_SWAP_OUTER;
-        else if (!strcmp(sm, "append") || !strcmp(sm, "beforeend")) m = HN_SWAP_APPEND;
-        else if (!strcmp(sm, "prepend") || !strcmp(sm, "afterbegin")) m = HN_SWAP_PREPEND;
-    }
-    int ok = hn_doc_swap(doc, tid, m, frag, strlen(frag));
+    hn_node *target = hx_resolve_target(rt, carrier);
+    if (!target) { free(frag); return 0; }
+    hn_swap_mode m = hx_swap_parse(hn_node_attr(carrier, "hx-swap"));
+    int ok = hn_doc_swap_node(doc, target, m, frag, strlen(frag));
     free(frag);
-    if (ok) hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+    if (ok) {
+        hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+        /* htmx 事件: afterRequest / afterSwap(无 preventDefault 语义, 通知型) */
+        rt_js_dispatch(rt, "htmx:afterRequest", carrier, 0, 0, NULL, 0, 1);
+        if (m != HN_SWAP_NONE)
+            rt_js_dispatch(rt, "htmx:afterSwap", target, 0, 0, NULL, 0, 0);
+    }
     return ok;
+}
+
+/* 值变化后的 change 触发器(hx-trigger="change [changed] [delay:Nms]")。
+ * 无 id 载体无法建状态槽 → 直接执行(无 changed/延迟语义)。 */
+static void hx_change_maybe(hn_rt *rt, hn_node *n) {
+    if (!rt || !n) return;
+    hn_node *carrier = hx_carrier(n);
+    if (!carrier) return;
+    const char *trig = hn_node_attr(carrier, "hx-trigger");
+    if (!trig || !hx_trigger_has(trig, "change")) return;
+
+    /* 当前请求体(编辑后的表单 + vals) — changed 比较/延迟挂起都用它 */
+    char body[512];
+    body[0] = 0;
+    hn_doc_form_encode(hn_context_doc(rt->ctx), body, sizeof(body));
+    const char *vals = hn_node_attr(carrier, "hx-vals");
+    if (vals && *vals && vals[0] != 'j' && vals[0] != 'J')
+        hx_vals_append(body, sizeof(body), vals, strlen(vals), NULL, NULL);
+    size_t bl = strlen(body);
+
+    const char *id = hn_node_attr(carrier, "id");
+    int slot = -1;
+    if (id && *id) {
+        for (int i = 0; i < HN_HX_SCHED_MAX; i++)
+            if (hx_sched_tab[i].id[0] && !strcmp(hx_sched_tab[i].id, id)) { slot = i; break; }
+        if (slot < 0)
+            for (int i = 0; i < HN_HX_SCHED_MAX; i++)
+                if (!hx_sched_tab[i].id[0]) { slot = i; break; }
+        if (slot >= 0) {
+            snprintf(hx_sched_tab[slot].id, sizeof(hx_sched_tab[slot].id), "%s", id);
+            hx_sched_tab[slot].id[sizeof(hx_sched_tab[slot].id) - 1] = 0;
+        }
+    }
+
+    int want_changed = hx_trigger_changed(trig, "change");
+    if (want_changed && slot >= 0 && hx_sched_tab[slot].has_last &&
+        bl == strlen(hx_sched_tab[slot].last) &&
+        memcmp(hx_sched_tab[slot].last, body, bl) == 0)
+        return;   /* 值未变: changed 修饰符跳过 */
+
+    int delay = hx_trigger_delay(trig, "change");
+    if (delay > 0 && slot >= 0) {
+        hx_sched_tab[slot].due = rt->poll_clock_ms + (double)delay;
+        if (bl < sizeof(hx_sched_tab[slot].last)) {
+            memcpy(hx_sched_tab[slot].last, body, bl);
+            hx_sched_tab[slot].last[bl] = 0;
+            hx_sched_tab[slot].has_last = 1;
+        }
+        return;   /* 到期在 hn_rt_frame 统一冲刷 */
+    }
+    if (slot >= 0 && bl < (int)sizeof(hx_sched_tab[slot].last)) {
+        memcpy(hx_sched_tab[slot].last, body, bl + 1);
+        hx_sched_tab[slot].has_last = 1;
+    }
+    hx_perform(rt, carrier);
 }
 
 /* 启动动作: hx-trigger 含 "load" 的元素立即执行一次 */
@@ -3367,6 +3694,15 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
        开关门控 —— 轮询在无 JS 构建同样存在): 每帧 += dt。真窗壳喂真实间隔
        ⇒ 与墙钟一致; 探针/--advance 喂虚拟步进 ⇒ 轮询确定性到期。 */
     rt->poll_clock_ms += dt_ms > 0 ? (double)dt_ms : 0;   /* 轮询/hx: 墙钟语义 */
+    /* hx-trigger change 的 delay 防抖冲刷: 到期即执行(一次性; 重触发刷新到期) */
+    for (int i = 0; i < HN_HX_SCHED_MAX; i++) {
+        if (!hx_sched_tab[i].id[0] || hx_sched_tab[i].due <= 0) continue;
+        if (rt->poll_clock_ms >= hx_sched_tab[i].due) {
+            hx_sched_tab[i].due = 0;
+            hn_node *cn = hn_doc_find_by_id(hn_context_doc(rt->ctx), hx_sched_tab[i].id);
+            if (cn) hx_perform(rt, cn);
+        }
+    }
     /* handwired #1: 事件已在各自时间戳推进过动画的部分从帧推进中扣除
        —— 同一真实跨度恰被推进一次(事件时刻 + 帧尾余量), 任何帧率下
        动画总进度 = 真实流逝。 */
@@ -3513,6 +3849,7 @@ int hn_rt_pointer_move(hn_rt *rt, float x, float y) {
             rt->range_id[0] = 0;
         } else {
             rt_range_set_from_x(rt, inp, x);
+            hx_change_maybe(rt, inp);   /* hx-trigger="change" 载体(拖拽续) */
             return rt_render(rt);
         }
     }
@@ -3863,6 +4200,7 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
                     for (int i = 0; i < n_opt; i++)
                         hn_node_remove_attr(opts[i], "selected");
                     hn_node_set_attr(opts[pick], "selected", "");
+                    hx_change_maybe(rt, opened);   /* hx-trigger="change" 载体 */
                 }
                 opened->select_open = 0;
                 opened->select_row0 = 0;
@@ -3889,11 +4227,18 @@ int hn_rt_button(hn_rt *rt, int down, float x, float y, int button) {
         return rt_render(rt);
     hn_node *carrier = hx_carrier(n);
     if (carrier) {
-        const char *url = hn_node_attr(carrier, "hx-post") ? hn_node_attr(carrier, "hx-post")
-                                                          : hn_node_attr(carrier, "hx-get");
-        printf("[hx] %s\n", url ? url : "?");
-        fflush(stdout);
-        if (hx_perform(rt, carrier)) return rt_render(rt);
+        /* hx-trigger 语义门: 显式声明了触发器且不含 "click"(如 change 载体)
+           → 点击不执行(浏览器同序: 触发器决定触发事件) */
+        const char *trig = hn_node_attr(carrier, "hx-trigger");
+        if (trig && *trig && !hx_trigger_has(trig, "click")) {
+            /* 非 click 触发器的载体: 点击不触发请求 */
+        } else {
+            const char *url = hn_node_attr(carrier, "hx-post") ? hn_node_attr(carrier, "hx-post")
+                                                              : hn_node_attr(carrier, "hx-get");
+            printf("[hx] %s\n", url ? url : "?");
+            fflush(stdout);
+            if (hx_perform(rt, carrier)) return rt_render(rt);
+        }
     }
     /* 链接导航(md 直染的 a[href]): #锚引擎内滚进可视区;
        外部链接交系统默认方式打开(sys://open 同一出口), 不在窗内导航 */
@@ -3979,6 +4324,7 @@ static int rt_edit_insert2(hn_rt *rt, const char *ins, int del_before, int del_a
     /* value 变更 → 焦点元素派发 input(键入/删除/粘贴共用此路径; 无监听器
        时派发在注册表扫描处零成本早退) */
     rt_js_dispatch(rt, "input", rt->focus, 0, 0, NULL, 0, 0);
+    hx_change_maybe(rt, rt->focus);   /* hx-trigger="change" 的载体(编辑即触发) */
     return 1;
 }
 static int rt_edit_insert(hn_rt *rt, const char *ins, int del_bytes) {
@@ -4041,6 +4387,7 @@ int hn_rt_ime_commit(hn_rt *rt, const char *text) {
     g_ime_base_len = 0;
     g_ime_base[0] = 0;
     rt_js_dispatch(rt, "input", rt->focus, 0, 0, NULL, 0, 0);
+    hx_change_maybe(rt, rt->focus);   /* hx-trigger="change" 的载体(编辑即触发) */
     return rt_render(rt);
 }
 

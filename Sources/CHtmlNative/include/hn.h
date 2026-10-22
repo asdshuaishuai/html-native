@@ -702,8 +702,11 @@ int  hn_doc_take_pending_link(hn_doc *doc, char *buf, size_t cap);
 typedef enum {
     HN_SWAP_INNER = 0,  /* 替换目标元素内容(默认, innerHTML) */
     HN_SWAP_OUTER,      /* 替换目标元素自身(outerHTML) */
-    HN_SWAP_APPEND,     /* 追加到目标末尾 */
-    HN_SWAP_PREPEND     /* 插到目标开头 */
+    HN_SWAP_APPEND,     /* 追加到目标末尾(beforeend) */
+    HN_SWAP_PREPEND,    /* 插到目标开头(afterbegin) */
+    HN_SWAP_AFTEREND,   /* 插到目标之后(afterend) */
+    HN_SWAP_DELETE,     /* 移除目标元素 */
+    HN_SWAP_NONE        /* 不换入(仅事件/副作用; htmx swap:none) */
 } hn_swap_mode;
 
 /* ---- DOM 变更(供脚本层与宿主使用; 引擎只做结构操作, 不关心调用者是谁) ---- */
@@ -788,6 +791,12 @@ int hn_doc_set_text(hn_doc *doc, const char *element_id, const char *utf8_text);
 /* 把 HTML 片段换入目标元素; 运行时随后调用 hn_context_layout 生效 */
 int hn_doc_swap(hn_doc *doc, const char *target_id, hn_swap_mode mode,
                 const char *html_src, size_t len);
+/* 同上, 但目标以节点给出(htmx hx-target 的 closest/find/next 等解析结果)。
+ * DELETE = 移除目标; NONE = 无操作(返回 1); AFTEREND = 插到目标之后。 */
+int hn_doc_swap_node(hn_doc *doc, hn_node *target, hn_swap_mode mode,
+                     const char *html_src, size_t len);
+/* 节点是否命中选择器(htmx hx-target closest/find 的匹配原语) */
+int  hn_node_matches_selector(hn_doc *doc, hn_node *n, const char *sel, hn_context *c);
 
 /* 热渲染: 用新 HTML 整体替换文档内容(样式表保留), 随后 layout 生效。
  * 这是 agent 驱动 UI 的核心原语: 现场生成 HTML → 推入常驻窗口。 */

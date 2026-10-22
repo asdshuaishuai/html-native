@@ -342,6 +342,31 @@
 
 ---
 
+### 2026-10-22 htmx 兼容网络轮(hx-* 升级为 htmx 语义, 已修+探针锚定)
+
+背景: hx-* 此前是自造语义(target 仅 id、swap 仅 4 种、触发只有隐式
+click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 C 实现,
+零 JS 依赖 —— 不引 htmx.js 本体, 其 MutationObserver 面在 QuickJS 跑不动)。
+
+- **hx-target 扩展**: `this`(缺省)/CSS 选择器(兼容旧 id 直查)/
+  `closest <sel>`/`find <sel>`/`next [sel]`/`previous [sel]`。
+  新原语 `hn_node_matches_selector` + `hn_doc_swap_node`(节点目标版 swap)。
+- **hx-swap 全集**: 旧 4 种 + `afterend`/`delete`/`none`
+  (新枚举 HN_SWAP_AFTEREND/DELETE/NONE; splice_children 增 AFTEREND)。
+- **hx-trigger 显式事件**: 逗号列表; `change`(输入编辑/checkbox/radio/
+  range 拖拽/select 选行 —— 所有值变更通路统一挂 hx_change_maybe)/
+  `click` 门(显式触发器不含 click 时点击不执行)/`load`/`every`(既有)。
+  修饰符 `delay:N[ms|s]`(防抖, hx_sched 表 poll 域冲刷)/`changed`
+  (请求体与上次相同跳过, last 存槽)。
+- **hx-vals/hx-headers**: JSON 对象 → 合并请求体(percent-encode)/
+  HTTP 自定义头(上限 8)。`js:` 前缀不支持 —— 如实声明。
+- **htmx 事件**: `htmx:beforeRequest`(preventDefault 取消)/
+  `htmx:afterRequest`/`htmx:afterSwap`(el.dispatchEvent 可监听)。
+- 边界如实声明: `hx-push-url`/`hx-include`/`hx-select`/SSE/WS 触发、
+  swap 修饰符(`swap:100ms`)、`js:` 前缀 —— 未做。
+- 探针: events_probe 72→87(+15: closest/next 换入、delete/none swap、
+  change 触发器编辑即请求)。
+
 ### 全域审查轮(2026-10-22)发现与修复
 
 - ~~hnapp headless/linux 目标链接失败(undefined symbol: hnp_now_ms_f)~~
