@@ -392,13 +392,16 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
 - **[间歇] media_window ⑪ 视频两帧 diff=0**(真窗时序): 视频图层帧推进
   断言偶发拿到同帧(忙机解码慢); 单跑复绿。与探针时序预算相关, 非引擎
   语义回归 —— 观察项。
-- **[活跃] gpu_probe rect 页 Metal parity 回归**(确定性, 非环境):
-  rect 页(纯色/半透明/描边)Metal vs hnsoft 最大色差 245/255, 同跑的
-  渐变/文本页 ≤1/255 —— 仅 rect 变体断裂。stash A/B 排除冻结线三轮
-  改动; 根因指向 hnsoft 侧 rect/描边语义演进(97014fb RGSS AA4 +
-  f2757f9 描边环 CSS 内带语义)后, Metal 翻译未跟进部分 rect 变体。
-  需 Metal 专项收口(hn_gpu.c/hnp_gpu_metal.c 对齐新语义), 修复前
-  GPU 路径对描边 rect 页不可信。
+- ~~gpu_probe rect 页 Metal parity 回归~~ **已修**(2026-10-22):
+  根因 = hn_gpu.c 的描边翻译仍复刻 hnsoft **2026-10-17 环带改版前**
+  的旧描边模型("偶数宽不可见"的候选中心线口径), 而 hnsoft 语义已
+  演进为 CSS 内带环带 —— 3px 边框整圈色差(245/255, 1656 像素)。
+  修复: hn_gpu 改为环带改版后语义的**逐像素精确复刻** —— 覆盖 LUT
+  (盒物理尺寸, texel = 像素中心环覆盖, 与 hnsoft 同式同采样点含 4-tap
+  与角部 sqrt 项), quad uv 对齐 texel 中心; LUT 按几何+描边参数键控
+  缓存(跨帧命中, LRU + dispose 释放, 同渐变 LUT 纪律)。修后 rect 页
+  maxdiff 0/255(逐位), 分数坐标页 ≤0.5px 边缘位移为 GPU 四边形管线
+  既有 v1 边界(填充/渐变同有, 如实声明)。
 
 ## 附: 存量简化(散落多处, 排期防漏)
 

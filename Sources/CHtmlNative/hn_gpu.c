@@ -271,6 +271,107 @@ typedef struct {
 static glyph_ent g_glyphs[4096];
 static int g_glyph_n;
 
+/* ---------------- 描边环覆盖 LUT(CSS border 语义, hnsoft 同式) ----------------
+ * hnsoft 2026-10-17 描边环改版后的现行口径: 环带 = 盒边内侧
+ * [sd ∈ (-bw, 0)], 覆盖 = clamp01(0.5-sd) - clamp01(0.5-sd-bw)
+ * (外缘/内缘各 1px 线性), 过渡像素(环值 ∈ (0.02, 0.98))走 4-tap 超采样,
+ * 角部由圆角盒 SDF 的 sqrt 项自然给出(与逐行/列分解不同 —— 角元覆盖
+ * 是二维函数, 必须逐像素)。
+ * GPU 侧以**覆盖 LUT**一次成盒: LUT = 盒物理尺寸, texel = 各自像素中心
+ * 的环覆盖(与 hnsoft 同式同采样点), quad uv 对齐 texel 中心 → 逐像素
+ * 与 hnsoft 一致。LUT 内容按 (几何+描边参数) 键控缓存(跨帧命中, 同
+ * 渐变 LUT 的持久 LRU 纪律), dispose/逐出时 tex_free。 */
+
+typedef struct {
+    float x, y, w, h, bw;
+    unsigned stroke;
+    hnp_gpu_tex tex;
+    unsigned used;
+} ring_ent;
+static ring_ent g_rings[8];
+static int g_ring_n;
+
+static float gpu_sd_rect(float px, float py, float x, float y, float w, float h) {
+    /* r=0 圆角盒 SDF(与 hnsoft sd_rounded 同式, r 项退化) */
+    float qx = fabsf(px - (x + w * 0.5f)) - (w * 0.5f);
+    float qy = fabsf(py - (y + h * 0.5f)) - (h * 0.5f);
+    float ax = qx > 0 ? qx : 0, ay = qy > 0 ? qy : 0;
+    return sqrtf(ax * ax + ay * ay) + fminf(fmaxf(qx, qy), 0.0f);
+}
+
+static float gpu_ring(float sd, float bw) {
+    float o = 0.5f - sd;
+    float i = 0.5f - sd - bw;
+    if (o < 0) o = 0; else if (o > 1) o = 1;
+    if (i < 0) i = 0; else if (i > 1) i = 1;
+    return o - i;
+}
+
+static float gpu_ring4(float fx, float fy, float x, float y, float w, float h, float bw) {
+    /* 与 hnsoft sd_ring_aa4 同一组采样偏移 */
+    float c0 = gpu_ring(gpu_sd_rect(fx - 0.25f, fy - 0.125f, x, y, w, h), bw);
+    float c1 = gpu_ring(gpu_sd_rect(fx + 0.25f, fy + 0.125f, x, y, w, h), bw);
+    float c2 = gpu_ring(gpu_sd_rect(fx - 0.125f, fy + 0.25f, x, y, w, h), bw);
+    float c3 = gpu_ring(gpu_sd_rect(fx + 0.125f, fy - 0.25f, x, y, w, h), bw);
+    return (c0 + c1 + c2 + c3) * 0.25f;
+}
+
+/* 环覆盖 LUT(键控缓存; 返回 0 = 尺寸超限/资源失败, 呼出方整帧回退) */
+static hnp_gpu_tex ring_lut(const hn_cmd *c, float scale, float bw) {
+    for (int i = 0; i < g_ring_n; i++) {
+        ring_ent *e = &g_rings[i];
+        if (e->x == c->x * scale && e->y == c->y * scale && e->w == c->w * scale &&
+            e->h == c->h * scale && e->bw == bw && e->stroke == c->stroke) {
+            e->used = ++g_frame_clock;
+            return e->tex;
+        }
+    }
+
+    int lw = (int)floorf(c->w * scale + 0.5f);
+    int lh = (int)floorf(c->h * scale + 0.5f);
+    if (lw <= 0 || lh <= 0 || (long)lw * lh > (1L << 21))
+        return 0;   /* 尺寸异常/超限: 整帧回退(hnsoft 侧画得对) */
+    unsigned char *px = (unsigned char *)malloc((size_t)lw * lh * 4);
+    if (!px) return 0;
+
+    float x0s = c->x * scale, y0s = c->y * scale;
+    float ws = c->w * scale, hs = c->h * scale;
+    unsigned sa = (unsigned)(unpack(c->stroke).a * 255.0f + 0.5f);
+    for (int gy = 0; gy < lh; gy++) {
+        for (int gx = 0; gx < lw; gx++) {
+            float fx = x0s + gx + 0.5f, fy = y0s + gy + 0.5f;
+            float sd = gpu_sd_rect(fx, fy, x0s, y0s, ws, hs);
+            float ring = gpu_ring(sd, bw);
+            if (ring > 0.02f && ring < 0.98f)
+                ring = gpu_ring4(fx, fy, x0s, y0s, ws, hs, bw);
+            unsigned char *t = px + ((size_t)gy * lw + gx) * 4;
+            t[0] = (unsigned char)((c->stroke >> 24) & 0xFF);
+            t[1] = (unsigned char)((c->stroke >> 16) & 0xFF);
+            t[2] = (unsigned char)((c->stroke >> 8) & 0xFF);
+            t[3] = (unsigned char)((float)sa * ring + 0.5f);
+        }
+    }
+    hnp_gpu_tex tex = g_gpu->tex_create(lw, lh, px);
+    free(px);
+    if (!tex) return 0;
+
+    if (g_ring_n >= (int)(sizeof(g_rings) / sizeof(g_rings[0]))) {
+        int old = 0;
+        for (int i = 1; i < g_ring_n; i++)
+            if (g_rings[i].used < g_rings[old].used) old = i;
+        g_gpu->tex_free(g_rings[old].tex);
+        g_rings[old] = g_rings[g_ring_n - 1];
+        g_ring_n--;
+    }
+    ring_ent *e = &g_rings[g_ring_n++];
+    e->x = c->x * scale; e->y = c->y * scale;
+    e->w = c->w * scale; e->h = c->h * scale;
+    e->bw = bw; e->stroke = c->stroke;
+    e->tex = tex; e->used = ++g_frame_clock;
+    return tex;
+}
+
+
 /* 全部缓存清空(换宿主: 句柄已随 shutdown 作废) */
 void caches_reset(void) {
     for (int i = 0; i < g_img_n; i++) {
@@ -284,6 +385,9 @@ void caches_reset(void) {
     for (int i = 0; i < g_lut_n; i++)
         if (g_luts[i].tex && g_gpu) g_gpu->tex_free(g_luts[i].tex);
     g_lut_n = 0;
+    for (int i = 0; i < g_ring_n; i++)
+        if (g_rings[i].tex && g_gpu) g_gpu->tex_free(g_rings[i].tex);
+    g_ring_n = 0;
     g_glyph_n = 0;   /* 字形纹理句柄一并作废 */
 }
 
@@ -688,37 +792,26 @@ static void emit_rect(const hn_cmd *c, float scale) {
         quad_rect(0, c->fill, (float)ix, (float)iy, (float)iw, (float)ih, 0, 0, 0, 0);
     }
 
-    /* 描边(hnsoft 描边模型的**逐像素精确**复刻): hnsoft 的 stroke 是
-       sd_in = |d| - hw ∈ (-0.5, 0.5) 的环(外侧半平台 0.5, 内侧线性下降),
-       像素中心 |d| 恒为半整数 → 每条边至多一条中心线 t = ⌊hw⌋+0.5 被画:
-         hw ∈ (k, k+1) → 因子 f = 0.5 (hw ≤ t) / 0.5-(hw-t) (hw > t);
-         hw 落整数(偶数宽)→ 两邻中心恰在 ±0.5 边界 → **一个像素都不画**
-       (hnsoft 实测口径: border:2px/4px 不可见, 这就是参照语义)。
-       角部: r=0 的 SDF 角弧在整数中心上只剩 ≤5% alpha 残点(≤13/通道,
-       容差内 —— 不复刻)。四段环: 上/下两行通宽(角元归行), 左/右两列
-       去角元 —— 与 hnsoft"每像素画一次"一致, 不双重混合。 */
+    /* 描边(CSS border 语义, hnsoft 2026-10-17 环带改版后的**逐像素精确**
+       复刻): 环带 = 盒边内侧 [sd ∈ (-bw, 0)], 覆盖 = clamp01(0.5-sd) -
+       clamp01(0.5-sd-bw)(外缘/内缘各 1px 线性), 过渡像素 4-tap, 角部由
+       盒 SDF 的 sqrt 项自然给出。GPU 侧以覆盖 LUT 一次成盒: LUT = 盒
+       物理尺寸, texel = 各自像素中心的环覆盖(与 hnsoft 同式同采样点),
+       quad uv 对齐 texel 中心 → 逐像素一致。键控缓存跨帧命中(静态布局
+       零重建), 尺寸超限/资源失败整帧回退(hnsoft 侧画得对)。 */
     fcolor sc = unpack(c->stroke);
     if (c->stroke_w > 0 && sc.a > 0.01f && (c->stroke & 0xFFu) != 0) {
-        float hw = c->stroke_w * scale * 0.5f;
-        float t = floorf(hw) + 0.5f;             /* 唯一候选中心线(半整数) */
-        float sd_in = t - hw;
-        if (sd_in > -0.5f && sd_in < 0.5f && 2.0f * t < (float)iw && 2.0f * t < (float)ih) {
-            float f = (sd_in >= 0) ? 0.5f : 0.5f + sd_in;
-            unsigned rgba_ring = (c->stroke & 0xFFFFFF00u)
-                               | (unsigned)((float)(c->stroke & 0xFFu) * f);
-            float x0 = (float)ix, y0 = (float)iy, x1 = (float)(ix + iw), y1 = (float)(iy + ih);
-            float cx0 = x0 + t, cx1 = x1 - t, cy0 = y0 + t, cy1 = y1 - t;
-            /* 上/下行(通宽: 含两端角元 —— 半开区间 [cx0, cx1+0.5) 恰含中心
-               cx0 与 cx1, 不含界外) */
-            quad_rect(0, rgba_ring, cx0, cy0 - 0.5f, (cx1 + 0.5f) - cx0, 1.0f, 0, 0, 0, 0);
-            quad_rect(0, rgba_ring, cx0, cy1 - 0.5f, (cx1 + 0.5f) - cx0, 1.0f, 0, 0, 0, 0);
-            /* 左/右列(去角元: 角元已归行 —— y ∈ [cy0+0.5, cy1-0.5) 只含
-               中心 cy0+1 .. cy1-1) */
-            quad_rect(0, rgba_ring, cx0 - 0.5f, cy0 + 0.5f, 1.0f,
-                      (cy1 - 0.5f) - (cy0 + 0.5f), 0, 0, 0, 0);
-            quad_rect(0, rgba_ring, cx1 - 0.5f, cy0 + 0.5f, 1.0f,
-                      (cy1 - 0.5f) - (cy0 + 0.5f), 0, 0, 0, 0);
-        }
+        float bw = c->stroke_w * scale;
+        hnp_gpu_tex lut = ring_lut(c, scale, bw);
+        if (!lut) { quads_flush(); g_failed = 1; return; }
+        /* uv 对齐: LUT texel gx 的值按 hnsoft 像素中心 (x0s+gx+0.5) 计算,
+           quad 的 uv 以**未取整**的盒几何线性映射 —— 整数坐标下像素中心
+           恰落 texel 中心(逐位一致), 分数坐标偏差 ≤0.5px(容差内) */
+        float x0s = c->x * scale, y0s = c->y * scale;
+        float ws = c->w * scale, hs = c->h * scale;
+        float u0 = ((float)ix - x0s) / ws, v0 = ((float)iy - y0s) / hs;
+        quad_rect(lut, 0xFFFFFFFFu, (float)ix, (float)iy, (float)iw, (float)ih,
+                  u0, v0, (float)iw / ws, (float)ih / hs);
     }
 }
 
