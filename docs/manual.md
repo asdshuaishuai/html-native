@@ -65,6 +65,9 @@
   `hx-swap`(innerHTML/outerHTML/beforeend/afterbegin/afterend/delete/
   none)、`hx-trigger`(click/load/`every Ns`/`change`/hover… +
   `delay:N` 防抖 + `changed`)、`hx-vals`/`hx-headers`(JSON)。
+- `hx-include="选择器列表"`: 附加元素值进请求体(逗号分隔 CSS;
+  输入控件取当前值, 非控件取 name/value 属性)。
+- `hx-select="选择器"`: 响应子树选择 —— 只换入匹配元素(无匹配 = 换空)。
 - `hx-confirm="问题"`: 触发 `htmx:confirm` 事件(`e.payload` = 问题),
   JS preventDefault 取消请求; 无 JS 监听 = 放行(对话框形态归平台层)。
 - `htmx:beforeRequest`(载荷=HTTP 动词, preventDefault 取消)/

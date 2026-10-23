@@ -449,6 +449,84 @@ int main(void) {
         }
     }
 
+    /* == 7c. htmx parity: hx-include 请求附加 + hx-select 响应子树选择 == */
+    printf("== htmx parity: hx-include 与 hx-select ==\n");
+    {
+        static const char *INC_HTML =
+            "<html><body>"
+            "<span id=\"extra\" name=\"value\" value=\"hello\">x</span>"
+            "<div id=\"incbox\" hx-post=\"sys://store/set?key=p2\" hx-include=\"#extra\" "
+            "hx-target=\"incbox\" style=\"width:80;height:30\">init</div>"
+            "<div id=\"noinc\" hx-post=\"sys://store/set?key=p3\" "
+            "hx-target=\"noinc\" style=\"width:80;height:30\">init</div>"
+            "<div id=\"readbox\" hx-get=\"sys://store/get?key=p2\" "
+            "hx-target=\"readbox\">?</div>"
+            "</body></html>";
+        hn_rt_desc hd = { "events-probe-include", INC_HTML, strlen(INC_HTML), NULL, 0, 300, 200 };
+        hn_rt *irt = hn_rt_open(&hd);
+        check(irt != NULL, "hn_rt_open(include 页)");
+        if (irt) {
+            float cx, cy;
+            box_center(irt, "noinc", &cx, &cy);
+            hn_rt_button(irt, 1, cx, cy, 0);
+            char *t = hn_rt_text(irt, "noinc");
+            check(t && strstr(t, "missing") != NULL,
+                  "对照: 无 hx-include → store/set 缺 value(missing)");
+            free(t);
+            box_center(irt, "incbox", &cx, &cy);
+            hn_rt_button(irt, 1, cx, cy, 0);
+            t = hn_rt_text(irt, "incbox");
+            check(t && strstr(t, "missing") == NULL && strlen(t) > 0,
+                  "hx-include → 非控件元素值进入请求体(set 成功)");
+            free(t);
+            box_center(irt, "readbox", &cx, &cy);
+            hn_rt_button(irt, 1, cx, cy, 0);
+            t = hn_rt_text(irt, "readbox");
+            check(t && strcmp(t, "hello") == 0,
+                  "回环: store/get?key=p2 读回 'hello'(hx-include 值已入库)");
+            free(t);
+            hn_rt_close(irt);
+        }
+    }
+    {
+        static const char *SEL_HTML =
+            "<html><body>"
+            "<div id=\"selbox\" hx-get=\"sys://store/set?key=s5&amp;value=abc\" "
+            "hx-select=\"span\" hx-target=\"selbox\" style=\"width:80;height:30\">init</div>"
+            "<div id=\"selnope\" hx-get=\"sys://store/set?key=s6&amp;value=xyz\" "
+            "hx-select=\"#nope\" hx-target=\"selnope\" style=\"width:80;height:30\">init</div>"
+            "</body></html>";
+        hn_rt_desc hd = { "events-probe-select", SEL_HTML, strlen(SEL_HTML), NULL, 0, 300, 160 };
+        hn_rt *srt = hn_rt_open(&hd);
+        check(srt != NULL, "hn_rt_open(select 页)");
+        if (srt) {
+            float cx, cy;
+            box_center(srt, "selbox", &cx, &cy);
+            hn_rt_button(srt, 1, cx, cy, 0);
+            char *t = hn_rt_text(srt, "selbox");
+            check(t && strcmp(t, "abc") == 0,
+                  "hx-select=span → 换入匹配子树(内容 'abc')");
+            free(t);
+            char *sv_text = hn_rt_text(srt, "store-value");
+            check(sv_text && strcmp(sv_text, "abc") == 0,
+                  "序列化保留 span 属性(#store-value 在树中, 文本 'abc')");
+            free(sv_text);
+            char *has = hn_rt_eval(
+                "document.getElementById('store-value') ? 1 : 0",
+                "events-probe-select", hn_rt_doc(srt));
+            check_int(has ? strtol(has, NULL, 10) : 0, 1,
+                      "序列化保留属性(#store-value 可查)");
+            free(has);
+            box_center(srt, "selnope", &cx, &cy);
+            hn_rt_button(srt, 1, cx, cy, 0);
+            char *t2 = hn_rt_text(srt, "selnope");
+            check(t2 && strcmp(t2, "") == 0,
+                  "hx-select 无匹配 → 换入空(htmx 语义)");
+            free(t2);
+            hn_rt_close(srt);
+        }
+    }
+
     /* == 8. 文档换装: 监听器清空 + 新文档脚本重注册 == */
     printf("== 文档换装(hn_rt_render)与二次 open ==\n");
     {

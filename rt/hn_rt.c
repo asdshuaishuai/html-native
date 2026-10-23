@@ -670,6 +670,84 @@ static int hx_vals_append(char *body, size_t cap, const char *json, size_t jlen,
     return used;
 }
 
+/* k=v percent 编码追加(&k=v; 与 hx_vals_append 同编码口径)。
+   返回追加后的 body 长度; 编码截断时不追加该对。 */
+static size_t hx_pair_append(char *body, size_t cap, size_t used,
+                             const char *name, const char *value) {
+    if (!name || !*name) return used;
+    char enc[1024];
+    size_t el = 0;
+    for (const char *q = name; *q && el + 3 < sizeof(enc); q++) {
+        unsigned char ch = (unsigned char)*q;
+        if (isalnum(ch) || strchr("-_.~", ch)) enc[el++] = (char)ch;
+        else el += (size_t)snprintf(enc + el, 4, "%%%02X", ch);
+    }
+    enc[el] = 0;
+    char enc_v[768];
+    size_t ev = 0;
+    for (const char *q = value; *q && ev + 3 < sizeof(enc_v); q++) {
+        unsigned char ch = (unsigned char)*q;
+        if (isalnum(ch) || strchr("-_.~", ch)) enc_v[ev++] = (char)ch;
+        else ev += (size_t)snprintf(enc_v + ev, 4, "%%%02X", ch);
+    }
+    enc_v[ev] = 0;
+    int w = snprintf(body + used, cap - used, "%s%s=%s",
+                     used ? "&" : "", enc, enc_v);
+    return (w > 0 && (size_t)w < cap - used) ? used + (size_t)w : used;
+}
+
+/* 最小 HTML 序列化器(hx-select 的换入面): 元素(属性转义)+文本(转义)
+   + 子级递归; void 元素(br/hr/img/input/meta/link)不自闭。能力面与
+   sys 路由响应的生成侧对齐(元素/属性/文本 —— 响应不做内联样式以外的
+   复杂结构, 此处如实覆盖)。 */
+static void html_serialize_escape(char *out, size_t cap, size_t *used,
+                                  const char *s, size_t n, int attr_mode) {
+    for (size_t i = 0; i < n && *used + 6 < cap; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch == '&') { out[(*used)++] = '&'; out[(*used)++] = 'a'; out[(*used)++] = 'm'; out[(*used)++] = 'p'; out[(*used)++] = ';'; }
+        else if (ch == '<' && !attr_mode) { memcpy(out + *used, "&lt;", 4); *used += 4; }
+        else if (ch == '>' && !attr_mode) { memcpy(out + *used, "&gt;", 4); *used += 4; }
+        else if (ch == '"' && attr_mode) { memcpy(out + *used, "&quot;", 6); *used += 6; }
+        else out[(*used)++] = (char)ch;
+    }
+}
+
+static void html_serialize_node(hn_node *n, char *out, size_t cap, size_t *used) {
+    if (!n || *used + 8 >= cap) return;
+    if (n->kind != HN_ELEM) {
+        /* TEXT: 文本在 text/text_len(hn_node_value 是表单/值缓冲通道,
+           对解析出的文本节点返回空 —— 首跑实测序列化空内容) */
+        if (n->text && n->text_len)
+            html_serialize_escape(out, cap, used, n->text, n->text_len, 0);
+        return;
+    }
+    const char *tag = n->tag ? n->tag : "div";
+    out[(*used)++] = '<';
+    html_serialize_escape(out, cap, used, tag, strlen(tag), 1);
+    for (int i = 0;; i++) {
+        const char *an = NULL, *av = NULL;
+        if (!hn_node_attr_at(n, i, &an, &av)) break;
+        if (!an) continue;
+        out[(*used)++] = ' ';
+        html_serialize_escape(out, cap, used, an, strlen(an), 1);
+        out[(*used)++] = '=';
+        out[(*used)++] = '"';
+        if (av) html_serialize_escape(out, cap, used, av, strlen(av), 1);
+        out[(*used)++] = '"';
+    }
+    out[(*used)++] = '>';
+    /* void 元素(br/hr/img/input/meta/link): 无闭合无子级 */
+    if (!strcmp(tag, "br") || !strcmp(tag, "hr") || !strcmp(tag, "img") ||
+        !strcmp(tag, "input") || !strcmp(tag, "meta") || !strcmp(tag, "link"))
+        return;
+    for (hn_node *ch = n->first; ch; ch = ch->next)
+        html_serialize_node(ch, out, cap, used);
+    out[(*used)++] = '<';
+    out[(*used)++] = '/';
+    html_serialize_escape(out, cap, used, tag, strlen(tag), 1);
+    out[(*used)++] = '>';
+}
+
 /* hx-trigger 事件语义: 值变化后(change 触发器)是否执行 hx 请求。
  * - 载体(自身或祖先)有 hx-get/post/put/delete/patch 且 hx-trigger 含 "change" → 检查
  * - changed 修饰符: 请求体与上次相同 → 跳过(last 存于 rt->hx_sched)
@@ -695,6 +773,51 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
     char form[4096];
     form[0] = 0;
     hn_doc_form_encode(doc, form, sizeof(form));
+    /* hx-include: 逗号分隔 CSS 选择器 → 追加元素值(htmx 语义)。
+       输入控件取当前值; 其余元素取 name/value 属性 —— 覆盖 form_walk
+       只收集控件的缺口(非控件载体的显式包含在此补齐)。选择器复用
+       hn_doc_query_selector(查全语义, 数组出参)。 */
+    {
+        const char *inc = hn_node_attr(carrier, "hx-include");
+        if (inc && *inc && inc[0] != 'j' && inc[0] != 'J') {
+            /* 逗号分隔选择器列表: 逐个查询累加(htmx 同语义) */
+            char sel[256];
+            int si = 0;
+            size_t used = strlen(form);
+            const char *p2 = inc;
+            int done = 0;
+            while (!done) {
+                char ch = *p2;
+                if (ch == ',' || ch == 0) {
+                    sel[si] = 0;
+                    if (si > 0) {
+                        hn_node *matches[16];
+                        int nm = hn_doc_query_selector(hn_context_doc(rt->ctx), sel,
+                                                       NULL, matches, 16);
+                        for (int i = 0; i < nm; i++) {
+                            hn_node *m = matches[i];
+                            const char *name = hn_node_attr(m, "name");
+                            if (!name || !*name) continue;
+                            const char *v = NULL;
+                            size_t vlen = 0;
+                            if (hn_node_is_input(m) && !hn_node_is_disabled(m))
+                                v = hn_node_value(m, &vlen);
+                            else
+                                v = hn_node_attr(m, "value");
+                            if (!v) continue;
+                            used = hx_pair_append(form, sizeof(form), used, name, v);
+                        }
+                    }
+                    si = 0;
+                    if (ch == 0) done = 1;
+                    p2++;
+                    continue;
+                }
+                if (si + 1 < (int)sizeof(sel)) sel[si++] = ch;
+                p2++;
+            }
+        }
+    }
     /* hx-vals: JSON 对象合并进请求体(htmx 语义) */
     {
         const char *vals = hn_node_attr(carrier, "hx-vals");
@@ -794,6 +917,30 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
             fflush(stderr);
         }
         return 0;
+    }
+    /* hx-select: 响应子树选择(htmx 语义: 换入**所有**匹配选择器的元素;
+       无匹配 = 换入空)。frag 解析为临时文档, 逐匹配序列化 —— 序列化器
+       做文本/属性转义(响应片段为 HTML, 重解析后转义态一致)。 */
+    {
+        const char *sel = hn_node_attr(carrier, "hx-select");
+        if (sel && *sel && frag) {
+            hn_doc *fd = hn_parse_html(frag, strlen(frag));
+            if (fd) {
+                hn_node *matches[32];
+                int nm = hn_doc_query_selector(fd, sel, NULL, matches, 32);
+                char picked[8192];
+                size_t used = 0;
+                for (int i = 0; i < nm; i++)
+                    html_serialize_node(matches[i], picked, sizeof(picked), &used);
+                picked[used] = 0;
+                free(frag);
+                frag = (char *)malloc(used + 1);
+                if (frag) memcpy(frag, picked, used + 1);
+                else { picked[0] = 0; frag = (char *)malloc(1); if (frag) frag[0] = 0; }
+                hn_doc_free(fd);
+            }
+            /* 解析失败: 保留原 frag(诚实降级 —— select 是优化不是门禁) */
+        }
     }
     hn_node *target = hx_resolve_target(rt, carrier);
     if (!target) { free(frag); return 0; }

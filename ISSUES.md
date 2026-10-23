@@ -369,11 +369,18 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
   取消, `e.payload` = 问题串) —— 引擎无 window.confirm, 对话框形态归
   平台层(与 sys://notify 同级), 无 JS 监听 = 放行(与 beforeRequest
   无监听者语义一致)。
-- 边界如实声明: `hx-push-url`/`hx-include`/`hx-select`/SSE/WS 触发、
-  swap 修饰符(`swap:100ms`)、`js:` 前缀 —— 未做。
-- 探针: events_probe 72→87→**96**(+9: 三动词方法分发/beforeRequest
-  载荷/confirm 放行·取消·问题串; 冒泡链监听器须挂 document —— body
-  无 id 不入命中链, 首跑实测)。
+- **hx-include/hx-select 补齐**(同日第三轮): `hx-include`(逗号分隔
+  CSS 选择器 → 追加元素值; 输入控件取当前值, 非控件取 name/value
+  属性 —— 覆盖 form_walk 只收集控件的缺口) + `hx-select`(响应子树
+  选择: frag 重解析 → 查全 → 逐匹配序列化换入; 无匹配 = 换入空,
+  htmx 语义; 附最小 HTML 序列化器 —— 教训: 文本节点内容在
+  text/text_len, hn_node_value 是表单值通道返回空, 首跑实测)。
+- 边界如实声明: `hx-push-url`/SSE/WS 触发、swap 修饰符(`swap:100ms`)、
+  `js:` 前缀 —— 未做。
+- 探针: events_probe 72→87→96→**105**(+18: 三动词方法分发/
+  beforeRequest 载荷/confirm 放行·取消·问题串 + hx-include 回环
+  (store/set→get 读回)/hx-select 换入·无匹配空/属性保留; 冒泡链
+  监听器须挂 document —— body 无 id 不入命中链, 首跑实测)。
 
 ### 全域审查轮(2026-10-22)发现与修复
 
