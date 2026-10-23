@@ -603,20 +603,49 @@ static hn_node *hx_resolve_target(hn_rt *rt, hn_node *carrier) {
     return hn_doc_find_by_id(doc, tid);
 }
 
-/* hx-swap 名 → 模式(含 htmx 全名与别名) */
+/* hx-swap 名 → 模式(含 htmx 全名与别名)。**首 token** 匹配 —— 属性可带
+   修饰符后缀("innerHTML swap:100ms", 修饰符由 hx_swap_delay_parse 消费) */
 static hn_swap_mode hx_swap_parse(const char *sm) {
     hn_swap_mode m = HN_SWAP_INNER;
-    if (sm) {
-        if (!strcmp(sm, "outerHTML")) m = HN_SWAP_OUTER;
-        else if (!strcmp(sm, "afterend")) m = HN_SWAP_AFTEREND;
-        else if (!strcmp(sm, "beforeend")) m = HN_SWAP_APPEND;
-        else if (!strcmp(sm, "afterbegin")) m = HN_SWAP_PREPEND;
-        else if (!strcmp(sm, "append")) m = HN_SWAP_APPEND;
-        else if (!strcmp(sm, "prepend")) m = HN_SWAP_PREPEND;
-        else if (!strcmp(sm, "delete")) m = HN_SWAP_DELETE;
-        else if (!strcmp(sm, "none")) m = HN_SWAP_NONE;
+    if (sm && *sm) {
+        char first[64];
+        size_t i = 0;
+        while (sm[i] && sm[i] != ' ' && i + 1 < sizeof(first)) { first[i] = sm[i]; i++; }
+        first[i] = 0;
+        if (!strcmp(first, "outerHTML")) m = HN_SWAP_OUTER;
+        else if (!strcmp(first, "afterend")) m = HN_SWAP_AFTEREND;
+        else if (!strcmp(first, "beforeend")) m = HN_SWAP_APPEND;
+        else if (!strcmp(first, "afterbegin")) m = HN_SWAP_PREPEND;
+        else if (!strcmp(first, "append")) m = HN_SWAP_APPEND;
+        else if (!strcmp(first, "prepend")) m = HN_SWAP_PREPEND;
+        else if (!strcmp(first, "delete")) m = HN_SWAP_DELETE;
+        else if (!strcmp(first, "none")) m = HN_SWAP_NONE;
     }
     return m;
+}
+
+/* hx-swap 属性 → (模式, swap 延迟 ms)。属性形态: "innerHTML swap:100ms"
+   (首 token = 模式, 其余 swap:N[ms|s] 生效; settle 与 ignoreTitle 等
+    其余修饰符诚实忽略)。
+   返回延迟 ms(0 = 立即)。 */
+static float hx_swap_delay_parse(const char *sm) {
+    if (!sm || !*sm) return 0;
+    float delay = 0;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", sm);
+    for (char *tok = strtok(buf, " "); tok; tok = strtok(NULL, " ")) {
+        if (strncmp(tok, "swap:", 5) == 0) {
+            const char *v = tok + 5;
+            char *end = NULL;
+            double n = strtod(v, &end);
+            if (end && end != v) {
+                if (end[0] == 's' && end[1] == 0) n *= 1000.0;   /* "2s" */
+                delay = (float)n;
+            }
+        }
+        /* settle:/ignoreTitle 等其余修饰符: 诚实忽略 */
+    }
+    return delay;
 }
 
 /* hx-vals/hx-headers 的 JSON 对象 → "k=urlencode(v)" 追加到 body。
@@ -669,6 +698,45 @@ static int hx_vals_append(char *body, size_t cap, const char *json, size_t jlen,
     if (n_added) *n_added = added;
     return used;
 }
+
+#ifdef HN_HAVE_QUICKJS
+static JSContext *js_scope_find(const char *key);   /* 作用域表(定义在后) */
+/* "js:" 前缀求值: 表达式在 rt 的 QuickJS 作用域**全局**求值 →
+   JSON.stringify 字符串。返回 malloc 串(调用方 free);
+   失败/异常/非序列化结果返回 NULL(htmx 的 this 绑定为 v1 边界)。 */
+static char *js_eval_to_json(hn_rt *rt, const char *expr, const char *tag) {
+    JSContext *ctx = js_scope_find(rt->id);
+    if (!ctx) return NULL;
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue jobj = JS_GetPropertyStr(ctx, global, "JSON");
+    JSValue sfn = JS_GetPropertyStr(ctx, jobj, "stringify");
+    JSValue rv = JS_Eval(ctx, expr, strlen(expr), tag, JS_EVAL_TYPE_GLOBAL);
+    char *out = NULL;
+    if (JS_IsException(rv)) {
+        JSValue e = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, e);
+        fprintf(stderr, "[hx] %s 求值异常: %s\n", tag, msg ? msg : "?");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, e);
+    } else {
+        JSValue sfn_v = JS_DupValue(ctx, sfn);
+        JSValue s = JS_Call(ctx, sfn_v, JS_UNDEFINED, 1, (JSValueConst *)&rv);
+        if (!JS_IsException(s) && JS_IsString(s)) {
+            size_t len = 0;
+            const char *str = JS_ToCStringLen(ctx, &len, s);
+            if (str) {
+                out = (char *)malloc(len + 1);
+                if (out) memcpy(out, str, len + 1);
+            }
+        }
+        JS_FreeValue(ctx, s);
+    }
+    JS_FreeValue(ctx, sfn);
+    JS_FreeValue(ctx, jobj);
+    JS_FreeValue(ctx, global);
+    return out;
+}
+#endif
 
 /* k=v percent 编码追加(&k=v; 与 hx_vals_append 同编码口径)。
    返回追加后的 body 长度; 编码截断时不追加该对。 */
@@ -764,6 +832,20 @@ struct {
     int has_last;
 } hx_sched_tab[HN_HX_SCHED_MAX];
 
+/* hx-swap 修饰符 swap:N[ms|s] 的延迟换入槽(响应已到, 换入延后):
+   到期在 hn_rt_frame 的 poll 域冲刷(重找目标 → swap → 布局)。
+   frag 副本有界(4 槽 × 2KB), 超长/槽满 → 立即换入(诚实降级)。 */
+#define HN_HX_SWAP_PEND_MAX 4
+#define HN_HX_SWAP_PEND_FRAG 2048
+static struct {
+    int active;
+    double due;
+    char target_id[64];
+    hn_swap_mode m;
+    char frag[HN_HX_SWAP_PEND_FRAG];
+    size_t len;
+} hx_swap_pend[HN_HX_SWAP_PEND_MAX];
+
 static int hx_perform(hn_rt *rt, hn_node *carrier) {
     const char *verb = "GET", *url = NULL;
     hx_method_of(carrier, &verb, &url);
@@ -818,11 +900,29 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
             }
         }
     }
-    /* hx-vals: JSON 对象合并进请求体(htmx 语义) */
+    /* hx-vals: JSON 对象合并进请求体(htmx 语义); "js:" 前缀 = QuickJS
+       求值表达式 → JSON.stringify → 同一合并(局部作者 JS 面, 表达式在
+       全局作用域求值 —— htmx 的 this 绑定为 v1 边界)。 */
     {
         const char *vals = hn_node_attr(carrier, "hx-vals");
-        if (vals && *vals && vals[0] != 'j' && vals[0] != 'J')   /* "js:" 前缀不支持, 如实忽略 */
-            hx_vals_append(form, sizeof(form), vals, strlen(vals), NULL, NULL);
+        char *js_json = NULL;
+        if (vals && *vals) {
+            if (vals[0] == 'j' && vals[1] == 's' && vals[2] == ':') {
+#ifdef HN_HAVE_QUICKJS
+                js_json = js_eval_to_json(rt, vals + 3, "hx-vals.js");
+#endif
+                if (!js_json) {
+                    fprintf(stderr, "[hx] hx-vals js: 求值失败(需 QuickJS 构建)\n");
+                    fflush(stderr);
+                }
+            } else {
+                hx_vals_append(form, sizeof(form), vals, strlen(vals), NULL, NULL);
+            }
+        }
+        if (js_json) {
+            hx_vals_append(form, sizeof(form), js_json, strlen(js_json), NULL, NULL);
+            free(js_json);
+        }
     }
     /* hx-confirm: htmx:confirm 事件(preventDefault 取消), 问题串走
        utf8 载荷。引擎无 window.confirm —— 对话框形态归平台层(与
@@ -867,10 +967,18 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
             hdr[nhdr].value = "application/x-www-form-urlencoded";
             nhdr++;
         }
-        /* hx-headers: JSON 对象 → 自定义头(htmx 语义; 上限 8) */
+        /* hx-headers: JSON 对象 → 自定义头(htmx 语义; 上限 8);
+           "js:" 前缀同 hx-vals(QuickJS 求值 → JSON) */
         {
             const char *hj = hn_node_attr(carrier, "hx-headers");
-            if (hj && *hj && hj[0] != 'j' && hj[0] != 'J') {
+            char *hjs_json = NULL;
+            if (hj && *hj && hj[0] == 'j' && hj[1] == 's' && hj[2] == ':') {
+#ifdef HN_HAVE_QUICKJS
+                hjs_json = js_eval_to_json(rt, hj + 3, "hx-headers.js");
+#endif
+                hj = hjs_json;
+            }
+            if (hj && *hj) {
                 char *hbuf = (char *)malloc(strlen(hj) + 1);
                 if (hbuf) {
                     memcpy(hbuf, hj, strlen(hj) + 1);
@@ -889,6 +997,7 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
                     free(hbuf);
                 }
             }
+            free(hjs_json);
         }
         opts.headers = nhdr ? hdr : NULL;
         opts.header_count = nhdr;
@@ -945,16 +1054,34 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
     hn_node *target = hx_resolve_target(rt, carrier);
     if (!target) { free(frag); return 0; }
     hn_swap_mode m = hx_swap_parse(hn_node_attr(carrier, "hx-swap"));
-    int ok = hn_doc_swap_node(doc, target, m, frag, strlen(frag));
-    free(frag);
-    if (ok) {
-        hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
-        /* htmx 事件: afterRequest / afterSwap(无 preventDefault 语义, 通知型) */
-        rt_js_dispatch(rt, "htmx:afterRequest", carrier, 0, 0, NULL, 0, 1);
-        if (m != HN_SWAP_NONE)
-            rt_js_dispatch(rt, "htmx:afterSwap", target, 0, 0, NULL, 0, 0);
+    float swap_delay = hx_swap_delay_parse(hn_node_attr(carrier, "hx-swap"));
+    /* swap:N 延迟换入: 目标有 id → frag 副本入延迟槽(poll 域到期执行);
+       无 id/槽满/超长 → 立即换入(诚实降级)。htmx 事件序: afterRequest
+       响应到达即派发, afterSwap 随换入(延迟时与 swap 一起到 poll 域)。 */
+    const char *tid = hn_node_attr(target, "id");
+    int delayed = 0;
+    if (swap_delay > 0 && tid && *tid && strlen(frag) < HN_HX_SWAP_PEND_FRAG) {
+        for (int i = 0; i < HN_HX_SWAP_PEND_MAX && !delayed; i++) {
+            if (hx_swap_pend[i].active) continue;
+            hx_swap_pend[i].active = 1;
+            hx_swap_pend[i].due = rt->poll_clock_ms + (double)swap_delay;
+            snprintf(hx_swap_pend[i].target_id, sizeof(hx_swap_pend[i].target_id),
+                     "%s", tid);
+            hx_swap_pend[i].m = m;
+            memcpy(hx_swap_pend[i].frag, frag, strlen(frag) + 1);
+            hx_swap_pend[i].len = strlen(frag);
+            delayed = 1;
+        }
     }
-    return ok;
+    if (!delayed) {
+        int ok = hn_doc_swap_node(doc, target, m, frag, strlen(frag));
+        if (ok) hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+    }
+    free(frag);
+    rt_js_dispatch(rt, "htmx:afterRequest", carrier, 0, 0, NULL, 0, 1);
+    if (!delayed && m != HN_SWAP_NONE)
+        rt_js_dispatch(rt, "htmx:afterSwap", target, 0, 0, NULL, 0, 0);
+    return 1;
 }
 
 /* 值变化后的 change 触发器(hx-trigger="change [changed] [delay:Nms]")。
@@ -3898,6 +4025,22 @@ int hn_rt_frame(hn_rt *rt, float dt_ms, int *repaint) {
             hx_sched_tab[i].due = 0;
             hn_node *cn = hn_doc_find_by_id(hn_context_doc(rt->ctx), hx_sched_tab[i].id);
             if (cn) hx_perform(rt, cn);
+        }
+    }
+    /* hx-swap swap:N 延迟换入冲刷: 到期 → 重找目标 → swap + 布局 +
+       afterSwap(目标重找失败 = 载体已被换掉, 静默弃帧) */
+    for (int i = 0; i < HN_HX_SWAP_PEND_MAX; i++) {
+        if (!hx_swap_pend[i].active || rt->poll_clock_ms < hx_swap_pend[i].due)
+            continue;
+        hx_swap_pend[i].active = 0;
+        hn_node *t = hn_doc_find_by_id(hn_context_doc(rt->ctx),
+                                       hx_swap_pend[i].target_id);
+        if (t && hn_doc_swap_node(hn_context_doc(rt->ctx), t, hx_swap_pend[i].m,
+                                  hx_swap_pend[i].frag, hx_swap_pend[i].len)) {
+            hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
+            if (hx_swap_pend[i].m != HN_SWAP_NONE)
+                rt_js_dispatch(rt, "htmx:afterSwap", t, 0, 0, NULL, 0, 0);
+            if (repaint) *repaint = 1;
         }
     }
     /* handwired #1: 事件已在各自时间戳推进过动画的部分从帧推进中扣除

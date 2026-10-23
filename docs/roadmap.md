@@ -716,6 +716,22 @@ neb3(wgpu 后端)的帧此前每帧 GPU→CPU 回读 → 引擎再上传纹理 �
   resume, 压制同时清 L1 片段缓存 —— 路由变化改变 cmds)。neb3_gpu_probe
   补压制/恢复机制断言。
 
+### hn-anim 动画原语路线(anime.js v4 研究采纳, 2026-10-23 立项)
+
+研究笔记 docs/anime-notes.md: anime.js v4(模块化 JS 动画库, 全量
+24.5KB)的**原语词表采纳、运行时不引**(v4 ESM + DOM 写入面与引擎自有
+动画时钟双驱动冲突)。四个采纳项按序:
+
+| # | 原语 | 落点 | 估量 |
+|---|---|---|---|
+| A1 | stagger 错档(时间/数值) | 入场动效列表扩展 + JS 桥 delay 函数值 | ~1 周 |
+| A2 | 物理弹簧积分器(stiffness/damping/velocity) | HN_EASE_SPRING 参数化升级(handwired settle 路线同宗) | ~1 周 |
+| A3 | timeline 跨元素编排(loop/alternate/reversed/回调) | anim tick 之上原生 timeline 实体 | ~2 周 |
+| A4 | hn.animate(targets, params) QuickJS 薄桥 | 走引擎自有时钟, 依赖 A1-A3 | ~1 周 |
+
+共同时间基座 = 1/64ms 栅格时钟; 消费面 = agent 生成页的列表错档
+入场/卡片编排(agent 动效语言的高频面)。
+
 ### 已落地(2026-10-15 渲染与分发批次)
 
 - **`hn build --target macos`**(第三段核心落地): 项目目录 → .hnapp 胶囊 v2

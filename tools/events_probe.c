@@ -527,6 +527,55 @@ int main(void) {
         }
     }
 
+    /* == 7d. htmx parity: swap:100ms 延迟换入 + hx-vals js: 前缀 == */
+    printf("== htmx parity: swap 延迟换入与 js: 前缀 ==\n");
+    {
+        static const char *SWAPD_HTML =
+            "<html><body>"
+            "<div id=\"sdbox\" hx-get=\"sys://store/set?key=sd\&value=delayed\" "
+            "hx-swap=\"innerHTML swap:100ms\" hx-target=\"sdbox\">init</div>"
+            "<div id=\"jsbox\" hx-post=\"sys://store/set?key=j1\" "
+            "hx-vals='js:({value: \"fromjs\"})' hx-target=\"jsbox\">init</div>"
+            "<div id=\"jread\" hx-get=\"sys://store/get?key=j1\" "
+            "hx-target=\"jread\">?</div>"
+            "</body></html>";
+        hn_rt_desc hd = { "events-probe-swapd", SWAPD_HTML, strlen(SWAPD_HTML), NULL, 0, 300, 200 };
+        hn_rt *drt = hn_rt_open(&hd);
+        check(drt != NULL, "hn_rt_open(swapd 页)");
+        if (drt) {
+            /* swap:100ms: 点击后立即读 → 旧内容(换入被延迟) */
+            float cx, cy;
+            box_center(drt, "sdbox", &cx, &cy);
+            hn_rt_button(drt, 1, cx, cy, 0);
+            char *t0 = hn_rt_text(drt, "sdbox");
+            check(t0 && strcmp(t0, "init") == 0,
+                  "swap:100ms → 响应已到但换入被延迟(内容仍 init)");
+            free(t0);
+            /* 帧泵推进 poll 钟(50ms 仍未到期) */
+            hn_rt_frame(drt, 50.0f, NULL);
+            t0 = hn_rt_text(drt, "sdbox");
+            check(t0 && strcmp(t0, "init") == 0, "50ms 未到期仍 init");
+            free(t0);
+            /* 再泵 150ms → 到期换入(响应片段= store/set 确认 span) */
+            hn_rt_frame(drt, 150.0f, NULL);
+            t0 = hn_rt_text(drt, "sdbox");
+            check(t0 && strcmp(t0, "init") != 0, "到期换入执行(内容已换)");
+            free(t0);
+
+            /* js: 前缀: hx-vals 表达式求值 → store/set 入库 → get 读回 */
+            hn_rt_eval("globalThis.j2 = 0;", "events-probe-swapd", hn_rt_doc(drt));
+            box_center(drt, "jsbox", &cx, &cy);
+            hn_rt_button(drt, 1, cx, cy, 0);
+            box_center(drt, "jread", &cx, &cy);
+            hn_rt_button(drt, 1, cx, cy, 0);
+            t0 = hn_rt_text(drt, "jread");
+            check(t0 && strcmp(t0, "fromjs") == 0,
+                  "hx-vals js: 前缀求值 → 值入库(get 读回 'fromjs')");
+            free(t0);
+            hn_rt_close(drt);
+        }
+    }
+
     /* == 8. 文档换装: 监听器清空 + 新文档脚本重注册 == */
     printf("== 文档换装(hn_rt_render)与二次 open ==\n");
     {
