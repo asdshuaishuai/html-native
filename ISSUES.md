@@ -375,8 +375,12 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
   选择: frag 重解析 → 查全 → 逐匹配序列化换入; 无匹配 = 换入空,
   htmx 语义; 附最小 HTML 序列化器 —— 教训: 文本节点内容在
   text/text_len, hn_node_value 是表单值通道返回空, 首跑实测)。
-- 边界如实声明: `hx-push-url`/SSE/WS 触发、swap 修饰符(`swap:100ms`)、
-  `js:` 前缀 —— 未做。
+- **swap:N 修饰符与 js: 前缀补齐**(同日第四轮): `hx-swap` 属性首
+  token 匹配模式 + `swap:N[ms|s]` 延迟换入(frag 副本入延迟槽, poll 域
+  到期重找目标换入 + afterSwap; 无 id/槽满/超长立即换入诚实降级);
+  `hx-vals/hx-headers "js:"` 前缀 = QuickJS 求值 → JSON.stringify →
+  同一合并(全局求值; this 绑定为 v1 边界; 无 QJS 构建 stderr + 忽略)。
+- 边界如实声明: `hx-push-url`、SSE/WS 触发 —— 未做。
 - 探针: events_probe 72→87→96→**105**(+18: 三动词方法分发/
   beforeRequest 载荷/confirm 放行·取消·问题串 + hx-include 回环
   (store/set→get 读回)/hx-select 换入·无匹配空/属性保留; 冒泡链
