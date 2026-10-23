@@ -426,6 +426,23 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
   maxdiff 0/255(逐位), 分数坐标页 ≤0.5px 边缘位移为 GPU 四边形管线
   既有 v1 边界(填充/渐变同有, 如实声明)。
 
+### hn-anim A2 物理弹簧积分器(2026-10-23)
+
+- **落地**: `transition: … spring(刚度, 阻尼[, 初速度])` 功能式激活物理
+  弹簧(anime.js spring 参数形状; 裸名 `spring` 仍走闭式, 既有页面零
+  回归)。单位质量 ODE `x'' = k(1-x) - d·v`, 固定 4ms 子步积分,
+  settle(|1-x|<5e-4 且 |v|<4e-3)精确落位 x=1(终态逐位)。per-property
+  槽与全局 anim 双路径接线, 速度态 `slot_v`/`tvel` 独立存储。anim_probe
+  新增 4 断言: 欠阻尼过冲签名 / 重阻尼无过冲 / 双方 settle 精确落位。
+- ~~样式分词器括号内切分(弹簧阻尼静默失真)~~ **已修**(2026-10-23):
+  `next_tok` 按空白切 token, `spring(180, 10)` 被腰斩成 `spring(180,`
+  + `10)` —— 阻尼落 0 后被 ease_parse 兜底成缺省 14, 任何手写弹簧参数
+  都静默退化为同一个欠阻尼弹簧; `cubic-bezier(0.4, 0, 0.2, 1)` 带空格
+  同病(控制点后三位落 0)。修复: 分词器括号感知(深度>0 不切分), 约 80
+  个调用点语义全部受益; 全量探针(css/layout/render/html/dom/events/
+  anim/fmt/md/include/freeze/timer/quad3d/mesh/gpu/canvas×2/gif/lottie/
+  three/neb3×3/capsule)复绿。
+
 ## 附: 存量简化(散落多处, 排期防漏)
 
 - Cubism 混合观感精修(对照官方 Web runtime, 见 hn_cubism.c 头注)。

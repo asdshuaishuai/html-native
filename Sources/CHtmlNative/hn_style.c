@@ -130,12 +130,20 @@ void hn_style_inherit(hn_style *dst, const hn_style *p) {
 
 typedef struct { const char *s; size_t n; } sv;
 
-/* 游标式 token 迭代: 从 v 中切出下一个非空白 token 到 out, v 前进 */
+/* 游标式 token 迭代: 从 v 中切出下一个非空白 token 到 out, v 前进。
+   括号内不切分 —— 函数式值 spring(180, 10) / rgba(0, 0, 0, .3) 的参数
+   空格不是 token 边界(此前 spring(180, 被腰斩, 阻尼落 0 后被兜底成
+   缺省 14, 物理参数静默失真; cubic-bezier 带空格同病)。 */
 static int next_tok(sv *v, sv *out) {
     while (v->n && (*v->s == ' ' || *v->s == '\t')) { v->s++; v->n--; }
     if (!v->n) return 0;
     out->s = v->s;
-    while (v->n && *v->s != ' ' && *v->s != '\t') { v->s++; v->n--; }
+    int depth = 0;
+    while (v->n && (depth > 0 || (*v->s != ' ' && *v->s != '\t'))) {
+        if (*v->s == '(') depth++;
+        else if (*v->s == ')' && depth > 0) depth--;
+        v->s++; v->n--;
+    }
     out->n = (size_t)(v->s - out->s);
     return 1;
 }
@@ -349,6 +357,21 @@ static int ease_parse(sv t, float cb[4], unsigned char *out) {
     if (!strcmp(buf, "ease-in-out")) { *out = HN_EASE_IN_OUT; return 1; }
     /* 弹性族(入场动画最常用的 out 口味; 裸名与 ease-out-* 同义) */
     if (!strcmp(buf, "spring") || !strcmp(buf, "ease-out-spring")) { *out = HN_EASE_SPRING; return 1; }
+    /* spring(刚度, 阻尼[, 初速度]): 物理弹簧积分器(anime.js spring 参数
+       形状对齐; 单位质量 ODE x'' = k(1-x) - d·v, 固定子步积分 + settle
+       精确落位)。cb[0]=k cb[1]=d cb[2]=v0 —— cb[0]>0 是物理模式标志
+       (闭式 spring 不写 cb); 裸名 "spring" 仍走闭式(既有页面零回归)。 */
+    if (!strncmp(buf, "spring(", 7)) {
+        const char *q = buf + 7;
+        for (int i = 0; i < 3; i++) {
+            while (*q == ' ' || *q == ',') q++;
+            cb[i] = (float)strtod(q, (char **)&q);
+        }
+        if (cb[0] <= 0) cb[0] = 170;   /* 刚度非法回缺省(欠阻尼好观感) */
+        if (cb[1] <= 0) cb[1] = 14;
+        *out = HN_EASE_SPRING;
+        return 1;
+    }
     if (!strcmp(buf, "bounce") || !strcmp(buf, "ease-out-bounce")) { *out = HN_EASE_BOUNCE; return 1; }
     if (!strcmp(buf, "elastic") || !strcmp(buf, "ease-out-elastic")) { *out = HN_EASE_ELASTIC; return 1; }
     if (!strcmp(buf, "back") || !strcmp(buf, "ease-out-back")) { *out = HN_EASE_BACK; return 1; }

@@ -561,10 +561,67 @@ static void test_stagger(void) {
     hn_rt_close(rt);
 }
 
+/* 物理弹簧积分器(anime.js spring 采纳): spring(刚度, 阻尼) 功能式 ——
+   欠阻尼过冲签名 + settle 精确落位 + 阻尼对比(过参数无过冲)。
+   断言: (a)欠阻尼采样 max > 1.03(过冲); (b)settle 后 opacity 逐位级
+   等于目标(±0.002); (c)重阻尼全程 ≤ 1.001(无过冲)。 */
+static void test_spring_physics(void) {
+    static const char *html =
+        "<html><head><style>html,body{margin:0}"
+        "#ua{width:60;height:40;background:#345;opacity:0.2;"
+        "transition: opacity .5s spring(180, 10)}"
+        "#ob{width:60;height:40;background:#345;opacity:0.2;"
+        "transition: opacity .5s spring(400, 60)}"
+        "</style></head><body>"
+        "<div id=\"ua\"></div><div id=\"ob\"></div>"
+        "</body></html>";
+    hn_rt_desc d = { "spring-phys", html, strlen(html), NULL, 0, 240, 200 };
+    hn_rt *rt = hn_rt_open(&d);
+    check(rt != NULL, "hn_rt_open(弹簧页)");
+    if (!rt) return;
+    hn_context *c = hn_rt_context(rt);
+    hn_node *ua = hn_doc_find_by_id(hn_rt_doc(rt), "ua");
+    hn_node *ob = hn_doc_find_by_id(hn_rt_doc(rt), "ob");
+    check(ua && ob, "弹簧目标存在");
+    hn_node_set_attr(ua, "style",
+                     "width:60;height:40;background:#345;opacity:1;"
+                     "transition: opacity .5s spring(180, 10)");
+    hn_node_set_attr(ob, "style",
+                     "width:60;height:40;background:#345;opacity:1;"
+                     "transition: opacity .5s spring(400, 60)");
+    hn_context_layout(c, 240, 200, NULL);   /* 改属性 → 重布局(样式重算) */
+    float max_ua = 0, max_ob = 0, min_ua = 1, min_ob = 1;
+    for (int i = 0; i < 120; i++) {
+        hn_context_anim_tick(c, 33.0f);
+        float u = ua->style.opacity, o = ob->style.opacity;
+        if (i < 12)
+            fprintf(stderr,
+                    "    DBG[%02d] ua=%.4f (ms=%.0f ease=%d cb=%.0f/%.0f) ob=%.4f (ease=%d cb=%.0f/%.0f tprop0=%.0f/%.0f)\n",
+                    i, u, ua->style.transition_ms, ua->anim.ease,
+                    ua->anim.cb[0], ua->anim.cb[1],
+                    o, ob->style.transition_ms, ob->anim.ease,
+                    ob->anim.cb[0], ob->anim.cb[1],
+                    ob->style.tprop_cb[0][0], ob->style.tprop_cb[0][1]);
+        if (u > max_ua) max_ua = u;
+        if (o > max_ob) max_ob = o;
+        if (u < min_ua) min_ua = u;
+        if (o < min_ob) min_ob = o;
+    }
+    check(max_ua > 1.03f, "欠阻尼过冲签名(max > 1.03)");
+    check(max_ob <= 1.001f, "重阻尼无过冲(max ≤ 1.001)");
+    float fu = ua->style.opacity, fo = ob->style.opacity;
+    check(near_f(fu, 1.0f, 0.002f), "欠阻尼 settle 精确落位(±0.002)");
+    check(near_f(fo, 1.0f, 0.002f), "重阻尼 settle 精确落位(±0.002)");
+    fprintf(stderr, "    DBG max_ua=%.4f max_ob=%.4f final_ua=%.5f final_ob=%.5f\n",
+            max_ua, max_ob, fu, fo);
+    hn_rt_close(rt);
+}
+
 int main(void) {
     printf("anim_probe: 动画/交互/流畅性验收\n");
     test_transition();
     test_stagger();
+    test_spring_physics();
     test_frame_pacing();
     test_anchor_scroll();
     test_smartux_enter_exit();

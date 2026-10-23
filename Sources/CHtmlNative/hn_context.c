@@ -1291,6 +1291,29 @@ static float bezier_solve(float x, float x1, float x2) {
     }
     return t;
 }
+/* 物理弹簧积分(anime.js spring 采纳; handwired 三件套: 固定步长 +
+   settle 整定点 + snap 落位)。单位质量 ODE: x'' = k·(1-x) - d·x',
+   x = 归一位移(0=from, 1=target), 子步 ≤ 4ms。
+   settle: |1-x| < 5e-4 且 |v| < 4e-3 → x=1 精确落位(终态逐位)。
+   返回 1 = 仍在途, 0 = 已 settle。x/v 就地推进。 */
+static int spring_integrate(float *x, float *v, float k, float d, float dt_ms) {
+    float remain = dt_ms;
+    const float h = 1000.0f / 240.0f;   /* 4ms 固定子步 */
+    while (remain > 0.0f) {
+        float step = remain > h ? h : remain;
+        remain -= step;
+        float ts = step / 1000.0f;
+        float acc = k * (1.0f - *x) - d * (*v);
+        *v += acc * ts;
+        *x += *v * ts;
+    }
+    if (fabsf(1.0f - *x) < 0.0005f && fabsf(*v) < 0.004f) {
+        *x = 1.0f; *v = 0.0f;
+        return 0;
+    }
+    return 1;
+}
+
 static float ease_apply(int ease, const float cb[4], float t0) {
     if (t0 <= 0) return 0;
     if (t0 >= 1) return 1;
@@ -1666,8 +1689,28 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inte
                         else a->slot_active &= (unsigned char)~(1 << s);
                     }
                     if (a->slot_active & (1 << s)) {
-                        if (dt_ms > 0) a->slot_t[s] += dt_ms / ms_s;
-                        if (a->slot_t[s] >= 1.0f) { a->slot_t[s] = 1.0f; a->slot_active &= (unsigned char)~(1 << s); }
+                        int spring_phys = (st->tprop_ease[s] == HN_EASE_SPRING &&
+                                           st->tprop_cb[s][0] > 0.0f);
+                        if (a->slot_t[s] < 0.0f) {
+                            /* 延迟域: 负进度归零后落 x=0/v=0(弹簧起始静止) */
+                            a->slot_t[s] += (dt_ms > 0 ? dt_ms : 0) / ms_s;
+                            if (a->slot_t[s] >= 0.0f) a->slot_t[s] = 0.0f;
+                        } else if (spring_phys) {
+                            float x = a->slot_t[s], v = a->slot_v[s];
+                            int running = dt_ms > 0
+                                ? spring_integrate(&x, &v, st->tprop_cb[s][0],
+                                                   st->tprop_cb[s][1], dt_ms)
+                                : 1;
+                            a->slot_t[s] = x;
+                            a->slot_v[s] = v;
+                            slot_lerp(a, s, x);   /* x 即 eased 进渡(1=target) */
+                            if (!running) a->slot_active &= (unsigned char)~(1 << s);
+                            else any_active = 1;
+                            continue;
+                        } else {
+                            if (dt_ms > 0) a->slot_t[s] += dt_ms / ms_s;
+                            if (a->slot_t[s] >= 1.0f) { a->slot_t[s] = 1.0f; a->slot_active &= (unsigned char)~(1 << s); }
+                        }
                         float e = ease_apply(st->tprop_ease[s], st->tprop_cb[s], a->slot_t[s]);
                         slot_lerp(a, s, e);
                         if (a->slot_active & (1 << s)) any_active = 1;
@@ -1719,16 +1762,39 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inte
                 }
 
                 if (a->active && a->ms > 0) {
-                    if (dt_ms > 0) a->t += dt_ms / a->ms;
-                    if (a->t >= 1.0f) { a->t = 1.0f; a->active = 0; }
-                    float e = ease_apply(a->ease, a->cb, a->t);
-                    lerp4(a->bg, a->bg_from, a->bg_to, e);
-                    lerp4(a->fg, a->fg_from, a->fg_to, e);
-                    a->o  = a->o_from  + (a->o_to  - a->o_from)  * e;
-                    a->tx = a->tx_from + (a->tx_to - a->tx_from) * e;
-                    a->ty = a->ty_from + (a->ty_to - a->ty_from) * e;
-                    a->sc = a->sc_from + (a->sc_to - a->sc_from) * e;
-                    a->rot = a->rot_from + (a->rot_to - a->rot_from) * e;
+                    int spring_phys = (a->ease == HN_EASE_SPRING && a->cb[0] > 0.0f);
+                    if (a->t < 0.0f) {
+                        /* 延迟域(负进度): 归零后进入弹簧/线性推进 */
+                        if (dt_ms > 0) a->t += dt_ms / a->ms;
+                        if (a->t >= 0.0f) a->t = 0.0f;
+                    }
+                    if (spring_phys && a->t >= 0.0f && dt_ms > 0) {
+                        /* 物理弹簧: x 即位移分数(eased 进度), settle 精确落位 */
+                        float x = a->t, v = a->tvel;
+                        int running = spring_integrate(&x, &v, a->cb[0], a->cb[1], dt_ms);
+                        a->t = x;
+                        a->tvel = v;
+                        lerp4(a->bg, a->bg_from, a->bg_to, x);
+                        lerp4(a->fg, a->fg_from, a->fg_to, x);
+                        a->o  = a->o_from  + (a->o_to  - a->o_from)  * x;
+                        a->tx = a->tx_from + (a->tx_to - a->tx_from) * x;
+                        a->ty = a->ty_from + (a->ty_to - a->ty_from) * x;
+                        a->sc = a->sc_from + (a->sc_to - a->sc_from) * x;
+                        a->rot = a->rot_from + (a->rot_to - a->rot_from) * x;
+                        if (!running) a->active = 0;
+                    } else if (!spring_phys) {
+                        if (dt_ms > 0) a->t += dt_ms / a->ms;
+                        if (a->t >= 1.0f) { a->t = 1.0f; a->active = 0; }
+                        float e = ease_apply(a->ease, a->cb, a->t);
+                        lerp4(a->bg, a->bg_from, a->bg_to, e);
+                        lerp4(a->fg, a->fg_from, a->fg_to, e);
+                        a->o  = a->o_from  + (a->o_to  - a->o_from)  * e;
+                        a->tx = a->tx_from + (a->tx_to - a->tx_from) * e;
+                        a->ty = a->ty_from + (a->ty_to - a->ty_from) * e;
+                        a->sc = a->sc_from + (a->sc_to - a->sc_from) * e;
+                        a->rot = a->rot_from + (a->rot_to - a->rot_from) * e;
+                    }
+                    /* spring_phys 且延迟域: 本帧停在起始态(不推进不重算) */
                 } else {
                     memcpy(a->bg, a->bg_to, sizeof(a->bg));
                     memcpy(a->fg, a->fg_to, sizeof(a->fg));

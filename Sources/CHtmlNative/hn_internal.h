@@ -312,6 +312,11 @@ typedef struct hn_anim {
     unsigned char per_prop;     /* 1 = 按槽推进(样式声明了 per-property 列表) */
     unsigned char slot_active;  /* 位图: bit s = 槽 s 仍在过渡 */
     float slot_t[HN_TPROP_N];   /* 各槽进度(可为负 = 延迟等待) */
+    /* 物理弹簧(anime.js spring 采纳; spring(k,d) 功能式激活):
+       归一位移 x 复用 slot_t/t(0=from 1=target), 速度独立存储。
+       settle(|1-x|<5e-4 且 |v|<4e-3)→ 精确落位 x=1(终态逐位)。 */
+    float slot_v[HN_TPROP_N];
+    float tvel;
     int   fresh;                /* 刚创建且声明了入场动画: 首次 tick 播放 */
     int   entering;             /* 正在播放入场动画(独立于样式重算) */
 } hn_anim;
