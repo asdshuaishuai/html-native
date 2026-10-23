@@ -576,6 +576,54 @@ int main(void) {
         }
     }
 
+    /* == 7e. htmx parity: hx-push-url 导航栈映射 == */
+    printf("== htmx parity: hx-push-url ==\n");
+    {
+        FILE *f = fopen("hn-push-detail.html", "wb");
+        if (f) {
+            fputs("<html><body><div id=\"detail-marker\">详情内容</div></body></html>", f);
+            fclose(f);
+        }
+        f = fopen("hn-push-main.html", "wb");
+        if (f) { fputs("<html><body><p>main</p></body></html>", f); fclose(f); }
+        static const char *PUSH_HTML =
+            "<html><body style=\"margin:0\">"
+            "<div id=\"pane\">init</div>"
+            "<div id=\"golink\" hx-get=\"sys://store/count\" hx-target=\"#pane\" "
+            "hx-push-url=\"hn-push-detail.html\" style=\"width:60;height:30\">go</div>"
+            "<div id=\"nolink\" hx-get=\"sys://store/count\" hx-target=\"nolink\" "
+            "style=\"width:60;height:30\">nogo</div>"
+            "</body></html>";
+        hn_rt_desc hd = { "events-probe-push", PUSH_HTML, strlen(PUSH_HTML), NULL, 0, 300, 200,
+                          "hn-push-main.html" };
+        hn_rt *prt = hn_rt_open(&hd);
+        check(prt != NULL, "hn_rt_open(文件型页面)");
+        if (prt) {
+            int back0 = 0;
+            {   /* 背景对照: 无 hx-push-url 的载体 → 栈不增长 */
+                float cx, cy;
+                box_center(prt, "nolink", &cx, &cy);
+                hn_rt_button(prt, 1, cx, cy, 0);
+                /* 观测: rt 内部栈经 back 行为间接断言 —— 回退一次应无可回退 */
+            }
+            back0 = (hn_rt_back(prt) == 1);
+            check(back0 == 0, "对照: 无 hx-push-url → 栈不增长(back 无可回退)");
+            float cx, cy;
+            box_center(prt, "golink", &cx, &cy);
+            hn_rt_button(prt, 1, cx, cy, 0);
+            /* 换入内容 = store/count span; 导航栈已记 detail.html */
+            int back1 = hn_rt_back(prt);
+            check(back1 == 1, "hx-push-url → 导航栈记录(back 可回退)");
+            if (back1) {
+                hn_node *marker = hn_doc_find_by_id(hn_rt_doc(prt), "detail-marker");
+                check(marker != NULL, "back 重渲被推 URL 的文件(detail 页全文)");
+            }
+        }
+        hn_rt_close(prt);
+        remove("hn-push-detail.html");
+        remove("hn-push-main.html");
+    }
+
     /* == 8. 文档换装: 监听器清空 + 新文档脚本重注册 == */
     printf("== 文档换装(hn_rt_render)与二次 open ==\n");
     {

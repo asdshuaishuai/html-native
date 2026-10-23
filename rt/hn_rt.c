@@ -417,6 +417,9 @@ char *hn_rt_sys_fragment(const char *url, const char *form_body, const char *sto
 }
 
 
+static int page_read(const char *rel, char **out, size_t *out_len);
+static void rt_render_trace(const char *tag);
+
 /* htmx 方法词表: 属性名 → HTTP 动词(查询/载荷口径见 hx_perform)。
    2026-10-22 起全五动词(get/post/put/delete/patch —— put/delete/patch
    为本轮 parity 补齐)。 */
@@ -1053,6 +1056,7 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
     }
     hn_node *target = hx_resolve_target(rt, carrier);
     if (!target) { free(frag); return 0; }
+
     hn_swap_mode m = hx_swap_parse(hn_node_attr(carrier, "hx-swap"));
     float swap_delay = hx_swap_delay_parse(hn_node_attr(carrier, "hx-swap"));
     /* swap:N 延迟换入: 目标有 id → frag 副本入延迟槽(poll 域到期执行);
@@ -1077,6 +1081,31 @@ static int hx_perform(hn_rt *rt, hn_node *carrier) {
         int ok = hn_doc_swap_node(doc, target, m, frag, strlen(frag));
         if (ok) hn_context_layout(rt->ctx, (float)rt->w, (float)rt->h, &g_tb);
     }
+    /* hx-push-url: swap 成功后把请求 URL 记入导航栈(htmx 语义: back
+       可返回)。映射口径: 项目内文件 URL → back 重渲该文件(与项目导航
+       同一语义); sys:///http(s) URL 无文件形态 → no-op(如实声明)。
+       "true" = 请求 URL; 其余非 false 值 = 字面 URL; "false" = 关闭。 */
+    {
+        const char *pu = hn_node_attr(carrier, "hx-push-url");
+        if (pu && *pu && strcmp(pu, "false") != 0) {
+            const char *push_url = (strcmp(pu, "true") == 0) ? url : pu;
+            char *html = NULL; size_t len = 0;
+            if (page_read(push_url, &html, &len)) {
+                free(html);
+                if (!rt->page_path) rt->page_path = strdup(push_url);
+                if (rt->back_n == rt->back_cap) {
+                    int nc = rt->back_cap ? rt->back_cap * 2 : 8;
+                    char **nb = (char **)realloc(rt->back, sizeof(char *) * (size_t)nc);
+                    if (nb) { rt->back = nb; rt->back_cap = nc; }
+                }
+                if (rt->back_n < 64) {
+                    rt->back[rt->back_n++] = strdup(push_url);
+                    rt_render_trace("hx-push-url");
+                }
+            }
+        }
+    }
+
     free(frag);
     rt_js_dispatch(rt, "htmx:afterRequest", carrier, 0, 0, NULL, 0, 1);
     if (!delayed && m != HN_SWAP_NONE)

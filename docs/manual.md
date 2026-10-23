@@ -75,6 +75,8 @@
   自身→祖先→最近载体提交。
 - **列表错档**: 容器 `hn-stagger="每项ms"` —— 子项(运行时插入)入场按
   序错档浮现(首项即入, 后项各延迟一档); 单条追加恒 idx=0 即时浮现。
+- `hx-push-url="true|URL"`: swap 成功后把请求 URL 记入导航栈(back 可
+  回退重渲该文件; 项目内文件 URL 生效, sys:///http 无文件形态 no-op)。
 - 目标地址两类: `sys://` 系统桥(§6)与注入的 HTTP transport
   (运行时 `hn.fetch` 同源, `HN_FETCH_ALLOW` 白名单)。
 - 生命周期事件: `launch/show/hide/destroy`(JS `addEventListener`

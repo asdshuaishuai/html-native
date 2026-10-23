@@ -380,7 +380,11 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
   到期重找目标换入 + afterSwap; 无 id/槽满/超长立即换入诚实降级);
   `hx-vals/hx-headers "js:"` 前缀 = QuickJS 求值 → JSON.stringify →
   同一合并(全局求值; this 绑定为 v1 边界; 无 QJS 构建 stderr + 忽略)。
-- 边界如实声明: `hx-push-url`、SSE/WS 触发 —— 未做。
+- **hx-push-url 补齐**(同日第四轮): swap 成功后把请求 URL 记入导航栈
+  (项目内文件 URL → back 重渲该文件, 与项目导航同一语义; "true" = 请求
+  URL, 字面值 = 指定 URL, "false" = 关闭); sys:///http(s) URL 无文件
+  形态 → no-op(如实声明)。
+- 边界如实声明: SSE/WS 触发 —— 未做(transport 长连接专项)。
 - 探针: events_probe 72→87→96→**105**(+18: 三动词方法分发/
   beforeRequest 载荷/confirm 放行·取消·问题串 + hx-include 回环
   (store/set→get 读回)/hx-select 换入·无匹配空/属性保留; 冒泡链
