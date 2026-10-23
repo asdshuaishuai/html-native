@@ -461,6 +461,25 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
 - anim_probe G 节 +12 断言(loop 重播/alternate 呼吸/reversed 首轮
   反向/complete 事件/退役终态); 全量 31 探针复绿。
 
+### hn-anim A4 第一刀: hn.animate() QuickJS 薄桥(2026-10-23)
+
+- **落地**: EVENT_GLUE 尾部纯 JS 薄桥 —— `hn.animate(targets, params)`:
+  targets = id 串/元素包装/数组; params = {<属性>: 目标值|[from,to],
+  duration, delay, stagger, ease, onComplete}。执行**走引擎自有时钟**:
+  第一写 transition 声明(+from 值), 第二写(下一帧/延迟后)目标值 →
+  引擎 per-property 槽插值; onComplete 走引擎定时器。loop/alternate
+  不入本桥(归声明面 hn-timeline)。
+- **配套修复: `hn` 命名空间跨 eval 幂等保留** —— 此前每次 eval 都新建
+  hn 对象, glue 挂上去的扩展会被静默冲掉; 改为已存在则复用只补 fetch。
+- **[重要发现] 本仓库 QuickJS(homebrew/quickjs-ng 系)的
+  `JS_SetPropertyStr` 是接管语义** —— 写入即消耗传入值, 不得再
+  JS_FreeValue。幂等保留首版按拷贝语义补了 Free → gc_decref_child
+  ref_count 断言(abort trap 6, events_probe 首个 eval 即崩)。全库既有
+  `JS_SetPropertyStr(ctx, x, k, JS_NewCFunction(...))` 写法恰好与接管
+  语义一致 —— 后续所有 QuickJS 面改动必须按此口径写。
+- events_probe 7f 节 +8 断言(在途插值/onComplete 一次/stagger 落声明/
+  命名空间幂等); 全量探针复绿。
+
 ## 附: 存量简化(散落多处, 排期防漏)
 
 - Cubism 混合观感精修(对照官方 Web runtime, 见 hn_cubism.c 头注)。

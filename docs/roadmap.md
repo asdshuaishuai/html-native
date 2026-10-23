@@ -727,7 +727,7 @@ neb3(wgpu 后端)的帧此前每帧 GPU→CPU 回读 → 引擎再上传纹理 �
 | A1 ✅ | stagger 错档(时间/数值) | **已落地**(2026-10-23): 容器属性 `hn-stagger="每项ms"`, 子项入场按"前序同批入场兄弟数"负进度起步(与 animation-delay 同机制); 显式入场路径与 Smart-UX 默认入场双路生效; anim_probe 错档序/收敛/零回归断言 | 落地 |
 | A2 ✅ | 物理弹簧积分器(stiffness/damping/velocity) | **已落地**(2026-10-23): `transition: … spring(k, d[, v0])` 功能式激活物理弹簧(单位质量 ODE 固定 4ms 子步 + settle 精确落位, per-property 槽与全局 anim 双路径); 顺修样式分词器括号内切分(spring 阻尼静默失真根因, cubic-bezier 带空格同病); anim_probe 过冲/落位 4 断言 | 落地 |
 | A3 ◐ | timeline 跨元素编排(loop/alternate/reversed/回调) | **第一刀已落地**(2026-10-23): 容器属性 `hn-timeline="loop=N|infinite alternate reversed interval=ms"`, 后代带入场声明的元素为步骤(首轮沿用 fresh/负延迟机制), 全落定即一轮 —— 重播/反向呼吸/退役派 `hn-timeline:complete` 事件(新增核心事件出口 `hn_context_set_event_sink`, rt 接 JS 派发); anim_probe G 节 12 断言 | 剩 JS 桥对齐(归 A4) |
-| A4 | hn.animate(targets, params) QuickJS 薄桥 | 走引擎自有时钟, 依赖 A1-A3 | ~1 周 |
+| A4 ◐ | hn.animate(targets, params) QuickJS 薄桥 | **第一刀已落地**(2026-10-23): EVENT_GLUE 纯 JS 薄桥 —— targets(id/元素/数组) + {属性: 目标|[from,to], duration/delay/stagger/ease/onComplete}; 执行走引擎自有过渡(写 transition 声明 + 目标值, JS 零每帧驱动); onComplete 经引擎定时器; `hn` 命名空间跨 eval 幂等保留 | 剩 loop/alternate 映射 hn-timeline + 选择器面 |
 
 共同时间基座 = 1/64ms 栅格时钟; 消费面 = agent 生成页的列表错档
 入场/卡片编排(agent 动效语言的高频面)。

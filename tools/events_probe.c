@@ -624,6 +624,59 @@ int main(void) {
         remove("hn-push-main.html");
     }
 
+    /* == 7f. anime.js 形状薄桥: hn.animate(A4 第一刀) == */
+    printf("== hn.animate(JS 薄桥 → 引擎自有时钟) ==\n");
+    {
+        static const char *ANIM_HTML =
+            "<html><head><style>html,body{margin:0}"
+            "#b1{width:40;height:30;background:#345;opacity:0.2}"
+            "#b2{width:40;height:30;background:#534;opacity:0.2}"
+            "</style></head><body>"
+            "<div id=\"b1\"></div><div id=\"b2\"></div>"
+            "</body></html>";
+        const char *ASCOPE = "events-probe-anim";
+        hn_rt_desc hd = { ASCOPE, ANIM_HTML, strlen(ANIM_HTML), NULL, 0, 300, 200 };
+        hn_rt *art = hn_rt_open(&hd);
+        check(art != NULL, "hn_rt_open(animate 页)");
+        if (art) {
+            /* hn 命名空间跨 eval 幂等: 第一次 eval 后挂的自定义键不被冲掉 */
+            hn_rt_eval("hn.mark = 7;", ASCOPE, hn_rt_doc(art));
+            hn_rt_eval("hn.animate('b1', {opacity: [0.2, 1], duration: 200,"
+                       " ease: 'linear',"
+                       " onComplete: function(){ globalThis.done1 ="
+                       " (globalThis.done1||0)+1; }});",
+                       ASCOPE, hn_rt_doc(art));
+            hn_node *b1 = hn_doc_find_by_id(hn_rt_doc(art), "b1");
+            check(b1 != NULL, "animate 目标存在");
+            float mid = -1;
+            int rp = 0;
+            for (int i = 0; i < 90; i++) {           /* 90×16ms ≈ 1.44s */
+                hn_rt_frame(art, 16.0f, &rp);
+                if (i == 6) mid = b1->style.opacity; /* ≈96ms: 在途采样 */
+            }
+            check(mid > 0.2f && mid < 1.0f,
+                  "在途插值(96ms 采样介于两端, 引擎时钟驱动)");
+            check(eval_int(art, ASCOPE, "globalThis.done1||0") == 1,
+                  "onComplete 恰好一次");
+            check(b1->style.opacity > 0.999f, "收敛终值 opacity=1");
+            /* stagger: 两目标第二拍延迟 100ms 写进 transition 声明 */
+            hn_rt_eval("hn.animate(['b1','b2'], {opacity: 1, duration: 100,"
+                       " stagger: 100});", ASCOPE, hn_rt_doc(art));
+            char *st = eval_str(art, ASCOPE,
+                                "__hnGetAttr('b2','style')");
+            check(st && strstr(st, "100ms") != NULL,
+                  "stagger: 第二拍 delay=100ms 落入 transition 声明");
+            free(st);
+            /* hn 命名空间幂等: 首次 eval 挂的 mark 仍在(animate 定义不丢) */
+            check(eval_int(art, ASCOPE, "hn.mark||0") == 7,
+                  "hn 命名空间跨 eval 幂等(扩展不被冲掉)");
+            check(eval_int(art, ASCOPE,
+                           "typeof hn.animate === 'function' ? 1 : 0") == 1,
+                  "hn.animate 跨 eval 仍是函数");
+            hn_rt_close(art);
+        }
+    }
+
     /* == 8. 文档换装: 监听器清空 + 新文档脚本重注册 == */
     printf("== 文档换装(hn_rt_render)与二次 open ==\n");
     {

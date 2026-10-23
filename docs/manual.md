@@ -80,6 +80,9 @@
 - **跨元素编排**: 容器 `hn-timeline="loop=2|infinite alternate reversed interval=400"` ——
   后代带入场声明(`animation: fade .2s .3s`)的元素为步骤, 拍点 = 声明 delay;
   全部落定为一轮, 按 loop 重播(alternate 正反向呼吸), 退役派 `hn-timeline:complete` 事件。
+- **JS 动画桥**: `hn.animate('#id', {opacity: [0.2, 1], duration: 300, ease: 'spring(180, 10)',`
+  `stagger: 80, onComplete(e){}})` —— anime.js 形状, 执行走引擎自有时钟(写 transition 由引擎插值);
+  `hn-timeline:complete` 等事件可 `document.addEventListener` 监听。
 - `hx-push-url="true|URL"`: swap 成功后把请求 URL 记入导航栈(back 可
   回退重渲该文件; 项目内文件 URL 生效, sys:///http 无文件形态 no-op)。
 - 目标地址两类: `sys://` 系统桥(§6)与注入的 HTTP transport

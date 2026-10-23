@@ -3702,6 +3702,63 @@ static const char *EVENT_GLUE_JS =
 "    ev.stopPropagation=function(){this._sp=true;};"
 "    return ev;"
 "  };"
+"  /* ---- hn.animate(targets, params) —— anime.js 形状薄桥(A4 第一刀) ----\n"
+"     targets: id 串/元素包装/数组; params: {<属性>: 目标|[from,to],\n"
+"     duration, delay, stagger, ease, onComplete}。执行**走引擎自有时钟**:\n"
+"     写 transition 声明 + 目标值, 插值由引擎 anim_tick 完成 —— JS 不做\n"
+"     每帧驱动(双驱动时钟冲突的教训)。loop/alternate 归声明面\n"
+"     hn-timeline(本桥只做一次性编排)。 */\n"
+"  if (!g.hn) g.hn = {};\n"
+"  g.hn.animate = function(targets, params) {\n"
+"    params = params || {};\n"
+"    var dur = params.duration != null ? +params.duration : 300;\n"
+"    if (!(dur > 0)) dur = 300;\n"
+"    var delay = params.delay ? +params.delay : 0;\n"
+"    var stag = params.stagger ? +params.stagger : 0;\n"
+"    var ease = params.ease ? String(params.ease) : 'ease-out';\n"
+"    var list = targets == null ? [] : (Array.isArray(targets) ? targets : [targets]);\n"
+"    var ids = [];\n"
+"    list.forEach(function(t) {\n"
+"      var id = (t && typeof t === 'object') ? String(t.id) : String(t);\n"
+"      if (id && __hnExists(id)) ids.push(id);\n"
+"    });\n"
+"    var props = {};\n"
+"    for (var k in params) {\n"
+"      if (k === 'duration' || k === 'delay' || k === 'ease' ||\n"
+"          k === 'stagger' || k === 'onComplete' ||\n"
+"          k === 'loop' || k === 'alternate') continue;\n"
+"      props[String(k).replace(/[A-Z]/g, function(c) { return '-' + c.toLowerCase(); })] = params[k];\n"
+"    }\n"
+"    if (!ids.length) {\n"
+"      if (typeof params.onComplete === 'function') params.onComplete({targets: []});\n"
+"      return {targets: [], duration: dur, delay: delay};\n"
+"    }\n"
+"    var pending = ids.length;\n"
+"    function oneDone() {\n"
+"      if (--pending === 0 && typeof params.onComplete === 'function')\n"
+"        params.onComplete({targets: ids});\n"
+"    }\n"
+"    ids.forEach(function(id, idx) {\n"
+"      var dl = delay + stag * idx;\n"
+"      var d = parseDecls(__hnGetAttr(id, 'style'));\n"
+"      var trans = [], to = {}, hasFrom = false;\n"
+"      for (var p in props) {\n"
+"        var v = props[p];\n"
+"        if (Array.isArray(v)) { d[p] = String(v[0]); to[p] = String(v[1]); hasFrom = true; }\n"
+"        else to[p] = String(v);\n"
+"        trans.push(p + ' ' + dur + 'ms ' + ease + ' ' + dl + 'ms');\n"
+"      }\n"
+"      d.transition = trans.join(', ');\n"
+"      __hnSetAttr(id, 'style', declsStr(d));           /* 第一写: from + transition */\n"
+"      setTimeout(function() {                           /* 第二写: 目标值 → 引擎过渡接管 */\n"
+"        var d2 = parseDecls(__hnGetAttr(id, 'style'));\n"
+"        for (var p2 in to) d2[p2] = to[p2];\n"
+"        __hnSetAttr(id, 'style', declsStr(d2));\n"
+"      }, hasFrom ? (dl > 16 ? dl : 16) : (dl > 0 ? dl : 16));\n"
+"      setTimeout(oneDone, dl + dur + 32);\n"
+"    });\n"
+"    return {targets: ids, duration: dur, delay: delay};\n"
+"  };\n"
 "})(globalThis);";
 
 char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
@@ -3720,10 +3777,27 @@ char *hn_rt_eval(const char *js, const char *scope_key, hn_doc *doc) {
     }
 
     JSValue global = JS_GetGlobalObject(ctx);
-    JSValue hn_api = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, hn_api, "fetch",
-        JS_NewCFunction(ctx, js_hn_fetch, "fetch", 2));
-    JS_SetPropertyStr(ctx, global, "hn", hn_api);
+    /* hn 命名空间幂等保留: 每次 eval 都走到这里, 若每次都新建对象,
+       glue 挂上去的扩展(hn.animate 等)会被静默冲掉 —— 已存在则复用,
+       只补缺失的 fetch。注意 JS_SetPropertyStr 是**接管语义**(ng 系;
+       写入即消耗传入值, 不得再 Free —— 此前按拷贝语义补 Free 造成
+       gc 双重释放, abort trap 6)。 */
+    JSValue hn_api = JS_GetPropertyStr(ctx, global, "hn");
+    if (JS_IsObject(hn_api)) {
+        JSValue f = JS_GetPropertyStr(ctx, hn_api, "fetch");
+        int has_fetch = JS_IsFunction(ctx, f);
+        JS_FreeValue(ctx, f);
+        if (!has_fetch)
+            JS_SetPropertyStr(ctx, hn_api, "fetch",
+                JS_NewCFunction(ctx, js_hn_fetch, "fetch", 2));
+        JS_FreeValue(ctx, hn_api);   /* GetPropertyStr 返回的引用 */
+    } else {
+        JS_FreeValue(ctx, hn_api);   /* undefined/异常: 免了再建 */
+        hn_api = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, hn_api, "fetch",
+            JS_NewCFunction(ctx, js_hn_fetch, "fetch", 2));
+        JS_SetPropertyStr(ctx, global, "hn", hn_api);  /* 接管, 不再 Free */
+    }
     JS_SetPropertyStr(ctx, global, "hnSetText",
         JS_NewCFunction(ctx, js_hn_set_text, "hnSetText", 2));
     JS_SetPropertyStr(ctx, global, "hnSetValue",

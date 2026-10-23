@@ -69,10 +69,12 @@ precision/pauseOnDocumentHidden), Timer/Animation 挂其上按帧推进。
    全落定重播/反向呼吸, 退役派 `hn-timeline:complete`(核心事件出口
    `hn_context_set_event_sink` → rt 接 JS 派发, 兼作 A4 onComplete 通路)。
    剩 JS 桥 createTimeline 形状对齐(归 A4)。
-4. **`hn.animate(targets, params)` 薄桥**(QuickJS): targets = 选择器/
-   id, params 对齐 anime 形状(duration/ease/loop/alternate/delay/
-   onComplete), 执行走引擎自有时钟与插值 —— 会 anime.js 的 agent
-   零学习成本。依赖 1-3 的原语先行。
+4. **`hn.animate(targets, params)` 薄桥**(QuickJS): ✅ 第一刀落地
+   (2026-10-23): EVENT_GLUE 纯 JS —— targets(id/元素/数组), params
+   {属性: 目标|[from,to], duration/delay/stagger/ease/onComplete};
+   执行走引擎自有过渡(写 transition + 目标值, JS 零每帧驱动);
+   onComplete 走引擎定时器。会 anime.js 的 agent 零学习成本。
+   剩 loop/alternate(映射 hn-timeline)与选择器面。
 5. **alternate/reversed/frameRate 播放设置**: @keyframes 状态机补齐
    (现有 loop/kf_done 之上)。
 

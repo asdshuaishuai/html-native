@@ -44,6 +44,8 @@
 功能式激活物理积分(欠阻尼过冲/重阻尼平滑收敛, settle 精确落位); 裸名 `spring` 仍为闭式弹性缓动。
 跨元素时间轴: 容器 `hn-timeline="loop=2|infinite alternate reversed interval=ms"` 编排后代入场
 步骤(拍点 = 各自 animation 的 delay), 轮完成重播/反向, 退役派 `hn-timeline:complete`。
+JS 动画: `hn.animate(targets, {opacity: [0.2, 1], duration, ease, stagger, onComplete})` ——
+anime.js 形状薄桥, 插值由引擎自有过渡完成。
 
 ## 交互控件
 
