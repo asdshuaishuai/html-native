@@ -40,6 +40,8 @@
 `visibility`(子级可复显) · 伪元素 `::before/::after`(content + 声明) ·
 `transform`(rotate/rotateX/rotateY/perspective + 3D 深度排序) ·
 `transition`/`@keyframes`(缓动族/时间轴采样) · `filter`(canvas 侧)。
+物理弹簧: `transition: opacity .5s spring(180, 10)` —— spring(刚度, 阻尼[, 初速度])
+功能式激活物理积分(欠阻尼过冲/重阻尼平滑收敛, settle 精确落位); 裸名 `spring` 仍为闭式弹性缓动。
 
 ## 交互控件
 

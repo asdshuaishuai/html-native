@@ -725,7 +725,7 @@ neb3(wgpu 后端)的帧此前每帧 GPU→CPU 回读 → 引擎再上传纹理 �
 | # | 原语 | 落点 | 估量 |
 |---|---|---|---|
 | A1 ✅ | stagger 错档(时间/数值) | **已落地**(2026-10-23): 容器属性 `hn-stagger="每项ms"`, 子项入场按"前序同批入场兄弟数"负进度起步(与 animation-delay 同机制); 显式入场路径与 Smart-UX 默认入场双路生效; anim_probe 错档序/收敛/零回归断言 | 落地 |
-| A2 | 物理弹簧积分器(stiffness/damping/velocity) | HN_EASE_SPRING 参数化升级(handwired settle 路线同宗) | ~1 周 |
+| A2 ✅ | 物理弹簧积分器(stiffness/damping/velocity) | **已落地**(2026-10-23): `transition: … spring(k, d[, v0])` 功能式激活物理弹簧(单位质量 ODE 固定 4ms 子步 + settle 精确落位, per-property 槽与全局 anim 双路径); 顺修样式分词器括号内切分(spring 阻尼静默失真根因, cubic-bezier 带空格同病); anim_probe 过冲/落位 4 断言 | 落地 |
 | A3 | timeline 跨元素编排(loop/alternate/reversed/回调) | anim tick 之上原生 timeline 实体 | ~2 周 |
 | A4 | hn.animate(targets, params) QuickJS 薄桥 | 走引擎自有时钟, 依赖 A1-A3 | ~1 周 |
 
