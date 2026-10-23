@@ -677,6 +677,63 @@ int main(void) {
         }
     }
 
+    /* == 7g. hn.animate 第二刀: loop/alternate/infinite == */
+    printf("== hn.animate loop/alternate(重播链) ==\n");
+    {
+        static const char *ANIM2_HTML =
+            "<html><head><style>html,body{margin:0}"
+            "#b1{width:40;height:30;background:#345;opacity:0.2}"
+            "#b2{width:40;height:30;background:#534;opacity:0.2}"
+            "#b3{width:40;height:30;background:#453;opacity:0.2}"
+            "</style></head><body>"
+            "<div id=\"b1\"></div><div id=\"b2\"></div><div id=\"b3\"></div>"
+            "</body></html>";
+        const char *ASCOPE = "events-probe-anim2";
+        hn_rt_desc hd = { ASCOPE, ANIM2_HTML, strlen(ANIM2_HTML), NULL, 0, 300, 200 };
+        hn_rt *art = hn_rt_open(&hd);
+        check(art != NULL, "7g: hn_rt_open(loop 页)");
+        if (art) {
+            hn_rt_eval("hn.animate('b1', {opacity: [0.2, 1], duration: 150,"
+                       " loop: 2,"
+                       " onComplete: function(){ globalThis.lp ="
+                       " (globalThis.lp||0)+1; }});"
+                       "hn.animate('b2', {opacity: [0.2, 1], duration: 150,"
+                       " loop: 2, alternate: true});"
+                       "hn.animate('b3', {opacity: [0.2, 1], duration: 150,"
+                       " loop: 'infinite', alternate: true});",
+                       ASCOPE, hn_rt_doc(art));
+            hn_node *b1 = hn_doc_find_by_id(hn_rt_doc(art), "b1");
+            hn_node *b2 = hn_doc_find_by_id(hn_rt_doc(art), "b2");
+            hn_node *b3 = hn_doc_find_by_id(hn_rt_doc(art), "b3");
+            check(b1 && b2 && b3, "7g: 三目标存在");
+            float b1_min_late = 1.0f;   /* 第一轮落定后 b1 的重置下探 */
+            float b2_late = 1.0f;       /* b2 反向轮可见下探 */
+            float b3_min = 1.0f, b3_max = 0.0f;
+            int rp = 0;
+            for (int i = 0; i < 100; i++) {          /* 100×16ms ≈ 1.6s */
+                hn_rt_frame(art, 16.0f, &rp);
+                if (i > 8 && i < 30 && b1->style.opacity < b1_min_late)
+                    b1_min_late = b1->style.opacity; /* roundMs=166: 第二轮重置窗 */
+                if (i > 16 && i < 40 && b2->style.opacity < b2_late)
+                    b2_late = b2->style.opacity;     /* alternate 反向轮下探 */
+                if (i >= 8) {
+                    if (b3->style.opacity < b3_min) b3_min = b3->style.opacity;
+                    if (b3->style.opacity > b3_max) b3_max = b3->style.opacity;
+                }
+            }
+            check(b1_min_late < 0.6f, "7g: loop=2 第二轮重播发生(重置下探)");
+            check(b1->style.opacity > 0.999f, "7g: loop=2 终态 = 目标值");
+            check(eval_int(art, ASCOPE, "globalThis.lp||0") == 1,
+                  "7g: onComplete 全轮完成后恰好一次");
+            check(b2_late < 0.6f, "7g: alternate 第二轮反向(可见下探)");
+            check(b2->style.opacity < 0.35f,
+                  "7g: alternate 终态 = from 值(anime 语义)");
+            check(b3_min < 0.6f && b3_max > 0.9f,
+                  "7g: infinite alternate 呼吸(双向摆动)");
+            hn_rt_close(art);
+        }
+    }
+
     /* == 8. 文档换装: 监听器清空 + 新文档脚本重注册 == */
     printf("== 文档换装(hn_rt_render)与二次 open ==\n");
     {

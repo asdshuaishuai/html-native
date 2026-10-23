@@ -480,6 +480,20 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
 - events_probe 7f 节 +8 断言(在途插值/onComplete 一次/stagger 落声明/
   命名空间幂等); 全量探针复绿。
 
+### hn-anim A4 第二刀: hn.animate loop/alternate(2026-10-23)
+
+- **落地**: `loop: N|'infinite'` + `alternate`/`reversed` —— 重播链
+  setInterval 排节拍(引擎定时器), 插值仍全在引擎。轮写策略:
+  alternate/reversed 轮间恒异向 → 上一轮终点 = 本轮起点, **单写**即可
+  (引擎从当前绘制值起插); 非 alternate 全正向 → 重置两写
+  (transition:none 落 from → transition+to)。reversed = 首轮即反向;
+  onComplete 在全轮落定后恰好一次(无限循环不派发)。loop 语义需要
+  [from,to] 数组形态(标量目标重播无视觉差, 同 anime.js)。
+- 路线状态: A1-A4 全部落地(A3 的 JS 面编排即本刀; 唯余选择器面 ——
+  桥 DOM 面按 id 键控的既有设计, 如实声明不做)。
+- events_probe 7g 节 8 断言(重播下探/alternate 反向与 from 终态/
+  infinite 呼吸/onComplete 计数); events_probe 全量 130 断言绿。
+
 ## 附: 存量简化(散落多处, 排期防漏)
 
 - Cubism 混合观感精修(对照官方 Web runtime, 见 hn_cubism.c 头注)。

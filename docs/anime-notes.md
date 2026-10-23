@@ -74,7 +74,9 @@ precision/pauseOnDocumentHidden), Timer/Animation 挂其上按帧推进。
    {属性: 目标|[from,to], duration/delay/stagger/ease/onComplete};
    执行走引擎自有过渡(写 transition + 目标值, JS 零每帧驱动);
    onComplete 走引擎定时器。会 anime.js 的 agent 零学习成本。
-   剩 loop/alternate(映射 hn-timeline)与选择器面。
+   第二刀(同日): loop=N|'infinite' + alternate/reversed —— 重播链走
+   引擎定时器(轮间异向单写/正向两写重置), loop 语义需 [from,to] 数组
+   形态; 剩选择器面(桥 DOM 面 id 键控, 如实声明)。
 5. **alternate/reversed/frameRate 播放设置**: @keyframes 状态机补齐
    (现有 loop/kf_done 之上)。
 
