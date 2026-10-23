@@ -64,10 +64,11 @@ precision/pauseOnDocumentHidden), Timer/Animation 挂其上按帧推进。
 2. **物理弹簧积分器**(stiffness/damping): handwired 笔记已挂路线图;
    现行 `spring` 是闭式 ease —— 参数化物理弹簧是它的真补齐, 参数形状
    对齐 anime spring(stiffness/damping/velocity)。
-3. **timeline 编排原语**: 跨元素/多段的顺序编排(loop/alternate/
-   reversed + onBegin/onComplete 回调), 落点 = 引擎 anim tick 之上的
-   原生 timeline 实体(JS 桥对齐 createTimeline 形状)。@keyframes 是
-   单元素内的时间轴, timeline 是跨元素时间轴 —— 二者正交。
+3. **timeline 编排原语**: ✅ 第一刀落地(2026-10-23): 容器属性
+   `hn-timeline`(loop/alternate/reversed/interval), 后代入场声明为步骤,
+   全落定重播/反向呼吸, 退役派 `hn-timeline:complete`(核心事件出口
+   `hn_context_set_event_sink` → rt 接 JS 派发, 兼作 A4 onComplete 通路)。
+   剩 JS 桥 createTimeline 形状对齐(归 A4)。
 4. **`hn.animate(targets, params)` 薄桥**(QuickJS): targets = 选择器/
    id, params 对齐 anime 形状(duration/ease/loop/alternate/delay/
    onComplete), 执行走引擎自有时钟与插值 —— 会 anime.js 的 agent

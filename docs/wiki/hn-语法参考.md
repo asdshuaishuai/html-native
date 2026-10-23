@@ -42,6 +42,8 @@
 `transition`/`@keyframes`(缓动族/时间轴采样) · `filter`(canvas 侧)。
 物理弹簧: `transition: opacity .5s spring(180, 10)` —— spring(刚度, 阻尼[, 初速度])
 功能式激活物理积分(欠阻尼过冲/重阻尼平滑收敛, settle 精确落位); 裸名 `spring` 仍为闭式弹性缓动。
+跨元素时间轴: 容器 `hn-timeline="loop=2|infinite alternate reversed interval=ms"` 编排后代入场
+步骤(拍点 = 各自 animation 的 delay), 轮完成重播/反向, 退役派 `hn-timeline:complete`。
 
 ## 交互控件
 

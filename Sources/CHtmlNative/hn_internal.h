@@ -710,6 +710,8 @@ typedef unsigned char *(*hn_paint_render_fn)(const hn_display_list *, int, int,
 void hn_paint_set_ledger_raster(hn_paint_render_fn fn);
 
 /* ---------- context ---------- */
+typedef struct hn_tl hn_tl;
+
 struct hn_context {
     hn_doc   *doc;
     /* ---- Smart-UX 出现/消失默认动效(2026-10-15) ----
@@ -724,6 +726,32 @@ struct hn_context {
         int t_ms, ms;               /* 已播/总时长(ms; anim tick 推进) */
     } exit_ghost[8];
     int exit_ghost_n;
+    /* ---- hn-timeline 跨元素编排(A3 第一刀; anime.js timeline 采纳) ----
+       容器声明 hn-timeline="loop=N|infinite alternate reversed interval=ms";
+       后代带入场预设声明(animation: fade/up/…)的元素为步骤, 首轮入场沿用
+       既有 fresh/负延迟机制(拍点 = 作者声明的 delay), 全部步骤落定为一轮
+       完成 —— 按 loop 重播(alternate/reversed 反向轮, 轮间 interval),
+       退役时经事件出口派 hn-timeline:complete。 */
+    struct hn_tl {
+        hn_node *box;              /* 容器(离树即退役) */
+        /* 步骤快照: 节点 + **登记时**的级联目标值 —— 重播 arm 不能读
+           st->*(入场推进每帧写回动画值, 反向轮收尾后 st->opacity=0,
+           拿它当目标会让下一轮 0→0 不动)。 */
+        struct hn_tl_step { hn_node *n; float o, tx, ty, sc, rot; } *steps;
+        int n_steps, cap_steps;
+        int passes_left;           /* 剩余轮次(含在播轮); -1 = 无限 */
+        int passes_total;          /* 声明总轮数(complete 事件 detail 用) */
+        int dir_next;              /* 下一轮方向: 1 正向, -1 反向 */
+        int alternate;             /* 1 = 逐轮翻转方向 */
+        int waiting;               /* 1 = 轮间隔等待 */
+        float wait;                /* 间隔已等(ms) */
+        float interval;            /* 轮间隔(ms) */
+        int seen;                  /* 本帧 walk 见到容器的帧代数(存活判据) */
+    } tl[8];
+    int tl_n;
+    int tl_gen;                    /* 时间线存活判据帧代数 */
+    hn_event_sink_fn ev_sink;      /* 事件出口(宿主注册; rt 接 JS 派发) */
+    void *ev_sink_ud;
     hn_sheet **sheets; int n_sheets, cap_sheets;
     hn_arena *tmp;                  /* 每次 layout 重建的临时区 */
     hn_cmd   *cmds; int n_cmds, cap_cmds;

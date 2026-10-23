@@ -365,6 +365,12 @@ static void js_listeners_clear(hn_rt *rt);
 static int rt_js_has_listener(hn_rt *rt, const char *type);
 static int rt_js_dispatch(hn_rt *rt, const char *type, hn_node *target,
                           float x, float y, const char *utf8, int key, int detail);
+/* 核心动画实体事件出口 → JS 派发(hn-timeline:complete 等; 单相冒泡同款) */
+static void rt_event_sink(hn_context *c, hn_node *target, const char *type,
+                          const char *detail, void *ud) {
+    (void)c;
+    rt_js_dispatch((hn_rt *)ud, type, target, 0, 0, detail, 0, 0);
+}
 static void rt_range_set_from_x(hn_rt *rt, hn_node *inp, float x);
 static int rt_native_click(hn_rt *rt, hn_node *n, float click_x);
 
@@ -1579,6 +1585,7 @@ hn_rt *hn_rt_open(const hn_rt_desc *d) {
     hn_doc_autoid_hx(doc);
     rt->ctx = hn_context_create();
     hn_context_set_doc(rt->ctx, doc);
+    hn_context_set_event_sink(rt->ctx, rt_event_sink, rt);
     hn_context_set_assets(rt->ctx, &g_assets_be);
     if (g_media_be) hn_context_set_media(rt->ctx, g_media_be);
 

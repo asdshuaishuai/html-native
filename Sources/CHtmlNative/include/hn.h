@@ -511,6 +511,12 @@ void hn_context_set_images(hn_context *c, const hn_image_backend *backend);
    返回 1 表示仍有动画在跑 —— 运行时据此继续帧循环。 */
 int hn_context_anim_tick(hn_context *c, float dt_ms);
 
+/* 事件出口(核心动画实体 → 宿主): hn-timeline 完成等单相通报, rt 层
+   接到 JS 事件派发; 无宿主注册时静默(引擎纯嵌入用法零负担)。 */
+typedef void (*hn_event_sink_fn)(hn_context *c, hn_node *target,
+                                 const char *type, const char *detail, void *ud);
+void hn_context_set_event_sink(hn_context *c, hn_event_sink_fn fn, void *ud);
+
 /* ---- 交互: 状态(伪类) ---- */
 /* 设置/清除当前悬浮与按下元素(触发 :hover/:active 重新匹配), 随后需重布局 */
 void hn_context_set_hover(hn_context *c, hn_node *n);

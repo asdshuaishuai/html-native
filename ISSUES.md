@@ -443,6 +443,24 @@ click/load/every)。本轮把 hx-* 升级为 **htmx 语义子集**(引擎原生 
   anim/fmt/md/include/freeze/timer/quad3d/mesh/gpu/canvas×2/gif/lottie/
   three/neb3×3/capsule)复绿。
 
+### hn-anim A3 第一刀: hn-timeline 跨元素编排(2026-10-23)
+
+- **落地**: 容器 `hn-timeline="loop=N|infinite alternate reversed
+  interval=ms"`; 后代带入场预设声明(animation: fade/up/…)的元素为步骤,
+  拍点 = 各自声明的 delay(负进度复刻); 全步骤落定为一轮 —— 按 loop
+  重播(alternate/reversed 反向轮 = 呼吸循环, 轮间 interval), 退役落
+  可见终态并派 `hn-timeline:complete`(detail=loops=N)。配套新增**核心
+  事件出口** `hn_context_set_event_sink`(context → 宿主单相通报), rt
+  接线到 JS 监听器派发 —— 兼作后续 A4 onComplete 的通用通路。
+- 实现修复三则(探针逼出): ① tl_touch 属性检查必须**先于登记**(否则
+  每个元素登记空时间线, 各派一次 complete); ② `loop=infinite` 选项值
+  解析(此前只认裸 token, 声明退化为 1 轮即退役); ③ 重播 arm 不得读
+  `st->*` —— 入场推进每帧写回动画值, 反向轮收尾后 st->opacity=0,
+  拿它当目标 = 下一轮 0→0 不动; 步骤目标改为**登记时级联快照**
+  (`hn_tl_step`), settle 同帧落写样式(退役后无推进帧)。
+- anim_probe G 节 +12 断言(loop 重播/alternate 呼吸/reversed 首轮
+  反向/complete 事件/退役终态); 全量 31 探针复绿。
+
 ## 附: 存量简化(散落多处, 排期防漏)
 
 - Cubism 混合观感精修(对照官方 Web runtime, 见 hn_cubism.c 头注)。

@@ -25,6 +25,10 @@ static float hn_stagger_delay_for(const hn_node *n) {
     return (float)idx * per;
 }
 static void stream_anchor_walk(hn_context *c, hn_node *n); /* hn-stream 贴底/让出(滚动节) */
+static void tl_clear_all(hn_context *c);  /* hn-timeline 登记表清空(文档换/销毁) */
+static void tl_tick(hn_context *c, float dt_ms, int *inter); /* 跨元素时间线推进 */
+static void tl_rearm(hn_context *c, struct hn_tl *t, int rev); /* 重播武装 */
+static void enter_from(int preset, float *tx, float *ty, float *sc, float *op);
 static int  stream_loop_walk(hn_node *n);   /* hn-stream-loop 滑窗摘除(滚动节) */
 static int  stream_anim_walk(hn_node *n, float dt_ms); /* 平滑追上推进(滚动节) */
 static int  scroll_anim_walk(hn_node *n, float dt_ms); /* 锚点平滑滚动推进(滚动节) */
@@ -55,6 +59,7 @@ void hn_context_destroy(hn_context *c) {
     free(c->med_sessions);
     hn_canvas_dispose(c);
     hn_paint_frag_clear(c);         /* <canvas> op 账本持堆顶点/字符串, 随上下文销毁 */
+    tl_clear_all(c);                /* 时间线步骤快照持节点指针, 随上下文销毁 */
     hn_layout_mcache_free(c->mcache);   /* 测量缓存持堆键副本, 随上下文销毁 */
     for (int i = 0; i < c->n_sheets; i++) hn_sheet_free(c->sheets[i]);
     free(c->sheets);
@@ -475,6 +480,7 @@ int hn_context_anim_tick_ex(hn_context *c, float dt_ms, int *cls) {
         anchors = scroll_anim_walk(c->doc->root, dt_ms);
         if (streams || anchors) inter = 1;   /* 平滑滚动在途 = interactive */
     }
+    c->tl_gen++;                          /* 时间线存活判据帧代数 */
     int act = anim_walk(c, c->doc->root, dt_ms, &amb, &inter);
     /* exit ghost 推进: 淡出完成后出列(帧循环持续渲染 → 淡出自然可见) */
     if (c->exit_ghost_n > 0 && dt_ms > 0) {
@@ -487,6 +493,10 @@ int hn_context_anim_tick_ex(hn_context *c, float dt_ms, int *cls) {
             }
         }
         if (c->exit_ghost_n > 0) inter = 1;   /* 淡出在途 = interactive */
+    }
+    if (c->tl_n > 0) {
+        tl_tick(c, dt_ms, &inter);            /* 跨元素时间线(重播/完成事件) */
+        if (inter) act = 1;
     }
     if (cls) *cls = inter ? HN_ANIM_INTERACTIVE
                           : (amb ? HN_ANIM_AMBIENT : HN_ANIM_NONE);
@@ -1362,6 +1372,198 @@ static float ease_apply(int ease, const float cb[4], float t0) {
 }
 
 /* 入场动画的起始状态: 返回 from 值(位移/缩放/透明度) */
+/* ---- hn-timeline 跨元素编排(A3 第一刀; anime.js timeline 采纳) ----
+   声明面: 容器 hn-timeline="loop=N|infinite alternate reversed interval=ms"。
+   步骤 = 后代中带入场预设声明(animation: fade/up/…)的元素; 首轮入场沿用
+   既有 fresh/负延迟机制(拍点 = 作者声明的 delay), 时间线只负责"全部步骤
+   落定 → 重播/退役"的跨元素编排。@keyframes 是单元素内的时间轴, 本实体
+   是跨元素时间轴 —— 二者正交。 */
+
+void hn_context_set_event_sink(hn_context *c, hn_event_sink_fn fn, void *ud) {
+    if (c) { c->ev_sink = fn; c->ev_sink_ud = ud; }
+}
+
+/* 时间线登记表清空(文档换/上下文销毁: 节点指针已失效) */
+static void tl_clear_all(hn_context *c) {
+    for (int i = 0; i < c->tl_n; i++) free(c->tl[i].steps);
+    c->tl_n = 0;
+}
+
+/* 步骤收集: 后代中带入场预设声明的元素(深度优先, 声明序 = 文档序) */
+static void tl_collect(hn_tl *t, hn_node *n) {
+    for (hn_node *ch = n->first; ch; ch = ch->next) {
+        if (ch->kind != HN_ELEM) continue;
+        if (ch->style.anim_enter != HN_ENTER_NONE) {
+            if (t->n_steps == t->cap_steps) {
+                int nc = t->cap_steps ? t->cap_steps * 2 : 4;
+                struct hn_tl_step *ns = (struct hn_tl_step *)
+                    realloc(t->steps, (size_t)nc * sizeof(*ns));
+                if (!ns) return;
+                t->steps = ns; t->cap_steps = nc;
+            }
+            struct hn_tl_step *sp = &t->steps[t->n_steps++];
+            sp->n = ch;
+            sp->o = ch->style.opacity;             /* 级联目标快照 */
+            sp->tx = ch->style.translate_x;
+            sp->ty = ch->style.translate_y;
+            sp->sc = ch->style.scale;
+            sp->rot = ch->style.rotate;
+        }
+        tl_collect(t, ch);
+    }
+}
+
+/* anim_walk 顺路登记/标记存活(每帧 O(容器数); 选项只解析一次) */
+static void tl_touch(hn_context *c, hn_node *n) {
+    if (!hn_node_attr(n, "hn-timeline")) return;   /* 非容器: 每帧唯一成本 */
+    for (int i = 0; i < c->tl_n; i++)
+        if (c->tl[i].box == n) { c->tl[i].seen = c->tl_gen; return; }
+    if (c->tl_n >= (int)(sizeof(c->tl) / sizeof(c->tl[0]))) return;
+    hn_tl *t = &c->tl[c->tl_n++];
+    memset(t, 0, sizeof(*t));
+    t->box = n;
+    t->seen = c->tl_gen;
+    t->dir_next = 1;
+    t->passes_left = 1;                    /* 缺省 once */
+    t->passes_total = 1;
+    int reversed = 0;
+    const char *v = hn_node_attr(n, "hn-timeline");
+    while (v && *v) {
+        while (*v == ' ' || *v == ',' || *v == '\t') v++;
+        if (!*v) break;
+        const char *e = v;
+        while (*e && *e != ' ' && *e != ',' && *e != '\t') e++;
+        size_t n2 = (size_t)(e - v);
+        if (n2 == 8 && !strncmp(v, "infinite", 8)) t->passes_left = -1;
+        else if (n2 == 9 && !strncmp(v, "alternate", 9)) t->alternate = 1;
+        else if (n2 == 8 && !strncmp(v, "reversed", 8)) reversed = 1;
+        else if (n2 > 5 && !strncmp(v, "loop=", 5)) {
+            const char *lv = v + 5;
+            if (e - lv == 8 && !strncmp(lv, "infinite", 8)) {
+                t->passes_left = -1;             /* loop=infinite */
+            } else {
+                int lp = atoi(v + 5);
+                t->passes_left = lp > 0 ? lp : 1;
+                t->passes_total = t->passes_left;
+            }
+        } else if (n2 > 9 && !strncmp(v, "interval=", 9)) {
+            t->interval = (float)atof(v + 9);
+            if (t->interval < 0) t->interval = 0;
+        }
+        v = e;
+    }
+    tl_collect(t, n);
+    if (reversed) {                        /* reversed = 首轮即反向 */
+        t->dir_next = -1;
+        for (int i = 0; i < t->n_steps; i++) t->steps[i].n->anim.fresh = 0;
+        tl_rearm(c, t, -1);
+    }
+}
+
+/* 重播武装: 步骤回到入场起步态(方向 rev=-1 为反向轮: 从终态播回起始态,
+   与下一正向轮构成呼吸循环)。拍点复刻首轮: 负进度 = 声明 delay。 */
+static void tl_rearm(hn_context *c, hn_tl *t, int rev) {
+    (void)c;
+    for (int i = 0; i < t->n_steps; i++) {
+        struct hn_tl_step *sp = &t->steps[i];
+        hn_node *n = sp->n;
+        hn_style *st = &n->style;
+        hn_anim *a = &n->anim;
+        float fx, fy, fsc, fop;
+        enter_from(st->anim_enter, &fx, &fy, &fsc, &fop);
+        if (rev >= 0) {
+            a->o = fop;  a->o_from = fop;  a->o_to = sp->o;
+            a->tx = fx;  a->tx_from = fx;  a->tx_to = sp->tx;
+            a->ty = fy;  a->ty_from = fy;  a->ty_to = sp->ty;
+            a->sc = fsc; a->sc_from = fsc; a->sc_to = sp->sc;
+        } else {
+            a->o = sp->o;  a->o_from = sp->o;  a->o_to = fop;
+            a->tx = sp->tx; a->tx_from = sp->tx; a->tx_to = fx;
+            a->ty = sp->ty; a->ty_from = sp->ty; a->ty_to = fy;
+            a->sc = sp->sc; a->sc_from = sp->sc; a->sc_to = fsc;
+        }
+        a->rot = a->rot_from = a->rot_to = sp->rot;
+        rgba_of(st->background, a->bg);
+        rgba_of(st->color, a->fg);
+        memcpy(a->bg_from, a->bg, sizeof(a->bg));
+        memcpy(a->fg_from, a->fg, sizeof(a->fg));
+        memcpy(a->bg_to, a->bg, sizeof(a->bg));
+        memcpy(a->fg_to, a->fg, sizeof(a->fg));
+        a->ms = st->enter_ms;
+        a->ease = st->anim_ease;
+        memcpy(a->cb, st->cb, sizeof(a->cb));
+        /* 拍点 = 声明 delay(负进度), 与首轮 fresh 入场同式 */
+        float delay_ms = st->anim_delay + hn_stagger_delay_for(n);
+        a->t = a->ms > 0 ? -delay_ms / a->ms : 0;
+        a->active = 1;
+        a->entering = 1;
+        a->dirty_written = 0;
+    }
+}
+
+/* 退役落位: 步骤钉在可见终态(反向轮收尾的呼吸循环不得停在隐藏态) */
+static void tl_settle_visible(struct hn_tl *t) {
+    for (int i = 0; i < t->n_steps; i++) {
+        struct hn_tl_step *sp = &t->steps[i];
+        hn_node *n = sp->n;
+        hn_anim *a = &n->anim;
+        /* 可见终态 = 登记时级联快照(反向轮的 a->o_to 是预设起始态 = 隐藏;
+           动画写回值也不可用 —— 反向轮收尾后 st->* 是污染值) */
+        a->o = sp->o;
+        a->tx = sp->tx; a->ty = sp->ty;
+        a->sc = sp->sc; a->rot = sp->rot;
+        a->entering = 0; a->active = 0;
+        /* 必须同帧落写样式(此后无推进帧, 不写就永久停在最后一帧) */
+        n->style.opacity = a->o;
+        n->style.translate_x = a->tx;
+        n->style.translate_y = a->ty;
+        n->style.scale = a->sc;
+        n->style.rotate = a->rot;
+        a->dirty_written = 1;
+    }
+}
+
+/* 每帧时间线推进(anim_tick_ex 尾部调用): 存活校验 → 轮间隔 → 轮完成 */
+static void tl_tick(hn_context *c, float dt_ms, int *inter) {
+    for (int i = c->tl_n - 1; i >= 0; i--) {
+        if (c->tl[i].seen == c->tl_gen) continue;
+        free(c->tl[i].steps);
+        c->tl[i] = c->tl[c->tl_n - 1];
+        c->tl_n--;
+    }
+    for (int i = 0; i < c->tl_n; i++) {
+        hn_tl *t = &c->tl[i];
+        if (t->passes_left == -2) continue;        /* 已退役 */
+        if (t->waiting) {
+            if (dt_ms > 0) t->wait += dt_ms;
+            if (t->wait < t->interval) { if (inter) *inter = 1; continue; }
+            t->waiting = 0;
+            tl_rearm(c, t, t->dir_next);
+        } else {
+            int busy = 0;
+            for (int k = 0; k < t->n_steps && !busy; k++) {
+                hn_anim *a = &t->steps[k].n->anim;
+                if (a->active || a->entering) busy = 1;
+            }
+            if (busy) { if (inter) *inter = 1; continue; }
+            if (t->passes_left > 0) t->passes_left--;
+            if (t->passes_left == 0) {             /* 播完退役 */
+                t->passes_left = -2;
+                tl_settle_visible(t);
+                if (c->ev_sink) {
+                    char det[32];
+                    snprintf(det, sizeof(det), "loops=%d", t->passes_total);
+                    c->ev_sink(c, t->box, "hn-timeline:complete", det, c->ev_sink_ud);
+                }
+            } else {                               /* 轮间隔后重播 */
+                t->waiting = 1;
+                t->wait = 0;
+                if (t->alternate) t->dir_next = -t->dir_next;
+            }
+        }
+    }
+}
+
 static void enter_from(int preset, float *tx, float *ty, float *sc, float *op) {
     *tx = 0; *ty = 0; *sc = 1.0f; *op = 1.0f;
     switch (preset) {
@@ -1423,6 +1625,7 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inte
     if (n->kind == HN_ELEM) {
         hn_style *st = &n->style;
         hn_anim *a = &n->anim;
+        tl_touch(c, n);       /* hn-timeline 容器登记/标记存活(无属性即返回) */
 
         /* 样式计算刚写入的字段就是"目标值"; 但绘制前我们会把插值结果写回同一字段。
            为区分二者: 每次写回后记录 last_bg/last_fg; 下次比较时若与记录一致,
@@ -2860,6 +3063,7 @@ void hn_context_compact(hn_context *c, const char *html, size_t len) {
     hn_media_sessions_clear(c);          /* 旧文档的节点指针已失效(host.close 全部) */
     hn_canvas_dispose(c);
     hn_paint_frag_clear(c);                /* 旧文档的 canvas 元素已销毁 = 账本清空 */
+    tl_clear_all(c);                       /* 旧文档的时间线登记(节点指针失效) */
     hn_arena_destroy(c->doc->arena);
     hn_doc_free(c->doc);
     c->doc = hn_parse_html(html, len);

@@ -77,6 +77,9 @@
   序错档浮现(首项即入, 后项各延迟一档); 单条追加恒 idx=0 即时浮现。
 - **物理弹簧**: `transition: opacity .5s spring(180, 10)`(刚度, 阻尼[, 初速度]) ——
   物理积分驱动过渡, 欠阻尼自然过冲、重阻尼平滑收敛, 终态精确落位。
+- **跨元素编排**: 容器 `hn-timeline="loop=2|infinite alternate reversed interval=400"` ——
+  后代带入场声明(`animation: fade .2s .3s`)的元素为步骤, 拍点 = 声明 delay;
+  全部落定为一轮, 按 loop 重播(alternate 正反向呼吸), 退役派 `hn-timeline:complete` 事件。
 - `hx-push-url="true|URL"`: swap 成功后把请求 URL 记入导航栈(back 可
   回退重渲该文件; 项目内文件 URL 生效, sys:///http 无文件形态 no-op)。
 - 目标地址两类: `sys://` 系统桥(§6)与注入的 HTTP transport

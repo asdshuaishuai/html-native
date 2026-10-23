@@ -594,14 +594,6 @@ static void test_spring_physics(void) {
     for (int i = 0; i < 120; i++) {
         hn_context_anim_tick(c, 33.0f);
         float u = ua->style.opacity, o = ob->style.opacity;
-        if (i < 12)
-            fprintf(stderr,
-                    "    DBG[%02d] ua=%.4f (ms=%.0f ease=%d cb=%.0f/%.0f) ob=%.4f (ease=%d cb=%.0f/%.0f tprop0=%.0f/%.0f)\n",
-                    i, u, ua->style.transition_ms, ua->anim.ease,
-                    ua->anim.cb[0], ua->anim.cb[1],
-                    o, ob->style.transition_ms, ob->anim.ease,
-                    ob->anim.cb[0], ob->anim.cb[1],
-                    ob->style.tprop_cb[0][0], ob->style.tprop_cb[0][1]);
         if (u > max_ua) max_ua = u;
         if (o > max_ob) max_ob = o;
         if (u < min_ua) min_ua = u;
@@ -612,9 +604,120 @@ static void test_spring_physics(void) {
     float fu = ua->style.opacity, fo = ob->style.opacity;
     check(near_f(fu, 1.0f, 0.002f), "欠阻尼 settle 精确落位(±0.002)");
     check(near_f(fo, 1.0f, 0.002f), "重阻尼 settle 精确落位(±0.002)");
-    fprintf(stderr, "    DBG max_ua=%.4f max_ob=%.4f final_ua=%.5f final_ob=%.5f\n",
-            max_ua, max_ob, fu, fo);
     hn_rt_close(rt);
+}
+
+/* hn-timeline 跨元素编排(A3 第一刀): loop 重播 + alternate 呼吸 +
+   reversed 首轮反向 + complete 事件(探针自任宿主注册事件出口)。 */
+static int g_tl_events = 0;
+static char g_tl_detail[64];
+static void tl_sink(hn_context *c, hn_node *t, const char *type,
+                    const char *detail, void *ud) {
+    (void)c; (void)t; (void)ud;
+    if (!strcmp(type, "hn-timeline:complete")) {
+        g_tl_events++;
+        snprintf(g_tl_detail, sizeof(g_tl_detail), "%s", detail ? detail : "");
+    }
+}
+
+static void test_timeline(void) {
+    /* G1: loop=2 错拍重播 + complete 事件(探针 = 宿主) */
+    {
+        static const char *html =
+            "<html><head><style>html,body{margin:0}"
+            "#ta{width:40;height:30;background:#345;animation: fade .2s}"
+            "#tb{width:40;height:30;background:#534;animation: fade .2s .3s}"
+            "</style></head><body>"
+            "<div id=\"tl\" hn-timeline=\"loop=2 interval=100\">"
+            "<div id=\"ta\"></div><div id=\"tb\"></div>"
+            "</div></body></html>";
+        hn_rt_desc d = { "tl-loop", html, strlen(html), NULL, 0, 240, 200 };
+        hn_rt *rt = hn_rt_open(&d);
+        check(rt != NULL, "G1: hn_rt_open(timeline 页)");
+        if (!rt) return;
+        hn_context *c = hn_rt_context(rt);
+        hn_node *ta = hn_doc_find_by_id(hn_rt_doc(rt), "ta");
+        check(ta != NULL, "G1: 步骤存在");
+        g_tl_events = 0; g_tl_detail[0] = 0;
+        hn_context_set_event_sink(c, tl_sink, NULL);
+        float replay_min = 1.0f;     /* 重播窗口内 ta 最低值(再次下探 = 重播) */
+        int first_settled = -1;      /* 首轮落定帧号 */
+        for (int i = 0; i < 120; i++) {           /* 120×33ms ≈ 4s */
+            hn_context_anim_tick(c, 33.0f);
+            float o = ta->style.opacity;
+            if (first_settled < 0) {
+                if (o >= 1.0f && i > 14) first_settled = i;  /* 首轮末(tb 已落定) */
+            } else if (i >= first_settled + 1 && i <= first_settled + 12) {
+                if (o < replay_min) replay_min = o;          /* 第二轮入场下探 */
+            }
+        }
+        check(g_tl_events == 1, "G1: 完成事件恰好一次");
+        check(!strcmp(g_tl_detail, "loops=2"), "G1: 事件 detail = loops=2");
+        check(replay_min < 0.9f, "G1: 第二轮重播发生(ta 再次下探)");
+        check(near_f(ta->style.opacity, 1.0f, 0.001f), "G1: 退役落位可见终态");
+        hn_rt_close(rt);
+    }
+    /* G2: loop=infinite alternate —— 呼吸循环(反向轮下探 + 正向轮回升) */
+    {
+        static const char *html =
+            "<html><head><style>html,body{margin:0}"
+            "#ta{width:40;height:30;background:#345;animation: fade .2s}"
+            "</style></head><body>"
+            "<div id=\"tl\" hn-timeline=\"loop=infinite alternate\">"
+            "<div id=\"ta\"></div>"
+            "</div></body></html>";
+        hn_rt_desc d = { "tl-alt", html, strlen(html), NULL, 0, 240, 200 };
+        hn_rt *rt = hn_rt_open(&d);
+        check(rt != NULL, "G2: hn_rt_open(alternate 页)");
+        if (!rt) return;
+        hn_context *c = hn_rt_context(rt);
+        hn_node *ta = hn_doc_find_by_id(hn_rt_doc(rt), "ta");
+        check(ta != NULL, "G2: 步骤存在");
+        float wmin = 1.0f, wmax = 0.0f;
+        for (int i = 0; i < 60; i++) {            /* 后半窗 ≈ 覆盖反/正向各一轮 */
+            hn_context_anim_tick(c, 33.0f);
+            if (i >= 20) {
+                float o = ta->style.opacity;
+                if (o < wmin) wmin = o;
+                if (o > wmax) wmax = o;
+            }
+        }
+        check(wmin < 0.5f, "G2: 反向轮可见下探(min < 0.5)");
+        check(wmax > 0.9f, "G2: 正向轮回升(max > 0.9)");
+        hn_rt_close(rt);
+    }
+    /* G3: loop=1 reversed —— 首轮即反向(淡出), 退役仍落可见终态 */
+    {
+        static const char *html =
+            "<html><head><style>html,body{margin:0}"
+            "#ta{width:40;height:30;background:#345;animation: fade .2s}"
+            "</style></head><body>"
+            "<div id=\"tl\" hn-timeline=\"loop=1 reversed\">"
+            "<div id=\"ta\"></div>"
+            "</div></body></html>";
+        hn_rt_desc d = { "tl-rev", html, strlen(html), NULL, 0, 240, 200 };
+        hn_rt *rt = hn_rt_open(&d);
+        check(rt != NULL, "G3: hn_rt_open(reversed 页)");
+        if (!rt) return;
+        hn_context *c = hn_rt_context(rt);
+        hn_node *ta = hn_doc_find_by_id(hn_rt_doc(rt), "ta");
+        check(ta != NULL, "G3: 步骤存在");
+        g_tl_events = 0; g_tl_detail[0] = 0;
+        hn_context_set_event_sink(c, tl_sink, NULL);
+        float early_min = 1.0f;
+        for (int i = 0; i < 60; i++) {
+            hn_context_anim_tick(c, 33.0f);
+            if (i >= 1 && i <= 5) {
+                float o = ta->style.opacity;
+                if (o < early_min) early_min = o;    /* 首轮反向: 起点即淡出 */
+            }
+        }
+        check(early_min < 0.95f, "G3: reversed 首轮反向(开场即下探)");
+        check(g_tl_events == 1 && !strcmp(g_tl_detail, "loops=1"),
+              "G3: 完成事件 loops=1");
+        check(near_f(ta->style.opacity, 1.0f, 0.001f), "G3: 退役落位可见终态");
+        hn_rt_close(rt);
+    }
 }
 
 int main(void) {
@@ -622,6 +725,7 @@ int main(void) {
     test_transition();
     test_stagger();
     test_spring_physics();
+    test_timeline();
     test_frame_pacing();
     test_anchor_scroll();
     test_smartux_enter_exit();
