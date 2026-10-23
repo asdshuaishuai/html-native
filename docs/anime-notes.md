@@ -55,9 +55,12 @@ precision/pauseOnDocumentHidden), Timer/Animation 挂其上按帧推进。
 
 ## 四、📋 可采纳(排期, 按 hn-anim 路线归并)
 
-1. **stagger 原语**(列表/网格错档): `stagger(每档ms, {from, ease, start})`
-   形状; 落点 = 入场动效(Smart-UX)的列表扩展 + JS 桥 `hn.animate` 的
-   delay 函数值。agent 生成的列表页(聊天/仪表盘)是高频消费面。
+1. ✅ **stagger 原语**(2026-10-23 首项落地): 容器属性
+   `hn-stagger="每项ms"`, 子项入场按"前序同批入场兄弟数"负进度起步
+   (与 animation-delay 同机制, t<0 停在起始态); 同批 = 前序兄弟
+   anim.entering 仍在途 —— 聊天流单条追加恒 idx=0 不受影响, 批量插入
+   依次浮现; 显式入场路径与 Smart-UX 默认入场双路生效。anim_probe
+   断言: 错档序 o0>o1>o2 / 收敛全 1 / 无 stagger 零回归 / stagger=0。
 2. **物理弹簧积分器**(stiffness/damping): handwired 笔记已挂路线图;
    现行 `spring` 是闭式 ease —— 参数化物理弹簧是它的真补齐, 参数形状
    对齐 anime spring(stiffness/damping/velocity)。

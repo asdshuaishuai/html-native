@@ -500,9 +500,71 @@ static void test_paint_reveal(void) {
     }
 }
 
+/* hn-stagger 错档(anime.js stagger 语义采纳): 容器声明 hn-stagger="每项ms",
+   子项入场按"前序同批入场兄弟数"错档 —— 负进度起步(与 animation-delay
+   同机制)。断言: 中途透明度严格按序递减(o0>o1>o2)、全部收敛到 1、
+   无 hn-stagger 容器同时入场(零回归)、stagger=0 等价无错档。 */
+static void test_stagger(void) {
+    static const char *html =
+        "<html><head><style>html,body{margin:0}</style></head><body>"
+        "<div id=\"feed\" hn-stagger=\"80\"></div>"
+        "<div id=\"plain\"></div>"
+        "<div id=\"zero\" hn-stagger=\"0\"></div>"
+        "</body></html>";
+    hn_rt_desc d = { "stagger", html, strlen(html), NULL, 0, 360, 300 };
+    hn_rt *rt = hn_rt_open(&d);
+    check(rt != NULL, "hn_rt_open(stagger 页)");
+    if (!rt) return;
+    hn_context *c = hn_rt_context(rt);
+    hn_node *feed = hn_doc_find_by_id(hn_rt_doc(rt), "feed");
+    hn_node *plain = hn_doc_find_by_id(hn_rt_doc(rt), "plain");
+    hn_node *zero = hn_doc_find_by_id(hn_rt_doc(rt), "zero");
+    hn_node *items[3] = {0};
+    for (int i = 0; i < 3; i++) {
+        items[i] = hn_node_append_element(feed, "div");
+        char idbuf[8]; snprintf(idbuf, sizeof(idbuf), "f%d", i);
+        hn_node_set_attr(items[i], "id", idbuf);
+        hn_node_append_element(plain, "div");
+        hn_node_append_element(zero, "div");
+    }
+    hn_context_layout(c, 360, 300, NULL);
+    hn_context_anim_tick(c, 0);          /* 初始化(错档负进度) */
+    hn_context_anim_tick(c, 160.0f);     /* 推进 160ms: 三项处于错档中段 */
+    float o0 = items[0]->style.opacity;
+    float o1 = items[1]->style.opacity;
+    float o2 = items[2]->style.opacity;
+    fprintf(stderr, "    DBG o0=%.3f o1=%.3f o2=%.3f\n", o0, o1, o2);
+    check(o0 > 0.05f, "错档首项已开始浮现");
+    check(o0 > o1 && o1 > o2, "错档序: o0 > o1 > o2(透明度按序递减)");
+    for (int i = 0; i < 12; i++) hn_context_anim_tick(c, 200.0f);
+    o0 = items[0]->style.opacity;
+    o1 = items[1]->style.opacity;
+    o2 = items[2]->style.opacity;
+    check(near_f(o0, 1.0f, 0.02f) && near_f(o1, 1.0f, 0.02f) && near_f(o2, 1.0f, 0.02f),
+          "错档收敛: 全部 opacity → 1");
+    /* plain(无 hn-stagger): 同批插入同时入场 —— 零回归对照 */
+    hn_node *pn = hn_node_append_element(plain, "div");
+    hn_node *pq = hn_node_append_element(plain, "div");
+    hn_context_layout(c, 360, 300, NULL);
+    hn_context_anim_tick(c, 0);
+    hn_context_anim_tick(c, 100.0f);
+    float po1 = pn->style.opacity, po2 = pq->style.opacity;
+    check(near_f(po1, po2, 0.001f), "无 hn-stagger: 同批同时入场(零回归)");
+    /* stagger=0: 等价无错档 */
+    hn_node *z1 = hn_node_append_element(zero, "div");
+    hn_node *z2 = hn_node_append_element(zero, "div");
+    hn_context_layout(c, 360, 300, NULL);
+    hn_context_anim_tick(c, 0);
+    hn_context_anim_tick(c, 100.0f);
+    float pz1 = z1->style.opacity, pz2 = z2->style.opacity;
+    check(near_f(pz1, pz2, 0.001f), "stagger=0: 无错档(等价同时入场)");
+    hn_rt_close(rt);
+}
+
 int main(void) {
     printf("anim_probe: 动画/交互/流畅性验收\n");
     test_transition();
+    test_stagger();
     test_frame_pacing();
     test_anchor_scroll();
     test_smartux_enter_exit();

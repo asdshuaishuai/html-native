@@ -724,7 +724,7 @@ neb3(wgpu 后端)的帧此前每帧 GPU→CPU 回读 → 引擎再上传纹理 �
 
 | # | 原语 | 落点 | 估量 |
 |---|---|---|---|
-| A1 | stagger 错档(时间/数值) | 入场动效列表扩展 + JS 桥 delay 函数值 | ~1 周 |
+| A1 ✅ | stagger 错档(时间/数值) | **已落地**(2026-10-23): 容器属性 `hn-stagger="每项ms"`, 子项入场按"前序同批入场兄弟数"负进度起步(与 animation-delay 同机制); 显式入场路径与 Smart-UX 默认入场双路生效; anim_probe 错档序/收敛/零回归断言 | 落地 |
 | A2 | 物理弹簧积分器(stiffness/damping/velocity) | HN_EASE_SPRING 参数化升级(handwired settle 路线同宗) | ~1 周 |
 | A3 | timeline 跨元素编排(loop/alternate/reversed/回调) | anim tick 之上原生 timeline 实体 | ~2 周 |
 | A4 | hn.animate(targets, params) QuickJS 薄桥 | 走引擎自有时钟, 依赖 A1-A3 | ~1 周 |

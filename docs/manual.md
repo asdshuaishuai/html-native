@@ -73,6 +73,8 @@
 - `htmx:beforeRequest`(载荷=HTTP 动词, preventDefault 取消)/
   `htmx:afterRequest`/`htmx:afterSwap` 事件可监听; input 回车沿
   自身→祖先→最近载体提交。
+- **列表错档**: 容器 `hn-stagger="每项ms"` —— 子项(运行时插入)入场按
+  序错档浮现(首项即入, 后项各延迟一档); 单条追加恒 idx=0 即时浮现。
 - 目标地址两类: `sys://` 系统桥(§6)与注入的 HTTP transport
   (运行时 `hn.fetch` 同源, `HN_FETCH_ALLOW` 白名单)。
 - 生命周期事件: `launch/show/hide/destroy`(JS `addEventListener`

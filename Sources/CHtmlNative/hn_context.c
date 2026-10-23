@@ -8,6 +8,22 @@
 
 const char *hn_ua_css(void); /* hn_style.c */
 static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inter);
+/* hn-stagger 错档(anime.js stagger 语义采纳): 容器声明 hn-stagger="每项ms",
+   子项入场按"前序同批入场兄弟数"错档 —— 负进度起步(t<0 停在起始态直至
+   延迟耗尽, 与 animation-delay 同机制)。同批 = 前序兄弟 anim.entering
+   仍在途; 已入场(fresh 消费完且 entering 结束)不计 —— 单条追加(聊天流)
+   恒 idx=0 不受影响。返回错档延迟 ms。 */
+static float hn_stagger_delay_for(const hn_node *n) {
+    const hn_node *parent = n->parent;
+    const char *stg = parent ? hn_node_attr(parent, "hn-stagger") : NULL;
+    if (!stg || !*stg) return 0;
+    float per = (float)strtod(stg, NULL);
+    if (per <= 0) return 0;
+    int idx = 0;
+    for (const hn_node *s = n->prev; s; s = s->prev)
+        if (s->kind == HN_ELEM && s->anim.entering) idx++;
+    return (float)idx * per;
+}
 static void stream_anchor_walk(hn_context *c, hn_node *n); /* hn-stream 贴底/让出(滚动节) */
 static int  stream_loop_walk(hn_node *n);   /* hn-stream-loop 滑窗摘除(滚动节) */
 static int  stream_anim_walk(hn_node *n, float dt_ms); /* 平滑追上推进(滚动节) */
@@ -1504,9 +1520,12 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inte
             memcpy(a->bg_to, a->bg, sizeof(a->bg));
             memcpy(a->fg_to, a->fg, sizeof(a->fg));
             /* animation-delay: 负进度起步 —— t<0 期间 ease_apply 返回 0,
-               停在起始态(不可见/偏移位)直至延迟耗尽, stagger 列表项因此
-               依次浮现; 负延迟则直接从中途进度开始。 */
-            a->t = a->ms > 0 ? -st->anim_delay / a->ms : 0;
+               停在起始态(不可见/偏移位)直至延迟耗尽; 负延迟则直接从中途
+               进度开始。hn-stagger 错档延迟与声明 delay 合并。 */
+            {
+                float delay_ms = st->anim_delay + hn_stagger_delay_for(n);
+                a->t = a->ms > 0 ? -delay_ms / a->ms : 0;
+            }
             a->active = 1;
             a->dirty_written = 0;
             goto children;
@@ -1531,7 +1550,8 @@ static int anim_walk(hn_context *c, hn_node *n, float dt_ms, int *amb, int *inte
             memcpy(a->fg_from, a->fg, sizeof(a->fg));
             memcpy(a->bg_to, a->bg, sizeof(a->bg));
             memcpy(a->fg_to, a->fg, sizeof(a->fg));
-            a->t = 0;
+            /* hn-stagger 错档: 前序同批入场兄弟数 × 每项延迟, 负进度起步 */
+            a->t = -hn_stagger_delay_for(n) / (a->ms > 0 ? a->ms : 1.0f);
             a->active = 1;
             a->dirty_written = 0;
             *inter = 1;
