@@ -1198,7 +1198,8 @@ static float layout_block(hn_context *c, hn_node *n, const hn_style *st,
     return cur_y + pending_mb;          /* 末位挂起的 mb 仍要计入总高 */
 }
 
-typedef struct { hn_node *n; float ml, mr, mt, mb; } fitem;
+/* fo: 主轴终尺寸(边框盒, 结算后); sk/frozen: 列向收缩的冻结-再分配状态 */
+typedef struct { hn_node *n; float ml, mr, mt, mb; float fo, sk; int frozen; } fitem;
 
 /* ---- flex 子项表的有界缓存(参照 hnsoft.c poly_scratch_ensure 手法) ----
    此前每次 layout_flex 都 malloc/free 一套 items(外加一份 line 行号表,
@@ -1253,6 +1254,43 @@ static int flex_scratch_acquire(int n, fitem **items, int **line, int *heap) {
 static void flex_scratch_release(fitem *items, int *line, int heap) {
     if (heap) { free(items); free(line); }
     if (g_flex_depth > 0) g_flex_depth--;
+}
+
+/* 列向 flex 主轴的内容下限(边框盒)。CSS 自动最小尺寸的引擎子集:
+ *   - 滚动容器(overflow 非 visible): 内容可滚走 → 下限只剩 padding/border;
+ *   - 列向 flex 容器: 子项下限之和 + gap(下限沿嵌套 flex 向上传播,
+ *     showcase.html 的 .panel-wrap 才能把亏空交给内部滚动列表吸收,
+ *     页面才能恰好装满而不溢出);
+ *   - 行向 flex 容器: 取子项下限最大值(行高 = 最高子项);
+ *   - 其余(块容器/替换元素/文本): pass1 量得的内容自然高。
+ * 读到的子级 bh 均为 pass1 纯度量值, 与终排互不污染。 */
+static float col_min_outer(const hn_node *ch) {
+    if (ch->kind != HN_ELEM) return ch->bh;      /* 文本/匿名盒: 一行高 */
+    const hn_style *s = &ch->style;
+    float pad = s->padding[0] + s->padding[2] + s->border_w * 2;
+    if (s->overflow) return pad;
+    if (s->display == HN_DISP_FLEX) {
+        float acc = 0, mx = 0;
+        int k = 0;
+        for (const hn_node *c2 = ch->first; c2; c2 = c2->next) {
+            if (c2->kind == HN_ELEM && c2->style.display == HN_DISP_NONE) continue;
+            if (c2->kind == HN_TEXT && c2->text_len == 0) continue;
+            if (is_out_of_flow(c2)) continue;
+            float f;
+            if (c2->kind == HN_ELEM) {
+                float m[4];
+                margins_of(&c2->style, -1, m);
+                f = m[0] + col_min_outer(c2) + m[2];
+            } else {
+                f = col_min_outer(c2);
+            }
+            if (s->flex_row) { if (f > mx) mx = f; }
+            else acc += f + (k > 0 ? s->gap : 0);
+            k++;
+        }
+        return pad + (s->flex_row ? mx : acc);
+    }
+    return ch->bh;   /* 块容器/替换元素: 内容自然高 */
 }
 
 static float layout_flex_body(hn_context *c, hn_node *n, const hn_style *st,
@@ -1570,28 +1608,58 @@ static float layout_flex_body(hn_context *c, hn_node *n, const hn_style *st,
             }
         }
 
-        float shrink_wsum = 0;
-        for (int i = 0; i < cnt; i++) {
-            hn_node *ch = items[i].n;
-            float sk = ch->kind == HN_ELEM ? ch->style.flex_shrink : 1;
-            if (sk < 0) sk = 0;
-            shrink_wsum += (items[i].mt + ch->bh + items[i].mb) * sk;
+        /* ---- 主轴终尺寸结算(边框盒) ----
+           grow: 按份额加到 outer(终尺寸由 forced_h 以边框盒口径钉进
+           layout_box, padding/border 计入账内)。shrink: 冻结-再分配 ——
+           压到内容下限(自动最小尺寸子集, 见 col_min_outer)的子项冻结,
+           余额由仍有余量的子项按比例继续吸收。此前无下限地按比例硬压,
+           内容盒被压瘪(showcase.html hero 被列向 shrink 压到 108 的实测
+           根因); 无再分配则冻结后剩下的亏空无人吸收, 页面照样溢出。 */
+        for (int i = 0; i < cnt; i++)
+            items[i].fo = items[i].mt + items[i].n->bh + items[i].mb;
+        if (free_space > 0 && grow > 0) {
+            for (int i = 0; i < cnt; i++) {
+                hn_node *ch = items[i].n;
+                if (ch->kind == HN_ELEM && ch->style.flex_grow > 0)
+                    items[i].fo += free_space * ch->style.flex_grow / grow;
+            }
+        } else if (shrink_deficit > 0) {
+            float left = shrink_deficit;
+            for (int i = 0; i < cnt; i++) {
+                hn_node *ch = items[i].n;
+                float sk = ch->kind == HN_ELEM ? ch->style.flex_shrink : 1;
+                if (sk < 0) sk = 0;
+                items[i].sk = sk;
+                items[i].frozen = (sk <= 0);
+            }
+            /* 每轮至少多冻结一个下限触底者 → 上限 cnt+1 轮必收敛 */
+            for (int pass = 0; pass <= cnt; pass++) {
+                float wsum = 0;
+                for (int i = 0; i < cnt; i++)
+                    if (!items[i].frozen) wsum += items[i].fo * items[i].sk;
+                if (wsum <= 0) break;
+                int froze = 0;
+                float pass_left = left;
+                for (int i = 0; i < cnt; i++) {
+                    if (items[i].frozen) continue;
+                    float target = items[i].fo - pass_left * (items[i].fo * items[i].sk / wsum);
+                    float floor_o = col_min_outer(items[i].n);
+                    if (target < floor_o) target = floor_o;
+                    left -= items[i].fo - target;      /* 本项实际吸收量 */
+                    items[i].fo = target;
+                    if (target <= floor_o) { items[i].frozen = 1; froze = 1; }
+                }
+                if (left <= 0 || !froze) break;
+            }
         }
 
         float my = lead;
+        /* 是否发生过主轴伸缩: 只有伸缩过的子项才以 forced_h 钉终尺寸,
+           未伸缩项保持 forced=-1 的旧口径(终排高度仍由内容/样式决定) */
+        int flexed = (free_space > 0 && grow > 0) || (shrink_deficit > 0);
         for (int i = 0; i < cnt; i++) {
             hn_node *ch = items[i].n;
-            float forced = -1;
-            if (free_space > 0 && grow > 0 && ch->kind == HN_ELEM && ch->style.flex_grow > 0)
-                forced = ch->bh + free_space * ch->style.flex_grow / grow;
-            if (shrink_deficit > 0 && shrink_wsum > 0) {
-                float sk = ch->kind == HN_ELEM ? ch->style.flex_shrink : 1;
-                if (sk < 0) sk = 0;
-                float outer = items[i].mt + ch->bh + items[i].mb;
-                float shrunk = outer - shrink_deficit * (outer * sk / shrink_wsum);
-                if (shrunk < 0) shrunk = 0;
-                forced = shrunk - items[i].mt - items[i].mb;
-            }
+            float forced = flexed ? items[i].fo - items[i].mt - items[i].mb : -1;
 
             /* 交叉轴(宽度): 默认 stretch 拉满 */
             float wavail = (cw < 0) ? -1 : cw - items[i].ml - items[i].mr;
@@ -1605,6 +1673,8 @@ static float layout_flex_body(hn_context *c, hn_node *n, const hn_style *st,
             }
             if (wavail < 0) wavail = ch->bw;
             layout_box(c, ch, cx + cx_off, cy + my + items[i].mt, wavail, cross_h, tb, 0, forced, -1);
+            /* 前进量取终排后的盒高: min_h/max_h 钳制可能改写 forced 值,
+               也顺带修正 pass1 与终排的交叉宽差引出的内容高差 */
             my += items[i].mt + ch->bh + items[i].mb + st->gap + extra_gap;
         }
         used_cross = cross_h >= 0 ? cross_h : my - st->gap - extra_gap;
@@ -1815,7 +1885,15 @@ static float layout_box_inner(hn_context *c, hn_node *n, float x, float y,
     /* 内容宽: auto = 可用宽(边框盒预算)内含 padding;
        显式宽度按 box-sizing 解释 */
     float content_w;
-    if (measuring) content_w = (w >= 0) ? (st->box_border ? w - pl - pr : w) : -1;
+    if (forced_w > 0) {
+        /* flex 主轴结算值按**边框盒**解释(与 forced_h 同口径): grow/shrink
+           分配的本就是含 padding/border 的外尺寸(bw 账目), padding/border
+           计入账内。此前按显式宽度的 box-sizing 口径再解释, 内容盒被多加
+           一遍 padding/border —— 兄弟叠压、整行溢出(dashboard.html chips
+           叠压 18px / 卡片溢出窗口的实测根因)。 */
+        content_w = forced_w - pl - pr;
+    }
+    else if (measuring) content_w = (w >= 0) ? (st->box_border ? w - pl - pr : w) : -1;
     else if (w < 0) content_w = avail_w - pl - pr;
     else content_w = (st->box_border ? w : w + pl + pr) - pl - pr;
     if (content_w < 0) content_w = 0;

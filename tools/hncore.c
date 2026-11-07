@@ -750,13 +750,22 @@ int main(int argc, char **argv) {
                 const hn_cmd *c = &dl->cmds[i];
                 switch (c->kind) {
                 case HN_CMD_RECT:
-                    /* stroke/shadow 一并打印 —— 少了它们就没法验证
-                       border-color / box-shadow 是否生效(只能看到 fill)。 */
-                    printf("RECT   %7.1f %7.1f %7.1f %7.1f r=%.1f fill=%08X%s stroke=%08X w=%.1f%s\n",
+                    /* stroke/shadow/stops 一并打印 —— 少了它们就没法验证
+                       border-color / box-shadow / 渐变多 stop 是否生效
+                       (只能看到 fill)。 */
+                    printf("RECT   %7.1f %7.1f %7.1f %7.1f r=%.1f fill=%08X%s stroke=%08X w=%.1f%s",
                            c->x, c->y, c->w, c->h, c->radius, c->fill,
                            c->gradient ? " gradient" : "",
                            c->stroke, c->stroke_w,
                            c->shadow ? " shadow" : "");
+                    if (c->gn_stops >= 2) {
+                        printf(" stops=%d", c->gn_stops);
+                        for (int gi = 0; gi < c->gn_stops; gi++)
+                            printf("%s%08X@%.2f", gi ? "," : " [",
+                                   (unsigned)c->gstops[gi].c, c->gstops[gi].t);
+                        printf("]");
+                    }
+                    printf("\n");
                     break;
                 case HN_CMD_TEXT:
                     printf("TEXT   x=%7.1f bl=%7.1f ", c->tx, c->baseline);

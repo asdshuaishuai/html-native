@@ -380,6 +380,28 @@ else
   ck_bool "级联: 渐变后声明者胜" 0
 fi
 
+# 渐变多 stop 色标与百分比位置(解析端 gstops)。修复前: 解析只落首末
+# 两端(hn_style.c parse_gradient 末尾 grad_from=cols[0]/grad_to=cols[-1]),
+# " N%" 位置被 strchr 首空格截断静默丢弃 —— showcase hero 的 3-stop
+# 渐变(#232b4d, #2b1f45 55%, #1b2233)被压成两端。判据取 paint dump 的
+# RECT stops 列表(色@位置, 位置已按 CSS 口径补齐)。
+# 注: 用 hn_fail 直记(而非 ck_bool 名 0)—— ck 的单值数值分支缺省
+# tol=1, 0 与 1 会被判等, ck_bool 的失败分支是哑的(既有断言面同此)。
+o="$(paint_of "$(page '.a{background:linear-gradient(135deg,#232b4d,#2b1f45 55%,#1b2233)}.c{width:100;height:50}' "<div class='a c'></div>")")"
+if printf '%s' "$o" | grep -qF 'stops=3 [232B4DFF@0.00,2B1F45FF@0.55,1B2233FF@1.00]'; then
+  NPASS=$((NPASS + 1))
+else
+  hn_fail "渐变 3-stop 色标与 % 位置" "stops=3 [232B4DFF@0.00,2B1F45FF@0.55,1B2233FF@1.00]" "RECT 无 stops 输出" 36
+fi
+
+# 未标位置的中点按最近两个已定邻居线性插值(CSS 口径; 全未标即均分)
+o="$(paint_of "$(page '.a{background:linear-gradient(0deg,#f00 20%,#0f0,#00f 80%)}.c{width:100;height:50}' "<div class='a c'></div>")")"
+if printf '%s' "$o" | grep -qF '00FF00FF@0.50'; then
+  NPASS=$((NPASS + 1))
+else
+  hn_fail "渐变未标中点插值(20%/80% 间取 0.5)" "00FF00FF@0.50" "RECT 无 stops 输出" 36
+fi
+
 # 继承链(含隔代)与子级覆盖
 bx="$(box1 "$(page '.p{font-size:40}.k{width:100}' "<div class='p'><div class='k' id='x'>文</div>")" x)"
 if [ "$bx" != "MISSING" ]; then

@@ -1272,6 +1272,23 @@ static void canvas_emit_ledger(hn_context *c, const hn_canvas_ledger *l,
     }
 }
 
+/* 背景渐变多 stop: 解析端色标(含百分比位置)复制进显示列表 cmd。
+   gstops 落 tmp 区(与 canvas_emit_grad 同生命周期口径); 不满足 n>=2 时
+   不动 cmd —— 渲染端按 grad_from→grad_to 两端旧口径插值(逐位一致)。 */
+static void fill_grad_stops(hn_context *c, hn_cmd *cmd, const hn_style *st,
+                            float alpha) {
+    if (st->ngstops < 2) return;
+    hn_grad_stop *gs = (hn_grad_stop *)hn_arena_alloc(
+        c->tmp, sizeof(hn_grad_stop) * (size_t)st->ngstops);
+    if (!gs) return;
+    for (int i = 0; i < st->ngstops; i++) {
+        gs[i].t = st->gstops[i].t;
+        gs[i].c = fill_color(st, st->gstops[i].c, alpha);
+    }
+    cmd->gstops = gs;
+    cmd->gn_stops = st->ngstops;
+}
+
 static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
                          float alpha, float sx, float sy, const paint_guard *g) {
     /* 元素盒背景(canvas 是替换元素: 盒背景仍按样式画, 账本内容叠在其上) */
@@ -1296,6 +1313,7 @@ static void paint_canvas(hn_context *c, hn_node *n, const hn_style *st,
             bg.grad_from = fill_color(st, st->grad_from, alpha);
             bg.grad_to = fill_color(st, st->grad_to, alpha);
             bg.grad_angle = st->grad_angle;
+            fill_grad_stops(c, &bg, st, alpha);
         }
         push_cmd(c, &bg);
     }
@@ -1714,6 +1732,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                         bg.grad_from = fill_color(st, st->grad_from, alpha);
                         bg.grad_to = fill_color(st, st->grad_to, alpha);
                         bg.grad_angle = st->grad_angle;
+                        fill_grad_stops(c, &bg, st, alpha);
                     }
                     push_cmd(c, &bg);
                 }
@@ -2347,6 +2366,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 bg.grad_from = fill_color(st, st->grad_from, alpha);
                 bg.grad_to = fill_color(st, st->grad_to, alpha);
                 bg.grad_angle = st->grad_angle;
+                fill_grad_stops(c, &bg, st, alpha);
             }
             push_cmd(c, &bg);
         }
@@ -2392,6 +2412,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
                 cmd.grad_from = fill_color(st, st->grad_from, alpha);
                 cmd.grad_to = fill_color(st, st->grad_to, alpha);
                 cmd.grad_angle = st->grad_angle;
+                fill_grad_stops(c, &cmd, st, alpha);
             }
             push_cmd(c, &cmd);
             /* 不再跳过子节点: 子树照常递归, 文字随摊平仿射落到面片上。 */
@@ -2422,6 +2443,7 @@ static void paint_walk_g(hn_context *c, hn_node *n, const hn_style *pst,
             cmd.grad_from = fill_color(st, st->grad_from, alpha);
             cmd.grad_to = fill_color(st, st->grad_to, alpha);
             cmd.grad_angle = st->grad_angle;
+            fill_grad_stops(c, &cmd, st, alpha);
         }
         if (st->has_shadow) {
             cmd.shadow = 1;

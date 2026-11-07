@@ -601,6 +601,7 @@ static int parse_gradient(const char *v, hn_style *st) {
     }
     /* 顶层逗号分段 */
     hn_color cols[8];
+    float poss[8];               /* 色标位置(0..1); -1 = 未标注 */
     int ncol = 0;
     float angle = 180; /* 缺省 to bottom */
     depth = 0;
@@ -624,11 +625,38 @@ static int parse_gradient(const char *v, hn_style *st) {
                     t[tl - 3] = 0;
                     angle = strtof(t, NULL);
                 } else {
-                    /* 去掉色标后缀 " N%" */
-                    char *sp = strchr(t, ' ');
-                    if (sp) *sp = 0;
+                    /* 色标: "color" 或 "color N%"(百分比位置)。
+                       位置识别: 末位空格的后缀以 % 收尾、且前缀能解出颜色
+                       才认 —— 颜色函数内的空格/百分号不误伤; 前缀解析失败
+                       则回落旧口径(首空格截断, 位置丢弃)。 */
                     hn_color col;
-                    if (hn_color_parse(t, strlen(t), &col) && ncol < 8) cols[ncol++] = col;
+                    float pos = -1;
+                    int got = 0;
+                    char *sp = strrchr(t, ' ');
+                    if (sp) {
+                        char cbuf[96];
+                        size_t pl = (size_t)(sp - t);
+                        size_t sl = strlen(sp + 1);
+                        if (pl < sizeof(cbuf)) {
+                            memcpy(cbuf, t, pl);
+                            if (sl >= 2 && (sp + 1)[sl - 1] == '%' &&
+                                hn_color_parse(cbuf, pl, &col)) {
+                                pos = strtof(sp + 1, NULL) / 100.0f;
+                                if (pos < 0) pos = 0; else if (pos > 1) pos = 1;
+                                got = 1;
+                            }
+                        }
+                    }
+                    if (!got) {
+                        char *f = strchr(t, ' ');
+                        if (f) *f = 0;
+                        got = hn_color_parse(t, strlen(t), &col);
+                    }
+                    if (got && ncol < 8) {
+                        cols[ncol] = col;
+                        poss[ncol] = pos;
+                        ncol++;
+                    }
                 }
             }
             seg = i + 1;
@@ -639,6 +667,21 @@ static int parse_gradient(const char *v, hn_style *st) {
     st->grad_from = cols[0];
     st->grad_to = cols[ncol - 1];
     st->grad_angle = angle;
+    /* 色标位置补齐(CSS 口径): 两端未标注按 0/1; 中间未标注的按最近两个
+       已定邻居线性插值 —— 全程未标注时即均分 i/(n-1)。 */
+    st->ngstops = (unsigned char)ncol;
+    if (poss[0] < 0) poss[0] = 0;
+    if (poss[ncol - 1] < 0) poss[ncol - 1] = 1;
+    for (int i = 1; i < ncol - 1; i++) {
+        if (poss[i] >= 0) continue;
+        int j = i - 1, k = i + 1;
+        while (k < ncol - 1 && poss[k] < 0) k++;
+        poss[i] = poss[j] + (poss[k] - poss[j]) * (float)(i - j) / (float)(k - j);
+    }
+    for (int i = 0; i < ncol; i++) {
+        st->gstops[i].t = poss[i];
+        st->gstops[i].c = cols[i];
+    }
     return 1;
 }
 

@@ -119,6 +119,12 @@ typedef struct hn_style {
     unsigned char has_gradient;
     hn_color   grad_from, grad_to;
     float      grad_angle;
+    /* 多 stop 色标(解析端; 含百分比位置)。ngstops >= 2 时 paint 期复制进
+       显示列表 cmd 的 gstops —— hnsoft/hn_cairo 的渐变插值器与 cairo
+       pattern 均按 n>=2 优先消费, 缺失/不足时回落 grad_from→grad_to 两端
+       (旧口径逐位一致, 见 hnsoft.c grad_color_at / hn_cairo.c make_gradient)。 */
+    hn_grad_stop  gstops[8];
+    unsigned char ngstops;
     /* 盒阴影(box-shadow: ox oy blur color) */
     unsigned char has_shadow;
     hn_color   sh_color;

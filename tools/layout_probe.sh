@@ -16,6 +16,10 @@
 #   4. justify-content: space-around / space-evenly 静默退化为 flex-start
 #   5. 脱离流子元素嵌在定位父里时, 文字被排两遍(绘制指令里同一句话出现
 #      两次, 第二份整体偏移 (left, top); 盒坐标正常, 只有指令数翻倍)
+#   6. flex 盒外尺寸账不平: 主轴结算值(grow/shrink 结果)未按边框盒解释,
+#      padding/border 被加两遍 → 兄弟叠压、整行溢出(dashboard.html chips
+#      叠压 18px 的实测根因); 列向收缩无内容下限 → 内容盒被压瘪
+#      (showcase.html hero 被列向 shrink 压瘪 168→98.9 的实测根因)
 # 所以每次改布局/样式代码都值得跑一遍。
 
 set -euo pipefail
@@ -151,6 +155,34 @@ r="$(boxes '<html><head><style>html,body{margin:0}
 # 溢出 100, 按 1:3 → a 缩 25, b 缩 75 → 125 / 75
 near "shrink 1:3 a" "$(get "$r" a)" 0 0 125 20
 near "shrink 1:3 b" "$(get "$r" b)" 125 0 75 20
+
+# ============ grow 计入 padding/border(盒外尺寸账) ============
+# 回归用例(dashboard.html chips/cards 实测根因)。flex:1 + padding:0 10:
+# pass1 量得边框盒 20(纯 padding), grow 各分 130 → 结算外尺寸 150。
+# 主轴结算值必须按**边框盒**解释(padding 计入账内)—— 按显式宽度的
+# content-box 口径再解释时内容宽多加一遍 padding, 盒变 170:
+# 兄弟叠压 20、整行溢出 40(修复前实测)。
+r="$(boxes '<html><head><style>html,body{margin:0}
+.f{display:flex;width:300;height:100}
+.a{flex:1;height:20;padding:0 10}.b{flex:1;height:20;padding:0 10}
+</style></head><body><div class="f"><div class="a" id="a"></div>
+<div class="b" id="b"></div></div></body></html>')"
+near "grow+padding a(外尺寸 150 含 padding)" "$(get "$r" a)" 0 0 150 20
+near "grow+padding b(不叠压, 恰好接上)" "$(get "$r" b)" 150 0 150 20
+
+# ============ 列向 shrink 保内容下限(冻结-再分配) ============
+# 回归用例(showcase.html hero 被列向 shrink 压瘪 168→98.9 实测根因)。
+# 容器高 80, .a 内容定高 60, .c 是 overflow:scroll 容器(内容 40, 下限 0):
+# 亏空 20 先按比例压 —— a 份额 12 会压到 48 < 内容下限 60, 冻结在 60;
+# 余额 12 由仍有余量的 c 继续吸收 → c 终高 20, 两项恰好装满 80。
+# 修复前: a 被压到 48(内容被压瘪), c 停在 32。
+r="$(boxes '<html><head><style>html,body{margin:0}
+.f{display:flex;flex-direction:column;width:100;height:80}
+.a{height:60}.c{overflow:scroll}.inner{height:40}
+</style></head><body><div class="f"><div class="a" id="a"></div>
+<div class="c" id="c"><div class="inner"></div></div></div></body></html>')"
+near "列向 shrink 保内容下限 a(不被压瘪)" "$(get "$r" a)" 0 0 100 60
+near "列向 shrink 再分配 c(吸收余额至 20)" "$(get "$r" c)" 0 60 100 20
 
 # ============ gap ============
 r="$(boxes "$(flex_case ";gap:20" a b)")"
