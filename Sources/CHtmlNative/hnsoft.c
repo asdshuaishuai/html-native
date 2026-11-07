@@ -1278,7 +1278,14 @@ static const glyph *glyph_get(int cp, int size_px) {
         if (glyphs[i].codepoint == cp && glyphs[i].size_px == size_px) return &glyphs[i];
     if (!ft_face_ok) return NULL;
     FT_Set_Pixel_Sizes(ft_face, 0, size_px);
-    if (FT_Load_Char(ft_face, (FT_ULong)cp, FT_LOAD_RENDER)) return NULL;
+    /* 小字号(≤12px)走 autohint: 实测(PingFang.ttc 缺失的 macOS 上落到
+       Hiragino Sans GB)字体自带的 TrueType 指令在 10px 档给出的位图塌成
+       "横条+两口"的糊形 —— 离/高/画 等结构相邻的常用字互相不可辨, 表现为
+       渲染文本"错字"。autohint 在该档保住字内笔画(离 中框内 㐅、高 上口
+       留空)的可辨特征; 大字号维持默认光栅(贴近字体自身设计)。 */
+    FT_Int32 flags = FT_LOAD_RENDER;
+    if (size_px <= 12) flags |= FT_LOAD_FORCE_AUTOHINT;
+    if (FT_Load_Char(ft_face, (FT_ULong)cp, flags)) return NULL;
     FT_GlyphSlot g = ft_face->glyph;
     if (glyph_n >= (int)(sizeof(glyphs) / sizeof(glyphs[0]))) return NULL;
     glyph *e = &glyphs[glyph_n++];
