@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html>
+<head>
+<!-- anim.html — 动效实验室 (1200x760, Neb Aurora Dark 主题)
+     ====================================================================
+     四组引擎自有时钟驱动的演出 + 两个注解卡:
+       K1 @keyframes 旋转: 渐变旋转环 + 轨道双点 + 内核 scale 呼吸
+       K2 spring(k,d):    物理弹簧下落球, 与 cubic-bezier 回弹进度条同屏对照
+       K3 负延迟错档:      三排药丸相位差矩阵 (任一时钟首屏即成片)
+       K4 hn-timeline:    容器跨元素编排 loop=infinite alternate
+       JS: hn.animate 薄桥注解面板 (anime.js 形状参数表; 离屏截图无 JS)
+       时钟: HN_CLOCK 确定性取帧原理卡
+
+     渲染 (仓库根目录执行):
+       HN_CLOCK=0   dist/hncore-macos-arm64 render examples/demo/anim.html out/demo/anim.png    1200 760
+       HN_CLOCK=700 dist/hncore-macos-arm64 render examples/demo/anim.html out/demo/anim-f2.png 1200 760
+-->
+<meta charset="utf-8">
+<meta name="hn-window" content="1200x760">
+<meta name="hn-title" content="动效实验室 · Animation Lab">
+<meta name="hn-theme" content="dark">
+<style>
+  html, body { margin: 0; }
+  body { background: #0a0e17; }
+
+  :root {
+    --bg-1: #0a0e17; --bg-2: #101a33; --bg-3: #16264d; --bg-4: #1d3263;
+    --ink: #eaf2ff; --ink-2: #c9d4ec; --ink-3: #8fa3c8; --deep: #0a0e17;
+    --pink: #ff6b9d; --purple: #c77dff; --gold: #ffd166; --orange: #ff8a5c;
+    --teal: #06d6a0; --teal-d: #0a9d78; --blue: #4f9dff; --blue-d: #2a5fd0;
+  }
+
+  #page {
+    position: relative; width: 1200px; height: 760px; box-sizing: border-box;
+    padding: 40px; overflow: hidden;
+    background: linear-gradient(160deg, #0a0e17 0%, #101a33 42%, #16264d 78%, #1d3263 100%);
+  }
+
+  /* ---- 四角光斑 (linear 渐变 + 50% 圆角, overflow 裁切) ---- */
+  .blob { position: absolute; border-radius: 50%; }
+  .b1 { width: 460px; height: 460px; left: -150px; top: -160px;
+        background: linear-gradient(135deg, #4f9dff 0%, #7b2cbf 46%, transparent 76%); opacity: .55; }
+  .b2 { width: 420px; height: 420px; left: 930px; top: -150px;
+        background: linear-gradient(135deg, #06d6a0 0%, transparent 70%); opacity: .5; }
+  .b3 { width: 430px; height: 430px; left: -150px; top: 470px;
+        background: linear-gradient(135deg, #06d6a0 0%, transparent 72%); opacity: .45; }
+  .b4 { width: 470px; height: 470px; left: 890px; top: 460px;
+        background: linear-gradient(135deg, #4f9dff 0%, #7b2cbf 48%, transparent 78%); opacity: .55; }
+
+  .wrap { position: relative; display: flex; flex-direction: column; }
+
+  /* ---- 顶部渐变饰带标题 ---- */
+  .band {
+    height: 54px; border-radius: 14px; box-sizing: border-box; padding: 0 20px;
+    display: flex; align-items: center; gap: 14px;
+    background: linear-gradient(90deg, #ff6b9d 0%, #ffd166 35%, #06d6a0 68%, #4f9dff 100%);
+    box-shadow: 0 12px 30px rgba(0,0,0,.5);
+  }
+  .band .bt { font-size: 20px; font-weight: 800; color: #0a0e17; }
+  .band .bs { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: rgba(10,14,23,.68); }
+  .band .sp { flex: 1; }
+  .band .br { font-size: 12px; font-weight: 700; color: rgba(10,14,23,.82); }
+
+  /* ---- 主栅格 ----
+     行式两列: 每行一个定高 flex 行, 左右卡跨轴拉伸到同行同高 —— 行沿
+     (顶/底)逐行对齐, 页脚上方左右留白一致。(此前双列各自堆叠, 引擎对
+     "拉伸定高列 + 内容恰好填满"的列会重排子项高度, 两列行沿错开。) */
+  .main { display: flex; flex-direction: column; gap: 18px; margin-top: 18px; }
+  .row  { display: flex; gap: 20px; }
+  #row1 { height: 186px; }
+  #row2 { height: 190px; }
+  #row3 { height: 158px; }
+  .w-l  { width: 640px; flex: none; }
+  .w-r  { width: 460px; flex: none; }
+
+  /* 主题组件基类(hn_theme BASE_CSS)给 .card 带了 margin: 0 0 10 ——
+     页内 .card 全部显式归零, 否则 flex 拉伸/行沿都要被这 10px 底边距吃掉 */
+  .card { box-sizing: border-box; padding: 16px; margin: 0; }
+
+  /* ---- 玻璃拟态卡 ---- */
+  .glass {
+    background: linear-gradient(120deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.03) 50%, rgba(10,14,23,.40) 100%);
+    border: 1px solid rgba(255,255,255,.16);
+    box-shadow: 0 12px 30px rgba(0,0,0,.5);
+    border-radius: 16px;
+  }
+
+  /* ---- 通用小件 ---- */
+  .chip {
+    display: flex; align-items: center; padding: 3px 10px; border-radius: 10px;
+    font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: #0a0e17;
+  }
+  .g-pink { background: linear-gradient(135deg, #ff6b9d, #c77dff); }
+  .g-gold { background: linear-gradient(135deg, #ffd166, #ff8a5c); }
+  .g-teal { background: linear-gradient(135deg, #06d6a0, #0a9d78); }
+  .g-blue { background: linear-gradient(135deg, #4f9dff, #2a5fd0); }
+  .lab  { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #8fa3c8; }
+  .kv   { display: flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+          background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12);
+          font-size: 10px; color: #c9d4ec; }
+  .ttl  { font-size: 16px; font-weight: 800; color: #eaf2ff; }
+  .ttl-s{ font-size: 14px; font-weight: 800; color: #eaf2ff; }
+  .desc { font-size: 12px; font-weight: 400; color: #c9d4ec; line-height: 1.5; }
+  .note { font-size: 10.5px; font-weight: 300; color: #8fa3c8; }
+  .hd   { display: flex; align-items: center; gap: 10px; }
+  .hd .sp { flex: 1; }
+
+  /* ==========================================================
+     K1 · @keyframes 旋转环 + 轨道双点 + 内核呼吸
+     ========================================================== */
+  #c-ring { display: flex; align-items: center; gap: 22px; }
+  .stage  { position: relative; width: 150px; height: 150px; flex: none; }
+  .oring  { position: absolute; left: 0; top: 0; width: 148px; height: 148px;
+            border-radius: 50%; border: 1px solid rgba(255,255,255,.16); }
+  .ringg  { position: absolute; left: 11px; top: 11px; width: 128px; height: 128px; border-radius: 50%;
+            background: linear-gradient(135deg, #ff6b9d 0%, #ffd166 32%, #06d6a0 62%, #4f9dff 100%); }
+  .hole   { position: absolute; left: 12px; top: 12px; width: 104px; height: 104px; border-radius: 50%;
+            background: #0d1830; }
+  .orb    { position: absolute; left: 0; top: 0; width: 150px; height: 150px;
+            animation: rot 5s linear infinite; animation-delay: -0.9s; }
+  .gem    { position: absolute; border-radius: 50%; }
+  .ga     { top: -7px; left: 68px; width: 14px; height: 14px;
+            background: linear-gradient(140deg, #d9fff4 0%, #06d6a0 42%, #05a87e 72%, #046b50 100%);
+            box-shadow: 0 4px 12px rgba(6,214,160,.5); }
+  .gb     { bottom: -6px; left: 70px; width: 10px; height: 10px;
+            background: linear-gradient(140deg, #fff3d6 0%, #ffd166 42%, #f0a35c 74%, #a35c2a 100%);
+            box-shadow: 0 4px 10px rgba(255,209,102,.45); }
+  .gc     { top: 71px; left: 146px; width: 8px; height: 8px;
+            background: linear-gradient(140deg, #dceaff 0%, #4f9dff 45%, #2a5fd0 100%);
+            box-shadow: 0 4px 10px rgba(79,157,255,.5); }
+  .core   { position: absolute; left: 48px; top: 48px; width: 54px; height: 54px; border-radius: 50%;
+            background: linear-gradient(140deg, #ffe3f0 0%, #ff6b9d 40%, #c7427f 72%, #8f2d5e 100%);
+            box-shadow: 0 6px 16px rgba(255,107,157,.45);
+            animation: pulse 2.2s ease-in-out infinite; animation-delay: -0.6s; }
+  .stginfo { display: flex; flex-direction: column; gap: 7px; flex: 1; }
+  .metarow { display: flex; gap: 8px; }
+
+  @keyframes rot    { from { rotate: 0; } to { rotate: 360; } }
+  @keyframes pulse  { 0%, 100% { scale: 1;    opacity: .82; } 50% { scale: 1.16; opacity: 1; } }
+
+  /* ==========================================================
+     K2 · spring(k,d) 下落球 vs cubic-bezier 回弹进度条
+     ========================================================== */
+  #c-spring { display: flex; flex-direction: column; gap: 8px; }
+  .spbody   { display: flex; gap: 14px; align-items: center; flex: 1; }
+  .track    { position: relative; width: 54px; height: 112px; flex: none;
+              background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.14);
+              border-radius: 10px; }
+  .ground   { position: absolute; left: 8px; right: 8px; bottom: 9px; height: 2px;
+              background: linear-gradient(90deg, rgba(255,255,255,.06), rgba(255,255,255,.3), rgba(255,255,255,.06)); }
+  .ball     { position: absolute; left: 16px; top: 6px; width: 20px; height: 20px; border-radius: 50%;
+              background: linear-gradient(140deg, #e9d8ff 0%, #a06bff 40%, #7b2cbf 75%, #4c1d80 100%);
+              box-shadow: 0 6px 14px rgba(160,107,255,.4);
+              animation: drop 1.9s infinite; animation-timing-function: spring(150, 11);
+              animation-delay: -0.85s; }
+  .bars     { display: flex; flex-direction: column; gap: 10px; flex: 1; }
+  .bunit    { display: flex; flex-direction: column; gap: 4px; }
+  .blab     { font-size: 10px; font-weight: 700; color: #8fa3c8; letter-spacing: 1px; }
+  .btrack   { position: relative; height: 14px; border-radius: 7px; background: rgba(255,255,255,.08);
+              border: 1px solid rgba(255,255,255,.12); overflow: hidden; }
+  .bfill    { position: absolute; left: -358px; top: 0; width: 358px; height: 12px; border-radius: 6px;
+              animation: fillin 1.9s infinite; animation-delay: -0.85s; }
+  .f-spring { background: linear-gradient(90deg, #06d6a0, #4f9dff); animation-timing-function: spring(150, 11); }
+  .f-bez    { background: linear-gradient(90deg, #ffd166, #ff8a5c); animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1); }
+
+  @keyframes drop   { 0% { translate-y: 0; } 78% { translate-y: 64; } 100% { translate-y: 64; } }
+  @keyframes fillin { from { translate-x: 0; } to { translate-x: 358; } }
+
+  /* ==========================================================
+     K3 · 负延迟错档药丸矩阵
+     ========================================================== */
+  #c-pill { display: flex; flex-direction: column; gap: 6px; }
+  .prow   { display: flex; align-items: center; gap: 12px; }
+  .plab   { width: 110px; flex: none; font-size: 10px; font-weight: 700;
+            letter-spacing: 1.5px; color: #8fa3c8; }
+  .pgroup { display: flex; gap: 10px; }
+  .pill   { display: flex; align-items: center; padding: 7px 14px;
+            border-radius: 15px; font-size: 11px; font-weight: 700; color: #0a0e17;
+            animation: bob 2.6s ease-in-out infinite; }
+  @keyframes bob { 0%, 100% { opacity: .45; translate-y: 0; } 50% { opacity: 1; translate-y: -6; } }
+  .r1 .pill:nth-child(1) { animation-delay: -0s; }
+  .r1 .pill:nth-child(2) { animation-delay: -0.35s; }
+  .r1 .pill:nth-child(3) { animation-delay: -0.7s; }
+  .r2 .pill:nth-child(1) { animation-delay: -0.5s; }
+  .r2 .pill:nth-child(2) { animation-delay: -0.85s; }
+  .r2 .pill:nth-child(3) { animation-delay: -1.2s; }
+  .r2 .pill:nth-child(4) { animation-delay: -1.55s; }
+  .r3 .pill:nth-child(1) { animation-delay: -1s; }
+  .r3 .pill:nth-child(2) { animation-delay: -1.35s; }
+  .r3 .pill:nth-child(3) { animation-delay: -1.7s; }
+
+  /* ==========================================================
+     K4 · hn-timeline 容器编排
+     ========================================================== */
+  #c-tl   { display: flex; flex-direction: column; gap: 9px; }
+  .seq    { display: flex; align-items: center; gap: 10px; height: 52px;
+            box-sizing: border-box; padding: 0 16px;
+            background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.10);
+            border-radius: 12px; }
+  .tnode  { width: 22px; height: 22px; border-radius: 50%; flex: none;
+            animation: pop .45s ease-out; }
+  .s1 { opacity: .9;  animation-delay: .25s; }
+  .s2 { opacity: .6;  animation-delay: .55s; }
+  .s3 { opacity: .4;  animation-delay: .85s; }
+  .s4 { opacity: .22; animation-delay: 1.15s; }
+  .tline  { flex: 1; height: 2px;
+            background: linear-gradient(90deg, rgba(255,255,255,.06), rgba(255,255,255,.28)); }
+  .codebox{ box-sizing: border-box; padding: 7px 10px; border-radius: 8px;
+            background: rgba(10,14,23,.55); border: 1px solid rgba(255,255,255,.12);
+            font-family: monospace; font-size: 10.5px; color: #c9d4ec; }
+  .cs     { color: #5fe3b8; }
+  .ck     { color: #ffd166; }
+  @keyframes pop { 0% { opacity: .25; } 100% { opacity: 1; } }
+
+  /* ==========================================================
+     JS · hn.animate 薄桥注解面板
+     ========================================================== */
+  #c-js   { display: flex; flex-direction: column; gap: 8px; }
+  .jsbody { display: flex; gap: 12px; flex: 1; }
+  .jscode { flex: 1.5; box-sizing: border-box; padding: 9px 12px; border-radius: 10px;
+            background: rgba(10,14,23,.6); border: 1px solid rgba(255,255,255,.14);
+            font-family: monospace; font-size: 10.5px; line-height: 15px; color: #d3e2fb;
+            white-space: pre; margin: 0; }
+  .jspar  { flex: 1; display: flex; flex-direction: column; gap: 3px; justify-content: center; }
+  .pr     { display: flex; align-items: center; gap: 6px; }
+  .pk     { display: flex; align-items: center; padding: 1px 6px; border-radius: 6px; flex: none;
+            background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12);
+            font-family: monospace; font-size: 9.5px; color: #ffd166; }
+  .pv     { font-size: 9.5px; color: #8fa3c8; }
+
+  /* ==========================================================
+     时钟 · HN_CLOCK 确定性取帧
+     ========================================================== */
+  #c-clock { display: flex; flex-direction: column; gap: 8px; }
+  .reel    { display: flex; gap: 8px; flex: 1; }
+  .fr      { position: relative; flex: 1; box-sizing: border-box;
+             background: rgba(10,14,23,.5); border: 1px solid rgba(255,255,255,.12);
+             border-radius: 10px; }
+  .fdot    { position: absolute; left: 50%; width: 10px; height: 10px; border-radius: 50%;
+             background: linear-gradient(140deg, #d9fff4 0%, #06d6a0 45%, #046b50 100%);
+             box-shadow: 0 3px 8px rgba(6,214,160,.45); }
+  .f1 .fdot { top: 7px;  }
+  .f2 .fdot { top: 24px; }
+  .f3 .fdot { top: 34px; }
+  .f4 .fdot { top: 26px; }
+  .fcap    { position: absolute; bottom: 4px; width: 100%; text-align: center;
+             font-family: monospace; font-size: 9px; color: #8fa3c8; }
+
+  /* ---- 页脚 ---- */
+  .foot { display: flex; align-items: center; justify-content: space-between; margin-top: 22px; }
+  .foot .fl { font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #8fa3c8; }
+  /* 右文压在 b4 紫色光斑最亮区上, 10px/300 #8fa3c8 对比不足 —— 提亮一档到
+     --ink-2 (#c9d4ec), 字号/字重不动 */
+  .foot .fr2 { font-size: 10px; font-weight: 300; letter-spacing: 1px; color: #c9d4ec; }
+</style>
+</head>
+<body>
+<div id="page">
+  <div class="blob b1"></div>
+  <div class="blob b2"></div>
+  <div class="blob b3"></div>
+  <div class="blob b4"></div>
+
+  <div class="wrap">
+    <header class="band">
+      <div class="bt">动效实验室</div>
+      <div class="bs">ANIMATION LAB</div>
+      <div class="sp"></div>
+      <div class="br">@keyframes · spring(k,d) · hn-timeline · hn.animate —— 引擎自有时钟驱动</div>
+    </header>
+
+    <main class="main">
+      <!-- ============ 行 1: K1 旋转环 | K2 弹簧 ============ -->
+      <div class="row" id="row1">
+        <!-- K1 旋转环 -->
+        <article class="glass card w-l" id="c-ring">
+          <div class="stage">
+            <div class="oring"></div>
+            <div class="ringg"><div class="hole"></div></div>
+            <div class="orb">
+              <div class="gem ga"></div>
+              <div class="gem gb"></div>
+              <div class="gem gc"></div>
+            </div>
+            <div class="core"></div>
+          </div>
+          <div class="stginfo">
+            <div class="hd">
+              <div class="chip g-pink">K1 · @KEYFRAMES</div>
+              <div class="lab">ROTATE / SCALE / ORBIT</div>
+            </div>
+            <div class="ttl">渐变轨道环 · 三点公转</div>
+            <div class="desc">rotate 0→360 驱动透明轨道层: 三枚渐变宝石沿品牌四停静环差速公转, 内核 140° 四停高光球 scale 呼吸。</div>
+            <div class="metarow">
+              <div class="kv">orbit 5s · infinite</div>
+              <div class="kv">差速 · 3 点</div>
+              <div class="kv">pulse 2.2s · scale</div>
+            </div>
+          </div>
+        </article>
+
+
+        <!-- K2 弹簧 -->
+        <article class="glass card w-r" id="c-spring">
+          <div class="hd">
+            <div class="chip g-blue">K2 · SPRING(k,d)</div>
+            <div class="ttl-s">物理弹簧下落 · 同幅对照</div>
+          </div>
+          <div class="spbody">
+            <div class="track">
+              <div class="ball"></div>
+              <div class="ground"></div>
+            </div>
+            <div class="bars">
+              <div class="bunit">
+                <div class="blab">spring(150, 11) · 物理积分过冲</div>
+                <div class="btrack"><div class="bfill f-spring"></div></div>
+              </div>
+              <div class="bunit">
+                <div class="blab">cubic-bezier(.34, 1.56, .64, 1) · 回折</div>
+                <div class="btrack"><div class="bfill f-bez"></div></div>
+              </div>
+              <div class="note">任一时钟截帧: 两轨同幅不同形 —— 弹簧过冲 vs 贝塞尔回折, 中途相位可截。</div>
+            </div>
+          </div>
+        </article>
+
+      </div>
+
+      <!-- ============ 行 2: K3 错档药丸 | K4 timeline ============ -->
+      <div class="row" id="row2">
+        <!-- K3 错档药丸 -->
+        <article class="glass card w-l" id="c-pill">
+          <div class="hd">
+            <div class="chip g-gold">K3 · 负延迟错档</div>
+            <div class="ttl-s">相位差药丸矩阵</div>
+            <div class="sp"></div>
+            <div class="lab">静态首屏即成片</div>
+          </div>
+          <div class="prow r1">
+            <div class="plab">排Ⅰ · 基准</div>
+            <div class="pgroup">
+              <div class="pill g-pink">缓动</div>
+              <div class="pill g-gold">弹簧</div>
+              <div class="pill g-teal">贝塞尔回弹</div>
+            </div>
+          </div>
+          <div class="prow r2">
+            <div class="plab">排Ⅱ · +0.5s</div>
+            <div class="pgroup">
+              <div class="pill g-teal">旋转</div>
+              <div class="pill g-blue">缩放</div>
+              <div class="pill g-pink">位移</div>
+              <div class="pill g-gold">透明度</div>
+            </div>
+          </div>
+          <div class="prow r3">
+            <div class="plab">排Ⅲ · +1.0s</div>
+            <div class="pgroup">
+              <div class="pill g-blue">错档</div>
+              <div class="pill g-pink">相位差</div>
+              <div class="pill g-teal">同一时钟</div>
+            </div>
+          </div>
+          <div class="note">负 animation-delay 让任一时钟都落在波形中段 —— 无透明空窗, 三排相位差恒定。</div>
+        </article>
+
+
+        <!-- K4 timeline -->
+        <article class="glass card w-r" id="c-tl">
+          <div class="hd">
+            <div class="chip g-teal">K4 · HN-TIMELINE</div>
+            <div class="ttl-s">容器跨元素编排</div>
+            <div class="sp"></div>
+            <div class="lab">loop · alternate</div>
+          </div>
+          <div class="seq" hn-timeline="loop=infinite alternate interval=250">
+            <div class="tnode g-pink s1"></div>
+            <div class="tline"></div>
+            <div class="tnode g-gold s2"></div>
+            <div class="tline"></div>
+            <div class="tnode g-teal s3"></div>
+            <div class="tline"></div>
+            <div class="tnode g-blue s4"></div>
+          </div>
+          <div class="codebox">&lt;div <span class="ck">hn-timeline</span>=<span class="cs">"loop=infinite alternate interval=250"</span>&gt;</div>
+          <div class="note">拍点 = 各步骤 animation delay · 一轮全落定按 loop 重播 / alternate 反向呼吸 · 轮完成退役派 hn-timeline:complete 事件。</div>
+        </article>
+
+      </div>
+
+      <!-- ============ 行 3: JS 薄桥注解 | 时钟卡 ============ -->
+      <div class="row" id="row3">
+        <!-- JS 薄桥注解 -->
+        <article class="glass card w-l" id="c-js">
+          <div class="hd">
+            <div class="chip g-pink">JS · HN.ANIMATE 薄桥</div>
+            <div class="ttl-s">anime.js 形状参数表</div>
+            <div class="sp"></div>
+            <div class="chip g-gold">真窗演出 · 离屏截图无 JS</div>
+          </div>
+          <div class="jsbody">
+            <pre class="jscode">hn.animate(<span class="cs">'.orb'</span>, { opacity: [0.2, 1] }, {
+  duration: 900, ease: <span class="cs">'spring(180, 10)'</span>,
+  stagger: 80, loop: <span class="cs">'infinite'</span>, alternate: true,
+  reversed: false,
+  onComplete(e) { tip.textContent = <span class="cs">'一轮完成'</span>; }
+});</pre>
+            <div class="jspar">
+              <div class="pr"><div class="pk">targets</div><div class="pv">选择器 / 元素集</div></div>
+              <div class="pr"><div class="pk">{prop:[a,b]}</div><div class="pv">双值引擎插值</div></div>
+              <div class="pr"><div class="pk">duration·delay·stagger</div><div class="pv">毫秒拍点</div></div>
+              <div class="pr"><div class="pk">ease</div><div class="pv">spring(k,d) / 缓动族</div></div>
+              <div class="pr"><div class="pk">loop·alternate·reversed</div><div class="pv">重播链</div></div>
+              <div class="pr"><div class="pk">onComplete(e)</div><div class="pv">一轮完成回调</div></div>
+            </div>
+          </div>
+        </article>
+
+      </section>
+
+        <!-- 时钟卡 -->
+        <article class="glass card w-r" id="c-clock">
+          <div class="hd">
+            <div class="chip g-blue">时钟 · HN_CLOCK</div>
+            <div class="ttl-s">确定性取帧</div>
+          </div>
+          <div class="desc">HN_CLOCK=&lt;ms&gt; 把引擎自有时钟钉在同一时刻 —— 同页任意次离屏渲染逐像素同相, 四组演出逐帧可复现。</div>
+          <div class="reel">
+            <div class="fr f1"><div class="fdot"></div><div class="fcap">0ms</div></div>
+            <div class="fr f2"><div class="fdot"></div><div class="fcap">450</div></div>
+            <div class="fr f3"><div class="fdot"></div><div class="fcap">900</div></div>
+            <div class="fr f4"><div class="fdot"></div><div class="fcap">1350</div></div>
+          </div>
+        </article>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <div class="fl">NEB DEMO · 动效实验室</div>
+      <div class="fr2">HN_CLOCK 逐帧可复现 · 离屏软件光栅 · 零 GUI 依赖</div>
+    </footer>
+  </div>
+</div>
+</body>
+</html>

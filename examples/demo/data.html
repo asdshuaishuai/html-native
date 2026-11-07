@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<!-- examples/demo/data.html — 数据画廊(DEMO 04)
+     md / json / csv 三种直染同屏 + CSS 渐变数据可视化。
+     hn-clock=0 截图即成片: 条形图用负 animation-delay 呈生长中途相位,
+     多停 linear-gradient 全页贯穿(条形填充各异 2-4 stop + 品牌谱带色标)。
+     零 JS / 零图片 / 零网络, 完全自包含。
+     渲染: dist/hncore-macos-arm64 render examples/demo/data.html out/demo/data.png 1200 760
+     布局备注: 离屏引擎纵向 flex-grow 未展开(实测), 全页纵向一律显式 px 高度;
+     absolute 元素的百分比宽不解析(实测 legend 条消失), 图例条改 flex 子元素。
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="1200x760">
+<meta name="hn-title" content="Neb · 数据画廊">
+<meta name="hn-theme" content="dark">
+<style>
+  :root {
+    --ink:  #eaf2ff;
+    --ink2: #c9d4ec;
+    --ink3: #8fa3c8;
+    --deep: #0a0e17;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+
+  /* ---- 页骨架: 160° 四停深蓝底 + 四角光斑 ---- */
+  #page {
+    width: 1200; height: 760; position: relative; overflow: hidden;
+    padding: 34 40 22;
+    background: linear-gradient(160deg, #0a0e17 0%, #101a33 42%, #16264d 78%, #1d3263 100%);
+  }
+  .glow { position: absolute; border-radius: 50%; }
+  .g1 { width: 560; height: 560; left: -190; top: -210;
+        background: linear-gradient(135deg, #4f9dff 0%, #7b2cbf 42%, transparent 76%);
+        opacity: .5; }
+  .g2 { width: 420; height: 420; right: -150; top: -170;
+        background: linear-gradient(160deg, #06d6a0 0%, transparent 62%);
+        opacity: .48; }
+  .g3 { width: 560; height: 560; right: -210; bottom: -240;
+        background: linear-gradient(225deg, #06d6a0 0%, transparent 58%);
+        opacity: .52; }
+  .g4 { width: 460; height: 460; left: -160; bottom: -190;
+        background: linear-gradient(45deg, #7b2cbf 0%, transparent 60%);
+        opacity: .45; }
+  .wrap { position: relative; z-index: 1; height: 704;
+          display: flex; flex-direction: column; }
+
+  /* ---- 共用件 ---- */
+  .band {
+    background: linear-gradient(90deg, #ff6b9d 0%, #ffd166 35%, #06d6a0 68%, #4f9dff 100%);
+    border-radius: 16; padding: 0 22; height: 52;
+    display: flex; align-items: center; gap: 12;
+    box-shadow: 0 12 30 rgba(0,0,0,.5);
+  }
+  .band .bt { font-size: 18; font-weight: 800; color: var(--deep); letter-spacing: 1; }
+  .band .bs { font-size: 11; font-weight: 700; color: rgba(10,14,23,.72); }
+  .band .sp { margin-left: auto; display: flex; align-items: center; gap: 8; }
+  .bchip { background: rgba(10,14,23,.34); border-radius: 999;
+           padding: 4 12; font-size: 9; font-weight: 800;
+           color: #eaf2ff; letter-spacing: 2; }
+
+  .glass {
+    background: linear-gradient(120deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.03) 50%, rgba(10,14,23,.4) 100%);
+    border: 1 solid rgba(255,255,255,.16);
+    border-radius: 16;
+    box-shadow: 0 12 30 rgba(0,0,0,.5);
+  }
+  /* 主题组件基类(hn_theme BASE_CSS)给 .card 带了 margin: 0 0 10 —— 页内
+     归零, 否则列内卡片各多 10px 底边距, 两列内容超 .main 定高被压缩重排,
+     行沿错位 */
+  .card { padding: 12 18; margin: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .cardhead { display: flex; align-items: center; gap: 10; margin: 0 0 6; }
+  .ctitle { font-size: 11; font-weight: 700; color: var(--ink3); letter-spacing: 2; }
+  .tag { background: linear-gradient(90deg, #ff6b9d, #c77dff);
+         border-radius: 999; padding: 2 10;
+         font-size: 9; font-weight: 800; color: var(--deep); letter-spacing: 1;
+         font-family: monospace; }
+  .tag.t2 { background: linear-gradient(90deg, #ffd166, #ff8a5c); }
+  .tag.t3 { background: linear-gradient(90deg, #06d6a0, #0a9d78); }
+  .tag.t4 { background: linear-gradient(90deg, #4f9dff, #2a5fd0); color: #eaf2ff; }
+  .cnote { margin-left: auto; font-size: 9; color: var(--ink3); letter-spacing: 1; }
+
+  /* ---- 数据铭牌 ---- */
+  .plaques { display: flex; gap: 14; height: 84; margin: 14 0 0; }
+  .plaque { flex: 1; padding: 12 18; display: flex; flex-direction: column;
+            justify-content: center; }
+  .pnum-row { display: flex; align-items: baseline; gap: 7; }
+  .pnum { font-size: 26; font-weight: 800; color: var(--ink); }
+  .punit { font-size: 11; font-weight: 700; color: var(--ink3); }
+  .pline { width: 44; height: 3; border-radius: 2; margin: 7 0 6; }
+  .pl1 { background: linear-gradient(90deg, #ff6b9d, #c77dff); }
+  .pl2 { background: linear-gradient(90deg, #ffd166, #ff8a5c); }
+  .pl3 { background: linear-gradient(90deg, #06d6a0, #0a9d78); }
+  .pl4 { background: linear-gradient(90deg, #4f9dff, #2a5fd0); }
+  .pcap { font-size: 11; color: var(--ink2); }
+
+  /* ---- 主区: 左右两列(纵向显式 px 高) ----
+     两列按同一组行高对齐: 行1 = 224(MD|JSON), 行2 = 194(CSV|CHART),
+     行距 14 —— 左右行沿(顶/底)逐行对齐, 中段视线不再左右跳动 */
+  .main { height: 432; display: flex; gap: 16; margin: 14 0 0; }
+  .col { flex: 1; display: flex; flex-direction: column; gap: 14; }
+  .h-md   { height: 224; }
+  .h-csv  { height: 194; }
+  .h-json { height: 224; }
+  .h-bars { height: 194; }
+
+  /* hn-md 卡: 直染内容观感显式接管 */
+  .mdbox h2 { color: var(--ink); font-size: 15; font-weight: 800; margin: 0 0 7; }
+  .mdbox h3 { color: var(--ink); font-size: 13; font-weight: 800; margin: 0 0 6; }
+  .mdbox p { color: var(--ink2); font-size: 12; line-height: 1.55; margin: 0 0 7; }
+  .mdbox strong { color: #ffd166; font-weight: 800; }
+  .mdbox code { color: #ffd166; background: rgba(255,209,102,.12);
+                border-radius: 5; padding: 1 6; font-size: 11; }
+  .mdbox li { color: var(--ink2); font-size: 12; line-height: 1.5; }
+  .mdbox blockquote { color: var(--ink3); border-left: 2 solid #4f9dff;
+                      padding: 2 0 2 10; margin: 8 0 0; font-size: 11.5; }
+
+  /* hn-json 卡: 树行 = 键数(引擎逐键展开), 字号 9.5 控制行高;
+     行高 1.1 —— 14 行树在 224 行高卡内收进(此前 258 卡收 196 行盒) */
+  .jsonbox { background: rgba(10,14,23,.5); border: 1 solid rgba(255,255,255,.12);
+             border-radius: 10; padding: 8 12;
+             font-family: monospace; font-size: 9.5; line-height: 1.1; }
+
+  /* hn-csv 卡 */
+  .csvbox { background: rgba(10,14,23,.5); border: 1 solid rgba(255,255,255,.12);
+            border-radius: 10; padding: 2 10; }
+  table.csv { font-size: 11; }
+  table.csv th { color: var(--ink); font-weight: 800; padding: 4 10;
+                 border-bottom: 1 solid rgba(255,255,255,.18); }
+  table.csv td { color: var(--ink2); padding: 2 10; }
+  table.csv tr:nth-child(odd) td { background: rgba(255,255,255,.035); }
+
+  /* ---- 条形图 ----
+     离屏 render 不采样动画(实测 HN_CLOCK 三档 md5 全同),
+     基础宽即取负 delay 对应的中途相位值; 真窗里 animation 负 delay
+     无限循环继续从 0 生长到各自目标宽。btrack 用 block(非 flex)承托,
+     填充为 block 子元素 % 宽 —— flex 子项的 % 宽实测不参与绘制。 */
+  .brow { display: flex; align-items: center; gap: 10; margin: 0 0 2; }
+  .brow:last-child { margin-bottom: 0; }
+  .blabel { width: 46; font-size: 11; font-weight: 700; color: var(--ink2);
+            text-align: right; }
+  .btrack { flex: 1; height: 15; background: rgba(255,255,255,.08);
+            border-radius: 8; }
+  .bfill { height: 15; border-radius: 8; }
+  .bval { width: 34; font-size: 10; font-weight: 800; color: var(--ink3);
+          font-family: monospace; }
+
+  .f1 { width: 19%; background: linear-gradient(90deg, #06d6a0 0%, #0a9d78 100%);
+        animation-name: g1; animation-duration: 2s;
+        animation-iteration-count: infinite;
+        animation-timing-function: linear; animation-delay: -1.10s; }
+  .f2 { width: 29%; background: linear-gradient(90deg, #ffd166 0%, #ff8a5c 100%);
+        animation-name: g2; animation-duration: 2s;
+        animation-iteration-count: infinite;
+        animation-timing-function: linear; animation-delay: -1.20s; }
+  .f3 { width: 40%; background: linear-gradient(90deg, #ff6b9d 0%, #c77dff 100%);
+        animation-name: g3; animation-duration: 2s;
+        animation-iteration-count: infinite;
+        animation-timing-function: linear; animation-delay: -1.30s; }
+  .f4 { width: 53%; background: linear-gradient(90deg, #4f9dff 0%, #2a5fd0 100%);
+        animation-name: g4; animation-duration: 2s;
+        animation-iteration-count: infinite;
+        animation-timing-function: linear; animation-delay: -1.40s; }
+  .f5 { width: 69%; background: linear-gradient(90deg, #ff6b9d 0%, #ffd166 35%, #06d6a0 68%, #4f9dff 100%);
+        animation-name: g5; animation-duration: 2s;
+        animation-iteration-count: infinite;
+        animation-timing-function: linear; animation-delay: -1.50s; }
+  @keyframes g1 { from { width: 0%; } to { width: 34%; } }
+  @keyframes g2 { from { width: 0%; } to { width: 48%; } }
+  @keyframes g3 { from { width: 0%; } to { width: 61%; } }
+  @keyframes g4 { from { width: 0%; } to { width: 76%; } }
+  @keyframes g5 { from { width: 0%; } to { width: 92%; } }
+
+  /* ---- 多停色标图例 ---- */
+  .legend { height: 66; margin: 14 0 0; padding: 0 18;
+            display: flex; align-items: center; gap: 14; }
+  .lleft { width: 116; }
+  .lleft .lt { font-size: 10; font-weight: 700; color: var(--ink3);
+               letter-spacing: 1.5; }
+  .lleft .ls { font-size: 9; color: var(--ink3); margin: 4 0 0; }
+  .lstage { flex: 1; position: relative; height: 40; }
+  .lbar { position: relative; top: 8; width: 100%; height: 12;
+          border-radius: 6;
+          background: linear-gradient(90deg, #ff6b9d 0%, #ffd166 35%, #06d6a0 68%, #4f9dff 100%);
+          box-shadow: 0 6 14 rgba(0,0,0,.45); }
+  .ltick { position: absolute; top: 6; width: 2; height: 16;
+           background: rgba(234,242,255,.85); border-radius: 1; }
+  .ltl { position: absolute; top: 24; font-size: 9; font-weight: 700;
+         color: var(--ink2); font-family: monospace; width: 40; }
+  .ltl.r { right: 0; text-align: right; width: 40; }
+  .lcap { width: 300; font-size: 9.5; color: var(--ink3); line-height: 1.5;
+          font-family: monospace; }
+
+  /* ---- 页脚 ---- */
+  .foot { display: flex; align-items: center; margin: 10 0 0; height: 18; }
+  .foot .f1t { font-size: 10; font-weight: 700; color: var(--ink3);
+               letter-spacing: 2; }
+  .foot .f2t { margin-left: auto; font-size: 10; color: var(--ink3);
+               letter-spacing: 1; font-family: monospace; }
+</style>
+</head>
+<body>
+<div id="page">
+  <div class="glow g1"></div>
+  <div class="glow g2"></div>
+  <div class="glow g3"></div>
+  <div class="glow g4"></div>
+
+  <div class="wrap">
+    <!-- 渐变饰带标题 -->
+    <div class="band">
+      <div class="bt">数据画廊</div>
+      <div class="bs">md/json/csv 同屏直染 · 渐变可视化</div>
+      <div class="sp">
+        <div class="bchip">HN-MD</div>
+        <div class="bchip">HN-JSON</div>
+        <div class="bchip">HN-CSV</div>
+      </div>
+    </div>
+
+    <!-- 数据铭牌行 -->
+    <div class="plaques">
+      <div class="glass plaque">
+        <div class="pnum-row"><div class="pnum">3</div><div class="punit">种直染</div></div>
+        <div class="pline pl1"></div>
+        <div class="pcap">md / json / csv 源文本装载即成 DOM</div>
+      </div>
+      <div class="glass plaque">
+        <div class="pnum-row"><div class="pnum">16</div><div class="punit">ms 帧预算</div></div>
+        <div class="pline pl2"></div>
+        <div class="pcap">五段管线耗时见右下条形图</div>
+      </div>
+      <div class="glass plaque">
+        <div class="pnum-row"><div class="pnum">4</div><div class="punit">stop 色标</div></div>
+        <div class="pline pl3"></div>
+        <div class="pcap">多停渐变按百分比精确落位</div>
+      </div>
+      <div class="glass plaque">
+        <div class="pnum-row"><div class="pnum">0</div><div class="punit">外部依赖</div></div>
+        <div class="pline pl4"></div>
+        <div class="pcap">零脚本 · 零图片 · 零网络</div>
+      </div>
+    </div>
+
+    <!-- 主区: 左列(md/csv) 右列(json/条形图) -->
+    <div class="main">
+      <div class="col">
+        <div class="glass card h-md">
+          <div class="cardhead">
+            <div class="tag">hn-md</div>
+            <div class="ctitle">MARKDOWN 直染</div>
+            <div class="cnote">标题/粗体/列表/行内 code</div>
+          </div>
+          <div class="mdbox" hn-md>
+## 渲染管线速览
+
+一份 hn 编码装载即成普通 DOM —— `hn-md / hn-json / hn-csv` 在装载期
+把源文本替换成子树, 之后走**同一条 C99 渲染管线**, 引擎零特例。
+
+- 解析: 词法语法一次成型, 显示列表全量复用
+- 布局: flex 主轴 + 行内格式化, 免单位数值合法
+- 绘制: 多停渐变由软件光栅逐段直出
+
+> 三平台产物逐字节一致 —— 子集即确定性
+          </div>
+        </div>
+        <div class="glass card h-csv">
+          <div class="cardhead">
+            <div class="tag t2">hn-csv</div>
+            <div class="ctitle">CSV 直染</div>
+            <div class="cnote">表头行 + 数字列自动右对齐</div>
+          </div>
+          <div class="csvbox">
+            <div hn-csv>
+模块,帧耗时,预算,占比,结论
+解析,3,5,60%,达标
+布局,8,12,67%,达标
+绘制,12,16,75%,关注
+合成,9,10,90%,关注
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="glass card h-json">
+          <div class="cardhead">
+            <div class="tag t3">hn-json</div>
+            <div class="ctitle">JSON 直染</div>
+            <div class="cnote">嵌套树形 · 语法着色</div>
+          </div>
+          <div class="jsonbox">
+            <div hn-json>
+{
+  "pipeline": "hn-render",
+  "stages": [
+    { "id": "parse",  "ms": 3 },
+    { "id": "raster", "ms": 12 }
+  ],
+  "warnings": [ "RASTER_BUDGET" ]
+}
+            </div>
+          </div>
+        </div>
+
+        <div class="glass card h-bars">
+          <div class="cardhead">
+            <div class="tag t4">CSS CHART</div>
+            <div class="ctitle">渐变条形图</div>
+            <div class="cnote">负 delay 入场 · hn-clock=0 呈中途相位</div>
+          </div>
+          <div class="brow">
+            <div class="blabel">解析</div>
+            <div class="btrack"><div class="bfill f1"></div></div>
+            <div class="bval">34%</div>
+          </div>
+          <div class="brow">
+            <div class="blabel">布局</div>
+            <div class="btrack"><div class="bfill f2"></div></div>
+            <div class="bval">48%</div>
+          </div>
+          <div class="brow">
+            <div class="blabel">绘制</div>
+            <div class="btrack"><div class="bfill f3"></div></div>
+            <div class="bval">61%</div>
+          </div>
+          <div class="brow">
+            <div class="blabel">文本</div>
+            <div class="btrack"><div class="bfill f4"></div></div>
+            <div class="bval">76%</div>
+          </div>
+          <div class="brow">
+            <div class="blabel">合成</div>
+            <div class="btrack"><div class="bfill f5"></div></div>
+            <div class="bval">92%</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 多停色标图例条 -->
+    <div class="glass legend">
+      <div class="lleft">
+        <div class="lt">谱带 · 4 STOP</div>
+        <div class="ls">品牌渐变基线</div>
+      </div>
+      <div class="lstage">
+        <div class="lbar"></div>
+        <div class="ltick" style="left:0"></div>
+        <div class="ltick" style="left:35%"></div>
+        <div class="ltick" style="left:68%"></div>
+        <div class="ltick" style="right:0"></div>
+        <div class="ltl" style="left:0">0%</div>
+        <div class="ltl" style="left:30%">35%</div>
+        <div class="ltl" style="left:63%">68%</div>
+        <div class="ltl r">100%</div>
+      </div>
+      <div class="lcap">linear-gradient(90deg,<br>
+        #ff6b9d 0% → #ffd166 35% →<br>
+        #06d6a0 68% → #4f9dff 100%)</div>
+    </div>
+
+    <!-- 页脚 -->
+    <div class="foot">
+      <div class="f1t">NEB DEMO · 数据画廊</div>
+      <div class="f2t">hn-md / hn-json / hn-csv · gradient chart</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

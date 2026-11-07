@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="hn-window" content="1200x760">
+<style>
+:root {
+  --ink: #eaf2ff; --dim: #c9d4ec; --faint: #8fa3c8;
+  --glass-line: rgba(255,255,255,.16);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+#page {
+  position: relative; width: 1200; height: 760; overflow: hidden;
+  background: linear-gradient(160deg, #0a0e17 0%, #101a33 42%, #16264d 78%, #1d3263 100%);
+  padding: 36 0 24 0;
+}
+/* 四角光斑: 50% 圆角大球, linear 模拟高光, absolute 脱流 + overflow 裁切 */
+.blob { position: absolute; border-radius: 50%; }
+.blob-a { top: -190; left: -150; width: 560; height: 560;
+  background: linear-gradient(135deg, #4f9dff 0%, #7b2cbf 42%, transparent 76%); opacity: .5; }
+.blob-b { bottom: -210; right: -170; width: 520; height: 520;
+  background: linear-gradient(315deg, #06d6a0 0%, transparent 66%); opacity: .55; }
+.blob-c { top: 130; right: -180; width: 420; height: 420;
+  background: linear-gradient(225deg, #7b2cbf 0%, #4f9dff 40%, transparent 74%); opacity: .45; }
+
+.wrap { position: relative; z-index: 1; margin: 0 48; display: flex; flex-direction: column; }
+
+/* 渐变饰带标题: 亮带压深色 800 字重 */
+.band {
+  height: 52; border-radius: 14;
+  background: linear-gradient(90deg, #ff6b9d 0%, #ffd166 35%, #06d6a0 68%, #4f9dff 100%);
+  display: flex; align-items: center; gap: 14; padding: 0 20;
+  box-shadow: 0 12 30 rgba(0,0,0,.5);
+}
+.band-title { font-size: 18; font-weight: 800; color: #0a0e17; letter-spacing: 1; }
+.band-sub { font-size: 12; font-weight: 700; color: rgba(10,14,23,.78); }
+.chips { margin-left: auto; display: flex; gap: 8; }
+.band-chip {
+  padding: 5 12; border-radius: 13; font-size: 11; font-weight: 700;
+  color: #0a0e17; background: rgba(10,14,23,.30);
+}
+
+.glass {
+  background: linear-gradient(120deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.03) 45%, rgba(10,14,23,.4) 100%);
+  border: 1 solid var(--glass-line); border-radius: 16;
+  box-shadow: 0 12 30 rgba(0,0,0,.5);
+}
+.cap { font-size: 11; font-weight: 700; letter-spacing: 2; color: var(--faint); display: flex; align-items: center; gap: 8; }
+.cap-dot { width: 8; height: 8; border-radius: 3; }
+.cap-note { font-size: 10; color: var(--faint); font-weight: 400; letter-spacing: 0; margin-left: auto; }
+
+.main { display: flex; gap: 18; height: 528; margin-top: 18; }
+.col-l { width: 600; display: flex; flex-direction: column; gap: 14; }
+.col-r { width: 468; display: flex; flex-direction: column; gap: 14; }
+.card1 { height: 322; padding: 16 18; display: flex; flex-direction: column; }
+.card4 { flex: 1; padding: 14 18; display: flex; flex-direction: column; }
+.card3 { height: 322; padding: 16 18; display: flex; flex-direction: column; }
+.card2 { flex: 1; padding: 12 16; display: flex; flex-direction: column; }
+
+/* —— 控件全家福 —— */
+.field-input {
+  width: 100%; height: 34; margin-top: 10; padding: 0 12;
+  background: rgba(255,255,255,.10); border: 1 solid var(--glass-line); border-radius: 10;
+  color: var(--ink); font-size: 13;
+}
+.btn-row { display: flex; align-items: center; gap: 10; margin-top: 12; }
+.btn {
+  display: flex; align-items: center; justify-content: center; border: 0;
+  height: 34; border-radius: 13; font-size: 12; font-weight: 700; color: #0a0e17;
+}
+.btn-launch { width: 150; background: linear-gradient(90deg, #ff6b9d, #c77dff); }
+.btn-reset { width: 130; background: linear-gradient(90deg, #ffd166, #ff8a5c); }
+.btn-ghost { width: 130; background: #16264d; color: var(--ink); border: 1 solid var(--glass-line); }
+.ctrl-row { display: flex; align-items: center; gap: 14; margin-top: 12; }
+.cb-label { display: flex; align-items: center; gap: 7; font-size: 12; color: var(--dim); }
+.rg-label { display: flex; align-items: center; gap: 8; font-size: 12; color: var(--dim); }
+.rg-val { font-size: 12; font-weight: 800; color: var(--ink); }
+.picker-row { display: flex; align-items: center; gap: 12; margin-top: 12; }
+.sel {
+  width: 190; height: 34; padding: 0 10; border-radius: 10; border: 0;
+  background: #1d3263; color: #ffd166; font-size: 12; font-weight: 700;
+}
+.np { width: 210; height: 10; border-radius: 999; }
+.np-pct { font-size: 11; font-weight: 700; color: var(--dim); }
+.fold {
+  margin-top: 12; background: rgba(255,255,255,.05); border: 1 solid rgba(255,255,255,.10);
+  border-radius: 12; padding: 10 12;
+}
+.fold summary { list-style: none; font-size: 12; font-weight: 700; color: var(--ink); }
+.fold summary::before { content: "▲  "; color: #06d6a0; font-size: 10; }
+.fold-body { display: flex; gap: 8; margin-top: 8; }
+.fold-tag { padding: 3 9; border-radius: 13; font-size: 10; font-weight: 700; color: #0a0e17; }
+.ft-teal { background: linear-gradient(90deg, #06d6a0, #0a9d78); }
+.ft-blue { background: linear-gradient(90deg, #4f9dff, #2a5fd0); }
+.ft-gold { background: linear-gradient(90deg, #ffd166, #ff8a5c); }
+.fold-tip { font-size: 11; color: var(--faint); margin-top: 7; }
+
+/* —— 状态面板 —— */
+.log { display: flex; flex-direction: column; gap: 6; margin-top: 10; }
+.log-row { display: flex; align-items: center; gap: 9; animation: rise 1.4s ease-in-out infinite alternate; }
+.log-row:nth-child(1) { animation-delay: -.15s; }
+.log-row:nth-child(2) { animation-delay: -.5s; }
+.log-row:nth-child(3) { animation-delay: -.85s; }
+@keyframes rise { 0% { opacity: .6; } 100% { opacity: 1; } }
+.log-chip { width: 66; height: 20; border-radius: 13; font-size: 10; font-weight: 800;
+  color: #0a0e17; display: flex; align-items: center; justify-content: center; letter-spacing: 1; }
+.lc-click { background: linear-gradient(90deg, #ff6b9d, #c77dff); }
+.lc-input { background: linear-gradient(90deg, #ffd166, #ff8a5c); }
+.lc-change { background: linear-gradient(90deg, #06d6a0, #0a9d78); }
+.log-text { font-size: 11.5; color: var(--dim); }
+.log-mark { margin-left: auto; font-size: 10; font-weight: 700; color: #06d6a0; }
+.meters { display: flex; flex-direction: column; gap: 8; margin-top: 11; }
+.meter { display: flex; align-items: center; gap: 10; }
+.m-name { width: 62; font-size: 11; color: var(--faint); font-weight: 700; }
+.m-track { width: 320; height: 6; border-radius: 3; background: #262e3d; overflow: hidden; }
+.m-fill { height: 6; border-radius: 3; }
+.mf-brand { background: linear-gradient(90deg, #ff6b9d, #ffd166); }
+.mf-gold { background: linear-gradient(90deg, #ffd166, #ff8a5c); }
+.mf-teal { background: linear-gradient(90deg, #06d6a0, #0a9d78); }
+.m-pct { text-align: right; font-size: 11; font-weight: 800; color: var(--ink); }
+
+/* —— Canvas 演出区 —— */
+.stage-wrap { position: relative; width: 100%; height: 168; margin-top: 10; border-radius: 12;
+  border: 1 solid var(--glass-line); overflow: hidden;
+  background: linear-gradient(160deg, #1d3263 0%, #101a33 55%, #0a0e17 100%); }
+.stage { width: 100%; height: 168; }
+.orb { position: absolute; border-radius: 50%; }
+.orb-a { bottom: -90; left: -60; width: 240; height: 240;
+  background: linear-gradient(45deg, #06d6a0 0%, transparent 68%); opacity: .3; }
+.orb-b { top: -80; right: -70; width: 230; height: 230;
+  background: linear-gradient(225deg, #4f9dff 0%, transparent 66%); opacity: .32; }
+/* 静态示波迹线: 离屏兜底, 真窗与 JS 波形同屏 */
+.trace { position: absolute; height: 2; border-radius: 2; opacity: .4; }
+.tr-1 { left: 24; top: 62; width: 250; background: linear-gradient(90deg, #4f9dff, transparent); }
+.tr-2 { left: 24; top: 92; width: 320; background: linear-gradient(90deg, #06d6a0, transparent); }
+.tr-3 { right: 30; top: 122; width: 200; background: linear-gradient(270deg, #ff6b9d, transparent); }
+.wave { display: flex; align-items: flex-end; gap: 5; height: 58; margin-top: 10;
+  padding: 0 12; border-radius: 12; background: rgba(10,14,23,.35); border: 1 solid rgba(255,255,255,.08); }
+.wb { width: 8; border-radius: 4 4 0 0; animation: pulse 1.6s ease-in-out infinite alternate; }
+.wb-blue { background: linear-gradient(180deg, #4f9dff, rgba(79,157,255,.12)); }
+.wb-teal { background: linear-gradient(180deg, #06d6a0, rgba(6,214,160,.12)); }
+.wb:nth-child(3n+1) { animation-delay: -.5s; }
+.wb:nth-child(3n+2) { animation-delay: -1.1s; }
+@keyframes pulse { 0% { opacity: .5; } 100% { opacity: 1; } }
+.stage-cap { display: flex; gap: 14; margin-top: 10; font-size: 10.5; color: var(--faint); }
+.stage-cap b { color: var(--dim); font-weight: 700; }
+
+/* —— htmx 语义注解 —— */
+.hx-rows { display: flex; flex-direction: column; gap: 7; margin-top: 10; }
+.hx-row { display: flex; align-items: center; gap: 10; }
+.hx-code { padding: 4 9; border-radius: 8; font-family: monospace; font-size: 10.5; font-weight: 700;
+  background: rgba(10,14,23,.5); border: 1 solid rgba(255,255,255,.10); }
+.hx-desc { font-size: 11; color: var(--dim); }
+.hx-note { margin-top: 10; display: flex; align-items: center; gap: 7; font-size: 10.5; color: var(--faint); }
+.hx-note .dot { color: #ffd166; font-size: 9; }
+
+/* —— 键盘可达性 —— */
+.kbd { height: 44; margin-top: 14; border-radius: 14; padding: 0 18;
+  display: flex; align-items: center; gap: 14; }
+.kbd-item { display: flex; align-items: center; gap: 8; font-size: 11.5; color: var(--dim); }
+.kbd-key { padding: 3 8; border-radius: 7; font-size: 10; font-weight: 700; font-family: monospace;
+  color: var(--ink); background: rgba(10,14,23,.5); border: 1 solid var(--glass-line); }
+.kbd-ok { color: #06d6a0; font-weight: 800; font-size: 11; }
+.kbd-sep { color: var(--faint); font-size: 11; }
+
+.foot { display: flex; align-items: center; margin-top: 10; font-size: 10; letter-spacing: 2;
+  font-weight: 700; color: var(--faint); }
+.foot-r { margin-left: auto; letter-spacing: 0; font-weight: 400; }
+</style>
+</head>
+<body>
+<div id="page">
+  <div class="blob blob-a"></div>
+  <div class="blob blob-b"></div>
+  <div class="blob blob-c"></div>
+
+  <div class="wrap">
+    <!-- 渐变饰带标题 -->
+    <div class="band">
+      <div class="band-title">交互驾驶舱</div>
+      <div class="band-sub">全套原生控件主题皮 × JS 状态机 × Canvas 2D 演出</div>
+      <div class="chips">
+        <div class="band-chip">键盘可达</div>
+        <div class="band-chip">事件驱动</div>
+        <div class="band-chip">零依赖渲染</div>
+      </div>
+    </div>
+
+    <div class="main">
+      <div class="col-l">
+        <!-- 控件全家福 -->
+        <div class="glass card1">
+          <div class="cap"><div class="cap-dot" style="background:linear-gradient(90deg, #ff6b9d, #c77dff)"></div>控件全家福 · 主题皮<span class="cap-note">原生控件, CSS 换肤</span></div>
+          <input class="field-input" type="text" value="巡航线程 α-07" placeholder="输入指令…">
+          <div class="btn-row">
+            <button class="btn btn-launch" id="btn-launch">发射指令</button>
+            <button class="btn btn-reset" id="btn-reset">重置状态</button>
+            <button class="btn btn-ghost" id="btn-log">记录日志</button>
+          </div>
+          <div class="ctrl-row">
+            <div class="cb-label"><input type="checkbox" checked>启用粒子引擎</div>
+            <div class="cb-label"><input type="checkbox">硬件加速</div>
+            <div class="rg-label">波形增益<input type="range" min="0" max="100" value="65" id="rg-gain"><span class="rg-val" id="rg-out">65</span></div>
+          </div>
+          <div class="picker-row">
+            <select class="sel" id="sel-mode">
+              <option>极光脉冲</option>
+              <option selected>深空巡航</option>
+              <option>流星雨</option>
+            </select>
+            <progress class="np" value="72" max="100"></progress>
+            <span class="np-pct">原生 progress 蓝皮</span>
+          </div>
+          <details class="fold" open>
+            <summary>details / summary 原生折叠</summary>
+            <div class="fold-body">
+              <span class="fold-tag ft-teal">点击切换</span>
+              <span class="fold-tag ft-blue">真窗可交互</span>
+              <span class="fold-tag ft-gold">本页默认展开</span>
+            </div>
+            <div class="fold-tip">summary 折叠 + 自绘 ▲ 指示 · 折叠态离屏截图与本页一致</div>
+          </details>
+        </div>
+
+        <!-- htmx 语义注解卡 -->
+        <div class="glass card4">
+          <div class="cap"><div class="cap-dot" style="background:linear-gradient(90deg, #ffd166, #ff8a5c)"></div>HTMX 语义 · 语法注解<span class="cap-note">本页仅注解, 不发起请求</span></div>
+          <div class="hx-rows">
+            <div class="hx-row">
+              <span class="hx-code" style="color:#ff9db5">hx-get="sys://cpu"</span>
+              <span class="hx-desc">系统桥取数, 渲染结果换入目标</span>
+            </div>
+            <div class="hx-row">
+              <span class="hx-code" style="color:#ffe08a">hx-target="#out" hx-swap="innerHTML"</span>
+              <span class="hx-desc">换入点定位 + 六种换入方式</span>
+            </div>
+            <div class="hx-row">
+              <span class="hx-code" style="color:#7defc4">hx-confirm="确定提交?"</span>
+              <span class="hx-desc">派发 htmx:confirm, JS 可取消</span>
+            </div>
+            <div class="hx-row">
+              <span class="hx-code" style="color:#9cc2ff">hx-trigger="click · load every 2s · change delay:200"</span>
+              <span class="hx-desc">触发器词表 + 防抖 + changed</span>
+            </div>
+          </div>
+          <div class="hx-note"><span class="dot">●</span>目标地址两类: sys:// 系统桥 与 http —— 均由宿主层提供; 引擎核心零网络依赖</div>
+        </div>
+      </div>
+
+      <div class="col-r">
+        <!-- Canvas 2D 演出区 -->
+        <div class="glass card3">
+          <div class="cap"><div class="cap-dot" style="background:linear-gradient(90deg, #4f9dff, #2a5fd0)"></div>演出区 · CANVAS 2D<span class="cap-note">真窗 JS: 渐变波形 + 粒子</span></div>
+          <div class="stage-wrap">
+            <canvas class="stage" id="stage"></canvas>
+            <div class="orb orb-a"></div>
+            <div class="orb orb-b"></div>
+            <div class="trace tr-1"></div>
+            <div class="trace tr-2"></div>
+            <div class="trace tr-3"></div>
+          </div>
+          <div class="wave">
+            <div class="wb wb-blue" style="height:12"></div><div class="wb wb-teal" style="height:20"></div><div class="wb wb-blue" style="height:30"></div><div class="wb wb-teal" style="height:42"></div><div class="wb wb-blue" style="height:50"></div><div class="wb wb-teal" style="height:44"></div><div class="wb wb-blue" style="height:34"></div><div class="wb wb-teal" style="height:26"></div><div class="wb wb-blue" style="height:18"></div><div class="wb wb-teal" style="height:28"></div><div class="wb wb-blue" style="height:38"></div><div class="wb wb-teal" style="height:48"></div><div class="wb wb-blue" style="height:52"></div><div class="wb wb-teal" style="height:46"></div><div class="wb wb-blue" style="height:36"></div><div class="wb wb-teal" style="height:24"></div><div class="wb wb-blue" style="height:16"></div><div class="wb wb-teal" style="height:22"></div><div class="wb wb-blue" style="height:32"></div><div class="wb wb-teal" style="height:44"></div><div class="wb wb-blue" style="height:50"></div><div class="wb wb-teal" style="height:42"></div><div class="wb wb-blue" style="height:30"></div><div class="wb wb-teal" style="height:20"></div><div class="wb wb-blue" style="height:14"></div><div class="wb wb-teal" style="height:24"></div><div class="wb wb-blue" style="height:36"></div><div class="wb wb-teal" style="height:46"></div><div class="wb wb-blue" style="height:40"></div><div class="wb wb-teal" style="height:28"></div>
+          </div>
+          <div class="stage-cap">
+            <span><b>离屏</b> 渐变底纹 + 静态波形兜底</span>
+            <span><b>真窗</b> 波形粒子每帧重绘</span>
+            <span style="margin-left:auto"><b>hnCanvas2D</b> 引擎桥</span>
+          </div>
+        </div>
+
+        <!-- JS 状态面板(静态完成态兜底) -->
+        <div class="glass card2">
+          <div class="cap"><div class="cap-dot" style="background:linear-gradient(90deg, #06d6a0, #0a9d78)"></div>状态面板 · 事件流<span class="cap-note">click / input / change 驱动(真窗)</span></div>
+          <div class="log" id="ev-log" hn-stagger="90">
+            <div class="log-row"><span class="log-chip lc-click">CLICK</span><span class="log-text">发射指令 · 巡航线程 α-07 已确认</span><span class="log-mark">●</span></div>
+            <div class="log-row"><span class="log-chip lc-input">INPUT</span><span class="log-text">指令文本 · α-07 → α-08</span><span class="log-mark" style="color:#ffd166">→</span></div>
+            <div class="log-row"><span class="log-chip lc-change">CHANGE</span><span class="log-text">波形增益 · 65 → 78 · 模式 深空巡航</span><span class="log-mark">●</span></div>
+          </div>
+          <div class="meters">
+            <div class="meter"><span class="m-name">发射能量</span><div class="m-track"><div class="m-fill mf-brand" id="m-energy" style="width:72%"></div></div><span class="m-pct">72%</span></div>
+            <div class="meter"><span class="m-name">波形增益</span><div class="m-track"><div class="m-fill mf-gold" id="m-gain" style="width:78%"></div></div><span class="m-pct">78%</span></div>
+            <div class="meter"><span class="m-name">在线控件</span><div class="m-track"><div class="m-fill mf-teal" id="m-live" style="width:100%"></div></div><span class="m-pct">6/6</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 键盘可达性 -->
+    <div class="glass kbd">
+      <div class="kbd-item"><span class="kbd-ok">●</span><span class="kbd-key">Enter</span>回车沿自身→祖先提交最近 hx 载体</div>
+      <div class="kbd-sep">·</div>
+      <div class="kbd-item"><span class="kbd-ok" style="color:#ffd166">●</span><span class="kbd-key">← →</span>range 方向键调值, 拖杆/键盘同源</div>
+      <div class="kbd-sep">·</div>
+      <div class="kbd-item"><span class="kbd-ok" style="color:#4f9dff">●</span><span class="kbd-key">↑ ↓</span>select 原生弹层键导航</div>
+      <div class="kbd-sep">·</div>
+      <div class="kbd-item"><span class="kbd-ok" style="color:#ff6b9d">●</span><span class="kbd-key">Tab</span>控件全量焦点态 :focus</div>
+    </div>
+
+    <div class="foot">NEB DEMO · 交互驾驶舱<span class="foot-r">原生控件 × CSS 渐变质感 · 1200×760 · 零外部引用</span></div>
+  </div>
+</div>
+
+<script>
+/* 真窗(hnapp)才执行的演示逻辑; 离屏 render 不跑 JS —— 静态完成态即兜底 */
+(function () {
+  var $ = function (s) { return document.querySelector(s); };
+  var logBox = $('#ev-log');
+  var state = { gain: 65, energy: 72, mode: '深空巡航' };
+
+  function meter(id, pct) { var f = $(id); if (f) f.style.width = pct + '%'; }
+  function push(kind, cls, text) {
+    var row = document.createElement('div');
+    row.className = 'log-row';
+    var chip = document.createElement('span');
+    chip.className = 'log-chip ' + cls; chip.textContent = kind;
+    var txt = document.createElement('span');
+    txt.className = 'log-text'; txt.textContent = text;
+    row.appendChild(chip); row.appendChild(txt);
+    if (logBox) { logBox.insertBefore(row, logBox.firstChild); }
+  }
+
+  var bl = $('#btn-launch');
+  if (bl) bl.addEventListener('click', function () {
+    state.energy = Math.min(100, state.energy + 6);
+    meter('#m-energy', state.energy);
+    push('CLICK', 'lc-click', '发射指令 · 能量 ' + state.energy + '%');
+  });
+  var br = $('#btn-reset');
+  if (br) br.addEventListener('click', function () {
+    state.energy = 72; meter('#m-energy', 72);
+    push('CLICK', 'lc-click', '重置状态 · 能量回落 72%');
+  });
+  var bg = $('#btn-log');
+  if (bg) bg.addEventListener('click', function () {
+    push('CLICK', 'lc-click', '记录日志 · 手动追加快照');
+  });
+  var rg = $('#rg-gain'), ro = $('#rg-out');
+  if (rg) ['input', 'change'].forEach(function (ev) {
+    rg.addEventListener(ev, function () {
+      state.gain = rg.value;
+      if (ro) ro.textContent = state.gain;
+      meter('#m-gain', state.gain);
+      if (ev === 'change') push('CHANGE', 'lc-change', '波形增益 → ' + state.gain);
+    });
+  });
+  var sel = $('#sel-mode');
+  if (sel) sel.addEventListener('change', function () {
+    state.mode = sel.value;
+    push('CHANGE', 'lc-change', '模式 → ' + state.mode);
+  });
+  var inp = document.querySelector('.field-input');
+  if (inp) inp.addEventListener('input', function () {
+    push('INPUT', 'lc-input', '指令文本 → ' + inp.value);
+  });
+
+  /* Canvas 2D: 渐变波形 + 粒子(引擎自有 rAF 时钟) */
+  var cv = $('#stage');
+  if (cv && typeof hnGet2D === 'function') {
+    var ctx = hnGet2D(cv);
+    var W = 0, H = 0, t = 0;
+    var dots = [];
+    for (var i = 0; i < 26; i++) {
+      dots.push({ x: Math.random(), y: Math.random(), r: 1 + Math.random() * 2.2, sp: .2 + Math.random() * .6 });
+    }
+    var draw = function () {
+      if (cv.width !== W || cv.height !== H) { W = cv.width; H = cv.height; }
+      ctx.clearRect(0, 0, W, H);
+      for (var b = 0; b < 3; b++) {
+        var g = ctx.createLinearGradient(0, 0, W, 0);
+        var c0 = ['#ff6b9d', '#06d6a0', '#4f9dff'][b];
+        g.addColorStop(0, c0); g.addColorStop(1, 'rgba(10,14,23,0)');
+        ctx.beginPath();
+        for (var x = 0; x <= W; x += 6) {
+          var y = H / 2 + Math.sin(x / 46 + t / (34 - b * 8) + b * 1.9) * (16 + b * 9);
+          if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = g; ctx.lineWidth = 2 - b * .5; ctx.stroke();
+      }
+      for (var d = 0; d < dots.length; d++) {
+        var p = dots[d];
+        p.y -= p.sp / 260; if (p.y < -.04) { p.y = 1.04; p.x = Math.random(); }
+        ctx.beginPath();
+        ctx.arc(p.x * W, p.y * H, p.r, 0, 6.283);
+        ctx.fillStyle = 'rgba(234,242,255,.55)'; ctx.fill();
+      }
+      t += 1;
+    };
+    setInterval(draw, 33);
+  }
+})();
+</script>
+</body>
+</html>
