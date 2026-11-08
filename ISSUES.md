@@ -99,6 +99,9 @@
 
 ## P2 — 活跃
 
+| P2-vc | `hncore verify` 打印不变量违反却**退出码 0**(试用版冒烟实测: demo 首页 3 个刻意出血的装饰负坐标被报"违反"后仍 exit 0) —— 作为脚本门禁不可靠; 需定契约: 违反即非零退出, 另设 `--decorative` 之类的豁免口径 | tools/hncore.c |
+
+
 | # | 问题 | 位置 |
 |---|---|---|
 | P2-1a | README 的显示列表口径已更新为 14 种；但当前树实测引擎 25,095 行，README/roadmap 的其余约数仍随开发漂移 | README.md / docs/roadmap.md |
