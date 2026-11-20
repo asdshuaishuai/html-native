@@ -4,6 +4,13 @@
 [![site](https://img.shields.io/badge/site-asdshuaishuai.github.io%2Fhtml--native-4f7cff)](https://asdshuaishuai.github.io/html-native/)
 [![license](https://img.shields.io/badge/license-MIT-3ecf6f)](LICENSE)
 
+> **⚠️ 定位更新(2026-11-20): Pure-WebView 转型** —— WebView 作唯一画板, 产品转为
+> 「桌面小程序守护进程运行时 + GenUI 桌面级画布运行时」; C99 引擎冻结为无头确定性后端。
+> 决策与分期见 [定位决策](docs/positioning-webview-pivot.md); WebView 画板壳入口
+> `tools/hnweb_wk_macos.c`(`bash tools/build-wk-macos.sh`)。
+>
+> 以下为冻结引擎(Neb)时期的原始介绍, 保留作能力档案。
+>
 > **为 AI agent 定制的 HTML 原生渲染引擎**。
 > **渲染引擎:C99 全自研, 官方名称 Neb(NO-WEB)** —— 名字即承诺: 不含 WebView/浏览器内核。
 > agent 生成 HTML/CSS/JS, Neb 直接渲染成桌面级原生窗(桌宠/数字人/数据大屏/

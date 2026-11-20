@@ -1,0 +1,21 @@
+<html><head><meta name="hn-title" content="WK Bridge Test">
+<style>
+html,body{margin:0;background:linear-gradient(160deg,#0b1220,#131a2e);color:#e8eefc;font-family:sans-serif}
+#card{margin:32;padding:28;border-radius:16;
+      background:rgba(255,255,255,.07);box-shadow:0 12px 40px rgba(0,0,0,.5)}
+h1{font-size:30px;margin:0 0 8px}
+p{font-size:14px;color:#c9d4ec;margin:4px 0}
+#pill{display:inline-block;margin-top:14px;padding:6 14;border-radius:999px;
+      background:linear-gradient(90deg,#4f7cff,#9b5cff);font-size:12px}
+</style></head><body>
+<div id="card">
+  <h1>WebView 画板</h1>
+  <p>真实 WebKit 渲染 —— 渐变/圆角/阴影模糊/真 JS 全部可用。</p>
+  <p id="s">等待桥…</p>
+  <div id="pill">hnBridge → native</div>
+</div>
+<script>
+  document.getElementById('s').textContent = '桥已就绪: ' + (typeof hnBridge);
+  hnBridge.post('hello-neb');
+</script>
+</body></html>
