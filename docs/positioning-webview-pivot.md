@@ -35,7 +35,7 @@
 |---|---|---|
 | **P0** | WebView 画板壳: 透明/无边框窗、JS→原生桥、相对资产按页面目录、`--probe` 自检 | ✅ 2026-11-20(`tools/hnweb_wk_macos.c`) |
 | **P1** | daemon 接线(`open/update/close/list/shot` 走 WebView 后端)、`hn-window` manifest(尺寸/透明/无边框/标题)、WKSnapshot 截图、300ms 热重载、隐藏模式 | ✅ 2026-11-20 核心面通过(验收 30/30)。**降级**: 交互面(输入法/右键/缩放/快捷键)未专项实现也未验收; 就地快照/预热复用/状态保持型热更新推迟 P2 |
-| **P2** | 小程序运行时时序(胶囊生命周期/状态保持型热更新/权限) + GenUI 运行时注入(`hn-*` 属性 → 运行时语义) + 真 htmx 内置 + 就地快照(socketpair) + 预热/窗口复用 | ⏳ |
+| **P2** | 常驻画布宿主 + A2UI/AG-UI 现成协议接入(设计见 genui-runtime-design.md)。**P2a ✅**(2026-11-20 `tools/hncanvas_host_macos.c` + `tools/wk_host_probe.sh` 21 断言): 多画布/JSON-lines 控制/同步快照/中性桥, 取代 P1 的每窗 spawn 与截屏临时进程; P2b daemon 接宿主 / P2c A2UI / P2d AG-UI / P2e 画布形态收口 | ◐ |
 | **P3** | 文档/skill 叙事切换(README 主叙述从 "NO-WEB" 改为双面定位)、三平台壳(WebKitGTK/WebView2)、探针口径重定(WebView 面新增端到端断言) | ⏳ |
 
 ### 4.1 P1 实现事实(2026-11-20)
