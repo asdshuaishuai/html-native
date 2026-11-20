@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -56,6 +57,21 @@ static char *rpc(const char *sock, const char *req) {
     /* 去掉尾部换行 */
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
     return buf;
+}
+
+/* 绝对路径化: daemon 以自身 cwd 解析上送路径, CLI 在任意 cwd 下调用
+   都应落到同一个文件。realpath 失败(输出文件尚不存在)则拼当前 cwd。 */
+static const char *abs_path(const char *p, char *buf, size_t cap) {
+    if (!p || !p[0]) return p;
+    if (p[0] == '/') { snprintf(buf, cap, "%s", p); return buf; }
+    char rp[PATH_MAX];
+    if (realpath(p, rp)) { snprintf(buf, cap, "%s", rp); return buf; }
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd))) {
+        snprintf(buf, cap, "%s/%s", cwd, p);
+        return buf;
+    }
+    return p;
 }
 
 static char *read_file(const char *path, size_t *len) {
@@ -157,7 +173,8 @@ int main(int argc, char **argv) {
 
     if (!strcmp(cmd, "open") || !strcmp(cmd, "update")) {
         if (!id || argc < 4) { usage(); return 2; }
-        const char *path = argv[3];
+        char srcbuf[PATH_MAX];
+        const char *path = abs_path(argv[3], srcbuf, sizeof(srcbuf));
         size_t hlen = 0;
         char *html = read_file(path, &hlen);
         if (!html) { fprintf(stderr, "无法读取 %s\n", path); return 1; }
@@ -251,7 +268,9 @@ int main(int argc, char **argv) {
             if (n > 0 && (size_t)n < sizeof(req))
                 snprintf(req + n, sizeof(req) - (size_t)n, "}");
         } else if (!strcmp(cmd, "shot")) {
-            char *pe = json_esc(argv[3]);
+            char obuf[PATH_MAX];
+            const char *out = abs_path(argv[3], obuf, sizeof(obuf));
+            char *pe = json_esc(out);
             snprintf(req, sizeof(req), "{\"op\":\"shot\",\"id\":\"%s\",\"path\":\"%s\"}", id, pe ? pe : "");
             free(pe);
         } else {

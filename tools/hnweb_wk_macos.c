@@ -8,13 +8,18 @@
  *   - 透明/无边框窗(透明卡片与 GenUI 画布语义); 普通窗带标题栏
  *   - JS→原生桥: 注入 window.hnBridge.post(msg) → 原生计数/打印(daemon 接线前置)
  *   - --probe 无窗口自检: 装载完成 + 桥消息 + 透明标志, 全部可脚本断言
+ *   - --shot <png>: 装载稳定后 WKSnapshot 快照落盘(daemon 的窗口 shot 后端)
+ *   - 交互模式 300ms 文件指纹 watch: daemon update 原子覆写后 reloadFromOrigin
+ *   - HN_WEBVIEW_HIDDEN=1: 不开窗不抢焦点(daemon/验收的隐藏模式)
  *
  * 纪律: 零 ObjC 编译单元 —— AppKit/WebKit 经 dlopen 装载, 所有调用走
  * objc_msgSend(消息发送即普通 C 函数调用, ABI 稳定; 与 hnweb_macos.c 同宗)。
+ * 唯一的 clang 扩展是 -fblocks(WKSnapshot 的 completionHandler 需要)。
  *
  * 用法:
- *   hnweb_wk_macos <file.html> [W H] [--transparent]          开窗口
- *   hnweb_wk_macos <file.html> [W H] [--transparent] --probe  自检(不显示窗口)
+ *   hnweb_wk_macos <file.html> [W H] [--transparent] [--frameless] [--title T]  开窗口
+ *   hnweb_wk_macos <file.html> [W H] [--transparent] --probe                   自检
+ *   hnweb_wk_macos <file.html> [W H] [--transparent] --shot out.png            快照
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +29,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 /* ---------------- ObjC 运行时的最小转发层(与 hnweb_macos.c 同口径) ---------------- */
 
@@ -130,27 +136,126 @@ static obj_t pump_event(double timeout_s) {
         app, o_sel("nextEventMatchingMask:untilDate:inMode:dequeue:"), ~0UL, lim, mode, 1);
 }
 
+/* ---------------- 装载稳定判据(probe/shot/交互共用) ----------------
+ * isLoading 连续 10 拍为假(≈160ms 稳定窗)才算装载完成。快照不等稳定
+ * 会拍到纯白图(WKWebView 首帧未上屏), 这是探针实证过的竞态。 */
+static int wait_loaded(obj_t app, obj_t wv, double timeout_s, double *elapsed_ms) {
+    double t0 = now_s();
+    int settle = 0;
+    while (now_s() - t0 < timeout_s) {
+        obj_t ev = pump_event(0.016);
+        if (ev) {
+            unsigned long ty = MSG0(unsigned long, ev, "type");
+            if (ty < EV_APPKITDEF || ty > EV_PERIODIC)
+                MSG1(void, app, "sendEvent:", ev);
+        }
+        if (!MSG0(char, wv, "isLoading")) {
+            if (++settle >= 10) break;
+        } else settle = 0;
+    }
+    if (elapsed_ms) *elapsed_ms = (now_s() - t0) * 1000.0;
+    return settle >= 10;
+}
+
+/* ---------------- 文件指纹(mtime 纳秒 + 尺寸; 同 app/hn_app.c 口径) ---------------- */
+
+#define WK_WATCH_INTERVAL_S 0.300
+
+typedef struct { long long mtime_ns; long long size; } file_fp;
+
+static int file_fp_of(const char *path, file_fp *fp) {
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    /* 本壳仅 macOS 构建; st_mtimespec 是 Darwin 口径 */
+    fp->mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL
+                 + (long long)st.st_mtimespec.tv_nsec;
+    fp->size = (long long)st.st_size;
+    return 1;
+}
+
+/* ---------------- WKSnapshot 快照(daemon 窗口 shot 后端) ----------------
+ * completionHandler 是 block, 因此本文件按 -fblocks 编译(仍是 C99, 无
+ * ObjC 编译单元)。回调里只置标志并写 PNG, 主线程在事件泵里等完成 ——
+ * 不引入 NSApplication run, 与 probe 的事件泵同款。 */
+
+static int g_snap_done = 0;
+static int g_snap_ok = 0;
+static const char *g_snap_path = NULL;
+
+static int snap_write_png(obj_t image) {
+    if (!image || !g_snap_path) return 0;
+    obj_t tiff = MSG0(obj_t, image, "TIFFRepresentation");
+    if (!tiff) return 0;
+    obj_t rep = MSG1(obj_t, o_getClass("NSBitmapImageRep"), "imageRepWithData:", tiff);
+    if (!rep) return 0;
+    obj_t props = MSG0(obj_t, o_getClass("NSDictionary"), "dictionary");
+    /* NSBitmapImageFileTypePNG = 4(NSBitmapImageRep.h) */
+    obj_t png = ((obj_t (*)(obj_t, sel_t, long, obj_t))o_msgSend)(
+        rep, o_sel("representationUsingType:properties:"), 4L, props);
+    if (!png) return 0;
+    return ((char (*)(obj_t, sel_t, obj_t, int))o_msgSend)(
+        png, o_sel("writeToFile:atomically:"), nsstr(g_snap_path), 1) ? 1 : 0;
+}
+
+static int wk_snapshot(obj_t app, obj_t wv, const char *out) {
+    g_snap_path = out;
+    g_snap_done = 0;
+    g_snap_ok = 0;
+    obj_t cfg = MSG0(obj_t, o_getClass("WKSnapshotConfiguration"), "new");
+    void (^cb)(obj_t, obj_t) = ^(obj_t image, obj_t err) {
+        (void)err;
+        g_snap_ok = snap_write_png(image);
+        g_snap_done = 1;
+    };
+    MSG2(void, wv, "takeSnapshotWithConfiguration:completionHandler:", cfg, (obj_t)cb);
+    double t0 = now_s();
+    while (!g_snap_done && now_s() - t0 < 5.0) {
+        obj_t ev = pump_event(0.010);
+        if (ev) {
+            unsigned long ty = MSG0(unsigned long, ev, "type");
+            if (ty < EV_APPKITDEF || ty > EV_PERIODIC)
+                MSG1(void, app, "sendEvent:", ev);
+        }
+    }
+    return g_snap_done && g_snap_ok;
+}
+
 /* ---------------- 主流程 ---------------- */
 
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
-                "用法: hnweb_wk_macos <file.html> [W H] [--transparent]          开窗口\n"
-                "      hnweb_wk_macos <file.html> [W H] [--transparent] --probe  自检\n");
+                "用法: hnweb_wk_macos <file.html> [W H] [--transparent] [--frameless] [--title T]  开窗口\n"
+                "      hnweb_wk_macos <file.html> [W H] [--transparent] --probe                   自检\n"
+                "      hnweb_wk_macos <file.html> [W H] [--transparent] --shot out.png            快照\n");
         return 2;
     }
     const char *path = argv[1];
-    int W = 960, H = 720, transparent = 0, probe = 0;
+    const char *title = NULL;
+    const char *shot = NULL;
+    int W = 960, H = 720, transparent = 0, probe = 0, frameless = 0;
     int nums[2], nn = 0;
+    /* 单趟解析: 带值的选项先吞掉自己的值, 数字扫描不会误吞标题/路径 */
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--transparent")) transparent = 1;
         else if (!strcmp(argv[i], "--probe")) probe = 1;
-        else if (argv[i][0] >= '0' && argv[i][0] <= '9' && nn < 2) nums[nn++] = atoi(argv[i]);
+        else if (!strcmp(argv[i], "--frameless")) frameless = 1;
+        else if (!strcmp(argv[i], "--title")) {
+            if (i + 1 >= argc) { fprintf(stderr, "hnweb_wk_macos: --title 需要字符串\n"); return 2; }
+            title = argv[++i];
+        } else if (!strcmp(argv[i], "--shot")) {
+            if (i + 1 >= argc) { fprintf(stderr, "hnweb_wk_macos: --shot 需要输出路径\n"); return 2; }
+            shot = argv[++i];
+        } else if (argv[i][0] >= '0' && argv[i][0] <= '9' && nn < 2) nums[nn++] = atoi(argv[i]);
     }
-    for (int i = 2; i < argc && nn < 2; i++)
-        if (argv[i][0] >= '0' && argv[i][0] <= '9') nums[nn++] = atoi(argv[i]);
     if (nn >= 1 && nums[0] > 0) W = nums[0];
     if (nn >= 2 && nums[1] > 0) H = nums[1];
+    if (shot && !shot[0]) { fprintf(stderr, "hnweb_wk_macos: --shot 需要输出路径\n"); return 2; }
+    int hidden = 0;
+    {
+        const char *hv = getenv("HN_WEBVIEW_HIDDEN");
+        if (hv && hv[0] && strcmp(hv, "0")) hidden = 1;
+    }
 
     char absfile[PATH_MAX], absdir[PATH_MAX];
     if (!realpath(path, absfile)) {
@@ -213,13 +318,15 @@ int main(int argc, char **argv) {
     }
 
     /* ---- 窗口 ---- */
-    unsigned long style = 1 | 2 | 4 | 8;   /* titled|closable|miniaturizable|resizable */
-    if (transparent) style = 0;            /* 无边框(GenUI 画布/透明卡片语义) */
+    /* titled|closable|miniaturizable|resizable; frameless/transparent = 无边框
+       (引擎 manifest 缺省 frameless=1, daemon 会显式传 --frameless) */
+    unsigned long style = 1 | 2 | 4 | 8;
+    if (transparent || frameless) style = 0;
     obj_t win = MSG0(obj_t, o_getClass("NSWindow"), "alloc");
     win = ((obj_t (*)(obj_t, sel_t, CGRect, unsigned long, unsigned long, int))o_msgSend)(
         win, o_sel("initWithContentRect:styleMask:backing:defer:"), cr, style, 2, 0);
     if (!win) { fprintf(stderr, "hnweb_wk_macos: NSWindow 创建失败\n"); return 1; }
-    MSG1(void, win, "setTitle:", nsstr("hn · WebView"));
+    MSG1(void, win, "setTitle:", nsstr(title && title[0] ? title : "hn · WebView"));
     if (transparent) {
         MSGL(void, win, "setOpaque:", 0);
         MSG1(void, win, "setBackgroundColor:",
@@ -235,7 +342,8 @@ int main(int argc, char **argv) {
                      sf.origin.y + (sf.size.h - wf.size.h) / 2 },
                    { wf.size.w, wf.size.h } };
     ((void (*)(obj_t, sel_t, CGRect, int))o_msgSend)(win, o_sel("setFrame:display:"), pos, 1);
-    printf("[wk] window %.0fx%.0f transparent=%d\n", pos.size.w, pos.size.h, transparent);
+    printf("[wk] window %.0fx%.0f transparent=%d hidden=%d frameless=%d\n",
+           pos.size.w, pos.size.h, transparent, hidden, frameless);
     fflush(stdout);
 
     /* ---- 装载本地页面(根 = 页面目录; 相对资产可用) ---- */
@@ -246,36 +354,39 @@ int main(int argc, char **argv) {
         url_cls, o_sel("fileURLWithPath:isDirectory:"), nsstr(absdir), 1);
     MSG2(void, wv, "loadFileURL:allowingReadAccessToURL:", furl, durl);
 
-    if (probe) {
-        /* 装载完成判据: isLoading 连续 10 拍为假(≈160ms 稳定窗) */
-        double t0 = now_s();
-        int settle = 0;
-        while (now_s() - t0 < 15.0) {
-            obj_t ev = pump_event(0.016);
-            if (ev) {
-                unsigned long ty = MSG0(unsigned long, ev, "type");
-                if (ty < EV_APPKITDEF || ty > EV_PERIODIC)
-                    MSG1(void, app, "sendEvent:", ev);
-            }
-            if (!MSG0(char, wv, "isLoading")) {
-                if (++settle >= 10) break;
-            } else settle = 0;
-        }
-        int loaded = settle >= 10;
-        printf("[wk] probe %s in %.0fms, bridge=%d, transparent=%d\n",
-               loaded ? "loaded" : "TIMEOUT", (now_s() - t0) * 1000.0,
+    if (probe || shot) {
+        double ms = 0;
+        int loaded = wait_loaded(app, wv, 15.0, &ms);
+        printf("[wk] %s %s in %.0fms, bridge=%d, transparent=%d\n",
+               shot ? "shot" : "probe", loaded ? "loaded" : "TIMEOUT", ms,
                g_bridge_msgs, transparent);
         if (transparent)
             printf("[wk] window opaque=%d (want 0)\n", (int)MSG0(char, win, "isOpaque"));
         fflush(stdout);
+        int rc = loaded ? 0 : 1;
+        if (shot) {
+            if (rc == 0) {
+                double ts = now_s();
+                int ok = wk_snapshot(app, wv, shot);
+                printf("[wk] shot %s in %.0fms: %s\n", ok ? "wrote" : "FAILED",
+                       (now_s() - ts) * 1000.0, shot);
+                fflush(stdout);
+                if (!ok) rc = 1;
+            }
+        }
         MSG0(void, win, "close");
         MSG0(void, win, "release");
-        return loaded ? 0 : 1;
+        return rc;
     }
 
     /* ---- 交互模式: 显示 + 事件泵(过滤 AppKit 内部事件, 同 hnweb_macos) ---- */
-    MSG1(void, win, "makeKeyAndOrderFront:", (obj_t)1);
-    MSG1(void, app, "activateIgnoringOtherApps:", (obj_t)1);
+    if (!hidden) {
+        MSG1(void, win, "makeKeyAndOrderFront:", (obj_t)1);
+        MSG1(void, app, "activateIgnoringOtherApps:", (obj_t)1);
+    }
+    file_fp fp = { 0, 0 };
+    int have_fp = file_fp_of(absfile, &fp);
+    double last_watch = now_s();
     while (!g_quit) {
         obj_t ev = pump_event(0.016);
         if (ev) {
@@ -286,7 +397,21 @@ int main(int argc, char **argv) {
             }
             if (ty < EV_APPKITDEF || ty > EV_PERIODIC) MSG1(void, app, "sendEvent:", ev);
         }
-        if (!MSG0(char, win, "isVisible")) g_quit = 1;
+        if (!hidden && !MSG0(char, win, "isVisible")) g_quit = 1;
+        /* daemon update: 原子 rename 覆写源文件 → 指纹变化 → 整文档重载 */
+        double tnow = now_s();
+        if (tnow - last_watch >= WK_WATCH_INTERVAL_S) {
+            last_watch = tnow;
+            file_fp nf;
+            if (file_fp_of(absfile, &nf) &&
+                (!have_fp || nf.mtime_ns != fp.mtime_ns || nf.size != fp.size)) {
+                fp = nf;
+                have_fp = 1;
+                MSG0(void, wv, "reloadFromOrigin");
+                printf("[wk] reload size=%lld\n", nf.size);
+                fflush(stdout);
+            }
+        }
     }
     MSG0(void, win, "close");
     MSG0(void, win, "release");

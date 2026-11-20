@@ -17,13 +17,18 @@
  *       window 应用:   新内容(html + 可选 css)原子写回 spawn 的源文件,
  *                      子进程 hn_app 的 mtime watch 自行重载 —— 热推送
  *                      对真窗口生效。回 {"ok":true,"window":true,"reloaded":true}
- *   {"op":"eval"/"shot"/"dump"/"text"} 对 window 应用回
+ *   {"op":"eval"/"dump"/"text"} 对 window 应用回
  *       ok:false,"error":"unsupported for window apps (headless only)"
- *       (文档在子进程里, daemon 无句柄 —— headless 是渲染/截图管线,
- *        window 是给人看的桌面窗, 分工见下)
+ *       (文档在子进程里, daemon 无句柄 —— headless 是渲染/检视管线,
+ *        window 是给人看的桌面窗)
+ *   {"op":"shot","id":"w","path":"out.png"}   window 应用走 WebView 后端:
+ *       临时 spawn 一次 hnweb-wk-macos-* --shot(WKSnapshot), 子进程 exit 0
+ *       且输出非空才算成功; engine 后端(hnapp)无快照能力, 如实报错。
  *   {"op":"close","id":"a"}           → headless 销毁; window 应用 SIGTERM+waitpid
  *   {"op":"list"}                     → {"apps":[{id,kind:"headless",w,h} |
- *                                                {id,kind:"window",pid,w,h}]}
+ *                                                {id,kind:"window",pid,w,h,
+ *                                                 backend:"webview|engine",
+ *                                                 transparent,title}]}
  *   {"op":"eval","id":"a","js":"..."} → {"value":"..."}
  *   {"op":"dom","id":"a"}             → {"dom":[...]}
  *   {"op":"dump","id":"a"}            → {"cmds":N}
@@ -241,17 +246,63 @@ static void daemon_frame_apps(void) {
 
 #define HN_DAEMON_MAX_WINS 64
 
+/* 窗口后端:
+ *   webview = hnweb-wk-macos-*(唯一画板; 快照/透明/标题/manifest 全支持)
+ *   engine  = hnapp-*(冻结引擎壳; 无 WebView 环境的兜底, 无快照) */
+enum { WIN_BACKEND_NONE = 0, WIN_BACKEND_WEBVIEW = 1, WIN_BACKEND_ENGINE = 2 };
+
+/* hn-* manifest 的 daemon 侧投影(与引擎 hn_doc_manifest 同口径):
+ * w/h 只覆盖 >0 的声明; frameless 缺省 1(窗口即画布)。 */
+typedef struct {
+    int w, h;
+    int transparent;
+    int frameless;
+    char title[128];
+} win_meta;
+
 typedef struct {
     char id[128];
     pid_t pid;
     int w, h;
     int alive;
+    int backend;
+    int transparent;
+    char title[128];
+    char shell[1024];    /* spawn 时的壳路径(shot 复用同一后端) */
     char path[1024];     /* spawn 时上送的源文件: update 热推送原子写回这里 */
 } dwin;
 
 static dwin g_wins[HN_DAEMON_MAX_WINS];
 static int g_win_n = 0;
 static const char *g_argv0 = NULL;   /* 用于定位同目录的平台壳 */
+
+static char *read_all(const char *path, size_t *len);   /* 定义见后 */
+
+static void win_meta_init(win_meta *m, int w, int h) {
+    memset(m, 0, sizeof(*m));
+    m->w = w;
+    m->h = h;
+    m->frameless = 1;   /* 引擎缺省: 窗口即画布, 标题栏是例外 */
+}
+
+/* 用请求里的 html 解析 hn-* manifest(与 headless open 的 hn_rt 同一条
+ * hn_parse_html + hn_doc_manifest 路径); path 供 <include> 相对解析。 */
+static void win_meta_parse(const char *html, const char *path, win_meta *m) {
+    if (!html) return;
+    if (path && path[0]) hn_html_set_doc_path(path);
+    hn_doc *doc = hn_parse_html(html, strlen(html));
+    if (!doc) return;
+    hn_manifest mm;
+    memset(&mm, 0, sizeof(mm));
+    hn_doc_manifest(doc, &mm);
+    if (mm.w > 0) m->w = (int)mm.w;
+    if (mm.h > 0) m->h = (int)mm.h;
+    m->transparent = mm.transparent;
+    m->frameless = mm.frameless;
+    if (mm.title && mm.title[0])
+        snprintf(m->title, sizeof(m->title), "%s", mm.title);
+    hn_doc_free(doc);
+}
 
 static dwin *win_find(const char *id) {
     for (int i = 0; i < g_win_n; i++)
@@ -287,38 +338,43 @@ static void win_kill(dwin *w) {
 /* 平台壳路径: **平台探测表** —— 按"编译目标 + 目标架构"给出候选序列,
  * 逐个 access(X_OK), 全失败才回退 headless(响应照旧标 fallback)。
  * 候选顺序:
- *   macOS arm64 编译 → hnapp-macos-arm64 → hnapp-macos-x86_64(Rosetta 兜底);
- *   macOS x86_64 编译 → 反序(Intel 机器原生优先, arm64 兜底);
- *   Linux arm64/x86_64 → hnapp-linux-aarch64 / hnapp-linux-x86_64(本架构优先);
- *   Windows → hnapp-windows-x86_64.exe → hnweb-windows-x86_64.exe
- *             (dist/ 实际命名: hnapp-windows 尚未入列, hnweb-windows 在产)。
- * 命令行契约各平台一致(app/hn_app.c 是同一份 main, `hnapp <path> [W H]`,
- * 无任何 mac 特有参数), 因此换壳只换二进制名, spawn 参数零分支。
- * 装载位(逐候选 × 逐位): daemon 可执行文件同目录(dist/ 自包含) → 相对 cwd 的 dist/。 */
-static int win_shell_path(char *out, size_t cap) {
-    const char *cand[2];
+ *   macOS arm64 编译 → hnweb-wk-macos-arm64(WebView, 首选)
+ *                      → hnweb-wk-macos-x86_64 → hnapp-macos-arm64(引擎兜底)
+ *                      → hnapp-macos-x86_64;
+ *   macOS x86_64 编译 → WebView x86_64 → arm64 → 引擎 x86_64 → arm64;
+ *   Linux arm64/x86_64 → hnapp-linux-*(引擎壳; WebView 面 P3 才有 WebKitGTK);
+ *   Windows → hnapp/hnweb-windows-x86_64.exe(均为冻结引擎壳)。
+ * backend 由命中的候选决定(webview 走 `<path> W H [--transparent] ...`,
+ * engine 走 `<path> W H`)。装载位: daemon 可执行文件同目录 → cwd 的 dist/。 */
+static int win_shell_path(char *out, size_t cap, int *backend) {
+    const char *cand[4];
+    int kind[4];
     int ncand = 0;
 #if defined(_WIN32)
-    cand[ncand++] = "hnapp-windows-x86_64.exe";
-    cand[ncand++] = "hnweb-windows-x86_64.exe";
+    cand[ncand] = "hnapp-windows-x86_64.exe"; kind[ncand++] = WIN_BACKEND_ENGINE;
+    cand[ncand] = "hnweb-windows-x86_64.exe"; kind[ncand++] = WIN_BACKEND_ENGINE;
 #elif defined(__APPLE__)
 #if defined(__aarch64__) || defined(__arm64__)
-    cand[ncand++] = "hnapp-macos-arm64";
-    cand[ncand++] = "hnapp-macos-x86_64";   /* Rosetta 兜底 */
+    cand[ncand] = "hnweb-wk-macos-arm64"; kind[ncand++] = WIN_BACKEND_WEBVIEW;
+    cand[ncand] = "hnweb-wk-macos-x86_64"; kind[ncand++] = WIN_BACKEND_WEBVIEW;  /* Rosetta */
+    cand[ncand] = "hnapp-macos-arm64"; kind[ncand++] = WIN_BACKEND_ENGINE;
+    cand[ncand] = "hnapp-macos-x86_64"; kind[ncand++] = WIN_BACKEND_ENGINE;
 #else
-    cand[ncand++] = "hnapp-macos-x86_64";
-    cand[ncand++] = "hnapp-macos-arm64";
+    cand[ncand] = "hnweb-wk-macos-x86_64"; kind[ncand++] = WIN_BACKEND_WEBVIEW;
+    cand[ncand] = "hnweb-wk-macos-arm64"; kind[ncand++] = WIN_BACKEND_WEBVIEW;
+    cand[ncand] = "hnapp-macos-x86_64"; kind[ncand++] = WIN_BACKEND_ENGINE;
+    cand[ncand] = "hnapp-macos-arm64"; kind[ncand++] = WIN_BACKEND_ENGINE;
 #endif
 #elif defined(__linux__)
 #if defined(__aarch64__) || defined(__arm64__)
-    cand[ncand++] = "hnapp-linux-aarch64";
-    cand[ncand++] = "hnapp-linux-x86_64";
+    cand[ncand] = "hnapp-linux-aarch64"; kind[ncand++] = WIN_BACKEND_ENGINE;
+    cand[ncand] = "hnapp-linux-x86_64"; kind[ncand++] = WIN_BACKEND_ENGINE;
 #else
-    cand[ncand++] = "hnapp-linux-x86_64";
-    cand[ncand++] = "hnapp-linux-aarch64";
+    cand[ncand] = "hnapp-linux-x86_64"; kind[ncand++] = WIN_BACKEND_ENGINE;
+    cand[ncand] = "hnapp-linux-aarch64"; kind[ncand++] = WIN_BACKEND_ENGINE;
 #endif
 #endif
-    (void)cand; (void)ncand;
+    (void)kind;
     for (int i = 0; i < ncand; i++) {
         if (g_argv0 && g_argv0[0]) {
             char dir[1024];
@@ -327,21 +383,43 @@ static int win_shell_path(char *out, size_t cap) {
             if (sl) {
                 *sl = 0;
                 int n = snprintf(out, cap, "%s/%s", dir, cand[i]);
-                if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
+                if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) {
+                    if (backend) *backend = kind[i];
+                    return 1;
+                }
             }
         }
         int n = snprintf(out, cap, "dist/%s", cand[i]);
-        if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) return 1;
+        if (n > 0 && (size_t)n < cap && access(out, X_OK) == 0) {
+            if (backend) *backend = kind[i];
+            return 1;
+        }
     }
     return 0;   /* 候选全缺席 → 调用方回退 headless */
 }
 
-/* posix_spawn 平台壳: hnapp <path> [W H](与手工 CLI 直开完全同参) */
-static pid_t win_spawn(const char *shell, const char *path, int w, int h) {
+/* posix_spawn 平台壳: webview = `<path> W H [--transparent] [--frameless]
+ * [--title T]`; engine = `<path> W H`(与手工 CLI 直开同参)。 */
+static pid_t win_spawn(const char *shell, int backend, const char *path,
+                       const win_meta *m) {
     char ws[16], hs[16];
-    snprintf(ws, sizeof(ws), "%d", w);
-    snprintf(hs, sizeof(hs), "%d", h);
-    char *cargv[] = { (char *)shell, (char *)path, ws, hs, NULL };
+    snprintf(ws, sizeof(ws), "%d", m->w);
+    snprintf(hs, sizeof(hs), "%d", m->h);
+    char *cargv[12];
+    int n = 0;
+    cargv[n++] = (char *)shell;
+    cargv[n++] = (char *)path;
+    cargv[n++] = ws;
+    cargv[n++] = hs;
+    if (backend == WIN_BACKEND_WEBVIEW) {
+        if (m->transparent) cargv[n++] = "--transparent";
+        if (m->frameless) cargv[n++] = "--frameless";
+        if (m->title[0]) {
+            cargv[n++] = "--title";
+            cargv[n++] = (char *)m->title;
+        }
+    }
+    cargv[n] = NULL;
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     pid_t pid = -1;
@@ -353,21 +431,70 @@ static pid_t win_spawn(const char *shell, const char *path, int w, int h) {
 /* spawn 平台壳 + 记入窗口表(open op 与 resident 重开共用这一条路)。
    返回 pid(>0); 壳缺失/spawn 失败/表满/撞 id 返回 -1(调用方走各自
    的回退/报错)。 */
-static pid_t win_open_register(const char *id, const char *path, int w, int h) {
+static pid_t win_open_register(const char *id, const char *path, const win_meta *m) {
     char shell[1024];
-    if (!win_shell_path(shell, sizeof(shell))) return -1;
+    int backend = WIN_BACKEND_NONE;
+    if (!win_shell_path(shell, sizeof(shell), &backend)) return -1;
     win_reap();
     if (g_win_n >= HN_DAEMON_MAX_WINS || win_find(id) || app_find(id)) return -1;
-    pid_t pid = win_spawn(shell, path, w, h);
+    pid_t pid = win_spawn(shell, backend, path, m);
     if (pid <= 0) return -1;
     dwin *wv = &g_wins[g_win_n++];
     memset(wv, 0, sizeof(*wv));
     snprintf(wv->id, sizeof(wv->id), "%s", id);
     wv->pid = pid;
-    wv->w = w; wv->h = h;
+    wv->w = m->w; wv->h = m->h;
     wv->alive = 1;
+    wv->backend = backend;
+    wv->transparent = m->transparent;
+    snprintf(wv->title, sizeof(wv->title), "%s", m->title);
+    snprintf(wv->shell, sizeof(wv->shell), "%s", shell);
     snprintf(wv->path, sizeof(wv->path), "%s", path);
     return pid;
+}
+
+/* 一次性 WKSnapshot 子进程: `<shell> <path> W H [--transparent] --shot out` */
+static pid_t shot_spawn(const char *shell, const char *path, const char *out,
+                        int w, int h, int transparent) {
+    char ws[16], hs[16];
+    snprintf(ws, sizeof(ws), "%d", w);
+    snprintf(hs, sizeof(hs), "%d", h);
+    char *cargv[10];
+    int n = 0;
+    cargv[n++] = (char *)shell;
+    cargv[n++] = (char *)path;
+    cargv[n++] = ws;
+    cargv[n++] = hs;
+    if (transparent) cargv[n++] = "--transparent";
+    cargv[n++] = "--shot";
+    cargv[n++] = (char *)out;
+    cargv[n] = NULL;
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    pid_t pid = -1;
+    int rc = posix_spawn(&pid, shell, NULL, &attr, cargv, environ);
+    posix_spawnattr_destroy(&attr);
+    return rc == 0 ? pid : -1;
+}
+
+/* 等快照子进程 ≤10s; 成功判据 = 子进程 exit 0 且输出非空。
+   超时 SIGTERM 收口, 不留僵尸。 */
+static int shot_wait(pid_t pid, const char *out) {
+    int st = 0;
+    for (int i = 0; i < 200; i++) {
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) {
+            if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return 0;
+            struct stat sb;
+            return stat(out, &sb) == 0 && sb.st_size > 0;
+        }
+        if (r < 0 && errno != EINTR) return 0;
+        struct timespec ts = { 0, 50 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    kill(pid, SIGTERM);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    return 0;
 }
 
 /* 原子覆写: tmp 写**同目录** + rename(同目录才在同一文件系统, rename 原子)。
@@ -469,8 +596,15 @@ static int resident_restore(void) {
             rid = idbuf;
         }
         long rw = json_num(line, "w", 480), rh = json_num(line, "h", 700);
-        if (win_open_register(rid, rf, (int)rw, (int)rh) > 0) {
-            fprintf(stderr, "[resident] 重开 %s (%s %ldx%ld)\n", rid, rf, rw, rh);
+        /* 账本只记 id/file/w/h; transparent/title/frameless 从文件里的
+           hn-* manifest 重新解析(与 open 同口径), 常驻窗不丢形态。 */
+        win_meta wm;
+        win_meta_init(&wm, (int)rw, (int)rh);
+        size_t fn = 0;
+        char *fc = read_all(rf, &fn);
+        if (fc) { win_meta_parse(fc, rf, &wm); free(fc); }
+        if (win_open_register(rid, rf, &wm) > 0) {
+            fprintf(stderr, "[resident] 重开 %s (%s %dx%d)\n", rid, rf, wm.w, wm.h);
             ok++;
         }
         free(rf);
@@ -647,6 +781,22 @@ static void resp_json(char *out, size_t cap, int ok, const char *body) {
              body && body[0] ? "," : "", body ? body : "");
 }
 
+/* 字符串值转义(manifest 标题等进回包; 只处理会破 JSON 的字符) */
+static void json_escape(const char *s, char *out, size_t cap) {
+    size_t n = 0;
+    if (!s) s = "";
+    for (; *s && n + 8 < cap; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { out[n++] = '\\'; out[n++] = (char)c; }
+        else if (c == '\n') { out[n++] = '\\'; out[n++] = 'n'; }
+        else if (c == '\t') { out[n++] = '\\'; out[n++] = 't'; }
+        else if (c == '\r') { out[n++] = '\\'; out[n++] = 'r'; }
+        else if (c < 0x20) { n += (size_t)snprintf(out + n, cap - n, "\\u%04x", c); }
+        else out[n++] = (char)c;
+    }
+    out[n] = 0;
+}
+
 static char *read_all(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -704,12 +854,25 @@ static void handle_line(const char *line, char *out, size_t cap) {
                 resp_json(out, cap, 0, "\"error\":\"window open needs path\"");
                 return;
             }
-            pid_t pid = win_open_register(id, spath, (int)w, (int)h);
+            /* manifest 优先: hn-window 的 w/h 压过 CLI 请求值, 与引擎
+               rt/hn_rt.c 的 "if (m.w > 0) rt->w = m.w" 同口径。 */
+            win_meta wm;
+            win_meta_init(&wm, (int)w, (int)h);
+            win_meta_parse(html, spath, &wm);
+            if (!wm.title[0] && title && title[0])
+                snprintf(wm.title, sizeof(wm.title), "%s", title);
+            pid_t pid = win_open_register(id, spath, &wm);
             if (pid > 0) {
-                char body[192];
+                dwin *wv = win_find(id);
+                char tesc[320];
+                json_escape(wm.title, tesc, sizeof(tesc));
+                char body[768];
                 snprintf(body, sizeof(body),
-                         "\"id\":\"%s\",\"pid\":%d,\"window\":true,\"w\":%d,\"h\":%d",
-                         id, (int)pid, (int)w, (int)h);
+                         "\"id\":\"%s\",\"pid\":%d,\"window\":true,\"w\":%d,\"h\":%d,"
+                         "\"backend\":\"%s\",\"transparent\":%s,\"title\":\"%s\"",
+                         id, (int)pid, wm.w, wm.h,
+                         wv && wv->backend == WIN_BACKEND_WEBVIEW ? "webview" : "engine",
+                         wm.transparent ? "true" : "false", tesc);
                 resp_json(out, cap, 1, body);
                 free(id); free(html); free(css); free(title); free(spath);
                 return;
@@ -787,14 +950,21 @@ static void handle_line(const char *line, char *out, size_t cap) {
             rid = (char *)malloc(9);
             if (rid) strcpy(rid, "resident");
         }
-        pid_t pid = rid ? win_open_register(rid, file, (int)w, (int)h) : -1;
+        win_meta wm;
+        win_meta_init(&wm, (int)w, (int)h);
+        {
+            size_t fn = 0;
+            char *fc = read_all(file, &fn);
+            if (fc) { win_meta_parse(fc, file, &wm); free(fc); }
+        }
+        pid_t pid = rid ? win_open_register(rid, file, &wm) : -1;
         if (pid <= 0) {
             free(file); free(rid);
             resp_json(out, cap, 0,
                       "\"error\":\"window spawn failed (shell missing or table full)\"");
             return;
         }
-        resident_persist(rid, file, (int)w, (int)h);
+        resident_persist(rid, file, wm.w, wm.h);
         char *rp = resident_path();
         char body[1408];
         snprintf(body, sizeof(body),
@@ -808,8 +978,9 @@ static void handle_line(const char *line, char *out, size_t cap) {
 
     if (!strcmp(op, "list")) {
         /* 注: 界宽一律用 sizeof(body)-n —— 曾误写 cap-n(out 的容量),
-           FORTIFY 下必触发 __chk_fail(开个应用 hn list 就把 daemon 打崩) */
-        char body[2048];
+           FORTIFY 下必触发 __chk_fail(开个应用 hn list 就把 daemon 打崩)。
+           64 个窗口 × 带 backend/title 的条目需要足够空间。 */
+        char body[16384];
         size_t n = 0;
         n += (size_t)snprintf(body + n, sizeof(body) - n, "\"apps\":[");
         int first = 1;
@@ -823,10 +994,15 @@ static void handle_line(const char *line, char *out, size_t cap) {
         }
         for (int i = 0; i < g_win_n; i++) {
             if (!g_wins[i].alive) continue;
+            char tesc[320];
+            json_escape(g_wins[i].title, tesc, sizeof(tesc));
             n += (size_t)snprintf(body + n, sizeof(body) - n,
-                                  "%s{\"id\":\"%s\",\"kind\":\"window\",\"pid\":%d,\"w\":%d,\"h\":%d}",
+                                  "%s{\"id\":\"%s\",\"kind\":\"window\",\"pid\":%d,\"w\":%d,\"h\":%d,"
+                                  "\"backend\":\"%s\",\"transparent\":%s,\"title\":\"%s\"}",
                                   first ? "" : ",", g_wins[i].id,
-                                  (int)g_wins[i].pid, g_wins[i].w, g_wins[i].h);
+                                  (int)g_wins[i].pid, g_wins[i].w, g_wins[i].h,
+                                  g_wins[i].backend == WIN_BACKEND_WEBVIEW ? "webview" : "engine",
+                                  g_wins[i].transparent ? "true" : "false", tesc);
             first = 0;
         }
         n += (size_t)snprintf(body + n, sizeof(body) - n, "]");
@@ -844,14 +1020,13 @@ static void handle_line(const char *line, char *out, size_t cap) {
         hn_rt_frame(a->rt, 16.0f, &repaint);
     }
 
-    /* window 应用只伺候 open/update(热推送)/close/list —— eval/shot/
-       dump/text 需要 daemon 内的文档句柄, 而窗口应用的文档在子进程
-       hn_app 里。错误信息写明分工: headless 是 agent 的渲染/截图管线,
-       window 是给人看的桌面窗。 */
+    /* window 应用只伺候 open/update(热推送)/close/list/shot —— eval/dump/
+       text 需要 daemon 内的文档句柄, 而窗口应用的文档在子进程里。
+       shot 由 WebView 后端的 WKSnapshot 一次性子进程承担(见下)。 */
     win_reap();   /* 已手关的窗口不再挡道(落回 app not found 口径) */
     if (id) {
-        static const char *const headless_only[] = { "eval", "shot", "dump", "text" };
-        for (int i = 0; i < 4; i++) {
+        static const char *const headless_only[] = { "eval", "dump", "text" };
+        for (int i = 0; i < 3; i++) {
             if (!strcmp(op, headless_only[i]) && win_find(id)) {
                 free(id);
                 resp_json(out, cap, 0,
@@ -1052,6 +1227,45 @@ static void handle_line(const char *line, char *out, size_t cap) {
         free(rid); free(rhtml);
         resp_json(out, cap, ra != NULL, ra ? "" : "\"error\":\"restore failed\"");
         return;
+    }
+
+    /* ---- shot: window 应用走 WebView 后端的一次性 WKSnapshot 子进程 ----
+       文档在窗口子进程里, daemon 不能就地取像素; 用同一后端壳以
+       `--shot` 重新装载当前源文件并落盘(不接受应用内 JS/动画时刻,
+       P1 的如实边界)。engine 后端(hnapp)没有快照能力, 如实报错。 */
+    if (!strcmp(op, "shot")) {
+        dwin *wv = id ? win_find(id) : NULL;
+        if (wv) {
+            char *p = json_str(line, "path");
+            int rc = 0;
+            if (!p || !p[0]) {
+                free(p); free(id);
+                resp_json(out, cap, 0, "\"error\":\"path required\"");
+                return;
+            }
+            if (wv->backend == WIN_BACKEND_WEBVIEW && wv->shell[0]) {
+                unlink(p);   /* 旧图不参与成功判据 */
+                pid_t pid = shot_spawn(wv->shell, wv->path, p,
+                                       wv->w, wv->h, wv->transparent);
+                if (pid > 0) rc = shot_wait(pid, p);
+            }
+            char pesc[1100];
+            json_escape(p, pesc, sizeof(pesc));
+            int backend = wv->backend;
+            free(p); free(id);
+            if (rc) {
+                char body[1200];
+                snprintf(body, sizeof(body),
+                         "\"path\":\"%s\",\"backend\":\"webview\"", pesc);
+                resp_json(out, cap, 1, body);
+            } else {
+                resp_json(out, cap, 0,
+                          backend == WIN_BACKEND_WEBVIEW
+                              ? "\"error\":\"webview snapshot failed\""
+                              : "\"error\":\"shot unsupported for engine window backend\"");
+            }
+            return;
+        }
     }
 
     if (!a) { free(id); resp_json(out, cap, 0, "\"error\":\"app not found\""); return; }
@@ -1328,12 +1542,17 @@ int main(int argc, char **argv) {
     g_argv0 = argc > 0 ? argv[0] : NULL;
     const char *home = getenv("HOME");
     char sock[1024];
-    /* --no-resident: 显式关掉 resident.json 的启动重开(调试/临时清场) */
+    /* --no-resident: 显式关掉 resident.json 的启动重开(调试/临时清场)
+       --socket PATH: 选项顺序无关(曾只认 argv[1], `--no-resident --socket`
+       会静默落回默认 socket —— 隔离 HOME 的验收被误导到用户实例) */
     int no_resident = 0;
-    for (int i = 1; i < argc; i++)
+    const char *sock_opt = NULL;
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--no-resident")) no_resident = 1;
-    if (argc > 2 && !strcmp(argv[1], "--socket")) {
-        snprintf(sock, sizeof(sock), "%s", argv[2]);
+        else if (!strcmp(argv[i], "--socket") && i + 1 < argc) sock_opt = argv[++i];
+    }
+    if (sock_opt) {
+        snprintf(sock, sizeof(sock), "%s", sock_opt);
     } else {
         snprintf(sock, sizeof(sock), "%s/.html-native/hn-daemon.sock", home ? home : ".");
     }
