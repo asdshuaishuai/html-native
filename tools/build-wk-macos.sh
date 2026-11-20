@@ -11,3 +11,14 @@ case "$(uname -m)" in
 esac
 cc -std=c99 -fblocks -O2 -Wall -ffp-contract=off tools/hnweb_wk_macos.c -o "$OUT"
 echo "✓ $OUT"
+
+# 常驻画布宿主(P2a): 纯 C99 + -fblocks(WKSnapshot 需要); 仅链接冻结的 hn_json.c 做协议解析
+case "$(uname -m)" in
+    arm64|aarch64) HOUT=dist/hncanvas-host-macos-arm64 ;;
+    x86_64)        HOUT=dist/hncanvas-host-macos-x86_64 ;;
+    *)             HOUT="dist/hncanvas-host-macos-$(uname -m)" ;;
+esac
+cc -std=c99 -fblocks -O2 -Wall -ffp-contract=off \
+   -I Sources/CHtmlNative tools/hncanvas_host_macos.c Sources/CHtmlNative/hn_json.c \
+   -o "$HOUT"
+echo "✓ $HOUT"
